@@ -70,6 +70,16 @@ export const REASON_CODES = [
   // Configuration
   "config.invalid",
   "config.loaded",
+
+  // Review-cache memoization (v0.9.0). None of these ever affect completeness — memoization is a
+  // pure optimization layer, and its own failure gates only re-review cost, never coverage. See
+  // `src/cache/review-cache.ts`'s doc comment for why replay is sound and why only a `complete`
+  // settlement may write an entry.
+  "cache.store_loaded",
+  "cache.store_rejected",
+  "cache.store_write_failed",
+  "cache.hits",
+  "cache.appended",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
@@ -93,4 +103,6 @@ export const REASON_CODE_GUIDANCE: Readonly<Record<string, string>> = {
   publish: "Findings could not be published. Check the App installation and its permissions.",
   config: "The supplied configuration was rejected. Compare it against the documented schema.",
   run: "Run lifecycle marker.",
+  cache:
+    "The review store could not be read or written, or a save was skipped. Coverage is unaffected; only re-review cost is.",
 };

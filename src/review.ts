@@ -2,14 +2,28 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { CommitSha } from "./core/brands.js";
+import type { CommitSha, Sha256 } from "./core/brands.js";
+import {
+  buildNewEntries,
+  combinedExcludes,
+  lookupMemoized,
+  mergeHitFindings,
+} from "./cache/memoize.js";
+import {
+  PARSE_LIMITS,
+  appendEntries,
+  type CacheEntry,
+  type CacheStore,
+} from "./cache/review-cache.js";
 import type { CompiledProfile } from "./config/profile.js";
 import type { GuidelineIndex } from "./config/guidelines.js";
 import type { RuntimeConfig } from "./config/runtime.js";
 import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
 import { acquireEngine } from "./engine/acquire.js";
+import { currentPlatformDigest } from "./engine/pinned-release.js";
 import { parseEngineResult, type EngineFinding } from "./engine/result.js";
+import { promptIdentityDigest } from "./engine/rule-identity.js";
 import { runEngine } from "./engine/run.js";
 import { settle, type Settlement } from "./engine/settle.js";
 import type { GitContext } from "./git/plumbing.js";
@@ -41,6 +55,12 @@ export interface ReviewRequest {
   readonly identity: string;
   readonly env: NodeJS.ProcessEnv;
   readonly pathValue: string;
+  /**
+   * The parsed review-cache store, already read by the action layer (v0.9.0). `undefined` — not an
+   * empty store — is what disables the feature entirely: every code path below only branches on
+   * this being present, so an absent store costs this run nothing beyond the check itself.
+   */
+  readonly cacheStore?: CacheStore;
 }
 
 export type ReviewOutcome = "complete" | "incomplete" | "abandoned";
@@ -50,6 +70,14 @@ export interface ReviewReport {
   readonly reason?: ReasonCode;
   readonly inventorySize: number;
   readonly publish?: PublishOutcome;
+  /** Cache-eligible paths a stored entry answered instead of the engine. Always 0 when inert. */
+  readonly cacheHits: number;
+  /** Cache-eligible paths that were sent to the engine anyway. Always 0 when inert. */
+  readonly cacheMisses: number;
+  /** How many new-or-refreshed entries `updatedCacheStore` carries over what was read in. */
+  readonly cacheAppended: number;
+  /** Present only for a `complete` outcome with the feature enabled — the store to write back. */
+  readonly updatedCacheStore?: CacheStore;
 }
 
 /** Measured blended cost per reviewable file, rounded up. The formula's dominant term by design. */
@@ -72,6 +100,12 @@ const ALLOTMENT_FLOOR = 80_000;
 
 /** Ceiling past which a run is expected to chunk or escalate rather than run as one unbounded spend. */
 const ALLOTMENT_CEILING = 6_000_000;
+
+/** Review-cache retention, reusing the same bounds the store's own parser enforces on read. */
+const RETENTION = {
+  maxEntries: PARSE_LIMITS.maxEntries,
+  maxFindingsPerEntry: PARSE_LIMITS.maxFindingsPerEntry,
+};
 
 /**
  * Clamps `value` to the inclusive range `[floor, ceiling]`.
@@ -144,6 +178,66 @@ function itemIndex(inventory: Inventory): ReadonlyMap<string, InventoryItem> {
   return new Map(inventory.items.map((item) => [item.path as string, item]));
 }
 
+/** What one run's review-cache lookup decided, threaded through the rest of `performReview`. */
+interface MemoContext {
+  readonly hits: ReadonlyMap<string, CacheEntry>;
+  readonly hitPaths: ReadonlySet<string>;
+  readonly eligiblePaths: ReadonlySet<string>;
+  /** Set together with `engineDigest`; both `undefined` whenever the feature is inert this run. */
+  readonly ruleDigest: Sha256 | undefined;
+  readonly engineDigest: Sha256 | undefined;
+}
+
+const INERT_MEMO: MemoContext = {
+  hits: new Map(),
+  hitPaths: new Set(),
+  eligiblePaths: new Set(),
+  ruleDigest: undefined,
+  engineDigest: undefined,
+};
+
+function cacheCounts(memo: MemoContext): { cacheHits: number; cacheMisses: number } {
+  return { cacheHits: memo.hits.size, cacheMisses: memo.eligiblePaths.size - memo.hits.size };
+}
+
+/**
+ * Looks up every cache-eligible path in `inventory`, after `buildInventory` and before the engine
+ * runs — the same point v0.8.0's mechanically-clean computation sits.
+ *
+ * `request.cacheStore === undefined` short-circuits before computing either digest: no identity
+ * digest, no platform digest, no diagnostic. That is what makes the feature genuinely inert rather
+ * than merely unused when the consumer never configures `review_store_path`.
+ */
+function prepareMemoization(
+  request: ReviewRequest,
+  inventory: Inventory,
+  diagnostics: Diagnostics,
+): MemoContext {
+  if (request.cacheStore === undefined) return INERT_MEMO;
+
+  const ruleDigest = promptIdentityDigest(request.profile, request.guidelines);
+  const engineDigest = currentPlatformDigest();
+  const { hits, eligiblePaths } = lookupMemoized(
+    request.cacheStore,
+    inventory,
+    ruleDigest,
+    engineDigest,
+    request.config,
+  );
+  const memo: MemoContext = {
+    hits,
+    hitPaths: new Set(hits.keys()),
+    eligiblePaths,
+    ruleDigest,
+    engineDigest,
+  };
+  diagnostics.record("cache.hits", {
+    headSha: request.head,
+    counts: { hits: hits.size, misses: eligiblePaths.size - hits.size },
+  });
+  return memo;
+}
+
 /**
  * Reports a run that fell short — and publishes whatever it managed to find.
  *
@@ -163,6 +257,7 @@ async function settleIncomplete(
   reason: ReasonCode,
   diagnostics: Diagnostics,
   findings: readonly EngineFinding[] = [],
+  memo: MemoContext = INERT_MEMO,
 ): Promise<ReviewReport> {
   diagnostics.record(reason, { headSha: request.head });
 
@@ -205,6 +300,8 @@ async function settleIncomplete(
     outcome: "incomplete",
     reason,
     inventorySize: inventory.items.length,
+    cacheAppended: 0,
+    ...cacheCounts(memo),
     ...(publish === undefined ? {} : { publish }),
   };
 }
@@ -212,6 +309,7 @@ async function settleIncomplete(
 async function executeEngine(
   request: ReviewRequest,
   inventory: Inventory,
+  memo: MemoContext,
   diagnostics: Diagnostics,
 ): Promise<Settlement> {
   const workspace = await mkdtemp(join(tmpdir(), "kfq-engine-bin-"));
@@ -222,6 +320,9 @@ async function executeEngine(
       inventory.reviewablePaths.size,
       reviewableChangedLines(inventory),
     );
+    // One unioned exclude list through the one threading point v0.8.0 built — cache hits are never
+    // a second, parallel exclude channel alongside the mechanically-clean one.
+    const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
     const output = await runEngine(
       {
         binaryPath: engine.binaryPath,
@@ -233,12 +334,12 @@ async function executeEngine(
         env: request.env,
         pathValue: request.pathValue,
         allottedBudget,
-        mechanicallyCleanPaths: mechanicallyCleanPaths(inventory),
+        mechanicallyCleanPaths: excluded,
       },
       diagnostics,
     );
     const parsed = parseEngineResult(output.stdout);
-    return settle(inventory, parsed, request.profile, request.config);
+    return settle(inventory, parsed, request.profile, request.config, memo.hitPaths);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -253,13 +354,48 @@ function publicationDegraded(outcome: PublishOutcome): boolean {
   );
 }
 
+/**
+ * Folds this run's newly-clean-or-found paths into the store to write back — never a hit's own
+ * entry, which is already in the store unchanged, and never anything from an outcome other than
+ * `complete`: this function is only reachable from `publishSettledFindings`, and that is the one
+ * caller-enforced condition for cache admission. See `review-cache.ts`'s own doc comment for why an
+ * incomplete run's findings would otherwise silently launder a transient failure into a permanent,
+ * confidently-replayed answer.
+ */
+function finalizeCacheStore(
+  request: ReviewRequest,
+  inventory: Inventory,
+  memo: MemoContext,
+  engineFindings: readonly EngineFinding[],
+): { store: CacheStore; appended: number } | undefined {
+  if (request.cacheStore === undefined) return undefined;
+  if (memo.ruleDigest === undefined || memo.engineDigest === undefined) return undefined;
+
+  const newEntries = buildNewEntries({
+    inventory,
+    eligiblePaths: memo.eligiblePaths,
+    hitPaths: memo.hitPaths,
+    findings: engineFindings,
+    ruleDigest: memo.ruleDigest,
+    engineDigest: memo.engineDigest,
+    config: request.config,
+  });
+  if (newEntries.length === 0) return { store: request.cacheStore, appended: 0 };
+  return {
+    store: appendEntries(request.cacheStore, newEntries, RETENTION),
+    appended: newEntries.length,
+  };
+}
+
 async function publishSettledFindings(
   request: ReviewRequest,
   inventory: Inventory,
   settlement: Extract<Settlement, { status: "complete" }>,
+  memo: MemoContext,
   startedAt: number,
   diagnostics: Diagnostics,
 ): Promise<ReviewReport> {
+  const findings = mergeHitFindings(settlement.findings, memo.hits);
   const publish = await publishFindings(
     {
       client: request.client,
@@ -269,7 +405,7 @@ async function publishSettledFindings(
       identity: request.identity,
       items: itemIndex(inventory),
     },
-    settlement.findings,
+    findings,
     diagnostics,
   );
 
@@ -281,6 +417,8 @@ async function publishSettledFindings(
       inventory,
       "publish.finding_rejected_placement",
       diagnostics,
+      [],
+      memo,
     );
     return { ...report, publish };
   }
@@ -290,7 +428,15 @@ async function publishSettledFindings(
     durationMs: Date.now() - startedAt,
     counts: { published: publish.published, suppressed: publish.suppressed },
   });
-  return { outcome: "complete", inventorySize: inventory.items.length, publish };
+  const finalized = finalizeCacheStore(request, inventory, memo, settlement.findings);
+  return {
+    outcome: "complete",
+    inventorySize: inventory.items.length,
+    publish,
+    cacheAppended: finalized?.appended ?? 0,
+    ...cacheCounts(memo),
+    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
+  };
 }
 
 /**
@@ -300,20 +446,49 @@ async function publishSettledFindings(
  * non-zero exit. There is nothing to publish in that case: no result reached the parser, so there
  * are no findings to carry forward, only the fact that the review did not happen.
  */
+/** The zero-reviewable-paths shortcut: nothing was ever eligible, so nothing was hit or missed. */
+function emptyReviewReport(inventory: Inventory): ReviewReport {
+  return {
+    outcome: "complete",
+    inventorySize: inventory.items.length,
+    cacheHits: 0,
+    cacheMisses: 0,
+    cacheAppended: 0,
+  };
+}
+
+/** A stale head never writes back to the cache — there is nothing settled to admit. */
+function abandonedReport(inventory: Inventory, memo: MemoContext): ReviewReport {
+  return {
+    outcome: "abandoned",
+    inventorySize: inventory.items.length,
+    ...cacheCounts(memo),
+    cacheAppended: 0,
+  };
+}
+
 async function settleOrReport(
   request: ReviewRequest,
   inventory: Inventory,
+  memo: MemoContext,
   diagnostics: Diagnostics,
 ): Promise<Settlement | ReviewReport> {
   try {
-    const settlement = await executeEngine(request, inventory, diagnostics);
+    const settlement = await executeEngine(request, inventory, memo, diagnostics);
     diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
       { headSha: request.head },
     );
     return settlement;
   } catch {
-    return settleIncomplete(request, inventory, "settlement.incomplete.engine_error", diagnostics);
+    return settleIncomplete(
+      request,
+      inventory,
+      "settlement.incomplete.engine_error",
+      diagnostics,
+      [],
+      memo,
+    );
   }
 }
 
@@ -346,15 +521,16 @@ export async function performReview(
       headSha: request.head,
       durationMs: Date.now() - started,
     });
-    return { outcome: "complete", inventorySize: inventory.items.length };
+    return emptyReviewReport(inventory);
   }
 
-  const settlement = await settleOrReport(request, inventory, diagnostics);
+  const memo = prepareMemoization(request, inventory, diagnostics);
+  const settlement = await settleOrReport(request, inventory, memo, diagnostics);
   if ("outcome" in settlement) return settlement;
 
   if (!(await headIsCurrent(request))) {
     diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
-    return { outcome: "abandoned", inventorySize: inventory.items.length };
+    return abandonedReport(inventory, memo);
   }
   if (settlement.status === "incomplete") {
     return settleIncomplete(
@@ -362,8 +538,9 @@ export async function performReview(
       inventory,
       settlement.reason,
       diagnostics,
-      settlement.findings,
+      mergeHitFindings(settlement.findings, memo.hits),
+      memo,
     );
   }
-  return publishSettledFindings(request, inventory, settlement, started, diagnostics);
+  return publishSettledFindings(request, inventory, settlement, memo, started, diagnostics);
 }

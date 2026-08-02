@@ -57,3 +57,26 @@ export function assetUrl(pin: EnginePin, asset: string): string {
 export function platformKey(platform: NodeJS.Platform, arch: string): string {
   return `${platform}-${arch}`;
 }
+
+/**
+ * The digest this process expects for its own platform, without acquiring anything.
+ *
+ * Every platform's digest is already known at pin time — `acquireEngine` downloads and *verifies*
+ * against it, it does not discover it — so a caller that only needs to know which binary this
+ * platform will run, not hold a copy of it, never has to acquire the engine first. This is what
+ * lets the v0.9.0 review-cache key include an engine identity before the engine itself has run:
+ * the cache key's `engineDigest` is this value, not `AcquiredEngine.digest`, precisely so a cache
+ * lookup never forces a download that a hit would have made unnecessary.
+ *
+ * Returns `undefined` on a platform this pin does not cover, matching `acquireEngine`'s own
+ * `engine.acquire.unsupported_platform` failure for the same key — a caller keying a cache lookup
+ * on this value treats that as "no trustworthy engine identity yet" and skips memoization for the
+ * run rather than acquiring just to find out.
+ */
+export function currentPlatformDigest(
+  pin: EnginePin = ENGINE_PIN,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): Sha256 | undefined {
+  return pin.platforms[platformKey(platform, arch)]?.sha256;
+}

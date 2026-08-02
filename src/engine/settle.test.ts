@@ -324,6 +324,81 @@ describe("counted settlement (no manifest)", () => {
 });
 
 /**
+ * v0.9.0: a review-cache hit answers a reviewable path instead of the engine. Unlike a
+ * mechanically-clean rename, the path stays `reviewable: true` in the inventory — the content is
+ * real review content, just answered from a prior run — so `settle` has to be told about it
+ * explicitly through `memoizedPaths` rather than the denominator shrinking on its own.
+ */
+describe("memoized coverage credit", () => {
+  function reconciledResult(completed: readonly string[]): EngineResult {
+    return result({
+      coverage: {
+        selected: completed.map((path) => ({ path })),
+        completed: completed.map((path) => ({ path })),
+        reused: [],
+        failed: [],
+        waived: [],
+      },
+    });
+  }
+
+  it("settles complete (reconciled) when the only path missing from engine coverage was memoized", () => {
+    const outcome = settle(
+      inventory(["src/a.ts", "src/b.ts"]),
+      reconciledResult(["src/a.ts"]),
+      PROFILE,
+      CONFIG,
+      new Set(["src/b.ts"]),
+    );
+    expect(outcome.status).toBe("complete");
+  });
+
+  it("still settles incomplete (reconciled) when a non-memoized path is missing from coverage", () => {
+    const outcome = settle(
+      inventory(["src/a.ts", "src/b.ts"]),
+      reconciledResult(["src/a.ts"]),
+      PROFILE,
+      CONFIG,
+      new Set(), // nothing memoized this run
+    );
+    expect(outcome).toMatchObject({
+      status: "incomplete",
+      reason: "settlement.incomplete.coverage_gap",
+    });
+    if (outcome.status === "incomplete") expect(outcome.counts.gap).toBe(1);
+  });
+
+  it("settles complete (counted) when the shortfall equals exactly the memoized count", () => {
+    const released = result({ manifestPresent: false, status: "success", filesReviewed: 2 });
+    const outcome = settle(
+      inventory(["src/a.ts", "src/b.ts", "src/c.ts"]),
+      released,
+      PROFILE,
+      CONFIG,
+      new Set(["src/c.ts"]),
+    );
+    expect(outcome).toMatchObject({ status: "complete", mode: "counted" });
+  });
+
+  it("still settles incomplete (counted) when the shortfall exceeds the memoized count", () => {
+    const released = result({ manifestPresent: false, status: "success", filesReviewed: 1 });
+    const outcome = settle(
+      inventory(["src/a.ts", "src/b.ts", "src/c.ts"]),
+      released,
+      PROFILE,
+      CONFIG,
+      new Set(["src/c.ts"]), // one file memoized, but two are still unaccounted for
+    );
+    expect(outcome).toMatchObject({
+      status: "incomplete",
+      mode: "counted",
+      reason: "settlement.incomplete.coverage_gap",
+    });
+    if (outcome.status === "incomplete") expect(outcome.counts.gap).toBe(1);
+  });
+});
+
+/**
  * A mechanically-clean rename is `reviewable: false`, so it never joins `reviewablePaths` — the
  * denominator both settlement paths reconcile against. This is what actually stops the engine's
  * spend on a path with nothing to review: the accounting shrinks, not just a label on the item.

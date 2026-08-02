@@ -67,16 +67,20 @@ with the source that produced it. This exact miss has already cost a CI round in
 
 ## Landing changes here
 
-- The integration branch is **`main`**, not `dev` — `ci.yml` triggers only on `main`, and branch
-  protection is configured on `main`. Do not carry Keiko's `dev`-based habits over by reflex.
-- `main` requires signed commits, linear history, no force pushes, and conversation resolution
-  (verified against the live branch protection, not stated in any doc here). The required status
-  checks are exactly `verify` and `engine pin` — `action smoke` runs on every pull request but is
-  _not_ required, so it failing does not by itself block a merge.
-- Native auto-merge is off at the repository level. Unlike Keiko's own `dev` flow, there is no
-  arm-and-walk-away here: integrating to `main` is a manual, human action once checks are green.
-- Branch names observed in history follow `type/slug` (`feat/…`, `fix/…`, `ci/…`, `docs/…`,
-  `release/…`) — same shape as Keiko, different base branch.
+- **`dev` is the integration branch and the default.** Ordinary work targets `dev`; native
+  auto-merge is enabled, so arm it after opening the pull request and the platform integrates once
+  the required checks are green and every conversation is resolved.
+- **`main` is the release line.** It advances only through a release pull request from `dev` —
+  version bump, regenerated `dist/index.js`, and a fresh qualification-corpus run recorded in the
+  PR — and every merge to `main` is tagged `vX.Y.Z`. Consumers pin full tag SHAs, so `main` is the
+  audit trail ("every commit is a qualified release"), not a consumer surface.
+- Both branches carry identical protection: signed commits, linear history, no force pushes,
+  conversation resolution, and the required checks `verify`, `engine pin`, and
+  `SonarCloud Code Analysis` (verified against the live branch protection). `action smoke` runs on
+  every pull request but is _not_ required.
+- The scheduled re-qualification (`qualify.yml`) measures `main` explicitly — consumers run
+  releases, and drift on `dev` is caught by the corpus run the release rule demands instead.
+- Branch names follow `type/slug` (`feat/…`, `fix/…`, `ci/…`, `docs/…`, `release/…`).
 
 ## Everything else
 

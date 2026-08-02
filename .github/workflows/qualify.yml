@@ -47,6 +47,12 @@ jobs:
       - name: Check out
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          # Explicitly main, not the default branch: since dev became the default, an unpinned
+          # checkout would measure the integration branch — but re-qualification exists to answer
+          # whether the pairing CONSUMERS run still holds, and consumers run releases cut from
+          # main. Drift on dev is caught by the release rule (corpus before every dev -> main
+          # release PR), not by this schedule.
+          ref: main
           persist-credentials: false
 
       - name: Set up Node
