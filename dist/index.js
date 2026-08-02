@@ -693,7 +693,17 @@ var CATCH_ALL_RULE = [
   "Plain Markdown prose. Do not emit HTML, images, links or URLs of any kind, @mentions, headings,",
   "or `suggestion` code fences. A short fenced code block is allowed when it shows the specific line",
   "at issue. A finding containing a prohibited construct is discarded before publication, so it",
-  "would be lost work."
+  "would be lost work.",
+  "",
+  "**Never write a placeholder in angle brackets.** `<path>`, `<file>`, `<name>` and the like read",
+  "as an HTML tag to the publisher, which discards the whole finding \u2014 including the parts that were",
+  "right. Write `PATH`, or name the real value, or rephrase. This is the one output rule that has",
+  "already cost a correct high-severity finding: a report about a command containing `<path>` was",
+  "thrown away, and the defect it described went unmentioned. Backticks do not help; the check does",
+  "not look at Markdown context.",
+  "",
+  "A comparison is fine \u2014 `i < items.length` is prose, not a tag \u2014 because what is rejected is `<`",
+  "immediately followed by a letter, `!`, `/` or `?`."
 ].join("\n");
 function buildRuleFile(profile) {
   const include = [...profile.profile.reviewRelevant];
