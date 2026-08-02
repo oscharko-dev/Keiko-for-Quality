@@ -2,9 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
 
 # The reviewer runs inside other people's CI with a model credential and comment-write access, so
 # its own pipeline holds no more authority than reading its source.
