@@ -1,0 +1,518 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-02T17:01:53.881Z",
+  "targetRepo": "oscharko-dev/Keiko",
+  "heuristics": {
+    "duplicateSimilarity": {
+      "method": "jaccard-token-set-v1",
+      "threshold": 0.15,
+      "note": "Two of one bot's own findings on the same pull request are treated as duplicate variants of one finding when they share a path, their line windows overlap, and the Jaccard similarity of their normalized content-word sets is at least the threshold. Estimates, not a correctness judgement — see corpus/arena-lib.mjs for the exact normalization."
+    },
+    "crossBotOverlap": {
+      "method": "path-and-line-window-intersection-v1",
+      "note": "A cross-bot overlap cluster groups distinct (already deduplicated) findings from different bots that share a path and an overlapping line window. No content comparison is applied across bots, so this is a proxy for consensus location, not for agreement on the claim."
+    },
+    "incompleteNotice": {
+      "method": "literal-phrase-match-v1",
+      "note": "A conversation is an incomplete-review notice, not a finding, when its body contains the fixed sentence Keiko for Quality's publisher emits for a settlement notice. Calibrated on this reviewer; other bots are checked against the same phrase for symmetry but are not expected to match it."
+    },
+    "disclaimer": "Duplicate-variant and cross-bot-overlap counts are heuristic estimates for a repeatable scoreboard, not a human adjudication of correctness or noise. See the pull request that introduced this tool for calibration evidence."
+  },
+  "identity": {
+    "knownBots": [
+      {
+        "arenaId": "kfq",
+        "displayName": "Keiko for Quality",
+        "matchLogin": "keiko-for-quality"
+      },
+      {
+        "arenaId": "coderabbit",
+        "displayName": "CodeRabbit",
+        "matchLogin": "coderabbitai"
+      },
+      {
+        "arenaId": "codex",
+        "displayName": "Codex",
+        "matchLogin": "chatgpt-codex-connector"
+      }
+    ],
+    "observedLogins": [
+      {
+        "rawLogin": "chatgpt-codex-connector",
+        "normalizedLogin": "chatgpt-codex-connector",
+        "typename": "Bot",
+        "arenaId": "codex",
+        "identityMismatch": false,
+        "commentCount": 22
+      },
+      {
+        "rawLogin": "coderabbitai",
+        "normalizedLogin": "coderabbitai",
+        "typename": "Bot",
+        "arenaId": "coderabbit",
+        "identityMismatch": false,
+        "commentCount": 53
+      },
+      {
+        "rawLogin": "keiko-for-quality",
+        "normalizedLogin": "keiko-for-quality",
+        "typename": "Bot",
+        "arenaId": "kfq",
+        "identityMismatch": false,
+        "commentCount": 71
+      },
+      {
+        "rawLogin": "oscharko",
+        "normalizedLogin": "oscharko",
+        "typename": "User",
+        "arenaId": null,
+        "identityMismatch": false,
+        "commentCount": 102
+      }
+    ]
+  },
+  "pullRequests": [
+    {
+      "number": 2924,
+      "headSha": "da36cc152f1ba208f604046bd32b8293b442b6eb",
+      "bots": {
+        "kfq": {
+          "findingsPosted": 0,
+          "distinctFindings": 0,
+          "duplicateVariants": 0,
+          "incompleteNotices": 1,
+          "filesTouched": 1,
+          "threads": {
+            "resolved": 1,
+            "unresolved": 0,
+            "outdated": 0
+          },
+          "uniqueToBot": 0,
+          "coFound": {
+            "kfq": null,
+            "coderabbit": null,
+            "codex": null
+          },
+          "coFoundAllThree": 0
+        },
+        "coderabbit": {
+          "findingsPosted": 1,
+          "distinctFindings": 1,
+          "duplicateVariants": 0,
+          "incompleteNotices": 0,
+          "filesTouched": 1,
+          "threads": {
+            "resolved": 1,
+            "unresolved": 0,
+            "outdated": 0
+          },
+          "uniqueToBot": 1,
+          "coFound": {
+            "kfq": null,
+            "coderabbit": null,
+            "codex": null
+          },
+          "coFoundAllThree": 0
+        },
+        "codex": {
+          "findingsPosted": 1,
+          "distinctFindings": 1,
+          "duplicateVariants": 0,
+          "incompleteNotices": 0,
+          "filesTouched": 1,
+          "threads": {
+            "resolved": 1,
+            "unresolved": 0,
+            "outdated": 0
+          },
+          "uniqueToBot": 1,
+          "coFound": {
+            "kfq": null,
+            "coderabbit": null,
+            "codex": null
+          },
+          "coFoundAllThree": 0
+        }
+      },
+      "duplicateClusters": [],
+      "crossBotClusters": []
+    },
+    {
+      "number": 2926,
+      "headSha": "19672bfa0ad0fffef98ac675e98d8f3316d238f5",
+      "bots": {
+        "kfq": {
+          "findingsPosted": 66,
+          "distinctFindings": 49,
+          "duplicateVariants": 17,
+          "incompleteNotices": 4,
+          "filesTouched": 37,
+          "threads": {
+            "resolved": 59,
+            "unresolved": 11,
+            "outdated": 0
+          },
+          "uniqueToBot": 36,
+          "coFound": {
+            "kfq": null,
+            "coderabbit": 9,
+            "codex": 8
+          },
+          "coFoundAllThree": 4
+        },
+        "coderabbit": {
+          "findingsPosted": 52,
+          "distinctFindings": 52,
+          "duplicateVariants": 0,
+          "incompleteNotices": 0,
+          "filesTouched": 36,
+          "threads": {
+            "resolved": 52,
+            "unresolved": 0,
+            "outdated": 0
+          },
+          "uniqueToBot": 40,
+          "coFound": {
+            "kfq": 9,
+            "coderabbit": null,
+            "codex": 7
+          },
+          "coFoundAllThree": 4
+        },
+        "codex": {
+          "findingsPosted": 21,
+          "distinctFindings": 21,
+          "duplicateVariants": 0,
+          "incompleteNotices": 0,
+          "filesTouched": 18,
+          "threads": {
+            "resolved": 21,
+            "unresolved": 0,
+            "outdated": 0
+          },
+          "uniqueToBot": 10,
+          "coFound": {
+            "kfq": 8,
+            "coderabbit": 7,
+            "codex": null
+          },
+          "coFoundAllThree": 4
+        }
+      },
+      "duplicateClusters": [
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-contracts/src/voice-session-recap.ts",
+          "startLine": null,
+          "endLine": null,
+          "isFileLevel": true,
+          "databaseId": 3699453432,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699453432, 3699595289]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-memory-vault/src/vault.ts",
+          "startLine": 634,
+          "endLine": 641,
+          "isFileLevel": false,
+          "databaseId": 3699453526,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699453526, 3699809035]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/coding-context/codingContextRoutes.ts",
+          "startLine": 235,
+          "endLine": 236,
+          "isFileLevel": false,
+          "databaseId": 3698995241,
+          "memberCount": 3,
+          "memberDatabaseIds": [3698995241, 3699015416, 3699137979]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/deps.ts",
+          "startLine": 3584,
+          "endLine": 3585,
+          "isFileLevel": false,
+          "databaseId": 3699138068,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699138068, 3699387396]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/gateway-setup.test.ts",
+          "startLine": null,
+          "endLine": null,
+          "isFileLevel": true,
+          "databaseId": 3698995305,
+          "memberCount": 2,
+          "memberDatabaseIds": [3698995305, 3699453629]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/grounded-orchestrator.ts",
+          "startLine": 3216,
+          "endLine": 3217,
+          "isFileLevel": false,
+          "databaseId": 3698995321,
+          "memberCount": 2,
+          "memberDatabaseIds": [3698995321, 3699387494]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/memory-capture-policy.ts",
+          "startLine": 207,
+          "endLine": 212,
+          "isFileLevel": false,
+          "databaseId": 3699138115,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699138115, 3699387601]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/memory-maintenance-handlers.ts",
+          "startLine": 575,
+          "endLine": 601,
+          "isFileLevel": false,
+          "databaseId": 3699138183,
+          "memberCount": 4,
+          "memberDatabaseIds": [3699138183, 3699387649, 3699595420, 3699809129]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/runtime/containerRunner.ts",
+          "startLine": 382,
+          "endLine": 387,
+          "isFileLevel": false,
+          "databaseId": 3699015605,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699015605, 3699138233]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/update-remediation.ts",
+          "startLine": 331,
+          "endLine": 338,
+          "isFileLevel": false,
+          "databaseId": 3699015635,
+          "memberCount": 3,
+          "memberDatabaseIds": [3699015635, 3699138273, 3699387729]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/update-session-lock.ts",
+          "startLine": 250,
+          "endLine": 262,
+          "isFileLevel": false,
+          "databaseId": 3699387685,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699387685, 3699453879]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-ui/src/app/components/desktop/modals/GatewaySetupDialog.tsx",
+          "startLine": 2040,
+          "endLine": 2044,
+          "isFileLevel": false,
+          "databaseId": 3699138346,
+          "memberCount": 3,
+          "memberDatabaseIds": [3699138346, 3699387799, 3699595586]
+        }
+      ],
+      "crossBotClusters": [
+        {
+          "path": "packages/keiko-contracts/src/bff-wire.ts",
+          "startLine": 1547,
+          "endLine": 1548,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit", "codex"],
+          "memberDatabaseIds": [3698968790, 3698986623, 3699015361]
+        },
+        {
+          "path": "packages/keiko-contracts/src/voice-session-recap.ts",
+          "startLine": null,
+          "endLine": null,
+          "isFileLevel": true,
+          "bots": ["kfq", "coderabbit", "codex"],
+          "memberDatabaseIds": [3699155391, 3699423354, 3699453432]
+        },
+        {
+          "path": "packages/keiko-memory-vault/src/tombstones.ts",
+          "startLine": 51,
+          "endLine": 52,
+          "isFileLevel": false,
+          "bots": ["coderabbit", "codex"],
+          "memberDatabaseIds": [3698968781, 3698986624]
+        },
+        {
+          "path": "packages/keiko-memory-vault/src/vault.ts",
+          "startLine": 628,
+          "endLine": 641,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit"],
+          "memberDatabaseIds": [3699155398, 3699453526]
+        },
+        {
+          "path": "packages/keiko-server/src/coding-context/codingContextRoutes.ts",
+          "startLine": 235,
+          "endLine": 243,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit"],
+          "memberDatabaseIds": [3698986629, 3698995241]
+        },
+        {
+          "path": "packages/keiko-server/src/coding-sidecar-gateway.test.ts",
+          "startLine": 521,
+          "endLine": 543,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit"],
+          "memberDatabaseIds": [3698986637, 3699595335]
+        },
+        {
+          "path": "packages/keiko-server/src/deps.ts",
+          "startLine": 3584,
+          "endLine": 3585,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699040175, 3699138068]
+        },
+        {
+          "path": "packages/keiko-server/src/gateway-instance-cache.ts",
+          "startLine": null,
+          "endLine": null,
+          "isFileLevel": true,
+          "bots": ["kfq", "coderabbit", "codex"],
+          "memberDatabaseIds": [3698986639, 3699040179, 3699453554]
+        },
+        {
+          "path": "packages/keiko-server/src/gateway-setup.test.ts",
+          "startLine": null,
+          "endLine": null,
+          "isFileLevel": true,
+          "bots": ["kfq", "coderabbit"],
+          "memberDatabaseIds": [3698986643, 3698995305]
+        },
+        {
+          "path": "packages/keiko-server/src/gateway-setup.ts",
+          "startLine": 350,
+          "endLine": 360,
+          "isFileLevel": false,
+          "bots": ["coderabbit", "codex"],
+          "memberDatabaseIds": [3698986644, 3699040168]
+        },
+        {
+          "path": "packages/keiko-server/src/memory-conv-handlers.ts",
+          "startLine": 495,
+          "endLine": 500,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit", "codex"],
+          "memberDatabaseIds": [3698986657, 3699040171, 3699387538]
+        },
+        {
+          "path": "packages/keiko-server/src/memory-handlers.ts",
+          "startLine": 638,
+          "endLine": 644,
+          "isFileLevel": false,
+          "bots": ["coderabbit", "codex"],
+          "memberDatabaseIds": [3698968787, 3698986658]
+        },
+        {
+          "path": "packages/keiko-server/src/memory-maintenance-handlers.ts",
+          "startLine": 575,
+          "endLine": 593,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699138183, 3699171842]
+        },
+        {
+          "path": "packages/keiko-server/src/run-engine.ts",
+          "startLine": 425,
+          "endLine": 426,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit"],
+          "memberDatabaseIds": [3698986670, 3699015576]
+        },
+        {
+          "path": "packages/keiko-server/src/runtime/containerRunner.ts",
+          "startLine": 385,
+          "endLine": 386,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699015605, 3699171835]
+        },
+        {
+          "path": "packages/keiko-server/src/update-remediation.ts",
+          "startLine": 331,
+          "endLine": 338,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699015635, 3699171841]
+        }
+      ]
+    }
+  ],
+  "aggregate": {
+    "prCount": 2,
+    "bots": {
+      "kfq": {
+        "findingsPosted": 66,
+        "distinctFindings": 49,
+        "duplicateVariants": 17,
+        "incompleteNotices": 5,
+        "filesTouched": 38,
+        "uniqueToBot": 36,
+        "threads": {
+          "resolved": 60,
+          "unresolved": 11,
+          "outdated": 0
+        },
+        "coFound": {
+          "kfq": null,
+          "coderabbit": 9,
+          "codex": 8
+        },
+        "coFoundAllThree": 4
+      },
+      "coderabbit": {
+        "findingsPosted": 53,
+        "distinctFindings": 53,
+        "duplicateVariants": 0,
+        "incompleteNotices": 0,
+        "filesTouched": 37,
+        "uniqueToBot": 41,
+        "threads": {
+          "resolved": 53,
+          "unresolved": 0,
+          "outdated": 0
+        },
+        "coFound": {
+          "kfq": 9,
+          "coderabbit": null,
+          "codex": 7
+        },
+        "coFoundAllThree": 4
+      },
+      "codex": {
+        "findingsPosted": 22,
+        "distinctFindings": 22,
+        "duplicateVariants": 0,
+        "incompleteNotices": 0,
+        "filesTouched": 19,
+        "uniqueToBot": 11,
+        "threads": {
+          "resolved": 22,
+          "unresolved": 0,
+          "outdated": 0
+        },
+        "coFound": {
+          "kfq": 8,
+          "coderabbit": 7,
+          "codex": null
+        },
+        "coFoundAllThree": 4
+      }
+    }
+  }
+}

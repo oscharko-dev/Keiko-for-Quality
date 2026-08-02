@@ -3,7 +3,14 @@ import type { Sha256 } from "../core/brands.js";
 import type { EngineFinding } from "../engine/result.js";
 import type { InventoryItem } from "../inventory/classify.js";
 import type { Inventory } from "../inventory/inventory.js";
-import { computeKey, lookup, modelId, type CacheEntry, type CacheStore } from "./review-cache.js";
+import {
+  computeKey,
+  computePathSetDigest,
+  lookup,
+  modelId,
+  type CacheEntry,
+  type CacheStore,
+} from "./review-cache.js";
 
 /**
  * Orchestrates `review-cache.ts`'s pure store primitives against one run's inventory.
@@ -31,14 +38,50 @@ function isCacheEligible(item: InventoryItem): boolean {
   );
 }
 
+/**
+ * This item's own token in the pull request's changed-path-set digest (v0.10.0, issue #50).
+ *
+ * A rename folds the path it moved from into the token instead of contributing only its new name:
+ * an old path silently disappearing from the diff is exactly the kind of context change an
+ * unrelated file's cached verdict cannot see for itself. See `review-cache.ts`'s top-of-file
+ * comment for the fuller "why names, not blobs" reasoning this token feeds.
+ */
+function pathSetToken(item: InventoryItem): string {
+  const path = item.path as string;
+  return item.oldPath === undefined ? path : `${item.oldPath as string}->${path}`;
+}
+
+/**
+ * This run's whole-inventory path-set digest (v0.10.0, issue #50).
+ *
+ * Every changed path counts, not only cache-eligible ones: the risk this bounds is a brand-new or
+ * renamed-away neighbour changing an unrelated file's import surface, and that neighbour need not
+ * itself be reviewable content for the risk to exist.
+ */
+export function computePrPathSetDigest(inventory: Inventory): Sha256 {
+  return computePathSetDigest(inventory.items.map(pathSetToken));
+}
+
 export interface MemoLookupResult {
   /** Cache-eligible paths a stored entry answered this run. */
   readonly hits: ReadonlyMap<string, CacheEntry>;
   /** Every cache-eligible path considered, hit or not — the denominator `misses` is measured against. */
   readonly eligiblePaths: ReadonlySet<string>;
+  /**
+   * Eligible paths whose content-based key matched a stored entry, but whose stored
+   * `prPathSetDigest` did not match this run's (v0.10.0, issue #50) — replay was refused because
+   * the pull request's changed-file set moved since that entry was written. Already excluded from
+   * `hits`, so already counted as an ordinary miss by any `eligiblePaths.size - hits.size`
+   * arithmetic; this field exists only so a caller can log *why*, distinct from a plain content miss.
+   */
+  readonly contextInvalidated: number;
 }
 
-const EMPTY_LOOKUP: MemoLookupResult = { hits: new Map(), eligiblePaths: new Set() };
+const EMPTY_LOOKUP: MemoLookupResult = {
+  hits: new Map(),
+  eligiblePaths: new Set(),
+  contextInvalidated: 0,
+};
 
 /**
  * Looks up every cache-eligible path in `inventory` against `store`.
@@ -47,6 +90,12 @@ const EMPTY_LOOKUP: MemoLookupResult = { hits: new Map(), eligiblePaths: new Set
  * does not itself reject) or an absent `engineDigest` (an unsupported platform) disables
  * memoization for this run — every path reports as a miss — rather than throwing and failing the
  * review itself. Memoization is a pure optimization layer; nothing about it may gate completeness.
+ *
+ * `pathSetDigest` (v0.10.0, issue #50) is this run's whole-inventory changed-path-set digest,
+ * computed once by the caller via `computePrPathSetDigest` so every path in this loop is compared
+ * against the exact same value. A stored entry only counts as a hit when its own `prPathSetDigest`
+ * equals this one; otherwise it is a content match this run refuses to replay, counted in
+ * `contextInvalidated` rather than `hits`.
  */
 export function lookupMemoized(
   store: CacheStore | undefined,
@@ -54,6 +103,7 @@ export function lookupMemoized(
   ruleDigest: Sha256,
   engineDigest: Sha256 | undefined,
   config: RuntimeConfig,
+  pathSetDigest: Sha256,
 ): MemoLookupResult {
   if (store === undefined || engineDigest === undefined) return EMPTY_LOOKUP;
 
@@ -66,6 +116,7 @@ export function lookupMemoized(
 
   const hits = new Map<string, CacheEntry>();
   const eligiblePaths = new Set<string>();
+  let contextInvalidated = 0;
   for (const item of inventory.items) {
     if (!isCacheEligible(item) || item.baseBlob === undefined || item.headBlob === undefined) {
       continue;
@@ -81,9 +132,11 @@ export function lookupMemoized(
       config.protocol,
     );
     const entry = lookup(store, key);
-    if (entry !== undefined) hits.set(path, entry);
+    if (entry === undefined) continue;
+    if (entry.prPathSetDigest === pathSetDigest) hits.set(path, entry);
+    else contextInvalidated += 1;
   }
-  return { hits, eligiblePaths };
+  return { hits, eligiblePaths, contextInvalidated };
 }
 
 /**
@@ -123,6 +176,12 @@ export interface NewEntryInputs {
   readonly findings: readonly EngineFinding[];
   readonly ruleDigest: Sha256;
   readonly engineDigest: Sha256;
+  /**
+   * This run's whole-inventory path-set digest (v0.10.0, issue #50), computed once by the caller
+   * via `computePrPathSetDigest` — the same value `lookupMemoized` was given, so an entry this run
+   * writes is stamped with exactly the digest a later run with an unchanged path set will match.
+   */
+  readonly pathSetDigest: Sha256;
   readonly config: RuntimeConfig;
 }
 
@@ -175,6 +234,7 @@ export function buildNewEntries(inputs: NewEntryInputs): CacheEntry[] {
       headBlob: item.headBlob,
       ruleDigest: inputs.ruleDigest,
       engineDigest: inputs.engineDigest,
+      prPathSetDigest: inputs.pathSetDigest,
       modelId: model,
       protocol: proto,
       findings: byPath.get(path) ?? [],

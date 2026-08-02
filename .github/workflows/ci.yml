@@ -90,8 +90,11 @@ jobs:
       # real GitHub event payload. Every other job runs the TypeScript source through Vitest and
       # would not notice a dist/index.js that fails to load — which is the only form consumers run.
       #
-      # This pull request targets `main`, so declaring `dev` as the only eligible branch makes the
-      # run settle at eligibility, before any credential or model call is needed.
+      # The declared eligible branch is a sentinel that is never any pull request's base, so the
+      # run settles at `eligibility.skipped.base_branch` before any credential or model call is
+      # needed — deterministically, whatever the base. The previous value was `dev`, written when
+      # every pull request here targeted `main`; after the dev/main topology (#41) that made this
+      # assertion fail on every dev-based pull request and pass only on release pull requests.
       - name: Run the action against this pull request
         id: smoke
         # Only a pull_request event carries the payload this step asserts against. On a push to
@@ -105,7 +108,7 @@ jobs:
           model_id: unused-on-this-path
           model_protocol: anthropic
           model_token_env: SMOKE_UNUSED_TOKEN
-          target_branches: dev
+          target_branches: smoke-eligibility-never
 
       - name: Assert it settled at eligibility with a reason
         if: github.event_name == 'pull_request'

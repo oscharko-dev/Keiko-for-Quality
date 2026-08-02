@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
+
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+
+import { FIXED_PATH } from "./fixed-path.mjs";
 
 /**
  * The qualification binding: what produced a measurement.
@@ -33,6 +36,7 @@ function adapterCommit() {
     return execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: join(HERE, ".."),
       encoding: "utf8",
+      env: { PATH: FIXED_PATH },
     }).trim();
   } catch {
     // A measurement taken outside a checkout is still a measurement; it is just less traceable,

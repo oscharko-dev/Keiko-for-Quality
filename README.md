@@ -27,15 +27,16 @@ publication layer.
 
 ## What it guarantees
 
-| Property                                  | How                                                                                                                                                                                                |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The candidate is data, never code         | Content is read as Git objects through plumbing. The tree is never checked out, symlink-followed, or submodule-initialized, and no candidate script, hook, action, or package manager is executed. |
-| The engine never holds a GitHub token     | Its environment is built from nothing and contains only the model endpoint, model, protocol, timeouts and its credential.                                                                          |
-| No candidate file becomes configuration   | The engine runs with an explicit rule file from a working directory outside candidate content, so its discovery paths — including `<repo>/.opencodereview/rule.json` — are never consulted.        |
-| Incomplete is never clean                 | Partial, skipped, failed, unknown, unlisted-warning-bearing, budget-exhausted, timed-out, and malformed results all settle as incomplete and publish a blocking notice.                            |
-| Nothing changed is silently unreviewed    | An independent change inventory is computed before the run and reconciled against the engine's coverage manifest afterwards.                                                                       |
-| Nothing raw is emitted                    | Diagnostics carry a reason code from a closed vocabulary plus counts, digests, and durations. The type system has no field that can hold free-form text.                                           |
-| The engine binary is the one we qualified | Downloaded at a pinned version and verified against a SHA-256 digest held in this repository. A mismatch fails closed.                                                                             |
+| Property                                     | How                                                                                                                                                                                                                                                                                  |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| The candidate is data, never code            | Content is read as Git objects through plumbing. The tree is never checked out, symlink-followed, or submodule-initialized, and no candidate script, hook, action, or package manager is executed.                                                                                   |
+| The engine never holds a GitHub token        | Its environment is built from nothing and contains only the model endpoint, model, protocol, timeouts and its credential.                                                                                                                                                            |
+| No candidate file becomes configuration      | The engine runs with an explicit rule file from a working directory outside candidate content, so its discovery paths — including `<repo>/.opencodereview/rule.json` — are never consulted.                                                                                          |
+| Incomplete is never clean                    | Partial, skipped, failed, unknown, unlisted-warning-bearing, budget-exhausted, timed-out, and malformed results all settle as incomplete and publish a blocking notice.                                                                                                              |
+| A finding is not lost to an unplaceable line | GitHub can refuse a line-anchored comment when a diff view does not accept the anchor. The publisher retries as a file-level comment before giving up, and only settles incomplete if that also fails — the diagnostic then carries both attempt outcomes, never just the bare code. |
+| Nothing changed is silently unreviewed       | An independent change inventory is computed before the run and reconciled against the engine's coverage manifest afterwards.                                                                                                                                                         |
+| Nothing raw is emitted                       | Diagnostics carry a reason code from a closed vocabulary plus counts, digests, and durations. The type system has no field that can hold free-form text.                                                                                                                             |
+| The engine binary is the one we qualified    | Downloaded at a pinned version and verified against a SHA-256 digest held in this repository. A mismatch fails closed.                                                                                                                                                               |
 
 ## Coverage guarantee
 
@@ -129,6 +130,12 @@ review-critical would otherwise inherit a coverage hole it never agreed to.
   ],
   "benignWarnings": [
     { "type": "context_truncated", "justification": "expected on files above the context window" }
+  ],
+  "pathInstructions": [
+    {
+      "paths": ["**/*.sql"],
+      "instructions": "Require snake_case identifiers and flag any SELECT * in production code."
+    }
   ]
 }
 ```
@@ -137,12 +144,31 @@ A changed path matching none of these is **unclassified**, which fails the run. 
 an unclassified path is a gap in your coverage statement, and the alternative is a clean-looking
 review that quietly skipped something.
 
+`pathInstructions` attaches short natural-language guidance to specific path patterns — the
+capability CodeRabbit calls path instructions and Qodo calls extra instructions. It only changes
+_how_ a matching file is reviewed, never _which_ files are: that remains entirely `reviewRelevant`'s,
+`deletionCritical`'s, `generated`'s, and `excluded`'s decision. It is optional and additive, so a
+profile written before this field existed still parses and behaves exactly as before. It is also
+distinct from the action's `guidelines` input: an instruction is a short string inlined directly
+into the engine's rule prompt and scoped to specific globs, while a guideline is a whole document,
+named rather than inlined, and read from the trusted base checkout on demand everywhere.
+
+Every entry's `instructions` is rendered into the one rule document the engine reads for every file
+it reviews, so keep it short — a caption, not a style guide. It is bounded accordingly: at most 32
+entries, at most 16 `paths` globs per entry, at most 512 characters per glob, at most 1024 characters
+of `instructions` per entry, and at most 8192 characters of `instructions` summed across every entry.
+`paths` accepts the same glob dialect as `reviewRelevant`/`excluded`, and a declared glob may not
+repeat anywhere else in the list. Like the rest of this profile, it is read from the trusted base
+checkout, so its content carries the same trust level as `reviewRelevant`/`excluded` — configuration
+you authored, never the candidate content the review itself treats as hostile.
+
 ### The bot identity
 
 Configure the GitHub App. Deduplication only suppresses a repost when the existing conversation was
-authored by _this_ reviewer — and a marker is a public string in a public comment. Under the shared
-`github-actions[bot]` identity, any other workflow in the repository can author a comment carrying a
-valid-looking marker and silence a real finding.
+authored by _this_ reviewer — true of both dedup stages, the exact marker and the phrasing-
+independent similarity check described below — and a marker is a public string in a public comment.
+Under the shared `github-actions[bot]` identity, any other workflow in the repository can author a
+comment carrying a valid-looking marker and silence a real finding.
 
 1. Create a GitHub App with **Pull requests: read & write** and **Contents: read**.
 2. Install it on the repository.
@@ -150,6 +176,69 @@ valid-looking marker and silence a real finding.
 
 Without them the action falls back to `github_token` and posts as the shared Actions identity. It
 works; it is weaker; the fallback exists so you can try the reviewer before registering an App.
+
+### Deduplication
+
+A finding is suppressed only when it is the same finding this reviewer already published, or the
+same finding at a location someone already gave a considered answer to, checked in three stages:
+
+1. **Exact marker.** Every published conversation carries a hidden fingerprint of its content. A
+   later run recomputes the same fingerprint for the same defect and suppresses the repost.
+2. **Phrasing-independent similarity.** A model asked to describe the same defect twice does not
+   always word it identically, which changes the fingerprint above. This second stage suppresses a
+   candidate only when an existing, still-open conversation this reviewer authored anchors the same
+   file, its line range overlaps the candidate's within a small tolerance, and the two bodies are
+   conservatively similar — a shared quoted code snippet, or enough shared content vocabulary. Two
+   different defects at the same or an adjacent line are deliberately not similar enough to match,
+   and an uncertain comparison publishes rather than suppresses.
+3. **Dispositioned recurrence.** The first two stages both ignore a resolved conversation, so a
+   genuinely recurred defect always stays publishable — but on a long-lived pull request this let a
+   finding someone had already reasoned through and resolved reappear on every later push, arguing
+   the same point again each time. This stage suppresses a same-location, same-substance match of a
+   _resolved_ conversation, but only when its last reply is a substantive disposition — at least 80
+   characters once signature lines (an automation footer, a `Co-Authored-By:` trailer) are stripped —
+   never a bare "resolved" click with no reply, or a resolve with no reply at all. Counted separately
+   as `dedup.dispositioned` so it is never confused with the two stages above.
+
+Every stage but the third ignores a **resolved or outdated** conversation: once a conversation is no
+longer open, whatever it described can recur and be republished. Resolution state, and — for a
+genuinely resolved thread — its last reply's author and body, come from a best-effort GraphQL lookup
+the `Pull requests` permission above already covers; if a token or platform cannot answer it, every
+conversation is simply treated as open, which is exactly how deduplication behaved before this lookup
+existed.
+
+### The run-summary comment
+
+In addition to per-finding conversations, the reviewer maintains one top-level pull-request
+comment — created on the first run and updated in place on every run after, never duplicated. It
+is identified by a hidden marker, the same technique findings use, but fixed per pull request
+rather than derived from content: the summary is the one comment that must be found and updated
+regardless of what changed or which head a given run reviewed. Only a comment authored by this
+reviewer's own identity is recognized as the existing summary; a look-alike marker inside someone
+else's comment is ignored and a fresh comment is created alongside it — the same authorship rule
+deduplication enforces for findings.
+
+The comment states, for every settlement outcome including `incomplete` and `abandoned`:
+
+- the outcome (`complete` / `incomplete` with its reason code / `abandoned`), the reviewed head SHA
+  in short form, the triggering event's own timestamp, and the engine and action version
+  identifiers;
+- a compact table of counts: total, reviewable, excluded, and mechanically-clean paths; paths
+  replayed from the review-cache store versus freshly reviewed; findings published; and duplicates
+  suppressed, broken out by dedup stage (exact marker, phrasing-independent similarity);
+- the per-run token budget, and the engine-reported spend when it is available.
+
+It carries no finding body, no file content, and no free-form model text — every field is a
+number, a closed-vocabulary reason code, or a branded identifier, enforced by the composer's own
+parameter type rather than by convention alone.
+
+**An issue comment carries no `commit_id`.** Unlike a review comment, it is not bound to the commit
+it describes, which is why it states its reviewed head in its own text and is reissued — updated,
+never left stale — on every run against a new head. Read it as describing exactly the head it
+names, never as a live status of the pull request's current head.
+
+Disable it with `run_summary: false` (default `true`). Disabled means exactly that: no
+issue-comment API call is made at all, not even to check whether one already exists.
 
 ## Known limitations
 
@@ -177,6 +266,27 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
    that line exists, not whether the reviewer reasons about prototype chains. A benchmark you tune
    until it goes green has stopped being a benchmark. If this class matters to you, the deterministic
    gates in your own repository are the right place to catch it.
+
+7. **The similarity dedup stage is a bag-of-words measure.** It compares content vocabulary, not
+   meaning, so it can occasionally score "the same defect, reworded" and "a different defect
+   described in the same sentence template with one key identifier swapped" the wrong way around —
+   the second can share more words than a genuine paraphrase does. Calibrated to catch every
+   paraphrase pattern observed in production; biased, when a comparison is uncertain, toward
+   publishing rather than suppressing, because a missed finding is worse than an occasional
+   duplicate.
+8. **The run-summary comment is not commit-bound.** An issue comment carries no `commit_id`, so
+   nothing on GitHub's side ties it to the head it describes the way a review comment is tied to
+   one. It states its reviewed head in its own text for exactly this reason — trust that text, not
+   the comment's mere presence, as the description of which head a given version of it covers.
+9. **The run-summary comment is not archived when a pull request closes.** It is updated in place
+   on every eligible run and otherwise left as it last stood; deciding whether and how to clean it
+   up on closure is a deliberately deferred, separate concern.
+10. **The dispositioned-recurrence stage's 80-character floor is a heuristic, not a semantic
+    judgment.** A long-winded reply that never actually engages with the finding could clear it, and
+    a terse but genuinely conclusive one ("Wrong — this path is dead code, see line 40.") could fall
+    just short. Biased the same direction as the similarity stage: an uncertain call republishes
+    rather than suppresses, because a re-opened settled question costs a reply, while a wrongly
+    suppressed genuine recurrence costs a defect nobody sees again.
 
 ## Measured quality
 
@@ -216,6 +326,56 @@ between runs — which is why classification is reported and not gated: severity
 and gates nothing. Every run records what produced it (engine digest, rule digest, corpus digest,
 adapter commit, model id), because recall is a property of a _pairing_, and the model is the input
 that can move without a commit.
+
+## Reviewer arena
+
+The seeded corpus measures this reviewer alone. Since activation, every eligible Keiko pull request
+is also reviewed by CodeRabbit and Codex on the identical head — a controlled, three-way comparison a
+solo history cannot provide. `corpus/arena.mjs` turns that into a repeatable scoreboard instead of
+something read by hand: it reads each bot's inline review threads through the GitHub API (read-only,
+no publication, no model call), attributes them by author login, and reports per bot — per pull
+request and in aggregate — findings posted, distinct files touched, thread resolution, paraphrase
+duplicates within one bot's own findings, and cross-bot location overlap as a consensus proxy. It
+scores none of this for correctness: the epic behind it (#26) is explicit that the tool records, a
+person judges.
+
+Every count beyond raw totals is a heuristic, and the tool says so in its own output rather than
+letting a number imply more precision than it has: a duplicate variant is two of one bot's own
+findings sharing a path, an overlapping line window, and a Jaccard similarity over normalized content
+words at or above 0.15; cross-bot overlap is the same path-and-window intersection with no content
+comparison at all. `corpus/arena-lib.test.mjs` pins both heuristics against fixtures shaped from a
+real pull request, including the case that motivated this tool: three textually different Keiko for
+Quality comments at one location on Keiko #2926, which the heuristic must collapse into one finding
+plus two duplicate variants (tracked as bug #38 — re-running the arena after that fix lands is the
+regression meter for it).
+
+Thread-resolution status is a human or bot toggle, not proof a finding was addressed — a stale
+conversation gets resolved for reasons that have nothing to do with the code. Acted-upon linking
+(issue #56) adds a second, git-grounded signal per distinct finding: did a commit pushed to the pull
+request _after_ the finding was posted actually change the anchored region — same file, within
+±3 lines, found by parsing that commit's own unified-diff hunk headers? Every finding lands in one of
+four buckets — `acted_upon`, `resolved_without_change`, `open_unaddressed`, or `outdated_by_rebase`
+(the file is gone at the current head, or this run could not tell) — and each bot gets an
+opportunity-adjusted rate that excludes findings posted after the pull request's last push, which
+never had a chance to be acted upon. This is a coarser proxy than a human tracing the code: it cannot
+follow a fix that lands in a different file (or a distant function in the same file) for the same
+root cause, and it checks each later commit against the finding's original anchor independently
+rather than tracking a line's drift through a chain of commits. The pull request that introduced this
+heuristic ran it against Keiko #2930 and compared the result finding-by-finding against a hand-verified
+manual pass posted on issue #56, including the cases where the two disagree and why.
+
+```bash
+npm run arena -- 2926 2924          # writes corpus/evidence/arena-latest.{json,md}
+npm run arena -- --since 2026-07-01 # discovers pull requests instead of naming them
+node --test corpus/arena-lib.test.mjs # the pure computation's own tests; not part of `npm test`
+node --test corpus/arena-fetch.test.mjs # the fetch layer's own tests, including the commit timeline
+```
+
+The evidence committed under `corpus/evidence/` started with the first live run, recorded as the
+v0.10.0 baseline; the v0.11.0 baseline adds acted-upon linking, run live against Keiko #2930, #2926,
+and #2924. Its JSON never carries a comment body — locations, counts, and hashes only, matching this
+repository's evidence-redaction discipline; a short quoted stub would still be another bot's
+generated prose distributed through this repository, not just this reviewer's own.
 
 ## Development
 

@@ -5,10 +5,17 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { buildRuleFile, serializeRuleFile } from "../src/engine/rule-file.ts";
-import { sanitizeFindingBody } from "../src/publish/sanitize.ts";
 import { buildBinding } from "./binding.mjs";
+import { FIXED_PATH } from "./fixed-path.mjs";
 import { CASES } from "./cases.mjs";
+// Rule generation and the .js→.ts resolve hook live in rule-source.mjs so node --test can cover
+// them in-process (this file is a script with top-level side effects and cannot be imported).
+// The hook must be registered before the production import below — dynamic imports resolve at
+// runtime, static ones during link, before any code here has run.
+import { generateRuleDocument, registerTsExtensionHooks } from "./rule-source.mjs";
+
+registerTsExtensionHooks();
+const { sanitizeFindingBody } = await import("../src/publish/sanitize.ts");
 
 /**
  * Measures the reviewer against the seeded-defect corpus.
@@ -51,17 +58,19 @@ if (!BINARY) {
   process.exit(2);
 }
 
-function generateRuleFile() {
-  const profile = JSON.parse(readFileSync(join(HERE, "profile.json"), "utf8"));
+async function generateRuleFile() {
+  // Through the production loader — see generateRuleDocument's doc comment for why routing
+  // through `loadReviewProfile` (not JSON.parse) is the load-bearing part.
+  const document = await generateRuleDocument(readFileSync(join(HERE, "profile.json"), "utf8"));
   const dir = mkdtempSync(join(tmpdir(), "kfq-rule-"));
   const path = join(dir, "rule.json");
-  writeFileSync(path, serializeRuleFile(buildRuleFile({ profile })));
+  writeFileSync(path, document);
   return { path, dir };
 }
 
 // `dir` is null when the rule came from OCR_RULE: that file belongs to whoever passed it, and
 // removing it would delete an experiment's input out from under them.
-const generated = process.env.OCR_RULE === undefined ? generateRuleFile() : null;
+const generated = process.env.OCR_RULE === undefined ? await generateRuleFile() : null;
 const RULE = generated?.path ?? process.env.OCR_RULE;
 
 const onlyIndex = process.argv.indexOf("--only");
@@ -76,7 +85,7 @@ function git(args, cwd) {
     cwd,
     encoding: "utf8",
     env: {
-      PATH: process.env.PATH ?? "",
+      PATH: FIXED_PATH,
       GIT_AUTHOR_NAME: "corpus",
       GIT_AUTHOR_EMAIL: "corpus@example.test",
       GIT_COMMITTER_NAME: "corpus",
@@ -118,7 +127,7 @@ function runEngine(dir) {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
       env: {
-        PATH: process.env.PATH ?? "",
+        PATH: FIXED_PATH,
         HOME: home,
         LC_ALL: "C",
         OCR_LLM_URL: process.env.OCR_LLM_URL ?? "",

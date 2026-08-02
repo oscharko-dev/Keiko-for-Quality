@@ -2,6 +2,7 @@
 import { chmod, writeFile } from "node:fs/promises";
 
 import { fetchVerified, loadPin, loadPlatformKey } from "./engine-pin.mjs";
+import { cliPathArgument } from "./cli-args.mjs";
 
 /**
  * Writes this platform's pinned engine binary to a path, or exits non-zero.
@@ -12,11 +13,9 @@ import { fetchVerified, loadPin, loadPlatformKey } from "./engine-pin.mjs";
  *
  * Usage: node scripts/fetch-engine.mjs <destination>
  */
-const destination = process.argv[2];
-if (destination === undefined) {
-  console.error("usage: fetch-engine.mjs <destination>");
-  process.exit(2);
-}
+const destination = cliPathArgument(process.argv[2], {
+  usage: "usage: fetch-engine.mjs <destination>",
+});
 
 const platformKey = await loadPlatformKey();
 const platform = platformKey(process.platform, process.arch);

@@ -4,8 +4,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { buildRuleFile, serializeRuleFile } from "../src/engine/rule-file.ts";
-import { sanitizeFindingBody } from "../src/publish/sanitize.ts";
+import { FIXED_PATH } from "./fixed-path.mjs";
+import { generateRuleDocument, registerTsExtensionHooks } from "./rule-source.mjs";
+
+registerTsExtensionHooks();
+const { sanitizeFindingBody } = await import("../src/publish/sanitize.ts");
 
 /**
  * Runs the reviewer over real, already-merged commits of a real repository.
@@ -41,10 +44,10 @@ if (BINARY === undefined || repo === undefined || commits.length === 0) {
   process.exit(2);
 }
 
-function loadProfile() {
+function loadProfileText() {
   const path = join(repo, ".github", "keiko-for-quality.json");
   try {
-    return JSON.parse(readFileSync(path, "utf8"));
+    return readFileSync(path, "utf8");
   } catch {
     console.error(`no profile at ${path} — pass a repository that carries one`);
     process.exit(2);
@@ -53,12 +56,15 @@ function loadProfile() {
 
 const ruleDir = mkdtempSync(join(tmpdir(), "kfq-real-"));
 const rulePath = join(ruleDir, "rule.json");
-writeFileSync(rulePath, serializeRuleFile(buildRuleFile({ profile: loadProfile() })));
+// Through the production loader (rule-source.mjs) — the raw `{ profile: JSON.parse(...) }`
+// shape was the same #48 loader bypass the qualification harness carried, second instance.
+writeFileSync(rulePath, await generateRuleDocument(loadProfileText()));
 
 function subjectOf(commit) {
   return execFileSync("git", ["log", "-1", "--format=%s", commit], {
     cwd: repo,
     encoding: "utf8",
+    env: { PATH: FIXED_PATH },
   }).trim();
 }
 
@@ -73,7 +79,7 @@ function review(commit) {
         encoding: "utf8",
         maxBuffer: 128 * 1024 * 1024,
         env: {
-          PATH: process.env.PATH ?? "",
+          PATH: FIXED_PATH,
           HOME: home,
           LC_ALL: "C",
           OCR_LLM_URL: process.env.OCR_LLM_URL ?? "",

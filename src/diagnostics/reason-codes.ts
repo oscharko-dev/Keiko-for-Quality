@@ -60,12 +60,33 @@ export const REASON_CODES = [
   "publish.identity_unresolved",
   "publish.finding_published",
   "publish.finding_suppressed_duplicate",
+  // Suppressed by the phrasing-independent similarity gate (Keiko-for-Quality#38) rather than an
+  // exact marker match — kept distinct from the code above so an operator tuning the gate can tell
+  // the two mechanisms apart.
+  "publish.finding_suppressed_similar",
   "publish.finding_rejected_sanitization",
   "publish.finding_rejected_placement",
   "publish.readback_failed",
   "publish.api_failed",
   "publish.incomplete_notice_published",
   "publish.abandoned_stale_head",
+
+  // Deduplication against a settled disposition (Keiko-for-Quality#64), distinct from the two
+  // `publish.finding_suppressed_*` codes above: those suppress against a still-open conversation,
+  // this one suppresses against a RESOLVED one whose last reply was a substantive disposition —
+  // never a bare resolve, which must keep a genuinely recurred defect publishable (Keiko-for-
+  // Quality#38's contract, unchanged). A separate top-level prefix rather than another
+  // `publish.finding_suppressed_*` variant because the decision it reports on belongs to a
+  // different question: not "is this the same finding" but "did someone already settle it."
+  "dedup.dispositioned",
+
+  // Run-summary comment (Keiko-for-Quality#31): a single, marker-identified issue comment this
+  // reviewer upserts once per pull request, independent of every finding conversation above. Never
+  // affects completeness — the same "pure add-on layer" posture as memoization below.
+  "publish.summary_published",
+  "publish.summary_updated",
+  "publish.summary_upsert_failed",
+  "publish.summary_disabled",
 
   // Configuration
   "config.invalid",
@@ -79,6 +100,10 @@ export const REASON_CODES = [
   "cache.store_rejected",
   "cache.store_write_failed",
   "cache.hits",
+  // A content-key match a stored entry's own `prPathSetDigest` refused to replay because the pull
+  // request's changed-file set moved since that entry was written (v0.10.0, issue #50). Distinct
+  // from an ordinary content miss so production can tell the two apart.
+  "cache.context_invalidated",
   "cache.appended",
 ] as const;
 
@@ -101,6 +126,9 @@ export const REASON_CODE_GUIDANCE: Readonly<Record<string, string>> = {
   engine: "The engine could not be acquired or completed. Check the pin and the model endpoint.",
   settlement: "The review did not complete. Treat the pull request as unreviewed.",
   publish: "Findings could not be published. Check the App installation and its permissions.",
+  dedup:
+    "A finding was suppressed against a settled disposition rather than published. No action " +
+    "unless the disposition itself was wrong — reopen the original thread to contest it.",
   config: "The supplied configuration was rejected. Compare it against the documented schema.",
   run: "Run lifecycle marker.",
   cache:
