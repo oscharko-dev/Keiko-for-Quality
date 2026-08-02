@@ -14,6 +14,16 @@ type Brand<T, B extends string> = T & { readonly [brand]: B };
 /** A full 40-character hexadecimal Git object id. Abbreviated ids are rejected. */
 export type CommitSha = Brand<string, "CommitSha">;
 
+/**
+ * A full 40-character hexadecimal Git blob object id, as it appears in `git diff --raw` metadata.
+ *
+ * Distinct from `CommitSha` even though the format is identical, because the two answer different
+ * questions: a commit id names a point in history, a blob id names file content. Keeping them
+ * separate brands stops a future caller from comparing a blob id to a commit id and getting a
+ * type-checked but meaningless `true`.
+ */
+export type BlobId = Brand<string, "BlobId">;
+
 /** A 64-character lowercase hexadecimal SHA-256 digest. */
 export type Sha256 = Brand<string, "Sha256">;
 
@@ -47,6 +57,19 @@ export function commitSha(value: string, field = "commitSha"): CommitSha {
   const normalized = value.trim().toLowerCase();
   if (!FULL_SHA.test(normalized)) throw new ValidationError(field);
   return normalized as CommitSha;
+}
+
+/**
+ * Requires `--no-abbrev` (or an equivalent full-length source) upstream.
+ *
+ * The all-zero id (`"0".repeat(40)`) — Git's placeholder for "no blob", on the added or deleted
+ * side of a change — is a valid `BlobId` by this check: it is a real, meaningful value a caller
+ * must be able to hold, not a malformed one.
+ */
+export function blobId(value: string, field = "blobId"): BlobId {
+  const normalized = value.trim().toLowerCase();
+  if (!FULL_SHA.test(normalized)) throw new ValidationError(field);
+  return normalized as BlobId;
 }
 
 export function sha256(value: string, field = "sha256"): Sha256 {

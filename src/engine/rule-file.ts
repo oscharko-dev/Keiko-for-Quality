@@ -187,9 +187,25 @@ function guidanceSection(guidelines: GuidelineIndex): string {
   ].join("\n");
 }
 
+/**
+ * @param mechanicallyClean Paths the inventory downgraded away from `reviewed` — a pure rename
+ *   today. Each entry is a candidate-controlled path string handed to the engine's own rule
+ *   interpreter, not this repository's `GlobSet`, so it is not guaranteed to be read as a literal
+ *   even though it names one file: a path containing the engine's own glob metacharacters could
+ *   exclude more than intended. That failure mode still fails closed rather than open — anything
+ *   over-excluded this way is a path the inventory still counts in `reviewablePaths`, so the
+ *   settlement reconciliation in `settle.ts` reports the resulting coverage gap and the run settles
+ *   incomplete instead of silently reviewing less than it claims. Unlike `profile.excluded`, this
+ *   list carries no include/exclude precedence risk: `classify` only reaches this reason *after*
+ *   the path already resolved to `reviewed`, so it is never also in `include` under a different
+ *   verdict. This list also changes per run — a rename on this head is not a rename on the next —
+ *   so the rule digest recorded with the run changes with it, which is expected: the digest names
+ *   exactly what was sent to the engine, and it did change.
+ */
 export function buildRuleFile(
   profile: CompiledProfile,
   guidelines: GuidelineIndex = { paths: [] },
+  mechanicallyClean: readonly string[] = [],
 ): EngineRuleFile {
   // Both lists are derived from the consumer's own profile, so the engine's file selection and this
   // adapter's inventory answer the same question from the same source.
@@ -206,7 +222,10 @@ export function buildRuleFile(
   // one-file documentation change.
   //
   // `generated` is safe to pass because it is the one list that beats review-relevance on both
-  // sides, so excluding it in the engine matches what the inventory already does.
+  // sides, so excluding it in the engine matches what the inventory already does. `mechanicallyClean`
+  // is safe for the same reason as `generated`, by construction rather than by profile authorship: it
+  // is computed *from* the inventory's own `reviewed` verdicts, so it can never contain a path the
+  // inventory still counts as reviewable.
   const include = [...profile.profile.reviewRelevant];
   if (include.length === 0) {
     // Never widen to `**/*` here. An empty statement of review relevance is a broken profile, and
@@ -224,7 +243,7 @@ export function buildRuleFile(
       },
     ],
     include,
-    exclude: [...profile.profile.generated],
+    exclude: [...profile.profile.generated, ...mechanicallyClean],
   };
 }
 

@@ -84,6 +84,7 @@ function item(overrides: Partial<InventoryItem> = {}): InventoryItem {
     classification: { kind: "reviewed" },
     modeChanged: false,
     reviewable: true,
+    changedLines: 0,
     ...overrides,
   };
 }

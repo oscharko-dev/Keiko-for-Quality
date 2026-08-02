@@ -35,6 +35,16 @@ export interface EngineRunOptions {
   readonly guidelines: GuidelineIndex;
   readonly env: NodeJS.ProcessEnv;
   readonly pathValue: string;
+  /**
+   * The size-scaled per-run ceiling passed to the engine's own `--max-tokens-budget`.
+   *
+   * Never larger than `config.tokenBudget` — see `computeAllottedBudget` in `../review.js`, which
+   * derives it from the inventory. Passing it is what makes the engine stop dispatching new files
+   * once projected spend crosses it, instead of discovering the overrun only after paying for it.
+   */
+  readonly allottedBudget: number;
+  /** Paths the inventory downgraded to `mechanically-clean`. Forwarded to `buildRuleFile`. */
+  readonly mechanicallyCleanPaths: readonly string[];
 }
 
 export interface EngineRunOutput {
@@ -98,13 +108,14 @@ async function writeRuleFile(
   options: EngineRunOptions,
   home: string,
 ): Promise<{ rulePath: string; ruleDigest: Sha256 }> {
-  const ruleBody = serializeRuleFile(buildRuleFile(options.profile, options.guidelines));
+  const rule = buildRuleFile(options.profile, options.guidelines, options.mechanicallyCleanPaths);
+  const ruleBody = serializeRuleFile(rule);
   const rulePath = join(home, "keiko-rules.json");
   await writeFile(rulePath, ruleBody, { mode: 0o600 });
   return { rulePath, ruleDigest: sha256(createHash("sha256").update(ruleBody).digest("hex")) };
 }
 
-function reviewArguments(options: EngineRunOptions, rulePath: string): string[] {
+export function reviewArguments(options: EngineRunOptions, rulePath: string): string[] {
   return [
     "review",
     "--from",
@@ -119,6 +130,11 @@ function reviewArguments(options: EngineRunOptions, rulePath: string): string[] 
     rulePath,
     "--concurrency",
     String(options.config.concurrency),
+    // Makes the engine's own dispatch loop stop selecting new files once projected spend crosses
+    // this ceiling, instead of the overrun only being detected in `settle.ts` after every file
+    // already selected has been paid for.
+    "--max-tokens-budget",
+    String(options.allottedBudget),
   ];
 }
 
@@ -154,7 +170,7 @@ export async function runEngine(
       headSha: options.pair.head,
       digest: ruleDigest,
       durationMs: Date.now() - started,
-      counts: { bytes: result.stdout.byteLength },
+      counts: { bytes: result.stdout.byteLength, budget: options.allottedBudget },
     });
 
     return { stdout: result.stdout.toString("utf8"), ruleDigest };

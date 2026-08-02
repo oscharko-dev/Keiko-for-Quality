@@ -78,7 +78,11 @@ inputs:
     required: false
     default: "1800"
   token_budget:
-    description: Hard token ceiling for one review. Exceeding it settles the run as incomplete.
+    description: >-
+      Hard ceiling for one review; exceeding it settles the run as incomplete. The adapter never
+      spends this much by default — it passes the engine a per-run allotment scaled to the
+      change's own size (file count and changed lines), capped at this ceiling, so the engine
+      stops dispatching new files once projected spend crosses the smaller of the two.
     required: false
     default: "2000000"
   max_findings:

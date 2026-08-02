@@ -150,4 +150,57 @@ describe("listChanges", () => {
     await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
     expect(git(["status", "--porcelain"], repo).trim()).toBe("");
   });
+
+  describe("blob ids", () => {
+    it("reports full 40-character object ids rather than git's default abbreviation", async () => {
+      const changes = await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
+      const keep = changes.find((c) => c.path === "src/keep.ts");
+      expect(keep?.oldBlob).toMatch(/^[0-9a-f]{40}$/);
+      expect(keep?.newBlob).toMatch(/^[0-9a-f]{40}$/);
+    });
+
+    it("differs across a real content edit", async () => {
+      const changes = await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
+      const keep = changes.find((c) => c.path === "src/keep.ts");
+      expect(keep?.oldBlob).not.toBe(keep?.newBlob);
+    });
+
+    // `src/old-name.ts` moves to `src/new-name.ts` with no edit — the pure-rename case
+    // `classify()` proves by comparing these ids, not by inferring it from a similarity score.
+    it("is equal on both sides of a byte-identical rename", async () => {
+      const changes = await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
+      const renamed = changes.find((c) => c.path === "src/new-name.ts");
+      expect(renamed?.oldBlob).toBe(renamed?.newBlob);
+      expect(renamed?.oldBlob).toMatch(/^[0-9a-f]{40}$/);
+    });
+  });
+
+  describe("changedLines", () => {
+    it("sums numstat's added and deleted counts for an ordinary edit", async () => {
+      // `src/keep.ts` replaces its one line: 1 insertion, 1 deletion.
+      const changes = await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
+      expect(changes.find((c) => c.path === "src/keep.ts")?.changedLines).toBe(2);
+    });
+
+    it("is zero for a binary change, where numstat reports `-` rather than a count", async () => {
+      const changes = await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
+      expect(changes.find((c) => c.path === "image.bin")?.changedLines).toBe(0);
+    });
+
+    it("is zero for a byte-identical rename", async () => {
+      const changes = await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
+      expect(changes.find((c) => c.path === "src/new-name.ts")?.changedLines).toBe(0);
+    });
+
+    it("is zero for a mode-only change with no content edit", async () => {
+      const changes = await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
+      expect(changes.find((c) => c.path === "script.sh")?.changedLines).toBe(0);
+    });
+
+    it("counts a one-line addition and a one-line deletion", async () => {
+      const changes = await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
+      expect(changes.find((c) => c.path === "src/added file with spaces.ts")?.changedLines).toBe(1);
+      expect(changes.find((c) => c.path === "src/remove.ts")?.changedLines).toBe(1);
+    });
+  });
 });

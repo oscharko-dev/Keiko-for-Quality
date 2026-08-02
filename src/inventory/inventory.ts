@@ -37,13 +37,43 @@ export async function resolveReviewPair(
   return { base, head, mergeBase: await mergeBase(ctx, base, head) };
 }
 
+/**
+ * The diagnostic bucket name for one item's classification.
+ *
+ * Ordinarily the classification's `kind` is the whole story. `mechanically-clean` is the one kind
+ * with more than one reason today, so its bucket carries the reason too — an operator reading
+ * `mechanically_clean_pure_rename` learns what was skipped without opening the run. The diagnostics
+ * sink's own key format (`^[a-z][a-z0-9_]{0,39}$`, no dots) is why the separator is `_` rather than
+ * the `.` a nested name might suggest.
+ */
+function bucketKey(item: InventoryItem): string {
+  const kind = item.classification.kind.replace(/-/g, "_");
+  return item.classification.kind === "mechanically-clean"
+    ? `${kind}_${item.classification.reason.replace(/-/g, "_")}`
+    : kind;
+}
+
 function countByKind(items: readonly InventoryItem[]): Record<string, number> {
   const counts: Record<string, number> = {};
   for (const item of items) {
-    const key = item.classification.kind.replace(/-/g, "_");
+    const key = bucketKey(item);
     counts[key] = (counts[key] ?? 0) + 1;
   }
   return counts;
+}
+
+/**
+ * Paths downgraded to `mechanically-clean` — a pure rename today.
+ *
+ * Classification alone stops the inventory from requiring engine coverage of them, but the engine
+ * would still spend tokens dispatching a path it was never asked to skip. Handing this list to the
+ * engine as an exclude (see `buildRuleFile`) is what actually stops the spend, not just the
+ * accounting.
+ */
+export function mechanicallyCleanPaths(inventory: Inventory): readonly string[] {
+  return inventory.items
+    .filter((item) => item.classification.kind === "mechanically-clean")
+    .map((item) => item.path as string);
 }
 
 export async function buildInventory(

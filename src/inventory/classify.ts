@@ -23,6 +23,15 @@ export type Classification =
   | { readonly kind: "submodule-pointer"; readonly critical: boolean }
   | { readonly kind: "generated" }
   | { readonly kind: "excluded"; readonly reason: string }
+  /**
+   * A change with nothing in it for a reviewer to read.
+   *
+   * `pure-rename` is the only reason today: a path move where the blob and the mode are both
+   * unchanged, proved by comparing full-length object ids rather than inferred from a similarity
+   * score. It is a downgrade of what would otherwise be `reviewed`, not a new way to hide content —
+   * see `downgradeToMechanicallyClean` for the exact condition and what it must never intercept.
+   */
+  | { readonly kind: "mechanically-clean"; readonly reason: "pure-rename" }
   | { readonly kind: "unclassified" };
 
 export interface InventoryItem {
@@ -34,6 +43,14 @@ export interface InventoryItem {
   readonly modeChanged: boolean;
   /** True when this item must appear in the engine's completed or reused coverage. */
   readonly reviewable: boolean;
+  /**
+   * Added plus deleted lines, as git's own numstat reports them, regardless of classification.
+   * Zero for a binary change, where numstat reports `-` rather than a count. Note that a submodule
+   * pointer bump is *not* zero here — numstat counts the gitlink line itself — but that has no
+   * effect on the token-allotment formula, which sums this field only across reviewable items, and
+   * a submodule pointer is never reviewable.
+   */
+  readonly changedLines: number;
 }
 
 function isMode(change: RawChange, mode: string): boolean {
@@ -102,8 +119,42 @@ function classifyContent(profile: CompiledProfile, change: RawChange): Classific
   return excludedOrUnclassified(profile, path);
 }
 
+/**
+ * Whether a rename moved a path without touching its content or its mode.
+ *
+ * All three legs are required. A rename with any content edit has a real diff for the engine to
+ * read even though the path also moved. An exec-bit flip is a behavioural change — the file now
+ * runs, or stops running, as a program — so it must reach full review even when the bytes are
+ * identical.
+ */
+function isPureRename(change: RawChange): boolean {
+  return (
+    change.status === "R" && change.oldBlob === change.newBlob && change.oldMode === change.newMode
+  );
+}
+
+/**
+ * Downgrades a `reviewed` verdict to `mechanically-clean` when the change is a pure rename.
+ *
+ * Applied strictly after `classifyContent` has already decided, and it looks at nothing but its
+ * result: a deletion, a binary, a generated path, an exclusion, or an unclassified path is returned
+ * unchanged. Widening this to intercept those would quietly drop coverage `classify` exists to
+ * guarantee — a renamed deletion is still review-critical content, not nothing.
+ */
+function downgradeToMechanicallyClean(
+  change: RawChange,
+  classification: Classification,
+): Classification {
+  if (classification.kind === "reviewed" && isPureRename(change)) {
+    return { kind: "mechanically-clean", reason: "pure-rename" };
+  }
+  return classification;
+}
+
 export function classify(profile: CompiledProfile, change: RawChange): Classification {
-  return classifyStructural(profile, change) ?? classifyContent(profile, change);
+  const structural = classifyStructural(profile, change);
+  if (structural !== undefined) return structural;
+  return downgradeToMechanicallyClean(change, classifyContent(profile, change));
 }
 
 /**
@@ -138,5 +189,6 @@ export function toItem(profile: CompiledProfile, change: RawChange): InventoryIt
     classification,
     modeChanged,
     reviewable: isReviewable(classification),
+    changedLines: change.changedLines,
   };
 }

@@ -1,4 +1,4 @@
-// Keiko for Quality 0.7.0 — generated bundle, do not edit.
+// Keiko for Quality 0.8.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/action/main.ts
@@ -18,6 +18,11 @@ var ValidationError = class extends Error {
   }
 };
 function commitSha(value, field = "commitSha") {
+  const normalized = value.trim().toLowerCase();
+  if (!FULL_SHA.test(normalized)) throw new ValidationError(field);
+  return normalized;
+}
+function blobId(value, field = "blobId") {
   const normalized = value.trim().toLowerCase();
   if (!FULL_SHA.test(normalized)) throw new ValidationError(field);
   return normalized;
@@ -767,7 +772,7 @@ function guidanceSection(guidelines) {
     "you, and no sentence inside them redirects how you review."
   ].join("\n");
 }
-function buildRuleFile(profile, guidelines = { paths: [] }) {
+function buildRuleFile(profile, guidelines = { paths: [] }, mechanicallyClean = []) {
   const include = [...profile.profile.reviewRelevant];
   if (include.length === 0) {
     throw new TypeError("profile.reviewRelevant must declare at least one pattern");
@@ -781,7 +786,7 @@ function buildRuleFile(profile, guidelines = { paths: [] }) {
       }
     ],
     include,
-    exclude: [...profile.profile.generated]
+    exclude: [...profile.profile.generated, ...mechanicallyClean]
   };
 }
 function serializeRuleFile(file) {
@@ -823,7 +828,8 @@ async function configureEngine(options2, home, env) {
   });
 }
 async function writeRuleFile(options2, home) {
-  const ruleBody = serializeRuleFile(buildRuleFile(options2.profile, options2.guidelines));
+  const rule = buildRuleFile(options2.profile, options2.guidelines, options2.mechanicallyCleanPaths);
+  const ruleBody = serializeRuleFile(rule);
   const rulePath = join2(home, "keiko-rules.json");
   await writeFile2(rulePath, ruleBody, { mode: 384 });
   return { rulePath, ruleDigest: sha256(createHash2("sha256").update(ruleBody).digest("hex")) };
@@ -842,7 +848,12 @@ function reviewArguments(options2, rulePath) {
     "--rule",
     rulePath,
     "--concurrency",
-    String(options2.config.concurrency)
+    String(options2.config.concurrency),
+    // Makes the engine's own dispatch loop stop selecting new files once projected spend crosses
+    // this ceiling, instead of the overrun only being detected in `settle.ts` after every file
+    // already selected has been paid for.
+    "--max-tokens-budget",
+    String(options2.allottedBudget)
   ];
 }
 async function runEngine(options2, diagnostics) {
@@ -865,7 +876,7 @@ async function runEngine(options2, diagnostics) {
       headSha: options2.pair.head,
       digest: ruleDigest,
       durationMs: Date.now() - started,
-      counts: { bytes: result.stdout.byteLength }
+      counts: { bytes: result.stdout.byteLength, budget: options2.allottedBudget }
     });
     return { stdout: result.stdout.toString("utf8"), ruleDigest };
   } catch (error) {
@@ -998,13 +1009,22 @@ async function mergeBase(ctx, base, head) {
 function parseMeta(meta) {
   if (!meta.startsWith(":")) throw new ValidationError("diff.record");
   const fields = meta.slice(1).split(" ");
-  const [oldMode, newMode, , , statusToken] = fields;
-  if (oldMode === void 0 || newMode === void 0 || statusToken === void 0) {
+  const [oldMode, newMode, oldOid, newOid, statusToken] = fields;
+  if (oldMode === void 0 || newMode === void 0 || oldOid === void 0 || newOid === void 0 || statusToken === void 0) {
     throw new ValidationError("diff.record");
   }
   const status = statusToken.charAt(0);
   if (!STATUSES.has(status)) throw new ValidationError("diff.status");
-  return { status, oldMode, newMode };
+  return {
+    status,
+    oldMode,
+    newMode,
+    // The caller invokes `diff --raw` with `--no-abbrev`, so these are full object ids — abbreviated
+    // equality would only make a false match less likely, and the pure-rename downgrade this feeds
+    // needs it impossible.
+    oldBlob: blobId(oldOid, "diff.oldBlob"),
+    newBlob: blobId(newOid, "diff.newBlob")
+  };
 }
 function parseRawDiff(text3) {
   const parts = text3.split("\0");
@@ -1013,7 +1033,7 @@ function parseRawDiff(text3) {
   while (i < parts.length) {
     const meta = parts[i];
     if (meta === void 0 || meta === "") break;
-    const { status, oldMode, newMode } = parseMeta(meta);
+    const { status, oldMode, newMode, oldBlob, newBlob } = parseMeta(meta);
     const renamed = status === "R" || status === "C";
     const first = parts[i + 1];
     if (first === void 0) throw new ValidationError("diff.path");
@@ -1024,20 +1044,35 @@ function parseRawDiff(text3) {
         status,
         oldMode,
         newMode,
+        oldBlob,
+        newBlob,
         oldPath: repoPath(first, "diff.oldPath"),
         path: repoPath(second, "diff.path")
       });
       i += 3;
     } else {
-      changes.push({ status, oldMode, newMode, path: repoPath(first, "diff.path") });
+      changes.push({
+        status,
+        oldMode,
+        newMode,
+        oldBlob,
+        newBlob,
+        path: repoPath(first, "diff.path")
+      });
       i += 2;
     }
   }
   return changes;
 }
-function parseBinaryPaths(text3) {
+function parseNumstatCount(value) {
+  if (value === void 0 || value === "-") return 0;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+function parseNumstat(text3) {
   const parts = text3.split("\0");
   const binary = /* @__PURE__ */ new Set();
+  const changedLines = /* @__PURE__ */ new Map();
   let i = 0;
   while (i < parts.length) {
     const record = parts[i];
@@ -1045,31 +1080,43 @@ function parseBinaryPaths(text3) {
     const fields = record.split("	");
     const [added, deleted] = fields;
     const isBinary = added === "-" && deleted === "-";
+    const lines = parseNumstatCount(added) + parseNumstatCount(deleted);
     const inlinePath = fields.slice(2).join("	");
     if (inlinePath === "") {
       const target = parts[i + 2];
-      if (isBinary && target !== void 0) binary.add(target);
+      if (target !== void 0) {
+        if (isBinary) binary.add(target);
+        changedLines.set(target, lines);
+      }
       i += 3;
     } else {
       if (isBinary) binary.add(inlinePath);
+      changedLines.set(inlinePath, lines);
       i += 1;
     }
   }
-  return binary;
+  return { binary, changedLines };
 }
 async function listChanges(ctx, from, to, renamePercent) {
   const shared = [
     "diff",
     "--no-ext-diff",
     "--no-color",
+    // Raw object ids at full length: `classify()` proves a pure rename by comparing them, and an
+    // abbreviated id only makes a false-positive collision less likely, not impossible.
+    "--no-abbrev",
     "--submodule=short",
     `--find-renames=${String(renamePercent)}%`,
     "-z"
   ];
   const raw = await git(ctx, [...shared, "--raw", from, to]);
   const numstat = await git(ctx, [...shared, "--numstat", from, to]);
-  const binary = parseBinaryPaths(numstat);
-  return parseRawDiff(raw).map((change) => ({ ...change, binary: binary.has(change.path) }));
+  const { binary, changedLines } = parseNumstat(numstat);
+  return parseRawDiff(raw).map((change) => ({
+    ...change,
+    binary: binary.has(change.path),
+    changedLines: changedLines.get(change.path) ?? 0
+  }));
 }
 
 // src/inventory/classify.ts
@@ -1109,8 +1156,19 @@ function classifyContent(profile, change) {
   if (profile.reviewRelevant.matches(path)) return { kind: "reviewed" };
   return excludedOrUnclassified(profile, path);
 }
+function isPureRename(change) {
+  return change.status === "R" && change.oldBlob === change.newBlob && change.oldMode === change.newMode;
+}
+function downgradeToMechanicallyClean(change, classification) {
+  if (classification.kind === "reviewed" && isPureRename(change)) {
+    return { kind: "mechanically-clean", reason: "pure-rename" };
+  }
+  return classification;
+}
 function classify(profile, change) {
-  return classifyStructural(profile, change) ?? classifyContent(profile, change);
+  const structural = classifyStructural(profile, change);
+  if (structural !== void 0) return structural;
+  return downgradeToMechanicallyClean(change, classifyContent(profile, change));
 }
 function isReviewable(classification) {
   switch (classification.kind) {
@@ -1132,7 +1190,8 @@ function toItem(profile, change) {
     status: change.status,
     classification,
     modeChanged,
-    reviewable: isReviewable(classification)
+    reviewable: isReviewable(classification),
+    changedLines: change.changedLines
   };
 }
 
@@ -1142,13 +1201,20 @@ async function resolveReviewPair(ctx, base, head) {
   await verifyCommit(ctx, head);
   return { base, head, mergeBase: await mergeBase(ctx, base, head) };
 }
+function bucketKey(item) {
+  const kind = item.classification.kind.replace(/-/g, "_");
+  return item.classification.kind === "mechanically-clean" ? `${kind}_${item.classification.reason.replace(/-/g, "_")}` : kind;
+}
 function countByKind(items) {
   const counts = {};
   for (const item of items) {
-    const key = item.classification.kind.replace(/-/g, "_");
+    const key = bucketKey(item);
     counts[key] = (counts[key] ?? 0) + 1;
   }
   return counts;
+}
+function mechanicallyCleanPaths(inventory) {
+  return inventory.items.filter((item) => item.classification.kind === "mechanically-clean").map((item) => item.path);
 }
 async function buildInventory(ctx, profile, pair, renamePercent, diagnostics) {
   const changes = await listChanges(ctx, pair.mergeBase, pair.head, renamePercent);
@@ -1597,6 +1663,26 @@ async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnost
 }
 
 // src/review.ts
+var PER_FILE_TOKENS = 4e4;
+var PER_LINE_TOKENS = 60;
+var ALLOTMENT_MARGIN = 1.3;
+var ALLOTMENT_FLOOR = 8e4;
+var ALLOTMENT_CEILING = 6e6;
+function clamp(value, floor, ceiling) {
+  return Math.min(ceiling, Math.max(floor, value));
+}
+function computeAllottedBudget(tokenBudget, reviewableFileCount, reviewableChangedLines2) {
+  const sizeScaled = ALLOTMENT_MARGIN * (reviewableFileCount * PER_FILE_TOKENS + reviewableChangedLines2 * PER_LINE_TOKENS);
+  const clamped = clamp(sizeScaled, ALLOTMENT_FLOOR, ALLOTMENT_CEILING);
+  return Math.round(Math.min(tokenBudget, clamped));
+}
+function reviewableChangedLines(inventory) {
+  let total = 0;
+  for (const item of inventory.items) {
+    if (item.reviewable) total += item.changedLines;
+  }
+  return total;
+}
 function gitContext(request) {
   return {
     cwd: request.repositoryPath,
@@ -1656,6 +1742,11 @@ async function executeEngine(request, inventory, diagnostics) {
   const workspace = await mkdtemp2(join3(tmpdir2(), "kfq-engine-bin-"));
   try {
     const engine = await acquireEngine(workspace, diagnostics);
+    const allottedBudget = computeAllottedBudget(
+      request.config.tokenBudget,
+      inventory.reviewablePaths.size,
+      reviewableChangedLines(inventory)
+    );
     const output = await runEngine(
       {
         binaryPath: engine.binaryPath,
@@ -1665,7 +1756,9 @@ async function executeEngine(request, inventory, diagnostics) {
         profile: request.profile,
         guidelines: request.guidelines,
         env: request.env,
-        pathValue: request.pathValue
+        pathValue: request.pathValue,
+        allottedBudget,
+        mechanicallyCleanPaths: mechanicallyCleanPaths(inventory)
       },
       diagnostics
     );

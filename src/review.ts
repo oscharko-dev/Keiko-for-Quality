@@ -14,7 +14,12 @@ import { runEngine } from "./engine/run.js";
 import { settle, type Settlement } from "./engine/settle.js";
 import type { GitContext } from "./git/plumbing.js";
 import type { InventoryItem } from "./inventory/classify.js";
-import { buildInventory, resolveReviewPair, type Inventory } from "./inventory/inventory.js";
+import {
+  buildInventory,
+  mechanicallyCleanPaths,
+  resolveReviewPair,
+  type Inventory,
+} from "./inventory/inventory.js";
 import type { GitHubClient, RepoRef } from "./github/client.js";
 import {
   publishFindings,
@@ -45,6 +50,67 @@ export interface ReviewReport {
   readonly reason?: ReasonCode;
   readonly inventorySize: number;
   readonly publish?: PublishOutcome;
+}
+
+/** Measured blended cost per reviewable file, rounded up. The formula's dominant term by design. */
+const PER_FILE_TOKENS = 40_000;
+
+/**
+ * A weak secondary term, in tokens per changed line.
+ *
+ * Deliberately small relative to `PER_FILE_TOKENS`: line count is a poor predictor of spend next to
+ * tool-call depth (how much the model searches and reads beyond the diff itself), so this term
+ * nudges the estimate for an unusually large file without letting line count dominate it.
+ */
+const PER_LINE_TOKENS = 60;
+
+/** Margin over the raw estimate, sized to the measured ~3x spend variance on identical input. */
+const ALLOTMENT_MARGIN = 1.3;
+
+/** Floor beneath which a 1-2-file pull request would otherwise get an unworkably small allotment. */
+const ALLOTMENT_FLOOR = 80_000;
+
+/** Ceiling past which a run is expected to chunk or escalate rather than run as one unbounded spend. */
+const ALLOTMENT_CEILING = 6_000_000;
+
+/**
+ * Clamps `value` to the inclusive range `[floor, ceiling]`.
+ */
+function clamp(value: number, floor: number, ceiling: number): number {
+  return Math.min(ceiling, Math.max(floor, value));
+}
+
+/**
+ * The size-scaled per-run token allotment passed to the engine's own `--max-tokens-budget`.
+ *
+ * `tokenBudget` — the consumer's configured ceiling — is never widened by this formula, only ever
+ * narrowed: the result is always `<= tokenBudget`. Everything else here estimates how much of that
+ * ceiling *this* change plausibly needs, from its own shape rather than a fixed constant, so a
+ * one-file typo fix and an 87-file rewrite are not held to the same allotment.
+ *
+ * @param tokenBudget The consumer's hard ceiling for the whole review.
+ * @param reviewableFileCount `N` — the number of paths the engine must account for.
+ * @param reviewableChangedLines `D` — added-plus-deleted lines across those same paths.
+ */
+export function computeAllottedBudget(
+  tokenBudget: number,
+  reviewableFileCount: number,
+  reviewableChangedLines: number,
+): number {
+  const sizeScaled =
+    ALLOTMENT_MARGIN *
+    (reviewableFileCount * PER_FILE_TOKENS + reviewableChangedLines * PER_LINE_TOKENS);
+  const clamped = clamp(sizeScaled, ALLOTMENT_FLOOR, ALLOTMENT_CEILING);
+  return Math.round(Math.min(tokenBudget, clamped));
+}
+
+/** `D` in `computeAllottedBudget`: added-plus-deleted lines, summed across reviewable items only. */
+function reviewableChangedLines(inventory: Inventory): number {
+  let total = 0;
+  for (const item of inventory.items) {
+    if (item.reviewable) total += item.changedLines;
+  }
+  return total;
 }
 
 function gitContext(request: ReviewRequest): GitContext {
@@ -151,6 +217,11 @@ async function executeEngine(
   const workspace = await mkdtemp(join(tmpdir(), "kfq-engine-bin-"));
   try {
     const engine = await acquireEngine(workspace, diagnostics);
+    const allottedBudget = computeAllottedBudget(
+      request.config.tokenBudget,
+      inventory.reviewablePaths.size,
+      reviewableChangedLines(inventory),
+    );
     const output = await runEngine(
       {
         binaryPath: engine.binaryPath,
@@ -161,6 +232,8 @@ async function executeEngine(
         guidelines: request.guidelines,
         env: request.env,
         pathValue: request.pathValue,
+        allottedBudget,
+        mechanicallyCleanPaths: mechanicallyCleanPaths(inventory),
       },
       diagnostics,
     );

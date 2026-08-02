@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { compileProfile, type ReviewProfile } from "../config/profile.js";
-import { repoPath } from "../core/brands.js";
+import { blobId, repoPath } from "../core/brands.js";
 import {
   MODE_ABSENT,
   MODE_EXECUTABLE,
@@ -23,12 +23,20 @@ const PROFILE: ReviewProfile = {
 
 const compiled = compileProfile(PROFILE);
 
+// Distinct by default, as an ordinary content-changing modification would be. A test exercising
+// the pure-rename downgrade overrides both to the same value explicitly.
+const OLD_BLOB = blobId("a".repeat(40));
+const NEW_BLOB = blobId("b".repeat(40));
+
 function change(overrides: Omit<Partial<RawChange>, "path"> & { path: string }): RawChange {
   return {
     status: "M",
     oldMode: MODE_REGULAR,
     newMode: MODE_REGULAR,
+    oldBlob: OLD_BLOB,
+    newBlob: NEW_BLOB,
     binary: false,
+    changedLines: 0,
     ...overrides,
     path: repoPath(overrides.path),
   };
@@ -140,6 +148,75 @@ describe("classify", () => {
     it("marks a symlink over a review-relevant path as critical", () => {
       const result = classify(compiled, change({ path: "src/a.ts", newMode: MODE_SYMLINK }));
       expect(result).toEqual({ kind: "symlink-pointer", critical: true });
+    });
+  });
+
+  describe("mechanically-clean: the pure-rename downgrade", () => {
+    function rename(overrides: Omit<Partial<RawChange>, "path"> & { path: string }): RawChange {
+      return change({
+        status: "R",
+        oldPath: repoPath("src/old.ts"),
+        oldBlob: OLD_BLOB,
+        newBlob: OLD_BLOB,
+        ...overrides,
+      });
+    }
+
+    it("downgrades a byte-identical rename with no mode change", () => {
+      const result = classify(compiled, rename({ path: "src/new.ts" }));
+      expect(result).toEqual({ kind: "mechanically-clean", reason: "pure-rename" });
+    });
+
+    it("falls through to full review when the rename also edits content", () => {
+      const result = classify(compiled, rename({ path: "src/new.ts", newBlob: NEW_BLOB }));
+      expect(result).toEqual({ kind: "reviewed" });
+    });
+
+    it("falls through to full review when the rename also flips the exec bit", () => {
+      const result = classify(
+        compiled,
+        rename({ path: "src/new.ts", oldMode: MODE_REGULAR, newMode: MODE_EXECUTABLE }),
+      );
+      expect(result).toEqual({ kind: "reviewed" });
+    });
+
+    it("never downgrades a generated path, even a byte-identical rename of one", () => {
+      const result = classify(compiled, rename({ path: "dist/new.js" }));
+      expect(result).toEqual({ kind: "generated" });
+    });
+
+    it("never downgrades an excluded path, even a byte-identical rename of one", () => {
+      const result = classify(compiled, rename({ path: "vendor/new.ts" }));
+      expect(result).toEqual({
+        kind: "excluded",
+        reason: "third-party source, reviewed upstream",
+      });
+    });
+
+    it("never downgrades a binary rename", () => {
+      const result = classify(compiled, rename({ path: "src/logo.ts", binary: true }));
+      expect(result).toEqual({ kind: "binary" });
+    });
+
+    it("never downgrades an unclassified rename", () => {
+      const result = classify(compiled, rename({ path: "random/new.txt" }));
+      expect(result).toEqual({ kind: "unclassified" });
+    });
+
+    // Deletions never carry a rename status in git's own model, so this pins that the deletion
+    // branch of `classifyContent` is reached first and the downgrade never has a chance to run.
+    it("never downgrades a review-critical deletion", () => {
+      const result = classify(
+        compiled,
+        change({ path: "tests/pin.test.ts", status: "D", newMode: MODE_ABSENT }),
+      );
+      expect(result).toEqual({ kind: "reviewed-as-deletion" });
+    });
+
+    it("requires no engine coverage once downgraded", () => {
+      const built = toItem(compiled, rename({ path: "src/new.ts" }));
+      expect(built.classification).toEqual({ kind: "mechanically-clean", reason: "pure-rename" });
+      expect(built.reviewable).toBe(false);
     });
   });
 });
