@@ -33,14 +33,32 @@ describe("buildRuleFile", () => {
    * then sent to the model while the inventory counted it as generated — the two sides answering
    * different questions while their totals appeared to agree.
    */
-  it("excludes everything the profile calls generated or excluded", () => {
+  it("excludes the generated paths", () => {
+    const file = buildRuleFile(profileWith({ generated: ["**/dist/**", "**/*.min.js"] }));
+    expect(file.exclude).toEqual(["**/dist/**", "**/*.min.js"]);
+  });
+
+  /**
+   * The two sides resolve an overlap in opposite directions: `classify` checks `generated` first
+   * and `excluded` last, so review-relevance beats an exclusion rule — while the engine's filter
+   * lets exclude beat include. Passing the profile's `excluded` rules through therefore made them
+   * disagree about every path matching both, and that is not a corner case: `docs/qa/**\/*.md` is
+   * review-relevant in Keiko's profile *and* matched by its `docs/**\/*.{md,json}` exclusion. The
+   * engine dropped those files, the inventory counted them reviewable, and every pull request
+   * touching one settled incomplete with a blocking notice. Found in production on the first live
+   * run, not in review.
+   */
+  it("never excludes a path the profile also calls review-relevant", () => {
     const file = buildRuleFile(
       profileWith({
-        generated: ["**/dist/**", "**/*.min.js"],
-        excluded: [{ pattern: "docs/**", reason: "prose" }],
+        reviewRelevant: ["docs/qa/**/*.md", "src/**/*.ts"],
+        generated: ["**/dist/**"],
+        excluded: [{ pattern: "docs/**/*.{md,json}", reason: "prose" }],
       }),
     );
-    expect(file.exclude).toEqual(["**/dist/**", "**/*.min.js", "docs/**"]);
+    expect(file.include).toContain("docs/qa/**/*.md");
+    expect(file.exclude).not.toContain("docs/**/*.{md,json}");
+    expect(file.exclude).toEqual(["**/dist/**"]);
   });
 
   it("refuses an empty review-relevance statement instead of widening to everything", () => {

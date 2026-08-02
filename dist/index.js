@@ -1,4 +1,4 @@
-// Keiko for Quality 0.4.0 — generated bundle, do not edit.
+// Keiko for Quality 0.5.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/action/main.ts
@@ -713,10 +713,7 @@ function buildRuleFile(profile) {
   return {
     rules: [{ path: "**/*", rule: CATCH_ALL_RULE, merge_system_rule: true }],
     include,
-    exclude: [
-      ...profile.profile.generated,
-      ...profile.profile.excluded.map((rule) => rule.pattern)
-    ]
+    exclude: [...profile.profile.generated]
   };
 }
 function serializeRuleFile(file) {

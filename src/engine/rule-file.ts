@@ -130,11 +130,19 @@ export function buildRuleFile(profile: CompiledProfile): EngineRuleFile {
   // Both lists are derived from the consumer's own profile, so the engine's file selection and this
   // adapter's inventory answer the same question from the same source.
   //
-  // `exclude` used to be empty, which was not a neutral default: the engine takes one whole layer,
-  // so an empty exclude means no exclusions apply, and every generated or excluded path that also
-  // matches a review-relevant glob — `packages/*/dist/**.js` against `**/*.ts,js` — was sent to the
-  // model. The inventory calls those paths generated and leaves them out of its count, so the two
-  // sides were answering different questions while appearing to agree.
+  // `exclude` carries **only** the generated paths, and that asymmetry is the whole point. The two
+  // sides resolve an overlap in opposite directions: `classify` checks `generated` first and
+  // `excluded` last, so review-relevance *beats* an exclusion rule — while the engine's filter lets
+  // exclude beat include. Passing the profile's `excluded` rules through therefore made the two
+  // disagree about every path that matches both, which is not a corner case: `docs/qa/**/*.md` is
+  // review-relevant in Keiko's profile and also matched by its `docs/**/*.{md,json}` exclusion. The
+  // engine dropped those files, the inventory counted them as reviewable, and every pull request
+  // touching one settled incomplete and published a blocking notice. Measured in production, not
+  // reasoned about: the first live run reported 145 bytes in 29 ms — a `skipped` result — on a
+  // one-file documentation change.
+  //
+  // `generated` is safe to pass because it is the one list that beats review-relevance on both
+  // sides, so excluding it in the engine matches what the inventory already does.
   const include = [...profile.profile.reviewRelevant];
   if (include.length === 0) {
     // Never widen to `**/*` here. An empty statement of review relevance is a broken profile, and
@@ -146,10 +154,7 @@ export function buildRuleFile(profile: CompiledProfile): EngineRuleFile {
   return {
     rules: [{ path: "**/*", rule: CATCH_ALL_RULE, merge_system_rule: true }],
     include,
-    exclude: [
-      ...profile.profile.generated,
-      ...profile.profile.excluded.map((rule) => rule.pattern),
-    ],
+    exclude: [...profile.profile.generated],
   };
 }
 
