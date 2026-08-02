@@ -44,6 +44,32 @@ describe("fingerprint", () => {
   it("produces a compact hexadecimal token", () => {
     expect(fingerprint(BASE)).toMatch(/^[0-9a-f]{32}$/);
   });
+
+  // A finding's marker must stay head-independent (see `does not depend on line numbers` above), but
+  // the incomplete-review notice's marker needs the opposite: Keiko-for-Quality#38 found two
+  // byte-identical notices published against the same head, and the notice's own dedup key excluding
+  // `head` entirely is one contributor — see `publisher.ts`'s `publishIncompleteNotice`.
+  describe("optional head field", () => {
+    it("does not change the fingerprint when omitted, matching every existing caller", () => {
+      expect(fingerprint(BASE)).toBe(fingerprint({ ...BASE }));
+    });
+
+    it("changes the fingerprint when supplied and different", () => {
+      const withHead = { ...BASE, head: "a".repeat(40) };
+      const otherHead = { ...BASE, head: "b".repeat(40) };
+      expect(fingerprint(withHead)).not.toBe(fingerprint(otherHead));
+    });
+
+    it("is stable for the identical head", () => {
+      const withHead = { ...BASE, head: "a".repeat(40) };
+      expect(fingerprint(withHead)).toBe(fingerprint({ ...withHead }));
+    });
+
+    it("differs from the head-omitted fingerprint of the same otherwise-identical input", () => {
+      const withHead = { ...BASE, head: "a".repeat(40) };
+      expect(fingerprint(withHead)).not.toBe(fingerprint(BASE));
+    });
+  });
 });
 
 describe("marker rendering", () => {

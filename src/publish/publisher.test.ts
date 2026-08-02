@@ -12,7 +12,7 @@ import {
 } from "../github/client.js";
 import type { InventoryItem } from "../inventory/classify.js";
 import { composeBody, fingerprint } from "./marker.js";
-import { publishFindings, type PublishContext } from "./publisher.js";
+import { publishFindings, publishIncompleteNotice, type PublishContext } from "./publisher.js";
 
 const HEAD = commitSha("b".repeat(40));
 const REF: RepoRef = { owner: "acme", repo: "widget" };
@@ -51,7 +51,7 @@ class FakeApi implements ReviewCommentApi {
       body: input.body,
       path: input.path,
       authorLogin: IDENTITY,
-      commitId: HEAD,
+      commitId: input.commitId,
       url: "https://example.test/c",
     };
     this.existing = [...this.existing, comment];
@@ -234,6 +234,88 @@ describe("publishFindings", () => {
     });
   });
 
+  /**
+   * Keiko-for-Quality#38: the exact-marker stage above hashes normalized finding text, so a model
+   * that words the same defect differently on a re-run produces a new marker and the stage above
+   * never fires. These prove the second, phrasing-independent stage catches exactly that case
+   * without swallowing a genuinely different finding at the same or an adjacent line.
+   */
+  describe("paraphrase deduplication (similarity stage)", () => {
+    const REPHRASED_SAME_DEFECT =
+      "The retry loop keeps spinning forever because it never resets its attempt counter after a failure.";
+    const UNRELATED_DEFECT =
+      "This endpoint never validates that the request payload size stays under the configured " +
+      "limit before buffering it into memory.";
+
+    function openComment(body: string, overrides: Partial<ReviewComment> = {}): ReviewComment {
+      return {
+        id: 1,
+        body,
+        path: "src/retry.ts",
+        authorLogin: IDENTITY,
+        commitId: HEAD,
+        url: "https://example.test/existing",
+        line: 12,
+        startLine: 10,
+        ...overrides,
+      };
+    }
+
+    it("suppresses a rephrased repost of the same finding at the same location", async () => {
+      api.existing = [openComment(REPHRASED_SAME_DEFECT)];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 0, suppressed: 1 });
+      expect(api.created).toHaveLength(0);
+    });
+
+    it("still publishes a genuinely different finding at the same line", async () => {
+      api.existing = [openComment(UNRELATED_DEFECT)];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+
+    it("still publishes a genuinely different finding on an adjacent line", async () => {
+      api.existing = [openComment(UNRELATED_DEFECT, { line: 13, startLine: 13 })];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+
+    it("does not suppress once the matching conversation is resolved", async () => {
+      api.existing = [openComment(REPHRASED_SAME_DEFECT, { resolved: true })];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+
+    it("does not suppress a rephrasing authored by someone else", async () => {
+      api.existing = [openComment(REPHRASED_SAME_DEFECT, { authorLogin: "contributor" })];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+
+    it("does not suppress against a conversation with no usable line anchor", async () => {
+      // A file-level comment: no `line`/`startLine` key at all, distinct from setting either to
+      // `undefined` (which `exactOptionalPropertyTypes` would reject as a caller error anyway).
+      api.existing = [
+        {
+          id: 1,
+          body: REPHRASED_SAME_DEFECT,
+          path: "src/retry.ts",
+          authorLogin: IDENTITY,
+          commitId: HEAD,
+          url: "https://example.test/existing",
+        },
+      ];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+
+    it("does not suppress anything against an empty existing-conversation list", async () => {
+      api.existing = [];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+  });
+
   describe("read-back confirmation", () => {
     it("does not count a comment as published when it comes back bound to another head", async () => {
       api.readBackOverride = { commitId: "c".repeat(40) };
@@ -246,5 +328,48 @@ describe("publishFindings", () => {
       const outcome = await publishFindings(context, [finding()], diagnostics);
       expect(outcome).toMatchObject({ published: 0, readbackFailures: 1 });
     });
+  });
+});
+
+/**
+ * Keiko-for-Quality#38's secondary defect: two byte-identical incomplete-review notices were
+ * published against the same head, which the marker mechanism should already have suppressed.
+ * These pin the two contributing fixes: the notice marker now keys on `head` (so a stale head's
+ * notice can never alias a fresh head's), and a resolved notice conversation does not block a
+ * recurrence — the same contract markers already hold for findings.
+ */
+describe("publishIncompleteNotice", () => {
+  const ANCHOR = "docs/adr/ADR-0117-something.md";
+  const REASON = "settlement.incomplete.engine_error";
+
+  it("suppresses a repost of the identical (anchor, reason, head)", async () => {
+    await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
+    await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
+    expect(api.created).toHaveLength(1);
+  });
+
+  it("publishes independently for a fresh head even when the reason and anchor repeat", async () => {
+    await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
+    const freshContext: PublishContext = { ...context, headSha: commitSha("c".repeat(40)) };
+    const secondVerified = await publishIncompleteNotice(freshContext, REASON, ANCHOR, diagnostics);
+    expect(api.created).toHaveLength(2);
+    expect(secondVerified).toBe(true);
+  });
+
+  it("does not suppress once the earlier notice's conversation is resolved", async () => {
+    await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
+    expect(api.existing).toHaveLength(1);
+    api.existing = api.existing.map((comment) => ({ ...comment, resolved: true }));
+
+    await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
+    expect(api.created).toHaveLength(2);
+  });
+
+  it("ignores an identical marker authored by anyone else", async () => {
+    await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
+    api.existing = api.existing.map((comment) => ({ ...comment, authorLogin: "contributor" }));
+
+    await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
+    expect(api.created).toHaveLength(2);
   });
 });

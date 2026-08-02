@@ -60,6 +60,10 @@ export const REASON_CODES = [
   "publish.identity_unresolved",
   "publish.finding_published",
   "publish.finding_suppressed_duplicate",
+  // Suppressed by the phrasing-independent similarity gate (Keiko-for-Quality#38) rather than an
+  // exact marker match — kept distinct from the code above so an operator tuning the gate can tell
+  // the two mechanisms apart.
+  "publish.finding_suppressed_similar",
   "publish.finding_rejected_sanitization",
   "publish.finding_rejected_placement",
   "publish.readback_failed",

@@ -38,6 +38,7 @@ import type { GitHubClient, RepoRef } from "./github/client.js";
 import {
   publishFindings,
   publishIncompleteNotice,
+  type PublishContext,
   type PublishOutcome,
 } from "./publish/publisher.js";
 
@@ -178,6 +179,18 @@ function itemIndex(inventory: Inventory): ReadonlyMap<string, InventoryItem> {
   return new Map(inventory.items.map((item) => [item.path as string, item]));
 }
 
+/** The one `PublishContext` shape every publish call in this file needs, built from the same two inputs. */
+function publishContextFor(request: ReviewRequest, inventory: Inventory): PublishContext {
+  return {
+    client: request.client,
+    ref: request.ref,
+    pullNumber: request.pullNumber,
+    headSha: request.head,
+    identity: request.identity,
+    items: itemIndex(inventory),
+  };
+}
+
 /** What one run's review-cache lookup decided, threaded through the rest of `performReview`. */
 interface MemoContext {
   readonly hits: ReadonlyMap<string, CacheEntry>;
@@ -250,6 +263,16 @@ function prepareMemoization(
  *
  * Publishing them softens nothing. The outcome stays `incomplete`, the conversation stays open, and
  * the notice says in its own words that resolving it does not make the review complete.
+ *
+ * Every caller funnels through here before publishing anything, which is what makes the staleness
+ * check below a single guard rather than four ad hoc ones. Before this guard existed, only the
+ * `settlement.status === "incomplete"` caller checked it; a run that instead settled incomplete via
+ * an unclassified path (found in seconds) or an engine failure (found only after the minutes-long
+ * engine call `headIsCurrent`'s own doc comment describes) could still publish a notice bound to a
+ * commit the pull request had already moved past — one contributor to the duplicate-notice defect in
+ * Keiko-for-Quality#38, alongside the notice marker now also keying on `head` (see `publisher.ts`).
+ * `publishSettledFindings`, the sibling "complete" path, applies the identical check itself
+ * immediately before publishing real findings, for the same reason.
  */
 async function settleIncomplete(
   request: ReviewRequest,
@@ -261,40 +284,21 @@ async function settleIncomplete(
 ): Promise<ReviewReport> {
   diagnostics.record(reason, { headSha: request.head });
 
+  if (!(await headIsCurrent(request))) {
+    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+    return abandonedReport(inventory, memo);
+  }
+
+  const context = publishContextFor(request, inventory);
   // Findings first. If publication is interrupted, a reader is better served by findings without
   // the caveat than by a caveat with no findings — the first is incomplete information, the second
   // is none.
   const publish =
-    findings.length === 0
-      ? undefined
-      : await publishFindings(
-          {
-            client: request.client,
-            ref: request.ref,
-            pullNumber: request.pullNumber,
-            headSha: request.head,
-            identity: request.identity,
-            items: itemIndex(inventory),
-          },
-          findings,
-          diagnostics,
-        );
+    findings.length === 0 ? undefined : await publishFindings(context, findings, diagnostics);
 
   const anchor = noticeAnchor(inventory);
   if (anchor !== undefined) {
-    await publishIncompleteNotice(
-      {
-        client: request.client,
-        ref: request.ref,
-        pullNumber: request.pullNumber,
-        headSha: request.head,
-        identity: request.identity,
-        items: itemIndex(inventory),
-      },
-      reason,
-      anchor,
-      diagnostics,
-    );
+    await publishIncompleteNotice(context, reason, anchor, diagnostics);
   }
   return {
     outcome: "incomplete",
@@ -397,14 +401,7 @@ async function publishSettledFindings(
 ): Promise<ReviewReport> {
   const findings = mergeHitFindings(settlement.findings, memo.hits);
   const publish = await publishFindings(
-    {
-      client: request.client,
-      ref: request.ref,
-      pullNumber: request.pullNumber,
-      headSha: request.head,
-      identity: request.identity,
-      items: itemIndex(inventory),
-    },
+    publishContextFor(request, inventory),
     findings,
     diagnostics,
   );
@@ -528,10 +525,10 @@ export async function performReview(
   const settlement = await settleOrReport(request, inventory, memo, diagnostics);
   if ("outcome" in settlement) return settlement;
 
-  if (!(await headIsCurrent(request))) {
-    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
-    return abandonedReport(inventory, memo);
-  }
+  // `settleIncomplete` applies its own staleness guard (see its doc comment), so the incomplete
+  // branch does not repeat one here. The complete branch below still needs its own: it publishes
+  // real findings directly through `publishSettledFindings`, which never calls `settleIncomplete` on
+  // its happy path.
   if (settlement.status === "incomplete") {
     return settleIncomplete(
       request,
@@ -541,6 +538,10 @@ export async function performReview(
       mergeHitFindings(settlement.findings, memo.hits),
       memo,
     );
+  }
+  if (!(await headIsCurrent(request))) {
+    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+    return abandonedReport(inventory, memo);
   }
   return publishSettledFindings(request, inventory, settlement, memo, started, diagnostics);
 }
