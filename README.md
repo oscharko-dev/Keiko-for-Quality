@@ -94,7 +94,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: git fetch --no-tags origin "pull/${PR}/head"
 
-      - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.2.0
+      - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.3.0
         env:
           # The credential is passed by variable NAME, never as an input.
           KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
