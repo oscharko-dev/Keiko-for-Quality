@@ -737,16 +737,31 @@ var CREDENTIAL_SHAPES = [
 ];
 var MAX_BODY_CHARS = 8e3;
 var MIN_BODY_CHARS = 12;
-var CHECKS = [
+var RAW_CHECKS = [
   { pattern: CONTROL_EXCEPT_WHITESPACE, reason: "control_characters" },
   { pattern: BIDIRECTIONAL, reason: "bidirectional_override" },
   { pattern: ZERO_WIDTH, reason: "zero_width" },
-  { pattern: SUGGESTION_BLOCK, reason: "suggestion_block" },
+  { pattern: SUGGESTION_BLOCK, reason: "suggestion_block" }
+];
+var MASKED_CHECKS = [
   { pattern: HTML_TAG, reason: "html" },
   { pattern: IMAGE, reason: "image" },
   { pattern: LINK, reason: "link" },
   { pattern: MENTION, reason: "mention" }
 ];
+function maskCodeRegions(body) {
+  let masked = body.replace(
+    /^(`{3,})([^\n]*)\n([\s\S]*?)\n(\1)`*$/gm,
+    (_whole, open, info, content, close) => `${open}${info}
+${content.replace(/[^\n]/g, "x")}
+${close}`
+  );
+  masked = masked.replace(
+    /(`+)([^`\n]+)\1/g,
+    (_whole, ticks, content) => `${ticks}${"x".repeat(content.length)}${ticks}`
+  );
+  return masked;
+}
 function looksLikeCredential(text3) {
   return CREDENTIAL_SHAPES.some((pattern) => pattern.test(text3));
 }
@@ -754,8 +769,12 @@ function sanitizeFindingBody(raw) {
   const body = raw.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
   if (body.length < MIN_BODY_CHARS) return { ok: false, reason: "empty" };
   if (body.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
-  for (const check of CHECKS) {
+  for (const check of RAW_CHECKS) {
     if (check.pattern.test(body)) return { ok: false, reason: check.reason };
+  }
+  const masked = maskCodeRegions(body);
+  for (const check of MASKED_CHECKS) {
+    if (check.pattern.test(masked)) return { ok: false, reason: check.reason };
   }
   if (looksLikeCredential(body)) return { ok: false, reason: "credential" };
   return { ok: true, body };
@@ -1419,8 +1438,8 @@ var CATCH_ALL_RULE = [
   "points at in prose \u2014 and never as working markup. The publisher rejects bodies carrying such",
   "markup outright, so an echoed link also costs the finding itself.",
   "",
-  "**Wrap every type, generic, or tag that contains angle brackets in backticks.** Write",
-  "`Record<string, string>`, never a bare Record<string, string>: outside backticks, `<` followed",
+  "**Quote code only inside backticks \u2014 especially anything containing angle brackets.** Write",
+  "generics and tags as inline code (`Record<string, string>`): outside code spans, `<` followed",
   "by a letter reads as HTML to the publisher and the whole finding is rejected \u2014 a correct",
   "finding you cannot publish is a finding you did not make.",
   "",
