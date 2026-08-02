@@ -363,6 +363,7 @@ async function acquireEngine(directory, diagnostics, pin = ENGINE_PIN, platform 
 
 // src/engine/result.ts
 var SUPPORTED_MANIFEST_SCHEMA = "ocr.run-manifest/v1";
+var RUN_STATUSES = /* @__PURE__ */ new Set(["success", "skipped", "failed"]);
 var TERMINAL_STATES = /* @__PURE__ */ new Set([
   "complete",
   "partial",
@@ -439,12 +440,16 @@ function parseWarnings(value, field) {
   });
 }
 function parseSummary(value) {
-  if (value === void 0 || value === null) return { totalTokens: 0, budgetExceeded: false };
+  if (value === void 0 || value === null) {
+    return { totalTokens: 0, budgetExceeded: false, filesReviewed: 0 };
+  }
   const object = asObject(value, "summary");
   const tokens = object.total_tokens;
+  const reviewed = object.files_reviewed;
   return {
     totalTokens: typeof tokens === "number" && Number.isFinite(tokens) ? Math.trunc(tokens) : 0,
-    budgetExceeded: object.budget_exceeded === true
+    budgetExceeded: object.budget_exceeded === true,
+    filesReviewed: typeof reviewed === "number" && Number.isFinite(reviewed) ? Math.trunc(reviewed) : 0
   };
 }
 function parseTerminalState(value) {
@@ -460,8 +465,12 @@ function parseEngineResult(text3) {
   const manifestPresent = rawManifest !== void 0 && rawManifest !== null;
   const manifest = manifestPresent ? asObject(rawManifest, "result.manifest") : {};
   const summary = parseSummary(root.summary);
+  const rawStatus = root.status;
+  const status = typeof rawStatus === "string" && RUN_STATUSES.has(rawStatus) ? rawStatus : "unknown";
   return {
     manifestPresent,
+    status,
+    filesReviewed: summary.filesReviewed,
     schemaVersion: manifestPresent ? asString(manifest.schema_version, "result.manifest.schema_version", 128) : "",
     terminalState: parseTerminalState(manifest.terminal_state),
     coverage: manifestPresent ? parseCoverage(manifest.coverage, "result.manifest.coverage") : { selected: [], completed: [], reused: [], failed: [], waived: [] },
@@ -732,8 +741,8 @@ async function runEngine(options2, diagnostics) {
 }
 
 // src/engine/settle.ts
-function incomplete(reason, counts = {}) {
-  return { status: "incomplete", reason, counts };
+function incomplete(mode, reason, counts = {}) {
+  return { status: "incomplete", mode, reason, counts };
 }
 function coveredPaths(result) {
   const covered = /* @__PURE__ */ new Set();
@@ -756,39 +765,68 @@ function unlistedWarnings(profile, result) {
   }
   return unlisted;
 }
-function settle(inventory, result, profile, config) {
-  if (!result.manifestPresent) {
-    return incomplete("settlement.incomplete.missing_manifest");
+function commonDisqualifier(mode, result, profile, config) {
+  const unlisted = unlistedWarnings(profile, result);
+  if (unlisted > 0) {
+    return incomplete(mode, "settlement.incomplete.warning_not_allowlisted", { unlisted });
   }
+  if (result.budgetExceeded || result.totalTokens > config.tokenBudget) {
+    return incomplete(mode, "settlement.incomplete.budget_exceeded", {
+      tokens: result.totalTokens
+    });
+  }
+  if (result.findings.length > config.maxFindings) {
+    return incomplete(mode, "settlement.incomplete.engine_error", {
+      findings: result.findings.length
+    });
+  }
+  return void 0;
+}
+function settleReconciled(inventory, result, profile, config) {
   if (result.schemaVersion !== SUPPORTED_MANIFEST_SCHEMA) {
-    return incomplete("engine.run.schema_rejected");
+    return incomplete("reconciled", "engine.run.schema_rejected");
   }
   if (result.terminalState !== "complete") {
-    return incomplete("settlement.incomplete.terminal_state");
+    return incomplete("reconciled", "settlement.incomplete.terminal_state");
   }
   if (result.coverage.failed.length > 0) {
-    return incomplete("settlement.incomplete.coverage_failed", {
+    return incomplete("reconciled", "settlement.incomplete.coverage_failed", {
       failed: result.coverage.failed.length
     });
   }
   const gap = findCoverageGap(inventory, result);
   if (gap > 0) {
-    return incomplete("settlement.incomplete.coverage_gap", {
+    return incomplete("reconciled", "settlement.incomplete.coverage_gap", {
       gap,
       reviewable: inventory.reviewablePaths.size
     });
   }
-  const unlisted = unlistedWarnings(profile, result);
-  if (unlisted > 0) {
-    return incomplete("settlement.incomplete.warning_not_allowlisted", { unlisted });
+  return commonDisqualifier("reconciled", result, profile, config) ?? {
+    status: "complete",
+    mode: "reconciled",
+    findings: result.findings
+  };
+}
+function settleCounted(inventory, result, profile, config) {
+  if (result.status !== "success") {
+    return incomplete("counted", "settlement.incomplete.terminal_state");
   }
-  if (result.budgetExceeded || result.totalTokens > config.tokenBudget) {
-    return incomplete("settlement.incomplete.budget_exceeded", { tokens: result.totalTokens });
+  const expected = inventory.reviewablePaths.size;
+  if (result.filesReviewed < expected) {
+    return incomplete("counted", "settlement.incomplete.coverage_gap", {
+      gap: expected - result.filesReviewed,
+      reviewable: expected,
+      reviewed: result.filesReviewed
+    });
   }
-  if (result.findings.length > config.maxFindings) {
-    return incomplete("settlement.incomplete.engine_error", { findings: result.findings.length });
-  }
-  return { status: "complete", findings: result.findings };
+  return commonDisqualifier("counted", result, profile, config) ?? {
+    status: "complete",
+    mode: "counted",
+    findings: result.findings
+  };
+}
+function settle(inventory, result, profile, config) {
+  return result.manifestPresent ? settleReconciled(inventory, result, profile, config) : settleCounted(inventory, result, profile, config);
 }
 
 // src/git/plumbing.ts
@@ -1441,6 +1479,10 @@ async function performReview(request, diagnostics) {
   let settlement;
   try {
     settlement = await executeEngine(request, inventory, diagnostics);
+    diagnostics.record(
+      settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
+      { headSha: request.head }
+    );
   } catch {
     return settleIncomplete(request, inventory, "settlement.incomplete.engine_error", diagnostics);
   }

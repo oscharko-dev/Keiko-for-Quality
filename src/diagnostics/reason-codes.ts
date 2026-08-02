@@ -43,8 +43,12 @@ export const REASON_CODES = [
 
   // Settlement
   "settlement.complete",
+  // Which coverage question was actually answered. Recorded on every run, because a consumer
+  // deciding how far to trust a clean result needs to know whether identities or only counts were
+  // reconciled.
+  "settlement.mode.reconciled",
+  "settlement.mode.counted",
   "settlement.incomplete.terminal_state",
-  "settlement.incomplete.missing_manifest",
   "settlement.incomplete.coverage_gap",
   "settlement.incomplete.coverage_failed",
   "settlement.incomplete.warning_not_allowlisted",

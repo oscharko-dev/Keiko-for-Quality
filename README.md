@@ -34,6 +34,28 @@ publication layer.
 | Nothing raw is emitted                    | Diagnostics carry a reason code from a closed vocabulary plus counts, digests, and durations. The type system has no field that can hold free-form text.                                           |
 | The engine binary is the one we qualified | Downloaded at a pinned version and verified against a SHA-256 digest held in this repository. A mismatch fails closed.                                                                             |
 
+## Coverage guarantee
+
+Read this before trusting a clean result. There are two levels, and the reviewer reports which one
+applied on every run.
+
+**Counted** — the engine reports a `files_reviewed` count and a run status. Coverage is reconciled by
+cardinality: fewer files reviewed than the inventory requires settles the run incomplete. This
+catches the engine's own path filters disagreeing with your review profile, which is the omission
+this adapter exists to prevent. It does not identify _which_ file, and it cannot detect a
+substitution that keeps the count intact.
+
+**Reconciled** — the engine additionally emits a run manifest with per-path coverage partitions.
+Every inventoried path is matched by identity, so an omission is caught regardless of which file.
+
+**Today every pinned release settles as counted.** The run manifest exists only on the upstream
+default branch (`internal/session/manifest.go`); no published release emits it. The reconciled path
+is implemented and takes effect automatically as soon as a release provides a manifest — nothing in
+a consumer's configuration has to change.
+
+The mode is emitted as a diagnostic (`settlement.mode.counted` / `settlement.mode.reconciled`) on
+every run, so it is auditable rather than assumed.
+
 ## Usage
 
 ```yaml

@@ -15,6 +15,15 @@ export const SUPPORTED_MANIFEST_SCHEMA = "ocr.run-manifest/v1";
 
 export type TerminalState = "complete" | "partial" | "failed" | "skipped";
 
+/**
+ * The released engine's top-level outcome.
+ *
+ * Distinct from `terminal_state`, which belongs to the run manifest. v1.8.4 emits only this.
+ */
+export type RunStatus = "success" | "skipped" | "failed" | "unknown";
+
+const RUN_STATUSES: ReadonlySet<string> = new Set<string>(["success", "skipped", "failed"]);
+
 const TERMINAL_STATES: ReadonlySet<string> = new Set<string>([
   "complete",
   "partial",
@@ -58,6 +67,10 @@ export interface EngineResult {
    * reported as a malformed engine error rather than as the coverage question it actually is.
    */
   readonly manifestPresent: boolean;
+  /** Top-level outcome. The only terminal signal a released engine provides. */
+  readonly status: RunStatus;
+  /** Files the engine says it reviewed. The denominator for degraded reconciliation. */
+  readonly filesReviewed: number;
   readonly schemaVersion: string;
   readonly terminalState: TerminalState | "unknown";
   readonly coverage: EngineCoverage;
@@ -149,13 +162,22 @@ function parseWarnings(value: unknown, field: string): EngineWarning[] {
   });
 }
 
-function parseSummary(value: unknown): { totalTokens: number; budgetExceeded: boolean } {
-  if (value === undefined || value === null) return { totalTokens: 0, budgetExceeded: false };
+function parseSummary(value: unknown): {
+  totalTokens: number;
+  budgetExceeded: boolean;
+  filesReviewed: number;
+} {
+  if (value === undefined || value === null) {
+    return { totalTokens: 0, budgetExceeded: false, filesReviewed: 0 };
+  }
   const object = asObject(value, "summary");
   const tokens = object.total_tokens;
+  const reviewed = object.files_reviewed;
   return {
     totalTokens: typeof tokens === "number" && Number.isFinite(tokens) ? Math.trunc(tokens) : 0,
     budgetExceeded: object.budget_exceeded === true,
+    filesReviewed:
+      typeof reviewed === "number" && Number.isFinite(reviewed) ? Math.trunc(reviewed) : 0,
   };
 }
 
@@ -180,8 +202,16 @@ export function parseEngineResult(text: string): EngineResult {
   const manifestPresent = rawManifest !== undefined && rawManifest !== null;
   const manifest = manifestPresent ? asObject(rawManifest, "result.manifest") : {};
   const summary = parseSummary(root.summary);
+  const rawStatus = root.status;
+  const status: RunStatus =
+    typeof rawStatus === "string" && RUN_STATUSES.has(rawStatus)
+      ? (rawStatus as RunStatus)
+      : "unknown";
+
   return {
     manifestPresent,
+    status,
+    filesReviewed: summary.filesReviewed,
     schemaVersion: manifestPresent
       ? asString(manifest.schema_version, "result.manifest.schema_version", 128)
       : "",

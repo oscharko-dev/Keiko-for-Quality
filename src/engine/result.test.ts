@@ -202,3 +202,40 @@ describe("real engine output", () => {
     expect(result.coverage.completed).toEqual([]);
   });
 });
+
+/**
+ * The document a pinned v1.8.4 binary actually produced against a live model.
+ *
+ * Captured from a real review of a seeded authentication bypass, with the finding body replaced —
+ * a fixture is committed, and model output is not ours to publish. Everything that settlement reads
+ * is preserved verbatim.
+ *
+ * This fixture exists because the earlier ones did not: the adapter's contract was written from the
+ * upstream default branch while the binary was pinned to a release, and the release emits no run
+ * manifest at all. Every hand-written fixture agreed with the assumption instead of testing it.
+ */
+describe("real v1.8.4 release output", () => {
+  const captured = readFileSync(
+    join(import.meta.dirname, "__fixtures__/real-v1.8.4-success.json"),
+    "utf8",
+  );
+
+  it("parses a successful review that carries no manifest", () => {
+    const result = parseEngineResult(captured);
+    expect(result.manifestPresent).toBe(false);
+    expect(result.status).toBe("success");
+    expect(result.findings).toHaveLength(1);
+  });
+
+  it("exposes the file count settlement needs when no manifest exists", () => {
+    const result = parseEngineResult(captured);
+    expect(result.filesReviewed).toBeGreaterThan(0);
+  });
+
+  it("carries the finding position through unchanged", () => {
+    const finding = parseEngineResult(captured).findings[0];
+    expect(finding?.path).toBe("auth.ts");
+    expect(finding?.severity).toBe("critical");
+    expect(finding?.category).toBe("security");
+  });
+});
