@@ -75,3 +75,62 @@ jobs:
       # product makes to every consumer, so it is proved on every change rather than assumed.
       - name: Verify pinned engine digest
         run: npm run check:engine-pin
+
+  action-smoke:
+    name: action smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # A synthetic fork-originated event. It exercises the whole entrypoint — bundle load, event
+      # parsing, eligibility, output writing — and settles before any credential or model call is
+      # needed, so the smoke test needs no secrets.
+      - name: Write synthetic event
+        run: |
+          cat > "${RUNNER_TEMP}/event.json" <<'JSON'
+          {
+            "action": "synchronize",
+            "pull_request": {
+              "number": 1,
+              "draft": false,
+              "head": {
+                "sha": "1111111111111111111111111111111111111111",
+                "repo": { "full_name": "attacker/Keiko-for-Quality" }
+              },
+              "base": {
+                "sha": "2222222222222222222222222222222222222222",
+                "ref": "dev",
+                "repo": { "full_name": "oscharko-dev/Keiko-for-Quality" }
+              }
+            }
+          }
+          JSON
+
+      # Proves the committed bundle actually executes under the node24 action runtime on a real
+      # runner. Everything else in this workflow runs the source through Vitest, which would not
+      # notice a bundle that fails to load.
+      - name: Run the action against the synthetic event
+        id: smoke
+        uses: ./
+        env:
+          GITHUB_EVENT_PATH: ${{ runner.temp }}/event.json
+        with:
+          profile: examples/review-profile.json
+          model_endpoint: https://example.invalid/v1
+          model_id: unused-in-this-path
+          model_protocol: anthropic
+          model_token_env: SMOKE_UNUSED_TOKEN
+          target_branches: dev
+
+      - name: Assert the fork head was skipped, with a reason
+        env:
+          OUTCOME: ${{ steps.smoke.outputs.outcome }}
+          REASON: ${{ steps.smoke.outputs.reason }}
+        run: |
+          echo "outcome=${OUTCOME} reason=${REASON}"
+          test "${OUTCOME}" = "skipped"
+          test "${REASON}" = "eligibility.skipped.fork"
