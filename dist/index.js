@@ -132,8 +132,13 @@ function computeKey(baseBlob, headBlob, ruleDigest, engineDigest, model, proto) 
   );
   return createHash("sha256").update(material, "utf8").digest("hex");
 }
+function byCodeUnit(a, b) {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
 function computePathSetDigest(pathTokens) {
-  const material = [...pathTokens].sort().join(FIELD_SEPARATOR);
+  const material = [...pathTokens].sort(byCodeUnit).join(FIELD_SEPARATOR);
   return createHash("sha256").update(material, "utf8").digest("hex");
 }
 function optionalToken(value, field) {
@@ -694,6 +699,10 @@ var REASON_CODES = [
   "cache.store_rejected",
   "cache.store_write_failed",
   "cache.hits",
+  // A content-key match a stored entry's own `prPathSetDigest` refused to replay because the pull
+  // request's changed-file set moved since that entry was written (v0.10.0, issue #50). Distinct
+  // from an ordinary content miss so production can tell the two apart.
+  "cache.context_invalidated",
   "cache.appended"
 ];
 var REASON_CODE_SET = new Set(REASON_CODES);

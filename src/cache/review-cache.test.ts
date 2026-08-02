@@ -7,6 +7,7 @@ import {
   SUPPORTED_STORE_SCHEMA,
   appendEntries,
   blobId,
+  byCodeUnit,
   computeKey,
   computePathSetDigest,
   lookup,
@@ -419,6 +420,28 @@ describe("computePathSetDigest", () => {
 
   it("does not let two tokens split differently collide, mirroring computeKey's own NUL-safety", () => {
     expect(computePathSetDigest(["ab", "c"])).not.toBe(computePathSetDigest(["a", "bc"]));
+  });
+});
+
+describe("byCodeUnit", () => {
+  // Sonar (typescript:S2871) flags a bare, argument-less `.sort()` on a string array and suggests
+  // `String.prototype.localeCompare`. That suggestion is wrong for this call site specifically:
+  // `computePathSetDigest`'s ordering feeds a content digest that must come out identical on every
+  // runner a store's Actions cache entry might be restored on, and `localeCompare` collates by the
+  // runtime's default locale, which is not guaranteed to agree across machines. These tests pin the
+  // actual (correct) choice — plain code-unit order — directly, rather than through a digest a
+  // future reader could not tell was locale-sensitive or not just by reading the assertion.
+  it("orders lexicographically by code unit", () => {
+    expect(byCodeUnit("a", "b")).toBeLessThan(0);
+    expect(byCodeUnit("b", "a")).toBeGreaterThan(0);
+    expect(byCodeUnit("a", "a")).toBe(0);
+  });
+
+  it("sorts every uppercase ASCII letter before every lowercase one", () => {
+    // Code-unit order: "A" is 0x41, "a" is 0x61. Many locale collations invert this pair, which is
+    // exactly the divergence this pin exists to catch if a future edit switched to `localeCompare`.
+    expect(byCodeUnit("B", "a")).toBeLessThan(0);
+    expect(["a", "B"].sort(byCodeUnit)).toEqual(["B", "a"]);
   });
 });
 

@@ -190,6 +190,23 @@ export function computeKey(
 }
 
 /**
+ * Plain code-unit ordering, spelled out rather than left to `Array.prototype.sort`'s argument-less
+ * default.
+ *
+ * Deliberately not `String.prototype.localeCompare`: this order feeds a content digest that must
+ * come out identical on every runner a store's Actions cache entry might be restored on, and
+ * `localeCompare` collates by the runtime's default locale — which can differ across machines,
+ * ICU builds, and Node versions. A `<`/`>` comparison is exactly what `sort()` already does with no
+ * comparator at all; naming it explicitly only makes that intentional rather than an oversight a
+ * static analyzer cannot tell apart from a forgotten comparator (typescript:S2871).
+ */
+export function byCodeUnit(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+/**
  * The bound on cross-file context drift between two runs (v0.10.0, issue #50): a digest over the
  * NUL-separated, lexicographically sorted set of every changed path's set-membership token in the
  * pull request's inventory. See this module's top-of-file comment for why this exists and why it
@@ -202,7 +219,7 @@ export function computeKey(
  * an implementation detail this digest must not be sensitive to.
  */
 export function computePathSetDigest(pathTokens: readonly string[]): Sha256 {
-  const material = [...pathTokens].sort().join(FIELD_SEPARATOR);
+  const material = [...pathTokens].sort(byCodeUnit).join(FIELD_SEPARATOR);
   // Same guaranteed-shape reasoning as `computeKey`'s own cast, immediately above: a freshly
   // computed sha256 hex digest is never untrusted input.
   return createHash("sha256").update(material, "utf8").digest("hex") as Sha256;
