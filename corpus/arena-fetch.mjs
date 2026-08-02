@@ -50,18 +50,32 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   }
 }`;
 
+/**
+ * The environment `gh` is allowed to see: `PATH` to be found at all, plus every variable `gh help
+ * environment` documents as one of its own ambient authentication mechanisms (a config file under
+ * `HOME`/`XDG_CONFIG_HOME`/`GH_CONFIG_DIR`, a `github.com` token, or a GitHub Enterprise Server
+ * token and host). Listed explicitly, like the engine invocations elsewhere in `corpus/`, rather
+ * than passed through wholesale — this repository's static analysis requires `PATH` to be a fixed
+ * value a child process could not widen, and an explicit list is also the honest documentation of
+ * what this script can actually authenticate with. A key `gh` does not see falls back to its own
+ * defaults; Node omits an `undefined` value from the child's environment rather than stringifying
+ * it, so a variable unset here is unset there too, not the literal text `"undefined"`.
+ */
 function runGh(args) {
   return execFileSync("gh", args, {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
-    // `gh` authenticates through any of several ambient mechanisms (a config file under `HOME`,
-    // `GH_TOKEN`, `GITHUB_TOKEN`, an enterprise host, …), so the environment is passed through
-    // rather than pared to an explicit allow-list — unlike the engine invocations elsewhere in
-    // `corpus/`, which is the right call for a process that never sees the model credential. `PATH`
-    // is re-asserted explicitly, as a fixed value from this process's own environment rather than
-    // one a child process could widen, satisfying this repository's static analysis for spawning by
-    // executable name.
-    env: { ...process.env, PATH: process.env.PATH ?? "" },
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: process.env.HOME,
+      XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+      GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
+      GH_TOKEN: process.env.GH_TOKEN,
+      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+      GH_ENTERPRISE_TOKEN: process.env.GH_ENTERPRISE_TOKEN,
+      GITHUB_ENTERPRISE_TOKEN: process.env.GITHUB_ENTERPRISE_TOKEN,
+      GH_HOST: process.env.GH_HOST,
+    },
   });
 }
 
