@@ -62,6 +62,12 @@ export function settle(
   profile: CompiledProfile,
   config: RuntimeConfig,
 ): Settlement {
+  // No manifest at all means there is no coverage statement to reconcile against. The engine
+  // answers this way for a `skipped` run, so it is an expected shape rather than corruption — and
+  // reporting it as a malformed result would send an operator looking for the wrong problem.
+  if (!result.manifestPresent) {
+    return incomplete("settlement.incomplete.missing_manifest");
+  }
   // An unfamiliar manifest schema means every field below may have shifted meaning. Reading it
   // anyway would be guessing about whether a review happened.
   if (result.schemaVersion !== SUPPORTED_MANIFEST_SCHEMA) {

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { ValidationError } from "../core/brands.js";
@@ -73,10 +75,20 @@ describe("parseEngineResult", () => {
     expect(result.schemaVersion).toBe("ocr.run-manifest/v9");
   });
 
-  it("treats a missing manifest as unparsable rather than as an empty clean run", () => {
-    expect(() => parseEngineResult(JSON.stringify({ status: "success", comments: [] }))).toThrow(
-      ValidationError,
-    );
+  // This case originally asserted that a missing manifest throws. Running the real binary
+  // disproved the assumption behind it: the engine legitimately omits `manifest` on a skipped run.
+  // The invariant that mattered — a manifest-less result must never read as a clean review — is
+  // preserved and tightened, because settlement now reports *why* rather than calling it malformed.
+  it("reports a missing manifest instead of treating it as an empty clean run", () => {
+    const result = parseEngineResult(JSON.stringify({ status: "success", comments: [] }));
+    expect(result.manifestPresent).toBe(false);
+    expect(result.terminalState).toBe("unknown");
+  });
+
+  it("still rejects a manifest that is present but not an object", () => {
+    expect(() =>
+      parseEngineResult(JSON.stringify({ status: "success", comments: [], manifest: "nope" })),
+    ).toThrow(ValidationError);
   });
 
   it("rejects malformed JSON", () => {
@@ -160,5 +172,33 @@ describe("parseEngineResult", () => {
       document({ warnings: [{ type: "context_truncated", message: "m", file: "src/a.ts" }] }),
     );
     expect(result.warnings).toEqual([{ type: "context_truncated", file: "src/a.ts" }]);
+  });
+});
+
+/**
+ * Captured from the pinned engine binary itself, not written by hand.
+ *
+ * `opencodereview v1.8.4 review --from HEAD --to HEAD --format json` on a repository with no
+ * changes. A hand-written fixture here would only have restated what this parser already assumed —
+ * and the assumption was wrong: a skipped run carries no `manifest` key at all, which the original
+ * parser rejected as malformed.
+ */
+describe("real engine output", () => {
+  const captured = readFileSync(
+    join(import.meta.dirname, "__fixtures__/real-skipped-run.json"),
+    "utf8",
+  );
+
+  it("parses a skipped run that carries no manifest", () => {
+    const result = parseEngineResult(captured);
+    expect(result.manifestPresent).toBe(false);
+    expect(result.findings).toEqual([]);
+  });
+
+  it("reports the absent manifest rather than guessing at a terminal state", () => {
+    const result = parseEngineResult(captured);
+    expect(result.terminalState).toBe("unknown");
+    expect(result.schemaVersion).toBe("");
+    expect(result.coverage.completed).toEqual([]);
   });
 });

@@ -49,6 +49,15 @@ export interface EngineCoverage {
 }
 
 export interface EngineResult {
+  /**
+   * False when the engine emitted no run manifest at all.
+   *
+   * It does exactly that for a `skipped` run — verified against the real binary, which answers
+   * `{"status":"skipped","message":"No supported files changed.","comments":[]}` with no
+   * `manifest` key. Without this flag the absence reads as a parse failure, and the run gets
+   * reported as a malformed engine error rather than as the coverage question it actually is.
+   */
+  readonly manifestPresent: boolean;
   readonly schemaVersion: string;
   readonly terminalState: TerminalState | "unknown";
   readonly coverage: EngineCoverage;
@@ -167,12 +176,19 @@ export function parseEngineResult(text: string): EngineResult {
     throw new ValidationError("result.size");
   }
   const root = asObject(parseJson(text, "result"), "result");
-  const manifest = asObject(root.manifest, "result.manifest");
+  const rawManifest = root.manifest;
+  const manifestPresent = rawManifest !== undefined && rawManifest !== null;
+  const manifest = manifestPresent ? asObject(rawManifest, "result.manifest") : {};
   const summary = parseSummary(root.summary);
   return {
-    schemaVersion: asString(manifest.schema_version, "result.manifest.schema_version", 128),
+    manifestPresent,
+    schemaVersion: manifestPresent
+      ? asString(manifest.schema_version, "result.manifest.schema_version", 128)
+      : "",
     terminalState: parseTerminalState(manifest.terminal_state),
-    coverage: parseCoverage(manifest.coverage, "result.manifest.coverage"),
+    coverage: manifestPresent
+      ? parseCoverage(manifest.coverage, "result.manifest.coverage")
+      : { selected: [], completed: [], reused: [], failed: [], waived: [] },
     findings: parseFindings(root.comments, "result.comments"),
     warnings: parseWarnings(root.warnings, "result.warnings"),
     totalTokens: summary.totalTokens,
