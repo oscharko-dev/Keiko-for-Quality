@@ -94,6 +94,10 @@ jobs:
       # run settle at eligibility, before any credential or model call is needed.
       - name: Run the action against this pull request
         id: smoke
+        # Only a pull_request event carries the payload this step asserts against. On a push to
+        # main there is no pull request, and the action correctly fails closed — which is right
+        # behaviour but a meaningless assertion here.
+        if: github.event_name == 'pull_request'
         uses: ./
         with:
           profile: examples/review-profile.json
@@ -104,6 +108,7 @@ jobs:
           target_branches: dev
 
       - name: Assert it settled at eligibility with a reason
+        if: github.event_name == 'pull_request'
         env:
           OUTCOME: ${{ steps.smoke.outputs.outcome }}
           REASON: ${{ steps.smoke.outputs.reason }}
