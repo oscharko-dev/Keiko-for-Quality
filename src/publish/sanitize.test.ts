@@ -128,3 +128,39 @@ describe("sanitizeFindingBody", () => {
     });
   });
 });
+
+describe("code-region masking (the corpus-blocking html false positive)", () => {
+  const PAD = " padding so the body clears the minimum length check";
+  it("accepts inline code containing generics", () => {
+    const r = sanitizeFindingBody(
+      "Indexing a plain `Record<string, string>` resolves inherited members." + PAD,
+    );
+    expect(r.ok).toBe(true);
+  });
+  it("accepts markup-shaped content inside a fenced block", () => {
+    const r = sanitizeFindingBody(
+      "The template renders this:\n\n```html\n<script>alert(1)</script>\n```\n" + PAD,
+    );
+    expect(r.ok).toBe(true);
+  });
+  it("still rejects a bare tag outside any code region", () => {
+    const r = sanitizeFindingBody("This body smuggles <b>markup</b> in the open." + PAD);
+    expect(r).toEqual({ ok: false, reason: "html" });
+  });
+  it("stays strict when an inline span never closes", () => {
+    const r = sanitizeFindingBody("An unbalanced `tick and then <b>markup</b> after it." + PAD);
+    expect(r).toEqual({ ok: false, reason: "html" });
+  });
+  it("still rejects an image outside code and accepts one inside", () => {
+    expect(sanitizeFindingBody("Look: ![beacon](x)" + PAD)).toEqual({ ok: false, reason: "image" });
+    expect(sanitizeFindingBody("The diff adds `![alt](url)` handling." + PAD).ok).toBe(true);
+  });
+  it("keeps rejecting credentials even inside a fenced block", () => {
+    const r = sanitizeFindingBody("```\nghp_abcdefghijklmnop1234\n```\n" + PAD);
+    expect(r).toEqual({ ok: false, reason: "credential" });
+  });
+  it("keeps rejecting a suggestion fence", () => {
+    const r = sanitizeFindingBody("```suggestion\nfixed()\n```\n" + PAD);
+    expect(r).toEqual({ ok: false, reason: "suggestion_block" });
+  });
+});

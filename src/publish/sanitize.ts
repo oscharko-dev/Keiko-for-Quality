@@ -85,16 +85,52 @@ const CREDENTIAL_SHAPES = [
 const MAX_BODY_CHARS = 8000;
 const MIN_BODY_CHARS = 12;
 
-const CHECKS: readonly { readonly pattern: RegExp; readonly reason: RejectionReason }[] = [
+/**
+ * Checks that run against the RAW body: security- and form-relevant regardless of Markdown
+ * context. A credential or control character inside a code span is exactly as dangerous as one
+ * outside it, and a suggestion fence is detected by its own delimiter line.
+ */
+const RAW_CHECKS: readonly { readonly pattern: RegExp; readonly reason: RejectionReason }[] = [
   { pattern: CONTROL_EXCEPT_WHITESPACE, reason: "control_characters" },
   { pattern: BIDIRECTIONAL, reason: "bidirectional_override" },
   { pattern: ZERO_WIDTH, reason: "zero_width" },
   { pattern: SUGGESTION_BLOCK, reason: "suggestion_block" },
+];
+
+/**
+ * Checks that run against the body with code regions MASKED. GitHub renders fenced blocks and
+ * inline code spans literally, so markup inside them cannot smuggle HTML, images, links, or
+ * mentions — while the qualification corpus proved the unmasked scan rejects legitimate reviews:
+ * quoting `Record<string, string>` in a finding tripped the raw `<`-plus-letter test, and the
+ * whole (correct) finding was lost. Masking is deliberately conservative: only well-delimited
+ * regions are masked, and anything unbalanced stays visible to these checks — fail closed.
+ */
+const MASKED_CHECKS: readonly { readonly pattern: RegExp; readonly reason: RejectionReason }[] = [
   { pattern: HTML_TAG, reason: "html" },
   { pattern: IMAGE, reason: "image" },
   { pattern: LINK, reason: "link" },
   { pattern: MENTION, reason: "mention" },
 ];
+
+/**
+ * Replaces the CONTENT of well-delimited code regions with `x` runs of equal length, keeping the
+ * delimiters and all offsets stable. Fenced blocks first (their content may contain backticks),
+ * then single-line inline spans (equal-length backtick delimiters, CommonMark-style). Unclosed
+ * fences and unbalanced inline backticks mask nothing — the text stays subject to the masked
+ * checks, which is the strict side of every ambiguity.
+ */
+function maskCodeRegions(body: string): string {
+  let masked = body.replace(
+    /^(`{3,})([^\n]*)\n([\s\S]*?)\n(\1)`*$/gm,
+    (_whole, open: string, info: string, content: string, close: string) =>
+      `${open}${info}\n${content.replace(/[^\n]/g, "x")}\n${close}`,
+  );
+  masked = masked.replace(
+    /(`+)([^`\n]+)\1/g,
+    (_whole, ticks: string, content: string) => `${ticks}${"x".repeat(content.length)}${ticks}`,
+  );
+  return masked;
+}
 
 function looksLikeCredential(text: string): boolean {
   return CREDENTIAL_SHAPES.some((pattern) => pattern.test(text));
@@ -113,8 +149,12 @@ export function sanitizeFindingBody(raw: string): SanitizeResult {
     .trim();
   if (body.length < MIN_BODY_CHARS) return { ok: false, reason: "empty" };
   if (body.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
-  for (const check of CHECKS) {
+  for (const check of RAW_CHECKS) {
     if (check.pattern.test(body)) return { ok: false, reason: check.reason };
+  }
+  const masked = maskCodeRegions(body);
+  for (const check of MASKED_CHECKS) {
+    if (check.pattern.test(masked)) return { ok: false, reason: check.reason };
   }
   if (looksLikeCredential(body)) return { ok: false, reason: "credential" };
   return { ok: true, body };
