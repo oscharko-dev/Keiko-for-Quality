@@ -51,7 +51,18 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
 }`;
 
 function runGh(args) {
-  return execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  return execFileSync("gh", args, {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    // `gh` authenticates through any of several ambient mechanisms (a config file under `HOME`,
+    // `GH_TOKEN`, `GITHUB_TOKEN`, an enterprise host, …), so the environment is passed through
+    // rather than pared to an explicit allow-list — unlike the engine invocations elsewhere in
+    // `corpus/`, which is the right call for a process that never sees the model credential. `PATH`
+    // is re-asserted explicitly, as a fixed value from this process's own environment rather than
+    // one a child process could widen, satisfying this repository's static analysis for spawning by
+    // executable name.
+    env: { ...process.env, PATH: process.env.PATH ?? "" },
+  });
 }
 
 function runGraphql(variables, after) {

@@ -263,52 +263,59 @@ function compareClusterOrder(a, b) {
  */
 export function clusterDuplicateFindings(findings, threshold = DUPLICATE_SIMILARITY_THRESHOLD) {
   const uf = createUnionFind(findings.length);
+  const tokenSets = findings.map((finding) => normalizeForSimilarity(finding.body));
+  linkWithinBotDuplicates(findings, tokenSets, uf, threshold);
   // `findings` are already-normalized conversations (see `extractConversations`), which carry
   // `startLine`/`endLine`/`isFileLevel` directly — not raw comments, so `lineWindow` does not apply
   // here; each finding already *is* its own window.
-  const windows = findings;
-  const tokenSets = findings.map((finding) => normalizeForSimilarity(finding.body));
+  return groupIndexesByRoot(uf, findings.length)
+    .map((memberIndexes) => buildDuplicateCluster(memberIndexes, findings))
+    .sort(compareClusterOrder);
+}
+
+function linkWithinBotDuplicates(findings, tokenSets, uf, threshold) {
   for (let i = 0; i < findings.length; i += 1) {
     for (let j = i + 1; j < findings.length; j += 1) {
       if (findings[i].path !== findings[j].path) continue;
-      if (!rangesOverlap(windows[i], windows[j])) continue;
+      if (!rangesOverlap(findings[i], findings[j])) continue;
       if (jaccardSimilarity(tokenSets[i], tokenSets[j]) >= threshold) uf.union(i, j);
     }
   }
-  return groupClusters(findings, windows, uf);
 }
 
-function groupClusters(findings, windows, uf) {
+function buildDuplicateCluster(memberIndexes, findings) {
+  const sortedMembers = memberIndexes
+    .slice()
+    .sort(
+      (a, b) =>
+        findings[a].createdAt.localeCompare(findings[b].createdAt) ||
+        findings[a].databaseId - findings[b].databaseId,
+    );
+  const representative = findings[sortedMembers[0]];
+  const window = unionWindow(sortedMembers, findings);
+  return {
+    path: representative.path,
+    startLine: window.startLine,
+    endLine: window.endLine,
+    isFileLevel: window.isFileLevel,
+    databaseId: representative.databaseId,
+    memberCount: sortedMembers.length,
+    memberDatabaseIds: sortedMembers
+      .map((index) => findings[index].databaseId)
+      .sort((a, b) => a - b),
+  };
+}
+
+/** Groups indexes `[0, size)` by their union-find root, one array of member indexes per root. */
+function groupIndexesByRoot(uf, size) {
   const groups = new Map();
-  for (let i = 0; i < findings.length; i += 1) {
+  for (let i = 0; i < size; i += 1) {
     const root = uf.find(i);
     const bucket = groups.get(root);
     if (bucket) bucket.push(i);
     else groups.set(root, [i]);
   }
-  const clusters = [...groups.values()].map((memberIndexes) => {
-    const sortedMembers = memberIndexes
-      .slice()
-      .sort(
-        (a, b) =>
-          findings[a].createdAt.localeCompare(findings[b].createdAt) ||
-          findings[a].databaseId - findings[b].databaseId,
-      );
-    const representative = findings[sortedMembers[0]];
-    const window = unionWindow(sortedMembers, windows);
-    return {
-      path: representative.path,
-      startLine: window.startLine,
-      endLine: window.endLine,
-      isFileLevel: window.isFileLevel,
-      databaseId: representative.databaseId,
-      memberCount: sortedMembers.length,
-      memberDatabaseIds: sortedMembers
-        .map((index) => findings[index].databaseId)
-        .sort((a, b) => a - b),
-    };
-  });
-  return clusters.sort(compareClusterOrder);
+  return [...groups.values()];
 }
 
 /**
@@ -330,45 +337,48 @@ function groupClusters(findings, windows, uf) {
  * the within-bot heuristic's chaining, one hop wider.
  */
 export function clusterAcrossBots(distinctFindingsByBot) {
+  const flat = flattenByArenaOrder(distinctFindingsByBot);
+  const uf = createUnionFind(flat.length);
+  linkCrossBotOverlaps(flat, uf);
+  return groupIndexesByRoot(uf, flat.length)
+    .map((memberIndexes) => buildCrossBotCluster(memberIndexes, flat))
+    .sort(compareClusterOrder);
+}
+
+/** Flattens the per-bot distinct-finding lists into one array, each entry tagged with `arenaId`. */
+function flattenByArenaOrder(distinctFindingsByBot) {
   const flat = [];
   for (const arenaId of ARENA_BOT_ORDER) {
     for (const finding of distinctFindingsByBot[arenaId] ?? []) flat.push({ ...finding, arenaId });
   }
-  const uf = createUnionFind(flat.length);
-  // Same reasoning as `clusterDuplicateFindings`: these are already-normalized findings, not raw
-  // comments, so they carry their own window fields directly.
-  const windows = flat;
+  return flat;
+}
+
+function linkCrossBotOverlaps(flat, uf) {
   for (let i = 0; i < flat.length; i += 1) {
     for (let j = i + 1; j < flat.length; j += 1) {
       if (flat[i].arenaId === flat[j].arenaId) continue;
       if (flat[i].path !== flat[j].path) continue;
-      if (rangesOverlap(windows[i], windows[j])) uf.union(i, j);
+      if (rangesOverlap(flat[i], flat[j])) uf.union(i, j);
     }
   }
-  const groups = new Map();
-  for (let i = 0; i < flat.length; i += 1) {
-    const root = uf.find(i);
-    const bucket = groups.get(root);
-    if (bucket) bucket.push(i);
-    else groups.set(root, [i]);
-  }
-  const clusters = [...groups.values()].map((memberIndexes) => {
-    const sorted = memberIndexes.slice().sort((a, b) => flat[a].databaseId - flat[b].databaseId);
-    const first = flat[sorted[0]];
-    const window = unionWindow(sorted, windows);
-    const bots = [...new Set(sorted.map((index) => flat[index].arenaId))].sort(
-      (a, b) => ARENA_BOT_ORDER.indexOf(a) - ARENA_BOT_ORDER.indexOf(b),
-    );
-    return {
-      path: first.path,
-      startLine: window.startLine,
-      endLine: window.endLine,
-      isFileLevel: window.isFileLevel,
-      bots,
-      memberDatabaseIds: sorted.map((index) => flat[index].databaseId).sort((a, b) => a - b),
-    };
-  });
-  return clusters.sort(compareClusterOrder);
+}
+
+function buildCrossBotCluster(memberIndexes, flat) {
+  const sorted = memberIndexes.slice().sort((a, b) => flat[a].databaseId - flat[b].databaseId);
+  const first = flat[sorted[0]];
+  const window = unionWindow(sorted, flat);
+  const bots = [...new Set(sorted.map((index) => flat[index].arenaId))].sort(
+    (a, b) => ARENA_BOT_ORDER.indexOf(a) - ARENA_BOT_ORDER.indexOf(b),
+  );
+  return {
+    path: first.path,
+    startLine: window.startLine,
+    endLine: window.endLine,
+    isFileLevel: window.isFileLevel,
+    bots,
+    memberDatabaseIds: sorted.map((index) => flat[index].databaseId).sort((a, b) => a - b),
+  };
 }
 
 function threadStatus(record) {
@@ -482,7 +492,7 @@ function sumBotMetrics(rows) {
   const threads = emptyThreadCounts();
   const coFound = emptyCoFound();
   let coFoundAllThree = 0;
-  let totals = {
+  const totals = {
     findingsPosted: 0,
     distinctFindings: 0,
     duplicateVariants: 0,
