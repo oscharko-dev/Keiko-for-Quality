@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "reviewRelevant": [
+    "src/**/*.{ts,tsx,js,jsx,mjs,cjs}",
+    "scripts/**",
+    ".github/workflows/**",
+    ".github/actions/**"
+  ],
+  "deletionCritical": ["src/**/*.test.ts", ".github/workflows/**", "scripts/**"],
+  "generated": ["dist/**", "build/**", "coverage/**"],
+  "excluded": [
+    {
+      "pattern": "docs/**",
+      "reason": "prose; a corpus case that changes it is measuring dilution, not documentation review"
+    },
+    {
+      "pattern": "**/*.{png,jpg,svg,ico,woff,woff2}",
+      "reason": "binary assets carry no reviewable source"
+    }
+  ],
+  "benignWarnings": []
+}

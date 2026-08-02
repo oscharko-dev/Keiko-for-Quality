@@ -1,9 +1,5 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { build } from "esbuild";
+import { fetchVerified, loadPin } from "./engine-pin.mjs";
 
 /**
  * Downloads every pinned engine asset and verifies its digest.
@@ -13,45 +9,17 @@ import { build } from "esbuild";
  * digest mistyped when the pin was advanced. Checking every platform — not just this runner's —
  * means a Linux CI run still catches a broken macOS pin.
  */
-async function loadPin() {
-  const dir = await mkdtemp(join(tmpdir(), "kfq-pin-"));
-  try {
-    const outfile = join(dir, "pin.mjs");
-    await build({
-      entryPoints: ["src/engine/pinned-release.ts"],
-      outfile,
-      bundle: true,
-      platform: "node",
-      target: "node24",
-      format: "esm",
-      logLevel: "silent",
-    });
-    const module = await import(`file://${outfile}`);
-    return module.ENGINE_PIN;
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-}
-
 const pin = await loadPin();
 let failures = 0;
 
-for (const [platform, target] of Object.entries(pin.platforms)) {
-  const url = `https://github.com/${pin.engine}/releases/download/${pin.version}/${target.asset}`;
-  const response = await fetch(url, { redirect: "follow" });
-  if (!response.ok) {
-    console.error(`FAIL ${platform}: HTTP ${response.status}`);
+for (const platform of Object.keys(pin.platforms)) {
+  const result = await fetchVerified(pin, platform);
+  if (!result.ok) {
+    console.error(`FAIL ${platform}: ${result.reason}`);
     failures += 1;
     continue;
   }
-  const bytes = Buffer.from(await response.arrayBuffer());
-  const actual = createHash("sha256").update(bytes).digest("hex");
-  if (actual !== target.sha256) {
-    console.error(`FAIL ${platform}: expected ${target.sha256}, got ${actual}`);
-    failures += 1;
-    continue;
-  }
-  console.log(`ok   ${platform}  ${target.asset}  ${actual.slice(0, 16)}…`);
+  console.log(`ok   ${platform}  ${result.asset}  ${result.sha256.slice(0, 16)}…`);
 }
 
 if (failures > 0) {

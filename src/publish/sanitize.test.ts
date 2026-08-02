@@ -72,10 +72,25 @@ describe("sanitizeFindingBody", () => {
     it.each([
       ["https url", `${VALID} see https://example.test/docs`],
       ["protocol-relative", `${VALID}\n//example.test/x`],
+      ["protocol-relative, indented", `${VALID}\n//sub-domain.example.test/x`],
       ["bare www", `${VALID} www.example.test`],
       ["custom scheme", `${VALID} data://payload`],
     ])("rejects %s", (_name, body) => {
       expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "link" });
+    });
+
+    /**
+     * The rule file invites a short fenced code block showing the line at issue, and in this
+     * language that block routinely contains a `//` comment. The `m` flag makes `^` match every
+     * line start, so a bare `^//` alternative rejected the whole finding — a correct review lost,
+     * and the run settled incomplete, because of a pattern meant to catch a URL.
+     */
+    it.each([
+      ["a line comment", `${VALID}\n// no close on this path`],
+      ["a comment inside a fence", `${VALID}\n\n\`\`\`js\n// ignore\nreturn x;\n\`\`\``],
+      ["a divider of slashes", `${VALID}\n//////////`],
+    ])("accepts %s, which is not a link", (_name, body) => {
+      expect(sanitizeFindingBody(body).ok).toBe(true);
     });
 
     it("rejects an @mention, which would notify a real person on the model's behalf", () => {

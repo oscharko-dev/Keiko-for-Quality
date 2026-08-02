@@ -55,8 +55,17 @@ const MENTION = new RegExp("(^|[^\\w`])@[A-Za-z0-9][A-Za-z0-9-]{0,38}", "m");
 
 const IMAGE = new RegExp("!\\[");
 
-/** Any URI scheme, plus protocol-relative and bare-www forms. */
-const LINK = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.|^//)", "m");
+/**
+ * Any URI scheme, plus protocol-relative and bare-www forms.
+ *
+ * The protocol-relative alternative requires a host-shaped segment immediately after the slashes —
+ * `//example.test`, not `// a comment`. The `m` flag makes `^` match every line start, so the
+ * earlier bare `^//` rejected any line beginning with a comment marker. The rule file invites a
+ * short fenced code block showing the line at issue, and in JavaScript or TypeScript that block
+ * very often contains one; the whole finding was then discarded and the run settled incomplete.
+ * A correct review was lost to a pattern meant to catch a URL.
+ */
+const LINK = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.|^//[A-Za-z0-9-]+\\.[A-Za-z])", "m");
 
 /**
  * Shapes that look like credentials.

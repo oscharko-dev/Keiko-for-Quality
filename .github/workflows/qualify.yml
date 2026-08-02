@@ -1,0 +1,143 @@
+name: qualify
+
+# Re-qualification: does the reviewer still find what it used to find?
+#
+# Recall and precision are properties of a pairing — this engine binary, this rule text, this model
+# — and the model is the one input that can move without a commit here. A number measured once at
+# release time says nothing about the reviewer a month later, so this runs on a schedule against the
+# exact released configuration and files an issue when the pairing stops meeting its thresholds.
+#
+# It is deliberately not a pull-request gate. Every run spends real model tokens against a live
+# endpoint, and a model-dependent measurement is too noisy to block a diff that cannot have caused
+# a regression in it. The deterministic half of the corpus — inventory, placement, sanitization,
+# settlement — is in `npm test` and does gate every change.
+on:
+  schedule:
+    # Weekly, at an odd minute so it does not queue behind the top-of-hour crowd.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qualify
+  cancel-in-progress: false
+
+jobs:
+  corpus:
+    name: corpus
+    runs-on: ubuntu-latest
+    # 23 cases at up to OCR_LLM_TIMEOUT (180 s) each is 69 minutes of worst-case model wait
+    # before any local work. Measured runs finish in about six, but a scheduled job has nothing
+    # waiting on it, and a timeout that cuts a healthy run produces a drift issue about the
+    # runner rather than about the reviewer.
+    timeout-minutes: 120
+    # Arming switch, so this can be merged and reviewed before any credential exists. Until the
+    # variable is set the job never starts and never consumes a token.
+    if: vars.KFQ_QUALIFY_ENABLED == 'true'
+    # The model credential lives in this environment, not at repository scope, so only a job that
+    # declares it can read it — and the environment can carry its own protection rules. Same
+    # reasoning as the consumer-side environment in ADR-0170 D4.
+    environment: qualification
+    permissions:
+      contents: read # reading this repository's own source is all the measurement needs
+      issues: write # filing the drift issue; nothing else in this job writes anything
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      # Digest-verified before it becomes executable. The corpus must measure the bytes a consumer
+      # runs, and "the same bytes" only means something if it is checked.
+      - name: Fetch the pinned engine
+        run: node scripts/fetch-engine.mjs "${RUNNER_TEMP}/ocr"
+
+      - name: Run the corpus
+        env:
+          OCR_BINARY: ${{ runner.temp }}/ocr
+          OCR_REPORT: ${{ runner.temp }}/report.json
+          OCR_LLM_URL: ${{ secrets.KFQ_QUALIFY_MODEL_ENDPOINT }}
+          OCR_LLM_TOKEN: ${{ secrets.KFQ_QUALIFY_MODEL_TOKEN }}
+          OCR_LLM_MODEL: ${{ vars.KFQ_QUALIFY_MODEL_ID }}
+          OCR_USE_ANTHROPIC: ${{ vars.KFQ_QUALIFY_MODEL_PROTOCOL == 'anthropic' }}
+        # A case can fail without the thresholds failing, so the runner's exit code is not the
+        # verdict — `check-qualification.mjs` is. Exit 1 means exactly that and is tolerated;
+        # anything else is the harness itself dying, and swallowing that would let the next step
+        # score a report from a previous run, or none at all.
+        run: |
+          npm run corpus && status=0 || status=$?
+          if [ "${status}" -gt 1 ]; then
+            echo "corpus harness aborted with status ${status}" >&2
+            exit "${status}"
+          fi
+          test -s "${RUNNER_TEMP}/report.json" || {
+            echo "corpus produced no report" >&2
+            exit 1
+          }
+
+      - name: Evaluate promotion thresholds
+        id: thresholds
+        # `bash -e {0}` — the default — does NOT set pipefail, so a pipeline reports the status of
+        # its LAST command. Piping into `tee` therefore returned tee's success and the threshold
+        # gate could never fail: the drift issue this whole job exists to file was unreachable.
+        # Redirect instead of piping, and merge stderr, because the FAIL lines are written there
+        # and `tee` would have captured only the passing ones into the record and the issue.
+        run: |
+          node scripts/check-qualification.mjs "${RUNNER_TEMP}/report.json" \
+            > "${RUNNER_TEMP}/qualification.txt" 2>&1 || status=$?
+          cat "${RUNNER_TEMP}/qualification.txt"
+          exit "${status:-0}"
+
+      # The report carries case ids, counts, digests and reason codes — no diff content and no
+      # endpoint. It is still not published: it is an artifact a maintainer fetches deliberately.
+      - name: Upload the qualification record
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: qualification-record
+          path: ${{ runner.temp }}/qualification.txt
+          retention-days: 90
+
+      # Drift halts nothing on its own — this repository publishes no required status to any
+      # consumer — so the issue IS the escalation.
+      #
+      # What goes into a public issue body is the threshold output: metric names, percentages, case
+      # ids, digests, and per-case detail strings. Those details are composed by the harness from a
+      # fixed vocabulary — the thrown-error path deliberately records a constant phrase rather than
+      # the error text, because a raw error reaches for whatever was in scope. That property is
+      # what makes pasting this safe; it is not safe merely because it is short.
+      - name: File a drift issue
+        if: failure() && steps.thresholds.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "The qualification corpus no longer meets its promotion thresholds."
+            echo
+            echo '```'
+            cat "${RUNNER_TEMP}/qualification.txt"
+            echo '```'
+            echo
+            echo "Run: ${RUN_URL}"
+            echo
+            echo "This does not block any consumer: this repository publishes no required status."
+            echo "Treat it as a signal that the pinned pairing drifted, and re-measure locally"
+            echo "before advancing the release."
+          } > "${RUNNER_TEMP}/issue.md"
+          gh issue create \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Qualification drift on $(date -u +%Y-%m-%d)" \
+            --body-file "${RUNNER_TEMP}/issue.md" \
+            --label qualification

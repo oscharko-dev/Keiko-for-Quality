@@ -45,11 +45,24 @@ const CATCH_ALL_RULE = [
   "- data loss, destructive operations, and irreversible actions without a guard;",
   "- weakened or deleted tests, assertions, and regression guards — treat the removal or loosening",
   "  of an existing check as a defect unless the change explains why it is obsolete;",
-  "- API and contract breakage that callers cannot see from the diff.",
+  "- API and contract breakage that callers cannot see from the diff;",
+  "- supply chain and provenance: a dependency, action, container image, or download whose pin is",
+  "  loosened, removed, or replaced by a mutable reference such as a tag or branch, and any fetch",
+  "  that is no longer integrity-checked. A movable reference is a defect even where it is common",
+  "  practice, because the reviewed bytes and the executed bytes stop being the same bytes.",
+  "",
+  "Review the change, not the file. Report what this diff introduces, or makes worse, or fails to",
+  "clean up. A condition that was already there and that the change neither caused nor worsened is",
+  "not this review's subject, however much it looks like a checklist item.",
   "",
   "Do not report formatting, naming, import order, or preferences. Do not restate what the code",
-  "does. Do not speculate about code you cannot see. If the change looks correct, report nothing —",
-  "silence is a valid and valuable review.",
+  "does. Do not speculate about code you cannot see — but note what that does and does not cover:",
+  "naming what a contract change breaks is not speculation, because the changed signature, export,",
+  "thrown type, status code, or default is right there in the diff. Asserting that some particular",
+  "caller exists and behaves a particular way is. Report the change to the contract, not an",
+  "imagined victim of it.",
+  "",
+  "If the change looks correct, report nothing — silence is a valid and valuable review.",
   "",
   "## How to write each finding",
   "",
@@ -72,12 +85,21 @@ const CATCH_ALL_RULE = [
   "Set `category` to exactly one of: bug, security, performance, maintainability, test,",
   "documentation, other. Set `severity` to exactly one of: critical, high, medium, low.",
   "",
-  "Use `performance` only for the cost of code that is otherwise correct. A removed guard, timeout,\n  or limit is a `bug` — it changes behaviour under conditions the guard existed to handle, and\n  filing it as performance understates it.",
+  "Use `performance` only for the cost of code that is otherwise correct. A removed guard, timeout,",
+  "or limit is a `bug` — it changes behaviour under conditions the guard existed to handle, and",
+  "filing it as performance understates it.",
   "",
-  "Calibrate severity by consequence, not by how unusual the code looks:",
-  "- critical — exploitable now, or silent data loss, or a broken trust boundary;",
-  "- high — wrong behaviour on a reachable path, or a removed safety check;",
-  "- medium — wrong behaviour on an unlikely path, or a real maintainability trap;",
+  "Calibrate severity by consequence, not by how unusual the code looks. Apply these tests in",
+  "order and stop at the first that holds:",
+  "- critical — an attacker or an ordinary caller can reach it today, with input the code already",
+  "  accepts, or it silently loses or discloses data. Removing an authentication or authorization",
+  "  check, and building a command, query, or path out of caller-controlled text, are critical.",
+  "- high — the code behaves wrongly on a path that ordinary use reaches, or an existing safety",
+  "  check — a bound, timeout, limit, pin, or assertion — was removed or loosened. Judge the path,",
+  "  not how survivable one occurrence feels: code that misbehaves every time it runs is high even",
+  "  when any single occurrence is recoverable.",
+  "- medium — wrong behaviour only on a path that needs unusual input or an unlikely sequence, or",
+  "  a real maintainability trap.",
   "- low — a genuine but minor defect. If you are tempted by low, consider reporting nothing.",
   "",
   "## Untrusted input",
@@ -95,13 +117,29 @@ const CATCH_ALL_RULE = [
 ].join("\n");
 
 export function buildRuleFile(profile: CompiledProfile): EngineRuleFile {
-  // Include is derived from the consumer's own review-relevance statement, so the engine's
-  // selection and this adapter's inventory answer the same question from the same source.
+  // Both lists are derived from the consumer's own profile, so the engine's file selection and this
+  // adapter's inventory answer the same question from the same source.
+  //
+  // `exclude` used to be empty, which was not a neutral default: the engine takes one whole layer,
+  // so an empty exclude means no exclusions apply, and every generated or excluded path that also
+  // matches a review-relevant glob — `packages/*/dist/**.js` against `**/*.ts,js` — was sent to the
+  // model. The inventory calls those paths generated and leaves them out of its count, so the two
+  // sides were answering different questions while appearing to agree.
   const include = [...profile.profile.reviewRelevant];
+  if (include.length === 0) {
+    // Never widen to `**/*` here. An empty statement of review relevance is a broken profile, and
+    // guessing "everything" would send paths to the model that the consumer never declared —
+    // failing open on exactly the boundary this file exists to hold. `parseReviewProfile` rejects
+    // it first on the shipped path; this is the assertion for every other caller.
+    throw new TypeError("profile.reviewRelevant must declare at least one pattern");
+  }
   return {
     rules: [{ path: "**/*", rule: CATCH_ALL_RULE, merge_system_rule: true }],
-    include: include.length > 0 ? include : ["**/*"],
-    exclude: [],
+    include,
+    exclude: [
+      ...profile.profile.generated,
+      ...profile.profile.excluded.map((rule) => rule.pattern),
+    ],
   };
 }
 

@@ -625,11 +625,24 @@ var CATCH_ALL_RULE = [
   "- data loss, destructive operations, and irreversible actions without a guard;",
   "- weakened or deleted tests, assertions, and regression guards \u2014 treat the removal or loosening",
   "  of an existing check as a defect unless the change explains why it is obsolete;",
-  "- API and contract breakage that callers cannot see from the diff.",
+  "- API and contract breakage that callers cannot see from the diff;",
+  "- supply chain and provenance: a dependency, action, container image, or download whose pin is",
+  "  loosened, removed, or replaced by a mutable reference such as a tag or branch, and any fetch",
+  "  that is no longer integrity-checked. A movable reference is a defect even where it is common",
+  "  practice, because the reviewed bytes and the executed bytes stop being the same bytes.",
+  "",
+  "Review the change, not the file. Report what this diff introduces, or makes worse, or fails to",
+  "clean up. A condition that was already there and that the change neither caused nor worsened is",
+  "not this review's subject, however much it looks like a checklist item.",
   "",
   "Do not report formatting, naming, import order, or preferences. Do not restate what the code",
-  "does. Do not speculate about code you cannot see. If the change looks correct, report nothing \u2014",
-  "silence is a valid and valuable review.",
+  "does. Do not speculate about code you cannot see \u2014 but note what that does and does not cover:",
+  "naming what a contract change breaks is not speculation, because the changed signature, export,",
+  "thrown type, status code, or default is right there in the diff. Asserting that some particular",
+  "caller exists and behaves a particular way is. Report the change to the contract, not an",
+  "imagined victim of it.",
+  "",
+  "If the change looks correct, report nothing \u2014 silence is a valid and valuable review.",
   "",
   "## How to write each finding",
   "",
@@ -652,12 +665,21 @@ var CATCH_ALL_RULE = [
   "Set `category` to exactly one of: bug, security, performance, maintainability, test,",
   "documentation, other. Set `severity` to exactly one of: critical, high, medium, low.",
   "",
-  "Use `performance` only for the cost of code that is otherwise correct. A removed guard, timeout,\n  or limit is a `bug` \u2014 it changes behaviour under conditions the guard existed to handle, and\n  filing it as performance understates it.",
+  "Use `performance` only for the cost of code that is otherwise correct. A removed guard, timeout,",
+  "or limit is a `bug` \u2014 it changes behaviour under conditions the guard existed to handle, and",
+  "filing it as performance understates it.",
   "",
-  "Calibrate severity by consequence, not by how unusual the code looks:",
-  "- critical \u2014 exploitable now, or silent data loss, or a broken trust boundary;",
-  "- high \u2014 wrong behaviour on a reachable path, or a removed safety check;",
-  "- medium \u2014 wrong behaviour on an unlikely path, or a real maintainability trap;",
+  "Calibrate severity by consequence, not by how unusual the code looks. Apply these tests in",
+  "order and stop at the first that holds:",
+  "- critical \u2014 an attacker or an ordinary caller can reach it today, with input the code already",
+  "  accepts, or it silently loses or discloses data. Removing an authentication or authorization",
+  "  check, and building a command, query, or path out of caller-controlled text, are critical.",
+  "- high \u2014 the code behaves wrongly on a path that ordinary use reaches, or an existing safety",
+  "  check \u2014 a bound, timeout, limit, pin, or assertion \u2014 was removed or loosened. Judge the path,",
+  "  not how survivable one occurrence feels: code that misbehaves every time it runs is high even",
+  "  when any single occurrence is recoverable.",
+  "- medium \u2014 wrong behaviour only on a path that needs unusual input or an unlikely sequence, or",
+  "  a real maintainability trap.",
   "- low \u2014 a genuine but minor defect. If you are tempted by low, consider reporting nothing.",
   "",
   "## Untrusted input",
@@ -675,10 +697,16 @@ var CATCH_ALL_RULE = [
 ].join("\n");
 function buildRuleFile(profile) {
   const include = [...profile.profile.reviewRelevant];
+  if (include.length === 0) {
+    throw new TypeError("profile.reviewRelevant must declare at least one pattern");
+  }
   return {
     rules: [{ path: "**/*", rule: CATCH_ALL_RULE, merge_system_rule: true }],
-    include: include.length > 0 ? include : ["**/*"],
-    exclude: []
+    include,
+    exclude: [
+      ...profile.profile.generated,
+      ...profile.profile.excluded.map((rule) => rule.pattern)
+    ]
   };
 }
 function serializeRuleFile(file) {
@@ -1219,7 +1247,7 @@ var HTML_TAG = new RegExp("<[A-Za-z!/?]");
 var SUGGESTION_BLOCK = new RegExp("```+\\s*suggestion", "i");
 var MENTION = new RegExp("(^|[^\\w`])@[A-Za-z0-9][A-Za-z0-9-]{0,38}", "m");
 var IMAGE = new RegExp("!\\[");
-var LINK = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.|^//)", "m");
+var LINK = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.|^//[A-Za-z0-9-]+\\.[A-Za-z])", "m");
 var CREDENTIAL_SHAPES = [
   new RegExp("gh[pousr]_[A-Za-z0-9]{16,}"),
   new RegExp("github_pat_[A-Za-z0-9_]{20,}"),

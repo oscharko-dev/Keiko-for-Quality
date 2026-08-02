@@ -33,7 +33,9 @@
     "review": "node --experimental-strip-types src/cli.ts",
     "verify": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run build && npm run check:bundle",
     "check:engine-pin": "node scripts/check-engine-pin.mjs",
-    "corpus": "node corpus/run.mjs"
+    "corpus": "node corpus/run.mjs",
+    "fetch:engine": "node scripts/fetch-engine.mjs",
+    "check:qualification": "node scripts/check-qualification.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",

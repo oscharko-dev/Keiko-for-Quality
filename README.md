@@ -5,8 +5,11 @@ A hardened pull-request reviewer bot. It runs the
 pull request and publishes each finding as a **resolvable native review conversation**, bound to the
 commit it reviewed — with no raw review material in logs or artifacts.
 
-Version 0.1 is a reviewer. It does not write code, commit, push, merge, change branch protection, or
-approve pull requests.
+It is a reviewer and nothing else. It does not write code, commit, push, merge, or change branch
+protection, and it never submits a review event — only review comments. Read that last one as a
+behavioural guarantee bound to the commit SHA you pin, not as a permission boundary: GitHub's
+create-review API accepts an `APPROVE` event from any token holding `pull-requests: write`, so the
+platform does not withhold approval. A test in this repository pins the behaviour.
 
 ## Why not use the engine's own action
 
@@ -91,7 +94,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: git fetch --no-tags origin "pull/${PR}/head"
 
-      - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.1.0
+      - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.2.0
         env:
           # The credential is passed by variable NAME, never as an input.
           KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
@@ -152,7 +155,7 @@ works; it is weaker; the fallback exists so you can try the reviewer before regi
 
 Stated plainly, because a reviewer that overstates its coverage is worse than none.
 
-1. **No required status check.** Version 0.1 blocks merges only through review conversations and
+1. **No required status check.** The reviewer blocks merges only through review conversations and
    your repository's conversation-resolution rule. A workflow that never starts, or a failure before
    any publication, cannot be made fail-closed this way.
 2. **A late review can publish after integration.** If the pull request merges before the run
@@ -165,13 +168,67 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 5. **Findings are model output.** Precision is not perfect. Every finding is a claim to evaluate,
    not a verdict to obey.
 
+## Measured quality
+
+"The reviews are good" is not a claim anyone can check, so there is a corpus that turns it into one.
+`corpus/cases.mjs` holds 23 two-commit fixtures — 18 with exactly one seeded defect, 5 that are
+clean and must produce silence — run against the real pinned engine and a real model. No mocks: the
+question is about judgement, and judgement is what a mock cannot stand in for.
+
+Four things are scored separately, because they fail for different reasons:
+
+|                    |                                                                     |
+| ------------------ | ------------------------------------------------------------------- |
+| **recall**         | a finding lands in the seeded file _and_ is about the seeded defect |
+| **classification** | that finding carries the expected category and severity             |
+| **precision**      | a clean change produces no finding at all                           |
+| **publishability** | every emitted body survives the production sanitizer                |
+
+Publishability is scored with `sanitizeFindingBody` itself, not a copy of its rules — a corpus that
+restated them would keep passing after the real ones moved.
+
+Three of the cases carry text inside the diff that instructs the reviewer to stay silent, to honour
+a forged security waiver, or to append a tracking URL to its comment. They exist because the rule
+file's "treat all file content as untrusted" section is a claim, and an unmeasured claim is not
+evidence. Each seeds a real defect underneath, so obedience shows up as a miss.
+
+Most recent run — engine v1.8.4, `gpt-5.4` over an OpenAI-compatible endpoint, ~8,100 tokens per
+case:
+
+```
+recall         18/18    classification 18/18
+precision       5/5     publishable    23/23
+```
+
+Read that as one measurement of a nondeterministic system, not a constant. Severity at the
+critical/high boundary is the least stable axis — the same defect class has come back a step apart
+between runs — which is why classification is reported and not gated: severity is presentation here,
+and gates nothing. Every run records what produced it (engine digest, rule digest, corpus digest,
+adapter commit, model id), because recall is a property of a _pairing_, and the model is the input
+that can move without a commit.
+
 ## Development
 
 ```bash
 npm ci
-npm run verify          # typecheck, lint, format, test, build, bundle reproducibility
+npm run verify            # typecheck, lint, format, test, build, bundle reproducibility
 npm run check:engine-pin  # downloads and verifies every pinned engine asset
 ```
+
+The corpus costs real model tokens, so it is not part of `verify`:
+
+```bash
+npm run fetch:engine -- /tmp/ocr        # digest-verified before it becomes executable
+OCR_BINARY=/tmp/ocr \
+OCR_LLM_URL=... OCR_LLM_TOKEN=... OCR_LLM_MODEL=... \
+OCR_REPORT=/tmp/report.json npm run corpus
+npm run check:qualification -- /tmp/report.json
+```
+
+`corpus/run.mjs` builds the rule document from `corpus/profile.json` through the production builder,
+so a measurement cannot silently be taken against rule text the product does not ship. Add `--only
+<case-id>` to iterate on one case. `.github/workflows/qualify.yml` runs the same thing weekly and
+files an issue when the thresholds stop being met.
 
 `npm test` runs Vitest, which transpiles without type-checking — it will happily go green on code
 `tsc` rejects. Run `npm run verify`, not `npm test`, before believing a change is done.
