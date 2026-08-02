@@ -281,6 +281,7 @@ describe("performReview: review-cache memoization end to end", () => {
         generated: [],
         excluded: [],
         benignWarnings: [],
+        pathInstructions: [],
       } satisfies ReviewProfile);
       const client = staleClient();
       const createSpy = vi.spyOn(client, "createReviewComment").mockResolvedValue({
