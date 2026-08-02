@@ -85,16 +85,100 @@ const CREDENTIAL_SHAPES = [
 const MAX_BODY_CHARS = 8000;
 const MIN_BODY_CHARS = 12;
 
-const CHECKS: readonly { readonly pattern: RegExp; readonly reason: RejectionReason }[] = [
+/**
+ * Checks that run against the RAW body: security- and form-relevant regardless of Markdown
+ * context. A credential or control character inside a code span is exactly as dangerous as one
+ * outside it, and a suggestion fence is detected by its own delimiter line.
+ */
+const RAW_CHECKS: readonly { readonly pattern: RegExp; readonly reason: RejectionReason }[] = [
   { pattern: CONTROL_EXCEPT_WHITESPACE, reason: "control_characters" },
   { pattern: BIDIRECTIONAL, reason: "bidirectional_override" },
   { pattern: ZERO_WIDTH, reason: "zero_width" },
   { pattern: SUGGESTION_BLOCK, reason: "suggestion_block" },
+];
+
+/**
+ * Checks that run against the body with code regions MASKED. GitHub renders fenced blocks and
+ * inline code spans literally, so markup inside them cannot smuggle HTML, images, links, or
+ * mentions — while the qualification corpus proved the unmasked scan rejects legitimate reviews:
+ * quoting `Record<string, string>` in a finding tripped the raw `<`-plus-letter test, and the
+ * whole (correct) finding was lost. Masking is deliberately conservative: only well-delimited
+ * regions are masked, and anything unbalanced stays visible to these checks — fail closed.
+ */
+const MASKED_CHECKS: readonly { readonly pattern: RegExp; readonly reason: RejectionReason }[] = [
   { pattern: HTML_TAG, reason: "html" },
   { pattern: IMAGE, reason: "image" },
   { pattern: LINK, reason: "link" },
   { pattern: MENTION, reason: "mention" },
 ];
+
+/** A fence opener: up to three spaces, a run of three or more backticks or tildes, an info string. */
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/** A fence closer: the same run alone on its line, trailing blanks allowed. */
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+/**
+ * Inline spans: equal-length backtick runs on one line, so a longer or shorter run inside stays
+ * content (``escape `this` here``).
+ *
+ * The content class is a single unambiguous `[^\n]`. An earlier `(?:[^`\n]|`+)+?` let one backtick
+ * run decompose many ways (three backticks as 3, or 1+2, or 2+1, or 1+1+1), which is exponential
+ * backtracking on hostile input, not a nicety — this module validates model output produced while
+ * reading attacker-influenced material, so a body of backticks is a reachable denial of service.
+ */
+const INLINE_SPAN = /(?<!`)(`+)(?!`)([^\n]+?)\1(?!`)/g;
+
+/** Index of the line closing a fence opened with `marker`, or -1 when the fence never closes. */
+function closingFenceIndex(lines: readonly string[], from: number, marker: string): number {
+  const char = marker.slice(0, 1);
+  for (let k = from; k < lines.length; k += 1) {
+    const run = FENCE_CLOSE.exec(lines[k] ?? "")?.[1];
+    if (run?.startsWith(char) === true && run.length >= marker.length) return k;
+  }
+  return -1;
+}
+
+/** The marker of a fence this line opens, or undefined when it opens none. */
+function openingFenceMarker(line: string): string | undefined {
+  const opened = FENCE_OPEN.exec(line);
+  const marker = opened?.[1];
+  if (marker === undefined) return undefined;
+  // A backtick fence's info string may not contain a backtick; a tilde fence's may.
+  if (marker.startsWith("`") && (opened?.[2] ?? "").includes("`")) return undefined;
+  return marker;
+}
+
+/**
+ * Masks the body of every closed fenced block, walking LINES rather than matching a multi-line
+ * regex: the regex form was super-linear (Sonar S8786) because a lazy `[\s\S]*?` re-scans toward
+ * every candidate closing line. A line walk is linear and states CommonMark's rules directly.
+ */
+function maskFencedBlocks(body: string): string {
+  const lines = body.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    const marker = openingFenceMarker(lines[i] ?? "");
+    if (marker === undefined) continue;
+    const close = closingFenceIndex(lines, i + 1, marker);
+    if (close === -1) continue;
+    for (let k = i + 1; k < close; k += 1) lines[k] = (lines[k] ?? "").replace(/./g, "x");
+    i = close;
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Replaces the CONTENT of well-delimited code regions with `x` runs of equal length, keeping the
+ * delimiters and all offsets stable. Fenced blocks first (their content may contain backticks),
+ * then single-line inline spans. Unclosed fences and unbalanced inline backticks mask nothing —
+ * the text stays subject to the masked checks, which is the strict side of every ambiguity.
+ */
+function maskCodeRegions(body: string): string {
+  return maskFencedBlocks(body).replace(
+    INLINE_SPAN,
+    (_whole, ticks: string, content: string) => `${ticks}${"x".repeat(content.length)}${ticks}`,
+  );
+}
 
 function looksLikeCredential(text: string): boolean {
   return CREDENTIAL_SHAPES.some((pattern) => pattern.test(text));
@@ -113,8 +197,12 @@ export function sanitizeFindingBody(raw: string): SanitizeResult {
     .trim();
   if (body.length < MIN_BODY_CHARS) return { ok: false, reason: "empty" };
   if (body.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
-  for (const check of CHECKS) {
+  for (const check of RAW_CHECKS) {
     if (check.pattern.test(body)) return { ok: false, reason: check.reason };
+  }
+  const masked = maskCodeRegions(body);
+  for (const check of MASKED_CHECKS) {
+    if (check.pattern.test(masked)) return { ok: false, reason: check.reason };
   }
   if (looksLikeCredential(body)) return { ok: false, reason: "credential" };
   return { ok: true, body };

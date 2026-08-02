@@ -6,6 +6,7 @@ import type { CommitSha, Sha256 } from "./core/brands.js";
 import {
   buildNewEntries,
   combinedExcludes,
+  computePrPathSetDigest,
   lookupMemoized,
   mergeHitFindings,
 } from "./cache/memoize.js";
@@ -30,6 +31,7 @@ import type { GitContext } from "./git/plumbing.js";
 import type { InventoryItem } from "./inventory/classify.js";
 import {
   buildInventory,
+  excludedPathCount,
   mechanicallyCleanPaths,
   resolveReviewPair,
   type Inventory,
@@ -38,6 +40,7 @@ import type { GitHubClient, RepoRef } from "./github/client.js";
 import {
   publishFindings,
   publishIncompleteNotice,
+  type PublishContext,
   type PublishOutcome,
 } from "./publish/publisher.js";
 
@@ -68,7 +71,14 @@ export type ReviewOutcome = "complete" | "incomplete" | "abandoned";
 export interface ReviewReport {
   readonly outcome: ReviewOutcome;
   readonly reason?: ReasonCode;
+  /** Total changed paths classified, whatever the classification. */
   readonly inventorySize: number;
+  /** Paths the engine must account for — `inventory.reviewablePaths.size`. */
+  readonly reviewablePaths: number;
+  /** Paths the profile's own `excluded` rules matched. */
+  readonly excludedPaths: number;
+  /** Paths downgraded to mechanically-clean (a pure rename today) — never sent to the engine. */
+  readonly mechanicallyClean: number;
   readonly publish?: PublishOutcome;
   /** Cache-eligible paths a stored entry answered instead of the engine. Always 0 when inert. */
   readonly cacheHits: number;
@@ -178,14 +188,48 @@ function itemIndex(inventory: Inventory): ReadonlyMap<string, InventoryItem> {
   return new Map(inventory.items.map((item) => [item.path as string, item]));
 }
 
+/**
+ * The inventory-derived counts every report-construction site below needs, computed once from the
+ * same `Inventory` each of them already has in scope — never a second, independent pass over the
+ * changed paths. This is what lets the run-summary comment (Keiko-for-Quality#31) report path
+ * accounting without `main.ts` ever seeing the `Inventory` type itself: it reads these fields off
+ * the same `ReviewReport` its action outputs already come from.
+ */
+function inventoryCounts(
+  inventory: Inventory,
+): Pick<ReviewReport, "inventorySize" | "reviewablePaths" | "excludedPaths" | "mechanicallyClean"> {
+  return {
+    inventorySize: inventory.items.length,
+    reviewablePaths: inventory.reviewablePaths.size,
+    excludedPaths: excludedPathCount(inventory),
+    mechanicallyClean: mechanicallyCleanPaths(inventory).length,
+  };
+}
+
+/** The one `PublishContext` shape every publish call in this file needs, built from the same two inputs. */
+function publishContextFor(request: ReviewRequest, inventory: Inventory): PublishContext {
+  return {
+    client: request.client,
+    ref: request.ref,
+    pullNumber: request.pullNumber,
+    headSha: request.head,
+    identity: request.identity,
+    items: itemIndex(inventory),
+  };
+}
+
 /** What one run's review-cache lookup decided, threaded through the rest of `performReview`. */
 interface MemoContext {
   readonly hits: ReadonlyMap<string, CacheEntry>;
   readonly hitPaths: ReadonlySet<string>;
   readonly eligiblePaths: ReadonlySet<string>;
-  /** Set together with `engineDigest`; both `undefined` whenever the feature is inert this run. */
+  /** Set together with `engineDigest` and `pathSetDigest`; all three `undefined` when inert this run. */
   readonly ruleDigest: Sha256 | undefined;
   readonly engineDigest: Sha256 | undefined;
+  /** This run's changed-path-set digest (v0.10.0, issue #50) — see `computePrPathSetDigest`. */
+  readonly pathSetDigest: Sha256 | undefined;
+  /** Eligible paths a stored entry answered on content alone, but whose path-set context had moved. */
+  readonly contextInvalidated: number;
 }
 
 const INERT_MEMO: MemoContext = {
@@ -194,6 +238,8 @@ const INERT_MEMO: MemoContext = {
   eligiblePaths: new Set(),
   ruleDigest: undefined,
   engineDigest: undefined,
+  pathSetDigest: undefined,
+  contextInvalidated: 0,
 };
 
 function cacheCounts(memo: MemoContext): { cacheHits: number; cacheMisses: number } {
@@ -217,12 +263,14 @@ function prepareMemoization(
 
   const ruleDigest = promptIdentityDigest(request.profile, request.guidelines);
   const engineDigest = currentPlatformDigest();
-  const { hits, eligiblePaths } = lookupMemoized(
+  const pathSetDigest = computePrPathSetDigest(inventory);
+  const { hits, eligiblePaths, contextInvalidated } = lookupMemoized(
     request.cacheStore,
     inventory,
     ruleDigest,
     engineDigest,
     request.config,
+    pathSetDigest,
   );
   const memo: MemoContext = {
     hits,
@@ -230,10 +278,19 @@ function prepareMemoization(
     eligiblePaths,
     ruleDigest,
     engineDigest,
+    pathSetDigest,
+    contextInvalidated,
   };
   diagnostics.record("cache.hits", {
     headSha: request.head,
     counts: { hits: hits.size, misses: eligiblePaths.size - hits.size },
+  });
+  // Distinct from `cache.hits`' own miss count (v0.10.0, issue #50): this tells an operator how
+  // many of those misses were specifically a content match the pull request's changed-file set
+  // invalidated, rather than the file's own bytes never having been reviewed before.
+  diagnostics.record("cache.context_invalidated", {
+    headSha: request.head,
+    counts: { invalidated: contextInvalidated },
   });
   return memo;
 }
@@ -250,6 +307,20 @@ function prepareMemoization(
  *
  * Publishing them softens nothing. The outcome stays `incomplete`, the conversation stays open, and
  * the notice says in its own words that resolving it does not make the review complete.
+ *
+ * Every caller funnels through here before publishing anything, which is what makes the staleness
+ * check below a single guard rather than four ad hoc ones. Before this guard existed, only the
+ * `settlement.status === "incomplete"` caller checked it; a run that instead settled incomplete via
+ * an unclassified path (found in seconds) or an engine failure (found only after the minutes-long
+ * engine call `headIsCurrent`'s own doc comment describes) could still publish a notice bound to a
+ * commit the pull request had already moved past — one contributor to the duplicate-notice defect in
+ * Keiko-for-Quality#38, alongside the notice marker now also keying on `head` (see `publisher.ts`).
+ * `publishSettledFindings`, the sibling "complete" path, applies the identical check itself
+ * immediately before publishing real findings, for the same reason.
+ *
+ * @param counts Redacted, bounded context for *why* this settlement fired — e.g. the publication
+ *   outcome's own rejection breakdown (Keiko-for-Quality#63) when the reason is a degraded
+ *   publication. Omitted by every caller that has nothing more specific than the reason code itself.
  */
 async function settleIncomplete(
   request: ReviewRequest,
@@ -258,48 +329,33 @@ async function settleIncomplete(
   diagnostics: Diagnostics,
   findings: readonly EngineFinding[] = [],
   memo: MemoContext = INERT_MEMO,
+  counts?: Readonly<Record<string, number>>,
 ): Promise<ReviewReport> {
-  diagnostics.record(reason, { headSha: request.head });
+  diagnostics.record(reason, {
+    headSha: request.head,
+    ...(counts !== undefined ? { counts } : {}),
+  });
 
+  if (!(await headIsCurrent(request))) {
+    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+    return abandonedReport(inventory, memo);
+  }
+
+  const context = publishContextFor(request, inventory);
   // Findings first. If publication is interrupted, a reader is better served by findings without
   // the caveat than by a caveat with no findings — the first is incomplete information, the second
   // is none.
   const publish =
-    findings.length === 0
-      ? undefined
-      : await publishFindings(
-          {
-            client: request.client,
-            ref: request.ref,
-            pullNumber: request.pullNumber,
-            headSha: request.head,
-            identity: request.identity,
-            items: itemIndex(inventory),
-          },
-          findings,
-          diagnostics,
-        );
+    findings.length === 0 ? undefined : await publishFindings(context, findings, diagnostics);
 
   const anchor = noticeAnchor(inventory);
   if (anchor !== undefined) {
-    await publishIncompleteNotice(
-      {
-        client: request.client,
-        ref: request.ref,
-        pullNumber: request.pullNumber,
-        headSha: request.head,
-        identity: request.identity,
-        items: itemIndex(inventory),
-      },
-      reason,
-      anchor,
-      diagnostics,
-    );
+    await publishIncompleteNotice(context, reason, anchor, diagnostics);
   }
   return {
     outcome: "incomplete",
     reason,
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     cacheAppended: 0,
     ...cacheCounts(memo),
     ...(publish === undefined ? {} : { publish }),
@@ -355,6 +411,22 @@ function publicationDegraded(outcome: PublishOutcome): boolean {
 }
 
 /**
+ * The redacted breakdown behind a degraded-publication settlement (Keiko-for-Quality#63): what
+ * published cleanly alongside what did not, and along which of the three failure modes. Every
+ * per-finding placement rejection folded into `outcome.rejectedPlacement` already carries its own
+ * finer attempt tally (`publisher.ts`'s `publish.finding_rejected_placement` record); this is the
+ * run-level rollup an operator sees on the single event that decided the run as a whole.
+ */
+function publicationDegradedCounts(outcome: PublishOutcome): Readonly<Record<string, number>> {
+  return {
+    published: outcome.published,
+    rejected_placement: outcome.rejectedPlacement,
+    rejected_sanitization: outcome.rejectedSanitization,
+    readback_failures: outcome.readbackFailures,
+  };
+}
+
+/**
  * Folds this run's newly-clean-or-found paths into the store to write back — never a hit's own
  * entry, which is already in the store unchanged, and never anything from an outcome other than
  * `complete`: this function is only reachable from `publishSettledFindings`, and that is the one
@@ -369,7 +441,13 @@ function finalizeCacheStore(
   engineFindings: readonly EngineFinding[],
 ): { store: CacheStore; appended: number } | undefined {
   if (request.cacheStore === undefined) return undefined;
-  if (memo.ruleDigest === undefined || memo.engineDigest === undefined) return undefined;
+  if (
+    memo.ruleDigest === undefined ||
+    memo.engineDigest === undefined ||
+    memo.pathSetDigest === undefined
+  ) {
+    return undefined;
+  }
 
   const newEntries = buildNewEntries({
     inventory,
@@ -378,6 +456,7 @@ function finalizeCacheStore(
     findings: engineFindings,
     ruleDigest: memo.ruleDigest,
     engineDigest: memo.engineDigest,
+    pathSetDigest: memo.pathSetDigest,
     config: request.config,
   });
   if (newEntries.length === 0) return { store: request.cacheStore, appended: 0 };
@@ -397,14 +476,7 @@ async function publishSettledFindings(
 ): Promise<ReviewReport> {
   const findings = mergeHitFindings(settlement.findings, memo.hits);
   const publish = await publishFindings(
-    {
-      client: request.client,
-      ref: request.ref,
-      pullNumber: request.pullNumber,
-      headSha: request.head,
-      identity: request.identity,
-      items: itemIndex(inventory),
-    },
+    publishContextFor(request, inventory),
     findings,
     diagnostics,
   );
@@ -419,6 +491,7 @@ async function publishSettledFindings(
       diagnostics,
       [],
       memo,
+      publicationDegradedCounts(publish),
     );
     return { ...report, publish };
   }
@@ -431,7 +504,7 @@ async function publishSettledFindings(
   const finalized = finalizeCacheStore(request, inventory, memo, settlement.findings);
   return {
     outcome: "complete",
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     publish,
     cacheAppended: finalized?.appended ?? 0,
     ...cacheCounts(memo),
@@ -450,7 +523,7 @@ async function publishSettledFindings(
 function emptyReviewReport(inventory: Inventory): ReviewReport {
   return {
     outcome: "complete",
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     cacheHits: 0,
     cacheMisses: 0,
     cacheAppended: 0,
@@ -461,7 +534,7 @@ function emptyReviewReport(inventory: Inventory): ReviewReport {
 function abandonedReport(inventory: Inventory, memo: MemoContext): ReviewReport {
   return {
     outcome: "abandoned",
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     ...cacheCounts(memo),
     cacheAppended: 0,
   };
@@ -528,10 +601,10 @@ export async function performReview(
   const settlement = await settleOrReport(request, inventory, memo, diagnostics);
   if ("outcome" in settlement) return settlement;
 
-  if (!(await headIsCurrent(request))) {
-    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
-    return abandonedReport(inventory, memo);
-  }
+  // `settleIncomplete` applies its own staleness guard (see its doc comment), so the incomplete
+  // branch does not repeat one here. The complete branch below still needs its own: it publishes
+  // real findings directly through `publishSettledFindings`, which never calls `settleIncomplete` on
+  // its happy path.
   if (settlement.status === "incomplete") {
     return settleIncomplete(
       request,
@@ -541,6 +614,10 @@ export async function performReview(
       mergeHitFindings(settlement.findings, memo.hits),
       memo,
     );
+  }
+  if (!(await headIsCurrent(request))) {
+    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+    return abandonedReport(inventory, memo);
   }
   return publishSettledFindings(request, inventory, settlement, memo, started, diagnostics);
 }

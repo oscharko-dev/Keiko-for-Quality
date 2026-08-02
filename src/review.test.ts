@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   computeKey,
+  computePathSetDigest,
   modelId,
   protocol,
   SUPPORTED_STORE_SCHEMA,
@@ -13,11 +14,11 @@ import {
 } from "./cache/review-cache.js";
 import { compileProfile, type ReviewProfile } from "./config/profile.js";
 import type { RuntimeConfig } from "./config/runtime.js";
-import { blobId, commitSha } from "./core/brands.js";
+import { blobId, commitSha, sha256 } from "./core/brands.js";
 import { createSilentDiagnostics } from "./diagnostics/sink.js";
 import { currentPlatformDigest } from "./engine/pinned-release.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
-import { GitHubClient } from "./github/client.js";
+import { GitHubApiError, GitHubClient } from "./github/client.js";
 import type { ReviewRequest } from "./review.js";
 
 const acquireEngineMock = vi.fn();
@@ -139,6 +140,7 @@ describe("performReview: review-cache memoization end to end", () => {
     generated: [],
     excluded: [],
     benignWarnings: [],
+    pathInstructions: [],
   } satisfies ReviewProfile);
 
   const CONFIG: RuntimeConfig = {
@@ -161,6 +163,24 @@ describe("performReview: review-cache memoization end to end", () => {
       status: "success",
       summary: { files_reviewed: filesReviewed, total_tokens: 100, budget_exceeded: false },
       comments: [],
+    });
+  }
+
+  /** The same counted-mode output, carrying one publishable finding against `src/a.ts`. */
+  function engineStdoutWithFinding(filesReviewed: number): string {
+    return JSON.stringify({
+      status: "success",
+      summary: { files_reviewed: filesReviewed, total_tokens: 100, budget_exceeded: false },
+      comments: [
+        {
+          path: "src/a.ts",
+          content: "This line never validates the input length before using it as an index.",
+          start_line: 1,
+          end_line: 1,
+          severity: "medium",
+          category: "bug",
+        },
+      ],
     });
   }
 
@@ -201,6 +221,10 @@ describe("performReview: review-cache memoization end to end", () => {
     const base = blobId(baseBlobA);
     const head = blobId(headBlobA);
     const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+    // Both src/a.ts and src/b.ts are modified in this fixture's base..head diff (see `beforeAll`),
+    // neither is a rename, so the token list is exactly their bare paths — matching what
+    // `computePrPathSetDigest` derives internally from the real inventory this run builds.
+    const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
     const store: CacheStore = {
       schemaVersion: SUPPORTED_STORE_SCHEMA,
       entries: [
@@ -210,6 +234,7 @@ describe("performReview: review-cache memoization end to end", () => {
           headBlob: head,
           ruleDigest,
           engineDigest,
+          prPathSetDigest: currentPathSet,
           modelId: model,
           protocol: proto,
           findings: [],
@@ -230,8 +255,69 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(report.outcome).toBe("complete");
     expect(report.cacheHits).toBe(1);
     expect(report.cacheMisses).toBe(1);
+    // Both changed files matched `reviewRelevant` and are ordinary edits — neither excluded nor a
+    // pure rename — which is what the run summary's (Keiko-for-Quality#31) path accounting reports.
+    expect(report.reviewablePaths).toBe(2);
+    expect(report.excludedPaths).toBe(0);
+    expect(report.mechanicallyClean).toBe(0);
     // src/a.ts's original entry survives untouched; src/b.ts is newly admitted.
     expect(report.updatedCacheStore?.entries).toHaveLength(2);
+  });
+
+  it("treats a hit rejected by the path-set digest as an ordinary miss: the file is reviewed and never memoized (v0.10.0, issue #50)", async () => {
+    const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+    const engineDigest = currentPlatformDigest();
+    expect(engineDigest).toBeDefined();
+    if (engineDigest === undefined) return;
+
+    const model = modelId(CONFIG.model);
+    const proto = protocol(CONFIG.protocol);
+    const base = blobId(baseBlobA);
+    const head = blobId(headBlobA);
+    const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+    // Deliberately the WRONG path-set digest — as if this entry were written for a pull request
+    // whose changed-file set no longer matches this run's. src/a.ts's content-based key still
+    // matches exactly, so this proves the rejection is the path-set gate, not a content miss.
+    const stalePathSet = sha256("9".repeat(64));
+    const store: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [
+        {
+          key,
+          baseBlob: base,
+          headBlob: head,
+          ruleDigest,
+          engineDigest,
+          prPathSetDigest: stalePathSet,
+          modelId: model,
+          protocol: proto,
+          findings: [],
+        },
+      ],
+    };
+
+    // The previous test in this block already recorded a call against these same shared mocks;
+    // clear that history so `calls[0]` below is unambiguously this test's own invocation.
+    acquireEngineMock.mockClear();
+    runEngineMock.mockClear();
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+    // Both reviewable files are dispatched to the engine: src/a.ts's stored entry is rejected by
+    // the path-set gate, so it is never excluded the way a genuine hit would be.
+    runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+    const report = await performReview(baseRequest(store), createSilentDiagnostics());
+
+    const [calledOptions] = runEngineMock.mock.calls[0] as [{ mechanicallyCleanPaths: string[] }];
+    expect(calledOptions.mechanicallyCleanPaths).not.toContain("src/a.ts");
+
+    expect(report.outcome).toBe("complete");
+    expect(report.cacheHits).toBe(0);
+    expect(report.cacheMisses).toBe(2);
+
+    // The stale entry is refreshed, not duplicated: same key, new (current) path-set digest.
+    expect(report.updatedCacheStore?.entries).toHaveLength(2);
+    const refreshed = report.updatedCacheStore?.entries.find((e) => e.key === key);
+    expect(refreshed?.prPathSetDigest).not.toBe(stalePathSet);
   });
 
   it("still settles incomplete when the missing file was never memoized", async () => {
@@ -245,5 +331,150 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(report.outcome).toBe("incomplete");
     expect(report.cacheHits).toBe(0);
     expect(report.cacheMisses).toBe(0);
+  });
+
+  /**
+   * Keiko-for-Quality#63, run-level: production evidence was a run that settled incomplete with
+   * reason `publish.finding_rejected_placement` alone — no breakdown of what was actually tried.
+   * `publisher.test.ts` already pins the per-finding tally this same rejection carries one layer
+   * down; this proves the run-level event `settleIncomplete` records also carries the publication
+   * outcome's own breakdown, not just the bare reason code, so an operator reading *this* one event
+   * does not have to go correlate it against the per-finding diagnostics stream by hand.
+   */
+  it("settles incomplete with the publication outcome's own breakdown when every placement is refused", async () => {
+    const engineDigest = currentPlatformDigest();
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+    runEngineMock.mockResolvedValue({
+      stdout: engineStdoutWithFinding(2),
+      ruleDigest: engineDigest,
+    });
+
+    const request = baseRequest(undefined);
+    vi.spyOn(request.client, "createReviewComment").mockRejectedValue(new GitHubApiError(422));
+
+    const diagnostics = createSilentDiagnostics();
+    const report = await performReview(request, diagnostics);
+
+    expect(report.outcome).toBe("incomplete");
+    expect(report.reason).toBe("publish.finding_rejected_placement");
+    expect(report.publish).toMatchObject({ published: 0, rejectedPlacement: 1 });
+
+    // The run-level record — the last one with this code, since `publishFindings`' own per-finding
+    // record for the same code is written first — carries the full outcome breakdown redactedly:
+    // counts and codes only, never the finding's content or the rejection's own message.
+    const runLevel = diagnostics
+      .drain()
+      .filter((record) => record.code === "publish.finding_rejected_placement")
+      .at(-1);
+    expect(runLevel?.counts).toStrictEqual({
+      published: 0,
+      rejected_placement: 1,
+      rejected_sanitization: 0,
+      readback_failures: 0,
+    });
+  });
+
+  /**
+   * Keiko-for-Quality#38's secondary defect: two byte-identical incomplete-review notices were
+   * published against the same head. `settleIncomplete` only checked whether the head was still
+   * current on the path reached after a real settlement decision; a run that instead settled
+   * incomplete via an unclassified path (found in seconds, before any engine work) or an engine
+   * failure (found only after the engine ran) could still publish a notice for a head the pull
+   * request had already moved past. These two prove that gap and that closing it makes the run
+   * abandon instead of publish.
+   */
+  describe("staleness guard on every settleIncomplete path", () => {
+    /** A client whose pull request has already moved to a different head than `request.head` uses. */
+    function staleClient(): GitHubClient {
+      const client = new GitHubClient("https://api.example.test", "unused");
+      vi.spyOn(client, "getPullRequest").mockResolvedValue({
+        headSha: commitSha("f".repeat(40)),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
+      return client;
+    }
+
+    it("abandons an unclassified-path settlement once the head has moved on", async () => {
+      // `reviewRelevant` must be non-empty to pass profile validation, but "docs/**" matches
+      // neither `src/a.ts` nor `src/b.ts`, so both fall through to `unclassified`.
+      const profile = compileProfile({
+        version: 1,
+        reviewRelevant: ["docs/**"],
+        deletionCritical: [],
+        generated: [],
+        excluded: [],
+        benignWarnings: [],
+        pathInstructions: [],
+      } satisfies ReviewProfile);
+      const client = staleClient();
+      const createSpy = vi.spyOn(client, "createReviewComment").mockResolvedValue({
+        id: 1,
+        body: "",
+        path: "src/a.ts",
+        authorLogin: "keiko-for-quality[bot]",
+        commitId: headSha,
+        url: "https://example.test/c",
+      });
+
+      const request: ReviewRequest = {
+        client,
+        ref: { owner: "acme", repo: "widget" },
+        pullNumber: 1,
+        base: commitSha(baseSha),
+        head: commitSha(headSha),
+        repositoryPath: repo,
+        config: CONFIG,
+        profile,
+        guidelines: { paths: [] },
+        identity: "keiko-for-quality[bot]",
+        env: {},
+        pathValue: process.env.PATH ?? "/usr/bin:/bin",
+      };
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("abandoned");
+      expect(createSpy).not.toHaveBeenCalled();
+    });
+
+    it("abandons an engine-failure settlement once the head has moved on", async () => {
+      acquireEngineMock.mockResolvedValue({
+        binaryPath: "/fake/engine",
+        digest: currentPlatformDigest(),
+      });
+      runEngineMock.mockRejectedValue(new Error("engine spawn failed"));
+      const client = staleClient();
+      const createSpy = vi.spyOn(client, "createReviewComment").mockResolvedValue({
+        id: 1,
+        body: "",
+        path: "src/a.ts",
+        authorLogin: "keiko-for-quality[bot]",
+        commitId: headSha,
+        url: "https://example.test/c",
+      });
+
+      const request: ReviewRequest = {
+        client,
+        ref: { owner: "acme", repo: "widget" },
+        pullNumber: 1,
+        base: commitSha(baseSha),
+        head: commitSha(headSha),
+        repositoryPath: repo,
+        config: CONFIG,
+        profile: PROFILE,
+        guidelines: { paths: [] },
+        identity: "keiko-for-quality[bot]",
+        env: {},
+        pathValue: process.env.PATH ?? "/usr/bin:/bin",
+      };
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("abandoned");
+      expect(createSpy).not.toHaveBeenCalled();
+    });
   });
 });

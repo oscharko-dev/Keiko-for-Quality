@@ -14,6 +14,7 @@ function profile(overrides: Partial<ReviewProfile> = {}): CompiledProfile {
     generated: [],
     excluded: [],
     benignWarnings: [],
+    pathInstructions: [],
     ...overrides,
   } satisfies ReviewProfile);
 }
@@ -48,6 +49,35 @@ describe("promptIdentityDigest", () => {
     const a = promptIdentityDigest(profile(), { paths: [] });
     const b = promptIdentityDigest(profile({ generated: ["**/dist/**"] }), { paths: [] });
     expect(a).not.toBe(b);
+  });
+
+  /**
+   * Per-path instructions change what the model is asked, exactly as the catch-all guidance or a
+   * guideline path does, so they must move this digest the same way `generated` does above — and
+   * they must do so through nothing more than `profile` already being a parameter here (see
+   * `rule-identity.ts`'s own doc comment on why that wiring needs no new plumbing).
+   *
+   * `mechanicallyClean` is the contrasting, per-run case this digest must *never* reflect: v0.8.0's
+   * pure-rename downgrade and v0.9.0's cache hits differ on every head, so `promptIdentityDigest`
+   * never receives that list at all (see "takes no per-run exclude list" below) — it can only ever
+   * move `buildRuleFile`'s `exclude`, never the `rules` this digest actually hashes.
+   */
+  it("changes when a path instruction's text changes, but never when a mechanically-clean exclude is added", () => {
+    const withInstruction = (text: string): CompiledProfile =>
+      profile({ pathInstructions: [{ paths: ["**/*.sql"], instructions: text }] });
+
+    const a = promptIdentityDigest(withInstruction("Use snake_case identifiers."), { paths: [] });
+    const b = promptIdentityDigest(withInstruction("Prefer parameterized queries."), {
+      paths: [],
+    });
+    expect(a).not.toBe(b);
+    expect(a).toBe(expectedDigest(withInstruction("Use snake_case identifiers.")));
+
+    const compiled = withInstruction("Use snake_case identifiers.");
+    const withoutRename = buildRuleFile(compiled, { paths: [] });
+    const withRename = buildRuleFile(compiled, { paths: [] }, ["src/renamed.sql"]);
+    expect(withRename.rules).toEqual(withoutRename.rules);
+    expect(withRename.exclude).not.toEqual(withoutRename.exclude);
   });
 
   /**

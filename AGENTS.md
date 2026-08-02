@@ -20,6 +20,12 @@ Do not run either without the user's explicit go-ahead, and do not reach for one
 an ordinary change — the deterministic half of the corpus (inventory, placement, sanitization,
 settlement) already runs under `npm test`.
 
+The free half of the corpus is invisible to `verify` too: the hermetic `corpus/*.test.mjs` suites
+run under `node --test`, which only the coverage lane executes — `npm run verify` can be green over
+a red corpus test (it happened on #53: a green verify masked a defused pin until the direct run
+surfaced it). After touching anything under `corpus/`, run `node --test corpus/*.test.mjs`
+yourself before claiming green.
+
 ## The rule text and the sanitizer must move together
 
 `src/engine/rule-file.ts`'s `CATCH_ALL_RULE` tells the model what it may write. `src/publish/

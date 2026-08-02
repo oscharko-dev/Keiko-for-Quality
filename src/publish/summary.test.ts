@@ -1,0 +1,336 @@
+import { beforeEach, describe, expect, it } from "vitest";
+
+import { commitSha, versionTag } from "../core/brands.js";
+import { createDiagnostics, createSilentDiagnostics } from "../diagnostics/sink.js";
+import type { IssueComment, IssueCommentApi, RepoRef } from "../github/client.js";
+import type { ReviewReport } from "../review.js";
+import { renderMarker, summaryMarker } from "./marker.js";
+import {
+  buildSummaryReport,
+  maintainRunSummary,
+  type SummaryPublishContext,
+  type SummaryRunInput,
+} from "./summary.js";
+
+const REF: RepoRef = { owner: "acme", repo: "widget" };
+const IDENTITY = "keiko-for-quality[bot]";
+const HEAD = commitSha("a".repeat(40));
+const MARKER = summaryMarker(`${REF.owner}/${REF.repo}`, 7);
+
+/** A scriptable stand-in for the issue-comment API, mirroring `publisher.test.ts`'s `FakeApi`. */
+class FakeIssueApi implements IssueCommentApi {
+  public existing: IssueComment[] = [];
+  public created: string[] = [];
+  public updated: { id: number; body: string }[] = [];
+  public failList = false;
+  public failCreate = false;
+  public failUpdate = false;
+  private nextId = 100;
+
+  public listIssueComments(): Promise<IssueComment[]> {
+    if (this.failList) return Promise.reject(new Error("listing failed"));
+    return Promise.resolve(this.existing);
+  }
+
+  public createIssueComment(_ref: RepoRef, _number: number, body: string): Promise<IssueComment> {
+    if (this.failCreate) return Promise.reject(new Error("create failed"));
+    this.created.push(body);
+    this.nextId += 1;
+    const comment: IssueComment = {
+      id: this.nextId,
+      body,
+      authorLogin: IDENTITY,
+      url: `https://example.test/issues/comments/${String(this.nextId)}`,
+    };
+    this.existing = [...this.existing, comment];
+    return Promise.resolve(comment);
+  }
+
+  public updateIssueComment(_ref: RepoRef, id: number, body: string): Promise<IssueComment> {
+    if (this.failUpdate) return Promise.reject(new Error("update failed"));
+    this.updated.push({ id, body });
+    const previous = this.existing.find((comment) => comment.id === id);
+    const updated: IssueComment = {
+      id,
+      body,
+      authorLogin: previous?.authorLogin ?? IDENTITY,
+      url: `https://example.test/issues/comments/${String(id)}`,
+    };
+    this.existing = this.existing.map((comment) => (comment.id === id ? updated : comment));
+    return Promise.resolve(updated);
+  }
+}
+
+function report(overrides: Partial<ReviewReport> = {}): ReviewReport {
+  return {
+    outcome: "complete",
+    inventorySize: 10,
+    reviewablePaths: 6,
+    excludedPaths: 3,
+    mechanicallyClean: 1,
+    cacheHits: 2,
+    cacheMisses: 4,
+    cacheAppended: 0,
+    publish: {
+      published: 2,
+      suppressed: 1,
+      suppressedExactDuplicate: 1,
+      suppressedSimilar: 0,
+      suppressedDispositioned: 0,
+      rejectedSanitization: 0,
+      rejectedPlacement: 0,
+      readbackFailures: 0,
+    },
+    ...overrides,
+  };
+}
+
+function runInput(overrides: Partial<SummaryRunInput> = {}): SummaryRunInput {
+  return {
+    report: report(),
+    headSha: HEAD,
+    eventTimestamp: "2026-08-02T10:15:00Z",
+    engineVersion: versionTag("v1.8.4"),
+    actionVersion: "abc1234",
+    ...overrides,
+  };
+}
+
+let api: FakeIssueApi;
+let context: SummaryPublishContext;
+
+beforeEach(() => {
+  api = new FakeIssueApi();
+  context = { client: api, ref: REF, pullNumber: 7, identity: IDENTITY };
+});
+
+describe("maintainRunSummary: upsert rules", () => {
+  it("creates a new comment when none exists", async () => {
+    const url = await maintainRunSummary(context, runInput(), createSilentDiagnostics());
+    expect(api.created).toHaveLength(1);
+    expect(api.updated).toHaveLength(0);
+    expect(url).toBeDefined();
+  });
+
+  it("updates the existing App-authored marker comment in place — same id, never a second create", async () => {
+    await maintainRunSummary(context, runInput(), createSilentDiagnostics());
+    expect(api.existing).toHaveLength(1);
+    const originalId = api.existing[0]?.id;
+
+    await maintainRunSummary(
+      context,
+      runInput({ headSha: commitSha("c".repeat(40)) }),
+      createSilentDiagnostics(),
+    );
+
+    expect(api.created).toHaveLength(1);
+    expect(api.updated).toHaveLength(1);
+    expect(api.updated[0]?.id).toBe(originalId);
+    expect(api.existing).toHaveLength(1);
+  });
+
+  it("replaces the head SHA in the updated comment rather than appending it", async () => {
+    await maintainRunSummary(context, runInput(), createSilentDiagnostics());
+    const newHead = commitSha("c".repeat(40));
+    await maintainRunSummary(context, runInput({ headSha: newHead }), createSilentDiagnostics());
+
+    const body = api.existing[0]?.body ?? "";
+    expect(body).toContain(newHead.slice(0, 7));
+    expect(body).not.toContain(HEAD.slice(0, 7));
+  });
+
+  it("ignores a foreign-authored comment carrying the marker and creates a fresh one", async () => {
+    api.existing = [
+      {
+        id: 1,
+        body: `Someone else's comment.\n\n${renderMarker(MARKER)}`,
+        authorLogin: "an-imposter",
+        url: "https://example.test/1",
+      },
+    ];
+
+    await maintainRunSummary(context, runInput(), createSilentDiagnostics());
+
+    expect(api.created).toHaveLength(1);
+    expect(api.updated).toHaveLength(0);
+    expect(api.existing).toHaveLength(2);
+    expect(api.existing[0]?.authorLogin).toBe("an-imposter");
+  });
+
+  it("updates the newest of several stale own-authored marker comments and leaves the other untouched", async () => {
+    api.existing = [
+      { id: 10, body: `old\n\n${renderMarker(MARKER)}`, authorLogin: IDENTITY, url: "u1" },
+      { id: 20, body: `newer\n\n${renderMarker(MARKER)}`, authorLogin: IDENTITY, url: "u2" },
+    ];
+
+    await maintainRunSummary(context, runInput(), createSilentDiagnostics());
+
+    expect(api.created).toHaveLength(0);
+    expect(api.updated).toHaveLength(1);
+    expect(api.updated[0]?.id).toBe(20);
+    expect(api.existing.find((c) => c.id === 10)?.body).toBe(`old\n\n${renderMarker(MARKER)}`);
+  });
+
+  it("does not match a comment authored by this identity that carries no marker at all", async () => {
+    api.existing = [{ id: 1, body: "An ordinary reply.", authorLogin: IDENTITY, url: "u1" }];
+
+    await maintainRunSummary(context, runInput(), createSilentDiagnostics());
+
+    expect(api.created).toHaveLength(1);
+    expect(api.updated).toHaveLength(0);
+  });
+
+  it("records publish.summary_published on create and publish.summary_updated on update", async () => {
+    const diagnostics = createDiagnostics(() => undefined);
+    await maintainRunSummary(context, runInput(), diagnostics);
+    expect(diagnostics.drain().map((r) => r.code)).toContain("publish.summary_published");
+
+    const second = createDiagnostics(() => undefined);
+    await maintainRunSummary(context, runInput(), second);
+    expect(second.drain().map((r) => r.code)).toContain("publish.summary_updated");
+  });
+});
+
+describe("maintainRunSummary: failure posture", () => {
+  it("does not throw when listing fails, and records a redacted diagnostic instead", async () => {
+    api.failList = true;
+    const diagnostics = createDiagnostics(() => undefined);
+    const url = await maintainRunSummary(context, runInput(), diagnostics);
+    expect(url).toBeUndefined();
+    expect(diagnostics.drain().map((r) => r.code)).toContain("publish.summary_upsert_failed");
+    expect(diagnostics.drain().map((r) => r.code)).not.toContain("publish.summary_published");
+  });
+
+  it("does not throw when create fails, and records a redacted diagnostic instead", async () => {
+    api.failCreate = true;
+    const diagnostics = createDiagnostics(() => undefined);
+    const url = await maintainRunSummary(context, runInput(), diagnostics);
+    expect(url).toBeUndefined();
+    expect(diagnostics.drain().map((r) => r.code)).toContain("publish.summary_upsert_failed");
+  });
+
+  it("does not throw when update fails, and records a redacted diagnostic instead", async () => {
+    await maintainRunSummary(context, runInput(), createSilentDiagnostics());
+    api.failUpdate = true;
+    const diagnostics = createDiagnostics(() => undefined);
+    const url = await maintainRunSummary(context, runInput(), diagnostics);
+    expect(url).toBeUndefined();
+    expect(diagnostics.drain().map((r) => r.code)).toContain("publish.summary_upsert_failed");
+  });
+
+  it("never carries the failure's own error text into the diagnostic", async () => {
+    api.failCreate = true;
+    const lines: string[] = [];
+    const diagnostics = createDiagnostics((line) => lines.push(line));
+    await maintainRunSummary(context, runInput(), diagnostics);
+    expect(lines.join("\n")).not.toContain("create failed");
+  });
+});
+
+/**
+ * `buildSummaryReport` is the projection from the production `ReviewReport` — the same object
+ * `main.ts`'s action outputs are built from — into `SummaryReport`. Every assertion below reads a
+ * count straight off the same `ReviewReport` value the test constructs, rather than restating the
+ * expectation as an independently computed number.
+ */
+describe("buildSummaryReport", () => {
+  it("wires every path and finding count straight from the production ReviewReport", () => {
+    const r = report({
+      inventorySize: 97,
+      reviewablePaths: 50,
+      excludedPaths: 30,
+      mechanicallyClean: 10,
+      cacheHits: 12,
+      publish: {
+        published: 2,
+        suppressed: 4,
+        suppressedExactDuplicate: 1,
+        suppressedSimilar: 2,
+        suppressedDispositioned: 1,
+        rejectedSanitization: 0,
+        rejectedPlacement: 0,
+        readbackFailures: 0,
+      },
+    });
+    const summary = buildSummaryReport(runInput({ report: r }), []);
+
+    expect(summary.counts.totalPaths).toBe(r.inventorySize);
+    expect(summary.counts.reviewablePaths).toBe(r.reviewablePaths);
+    expect(summary.counts.excludedPaths).toBe(r.excludedPaths);
+    expect(summary.counts.mechanicallyClean).toBe(r.mechanicallyClean);
+    expect(summary.counts.cacheHits).toBe(r.cacheHits);
+    expect(summary.counts.findingsPublished).toBe(r.publish?.published);
+    expect(summary.counts.suppressedExactDuplicate).toBe(r.publish?.suppressedExactDuplicate);
+    expect(summary.counts.suppressedSimilar).toBe(r.publish?.suppressedSimilar);
+    expect(summary.counts.suppressedDispositioned).toBe(r.publish?.suppressedDispositioned);
+  });
+
+  it("derives freshlyReviewed as the one arithmetic step: reviewablePaths minus cacheHits", () => {
+    const r = report({ reviewablePaths: 50, cacheHits: 12 });
+    const summary = buildSummaryReport(runInput({ report: r }), []);
+    expect(summary.counts.freshlyReviewed).toBe(r.reviewablePaths - r.cacheHits);
+  });
+
+  it("defaults every finding count to zero when the report never reached publication", () => {
+    // `publish` is optional on `ReviewReport` and genuinely absent on this path (the
+    // zero-reviewable-paths shortcut, an early unclassified-path incomplete, or an abandoned run) —
+    // built directly rather than through `report()`'s override spread, since `exactOptionalPropertyTypes`
+    // correctly refuses to let a `Partial<ReviewReport>` override assign `undefined` to an optional key.
+    const { publish: _publish, ...withoutPublish } = report();
+    const r: ReviewReport = withoutPublish;
+    const summary = buildSummaryReport(runInput({ report: r }), []);
+    expect(summary.counts.findingsPublished).toBe(0);
+    expect(summary.counts.suppressedExactDuplicate).toBe(0);
+    expect(summary.counts.suppressedSimilar).toBe(0);
+    expect(summary.counts.suppressedDispositioned).toBe(0);
+  });
+
+  it("carries the reason code only for an incomplete outcome", () => {
+    const r = report({ outcome: "incomplete", reason: "settlement.incomplete.coverage_gap" });
+    const summary = buildSummaryReport(runInput({ report: r }), []);
+    expect(summary.reason).toBe(r.reason);
+  });
+
+  it("drops a reason code present on a non-incomplete report rather than misrepresenting the outcome", () => {
+    // Not a realistic production shape (only `settleIncomplete` ever sets `reason`), but this is the
+    // exact defensive case the outcome-line contract depends on: only `incomplete` may show a reason.
+    const r: ReviewReport = {
+      ...report({ outcome: "complete" }),
+      reason: "settlement.incomplete.coverage_gap",
+    };
+    const summary = buildSummaryReport(runInput({ report: r }), []);
+    expect(summary.reason).toBeUndefined();
+  });
+
+  it("carries the head SHA, timestamp, and version identifiers supplied by the caller", () => {
+    const summary = buildSummaryReport(runInput(), []);
+    expect(summary.headSha).toBe(HEAD);
+    expect(summary.eventTimestamp).toBe("2026-08-02T10:15:00Z");
+    expect(summary.engineVersion).toBe("v1.8.4");
+    expect(summary.actionVersion).toBe("abc1234");
+  });
+
+  describe("budget extraction from the diagnostics stream", () => {
+    it("reads the allotted budget from engine.run.completed's own counts field", () => {
+      const diagnostics = createDiagnostics(() => undefined);
+      diagnostics.record("engine.run.completed", { counts: { bytes: 500, budget: 1_200_000 } });
+      const summary = buildSummaryReport(runInput(), diagnostics.drain());
+      expect(summary.budget).toEqual({ allotted: 1_200_000, spent: undefined });
+    });
+
+    it("reads a reported spend from any diagnostic on this run that carries one", () => {
+      const diagnostics = createDiagnostics(() => undefined);
+      diagnostics.record("engine.run.completed", { counts: { bytes: 500, budget: 1_200_000 } });
+      diagnostics.record("settlement.incomplete.budget_exceeded", {
+        counts: { tokens: 1_250_000 },
+      });
+      const summary = buildSummaryReport(runInput(), diagnostics.drain());
+      expect(summary.budget).toEqual({ allotted: 1_200_000, spent: 1_250_000 });
+    });
+
+    it("leaves both undefined when the engine never completed this run", () => {
+      const summary = buildSummaryReport(runInput(), []);
+      expect(summary.budget).toEqual({ allotted: undefined, spent: undefined });
+    });
+  });
+});

@@ -103,9 +103,20 @@ inputs:
       answered from that entry instead of re-sent to the model. Empty (the default) disables the
       feature entirely, with no other behavioural change. A missing or unreadable store is treated
       as empty and the run proceeds normally: memoization is a pure optimization layer, so its own
-      failure never gates completeness, only re-review cost.
+      failure never gates completeness, only re-review cost. A matching entry also replays only
+      while the pull request's changed-file set stays the same shape it was when that entry was
+      written — a new, deleted, or renamed path anywhere in the pull request invalidates it, bounding
+      how stale a replay's repository context can be.
     required: false
     default: ""
+  run_summary:
+    description: >-
+      Whether to maintain a single upserted run-summary comment on the pull request, in addition to
+      finding conversations. `true` (the default) posts or updates one comment per run — for every
+      settlement outcome, including incomplete and abandoned — stating the outcome, the reviewed
+      head, and redacted counts. `false` disables it: no issue-comment API call is made at all.
+    required: false
+    default: "true"
 
 outputs:
   outcome:
@@ -126,6 +137,11 @@ outputs:
     description: >-
       Number of cache-eligible files sent to the model despite a configured store (no matching
       entry). Always `0` when that input is empty.
+  summary_comment_url:
+    description: >-
+      URL of the maintained run-summary comment, when `run_summary` is enabled and the upsert
+      succeeded. Empty when disabled, when the upsert failed (never fails the run), or when the
+      event was skipped at eligibility before a review was attempted.
 
 runs:
   using: node24

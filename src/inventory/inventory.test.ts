@@ -5,10 +5,17 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { compileProfile, type ReviewProfile } from "../config/profile.js";
-import { commitSha } from "../core/brands.js";
+import { commitSha, repoPath } from "../core/brands.js";
 import { createSilentDiagnostics } from "../diagnostics/sink.js";
 import { mergeBase, type GitContext } from "../git/plumbing.js";
-import { buildInventory, mechanicallyCleanPaths, resolveReviewPair } from "./inventory.js";
+import type { InventoryItem } from "./classify.js";
+import {
+  buildInventory,
+  excludedPathCount,
+  mechanicallyCleanPaths,
+  resolveReviewPair,
+  type Inventory,
+} from "./inventory.js";
 
 /**
  * Exercised against a real repository, for the same reason `plumbing.test.ts` is: the pure-rename
@@ -43,6 +50,7 @@ const PROFILE: ReviewProfile = {
   generated: [],
   excluded: [],
   benignWarnings: [],
+  pathInstructions: [],
 };
 
 const compiled = compileProfile(PROFILE);
@@ -100,5 +108,52 @@ describe("buildInventory: the pure-rename prefilter end to end", () => {
     // shaped specially for this test.
     const base = await mergeBase(ctx, commitSha(baseSha), commitSha(headSha));
     expect(base).toBe(baseSha);
+  });
+});
+
+/**
+ * A pure function over already-classified items, so — unlike the suite above — this needs no real
+ * git repository: a hand-built inventory exercises it directly and faster.
+ */
+describe("excludedPathCount", () => {
+  function item(path: string, classification: InventoryItem["classification"]): InventoryItem {
+    return {
+      path: repoPath(path),
+      status: "M",
+      classification,
+      modeChanged: false,
+      reviewable: classification.kind === "reviewed",
+      changedLines: 1,
+    };
+  }
+
+  function inventoryOf(items: readonly InventoryItem[]): Inventory {
+    return {
+      pair: {
+        base: commitSha("a".repeat(40)),
+        head: commitSha("b".repeat(40)),
+        mergeBase: commitSha("a".repeat(40)),
+      },
+      items,
+      reviewablePaths: new Set(items.filter((i) => i.reviewable).map((i) => i.path as string)),
+      unclassified: [],
+    };
+  }
+
+  it("is zero for an inventory with no excluded path", () => {
+    const inventory = inventoryOf([item("src/a.ts", { kind: "reviewed" })]);
+    expect(excludedPathCount(inventory)).toBe(0);
+  });
+
+  it("counts only the excluded classification, not generated, binary, or mechanically-clean", () => {
+    const inventory = inventoryOf([
+      item("src/a.ts", { kind: "reviewed" }),
+      item("docs/readme.md", { kind: "excluded", reason: "prose, reviewed by humans" }),
+      item("docs/other.md", { kind: "excluded", reason: "prose, reviewed by humans" }),
+      item("dist/bundle.js", { kind: "generated" }),
+      item("assets/logo.png", { kind: "binary" }),
+      item("src/renamed.ts", { kind: "mechanically-clean", reason: "pure-rename" }),
+    ]);
+    expect(excludedPathCount(inventory)).toBe(2);
   });
 });
