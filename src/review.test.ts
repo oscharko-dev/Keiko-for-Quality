@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   computeKey,
+  computePathSetDigest,
   modelId,
   protocol,
   SUPPORTED_STORE_SCHEMA,
@@ -13,7 +14,7 @@ import {
 } from "./cache/review-cache.js";
 import { compileProfile, type ReviewProfile } from "./config/profile.js";
 import type { RuntimeConfig } from "./config/runtime.js";
-import { blobId, commitSha } from "./core/brands.js";
+import { blobId, commitSha, sha256 } from "./core/brands.js";
 import { createSilentDiagnostics } from "./diagnostics/sink.js";
 import { currentPlatformDigest } from "./engine/pinned-release.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
@@ -202,6 +203,10 @@ describe("performReview: review-cache memoization end to end", () => {
     const base = blobId(baseBlobA);
     const head = blobId(headBlobA);
     const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+    // Both src/a.ts and src/b.ts are modified in this fixture's base..head diff (see `beforeAll`),
+    // neither is a rename, so the token list is exactly their bare paths — matching what
+    // `computePrPathSetDigest` derives internally from the real inventory this run builds.
+    const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
     const store: CacheStore = {
       schemaVersion: SUPPORTED_STORE_SCHEMA,
       entries: [
@@ -211,6 +216,7 @@ describe("performReview: review-cache memoization end to end", () => {
           headBlob: head,
           ruleDigest,
           engineDigest,
+          prPathSetDigest: currentPathSet,
           modelId: model,
           protocol: proto,
           findings: [],
@@ -238,6 +244,62 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(report.mechanicallyClean).toBe(0);
     // src/a.ts's original entry survives untouched; src/b.ts is newly admitted.
     expect(report.updatedCacheStore?.entries).toHaveLength(2);
+  });
+
+  it("treats a hit rejected by the path-set digest as an ordinary miss: the file is reviewed and never memoized (v0.10.0, issue #50)", async () => {
+    const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+    const engineDigest = currentPlatformDigest();
+    expect(engineDigest).toBeDefined();
+    if (engineDigest === undefined) return;
+
+    const model = modelId(CONFIG.model);
+    const proto = protocol(CONFIG.protocol);
+    const base = blobId(baseBlobA);
+    const head = blobId(headBlobA);
+    const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+    // Deliberately the WRONG path-set digest — as if this entry were written for a pull request
+    // whose changed-file set no longer matches this run's. src/a.ts's content-based key still
+    // matches exactly, so this proves the rejection is the path-set gate, not a content miss.
+    const stalePathSet = sha256("9".repeat(64));
+    const store: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [
+        {
+          key,
+          baseBlob: base,
+          headBlob: head,
+          ruleDigest,
+          engineDigest,
+          prPathSetDigest: stalePathSet,
+          modelId: model,
+          protocol: proto,
+          findings: [],
+        },
+      ],
+    };
+
+    // The previous test in this block already recorded a call against these same shared mocks;
+    // clear that history so `calls[0]` below is unambiguously this test's own invocation.
+    acquireEngineMock.mockClear();
+    runEngineMock.mockClear();
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+    // Both reviewable files are dispatched to the engine: src/a.ts's stored entry is rejected by
+    // the path-set gate, so it is never excluded the way a genuine hit would be.
+    runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+    const report = await performReview(baseRequest(store), createSilentDiagnostics());
+
+    const [calledOptions] = runEngineMock.mock.calls[0] as [{ mechanicallyCleanPaths: string[] }];
+    expect(calledOptions.mechanicallyCleanPaths).not.toContain("src/a.ts");
+
+    expect(report.outcome).toBe("complete");
+    expect(report.cacheHits).toBe(0);
+    expect(report.cacheMisses).toBe(2);
+
+    // The stale entry is refreshed, not duplicated: same key, new (current) path-set digest.
+    expect(report.updatedCacheStore?.entries).toHaveLength(2);
+    const refreshed = report.updatedCacheStore?.entries.find((e) => e.key === key);
+    expect(refreshed?.prPathSetDigest).not.toBe(stalePathSet);
   });
 
   it("still settles incomplete when the missing file was never memoized", async () => {

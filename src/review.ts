@@ -6,6 +6,7 @@ import type { CommitSha, Sha256 } from "./core/brands.js";
 import {
   buildNewEntries,
   combinedExcludes,
+  computePrPathSetDigest,
   lookupMemoized,
   mergeHitFindings,
 } from "./cache/memoize.js";
@@ -222,9 +223,13 @@ interface MemoContext {
   readonly hits: ReadonlyMap<string, CacheEntry>;
   readonly hitPaths: ReadonlySet<string>;
   readonly eligiblePaths: ReadonlySet<string>;
-  /** Set together with `engineDigest`; both `undefined` whenever the feature is inert this run. */
+  /** Set together with `engineDigest` and `pathSetDigest`; all three `undefined` when inert this run. */
   readonly ruleDigest: Sha256 | undefined;
   readonly engineDigest: Sha256 | undefined;
+  /** This run's changed-path-set digest (v0.10.0, issue #50) — see `computePrPathSetDigest`. */
+  readonly pathSetDigest: Sha256 | undefined;
+  /** Eligible paths a stored entry answered on content alone, but whose path-set context had moved. */
+  readonly contextInvalidated: number;
 }
 
 const INERT_MEMO: MemoContext = {
@@ -233,6 +238,8 @@ const INERT_MEMO: MemoContext = {
   eligiblePaths: new Set(),
   ruleDigest: undefined,
   engineDigest: undefined,
+  pathSetDigest: undefined,
+  contextInvalidated: 0,
 };
 
 function cacheCounts(memo: MemoContext): { cacheHits: number; cacheMisses: number } {
@@ -256,12 +263,14 @@ function prepareMemoization(
 
   const ruleDigest = promptIdentityDigest(request.profile, request.guidelines);
   const engineDigest = currentPlatformDigest();
-  const { hits, eligiblePaths } = lookupMemoized(
+  const pathSetDigest = computePrPathSetDigest(inventory);
+  const { hits, eligiblePaths, contextInvalidated } = lookupMemoized(
     request.cacheStore,
     inventory,
     ruleDigest,
     engineDigest,
     request.config,
+    pathSetDigest,
   );
   const memo: MemoContext = {
     hits,
@@ -269,10 +278,19 @@ function prepareMemoization(
     eligiblePaths,
     ruleDigest,
     engineDigest,
+    pathSetDigest,
+    contextInvalidated,
   };
   diagnostics.record("cache.hits", {
     headSha: request.head,
     counts: { hits: hits.size, misses: eligiblePaths.size - hits.size },
+  });
+  // Distinct from `cache.hits`' own miss count (v0.10.0, issue #50): this tells an operator how
+  // many of those misses were specifically a content match the pull request's changed-file set
+  // invalidated, rather than the file's own bytes never having been reviewed before.
+  diagnostics.record("cache.context_invalidated", {
+    headSha: request.head,
+    counts: { invalidated: contextInvalidated },
   });
   return memo;
 }
@@ -399,7 +417,13 @@ function finalizeCacheStore(
   engineFindings: readonly EngineFinding[],
 ): { store: CacheStore; appended: number } | undefined {
   if (request.cacheStore === undefined) return undefined;
-  if (memo.ruleDigest === undefined || memo.engineDigest === undefined) return undefined;
+  if (
+    memo.ruleDigest === undefined ||
+    memo.engineDigest === undefined ||
+    memo.pathSetDigest === undefined
+  ) {
+    return undefined;
+  }
 
   const newEntries = buildNewEntries({
     inventory,
@@ -408,6 +432,7 @@ function finalizeCacheStore(
     findings: engineFindings,
     ruleDigest: memo.ruleDigest,
     engineDigest: memo.engineDigest,
+    pathSetDigest: memo.pathSetDigest,
     config: request.config,
   });
   if (newEntries.length === 0) return { store: request.cacheStore, appended: 0 };

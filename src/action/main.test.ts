@@ -128,12 +128,14 @@ function entry(_path: string, findings: CacheEntry["findings"] = []): CacheEntry
   const head = blobId("b".repeat(40));
   const rule = sha256("1".repeat(64));
   const engine = sha256("2".repeat(64));
+  const pathSet = sha256("5".repeat(64));
   return {
     key: computeKey(base, head, rule, engine, model, proto),
     baseBlob: base,
     headBlob: head,
     ruleDigest: rule,
     engineDigest: engine,
+    prPathSetDigest: pathSet,
     modelId: model,
     protocol: proto,
     findings,
@@ -189,6 +191,24 @@ describe("runAction: loading the store", () => {
     performReviewMock.mockResolvedValue(report());
     const storePath = join(dir, "store.json");
     await writeFile(storePath, "not json at all", "utf8");
+    const env = await baseEnv({ reviewStorePath: storePath });
+    const diagnostics = createDiagnostics(() => undefined);
+
+    await runAction(env, diagnostics);
+
+    expect(diagnostics.drain().map((r) => r.code)).toContain("cache.store_rejected");
+    const [request] = performReviewMock.mock.calls[0] as [{ cacheStore?: CacheStore }, unknown];
+    expect(request.cacheStore).toEqual({ schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] });
+  });
+
+  it("rejects a store still carrying the retired v1 schema and proceeds as an empty store (no migration, v0.10.0 issue #50)", async () => {
+    performReviewMock.mockResolvedValue(report());
+    const storePath = join(dir, "store.json");
+    await writeFile(
+      storePath,
+      JSON.stringify({ schemaVersion: "keiko-for-quality.review-cache/v1", entries: [] }),
+      "utf8",
+    );
     const env = await baseEnv({ reviewStorePath: storePath });
     const diagnostics = createDiagnostics(() => undefined);
 

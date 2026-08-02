@@ -103,7 +103,10 @@ inputs:
       answered from that entry instead of re-sent to the model. Empty (the default) disables the
       feature entirely, with no other behavioural change. A missing or unreadable store is treated
       as empty and the run proceeds normally: memoization is a pure optimization layer, so its own
-      failure never gates completeness, only re-review cost.
+      failure never gates completeness, only re-review cost. A matching entry also replays only
+      while the pull request's changed-file set stays the same shape it was when that entry was
+      written — a new, deleted, or renamed path anywhere in the pull request invalidates it, bounding
+      how stale a replay's repository context can be.
     required: false
     default: ""
   run_summary:

@@ -11,6 +11,7 @@ export type { ReviewRequest, ReviewReport, ReviewOutcome } from "./review.js";
 export {
   appendEntries,
   computeKey,
+  computePathSetDigest,
   lookup,
   readStore,
   serializeStore,
