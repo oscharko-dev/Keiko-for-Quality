@@ -2326,6 +2326,14 @@ function describePlacement(input) {
   if (input.line === void 0) return "file";
   return input.side === "LEFT" ? "deletion" : "line";
 }
+function tallyPlacementAttempts(ladder) {
+  const tally = {};
+  for (const attempt of ladder) {
+    const kind = describePlacement(attempt);
+    tally[kind] = (tally[kind] ?? 0) + 1;
+  }
+  return tally;
+}
 
 // src/publish/similarity.ts
 var LINE_TOLERANCE = 2;
@@ -2471,7 +2479,10 @@ async function publishComposedFinding(context, finding, marker, sanitizedBody, c
   const result = await publishWithLadder(context, ladder, document);
   if (result === void 0) {
     counters.rejectedPlacement += 1;
-    diagnostics.record("publish.finding_rejected_placement", { headSha: context.headSha });
+    diagnostics.record("publish.finding_rejected_placement", {
+      headSha: context.headSha,
+      counts: tallyPlacementAttempts(ladder)
+    });
     return;
   }
   if (!await verifyPublication(context, result.comment, marker)) {
@@ -2669,8 +2680,11 @@ function prepareMemoization(request, inventory, diagnostics) {
   });
   return memo;
 }
-async function settleIncomplete(request, inventory, reason, diagnostics, findings = [], memo = INERT_MEMO) {
-  diagnostics.record(reason, { headSha: request.head });
+async function settleIncomplete(request, inventory, reason, diagnostics, findings = [], memo = INERT_MEMO, counts) {
+  diagnostics.record(reason, {
+    headSha: request.head,
+    ...counts !== void 0 ? { counts } : {}
+  });
   if (!await headIsCurrent(request)) {
     diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
     return abandonedReport(inventory, memo);
@@ -2724,6 +2738,14 @@ async function executeEngine(request, inventory, memo, diagnostics) {
 function publicationDegraded(outcome) {
   return outcome.rejectedSanitization > 0 || outcome.rejectedPlacement > 0 || outcome.readbackFailures > 0;
 }
+function publicationDegradedCounts(outcome) {
+  return {
+    published: outcome.published,
+    rejected_placement: outcome.rejectedPlacement,
+    rejected_sanitization: outcome.rejectedSanitization,
+    readback_failures: outcome.readbackFailures
+  };
+}
 function finalizeCacheStore(request, inventory, memo, engineFindings) {
   if (request.cacheStore === void 0) return void 0;
   if (memo.ruleDigest === void 0 || memo.engineDigest === void 0 || memo.pathSetDigest === void 0) {
@@ -2759,7 +2781,8 @@ async function publishSettledFindings(request, inventory, settlement, memo, star
       "publish.finding_rejected_placement",
       diagnostics,
       [],
-      memo
+      memo,
+      publicationDegradedCounts(publish)
     );
     return { ...report, publish };
   }

@@ -30,6 +30,13 @@ class FakeApi implements ReviewCommentApi {
   public existing: ReviewComment[] = [];
   public created: ReviewCommentInput[] = [];
   public rejectWith = new Map<string, number>();
+  /**
+   * Paths whose every placement attempt is rejected with 422, regardless of `rejectWith` — lets a
+   * test give one finding's entire ladder no path to succeed while a different finding's placements
+   * proceed normally (Keiko-for-Quality#63's "only some of several findings reject" scenario, which
+   * `rejectWith` alone cannot express since it rejects by anchor kind across every finding).
+   */
+  public rejectPaths = new Set<string>();
   public readBackOverride: Partial<ReviewComment> | undefined;
   private nextId = 100;
 
@@ -42,6 +49,7 @@ class FakeApi implements ReviewCommentApi {
     _number: number,
     input: ReviewCommentInput,
   ): Promise<ReviewComment> {
+    if (this.rejectPaths.has(input.path)) return Promise.reject(new GitHubApiError(422));
     const key = input.line === undefined ? "file" : (input.side ?? "RIGHT");
     const status = this.rejectWith.get(key);
     if (status !== undefined) return Promise.reject(new GitHubApiError(status));
@@ -175,6 +183,120 @@ describe("publishFindings", () => {
       api.rejectWith.set("file", 422);
       const outcome = await publishFindings(context, [finding()], diagnostics);
       expect(outcome).toMatchObject({ published: 0, rejectedPlacement: 1 });
+    });
+
+    /**
+     * Keiko-for-Quality#63: production evidence was a run that settled incomplete with reason
+     * `publish.finding_rejected_placement` and nothing else — an operator reading the diagnostic
+     * could not tell "only a line anchor was ever tried" apart from "the file-level retry ran too,
+     * and GitHub refused that as well". The ladder above already retries at file level before
+     * `publishComposedFinding` gives up (see the "falls back to a file-level conversation" and
+     * "anchors a finding about a deleted file" cases above), so the fix is not adding that retry —
+     * it is making the diagnostic honest about which attempts, plural, actually happened. Against
+     * unmodified source this fails: today's `diagnostics.record` call for this code carries no
+     * `counts` field at all, so `record?.counts` is `undefined`.
+     */
+    it("carries both attempt outcomes — line-anchored and file-level — in the rejection diagnostic", async () => {
+      api.rejectWith.set("RIGHT", 422);
+      api.rejectWith.set("LEFT", 422);
+      api.rejectWith.set("file", 422);
+      const localDiagnostics = createSilentDiagnostics();
+      const outcome = await publishFindings(context, [finding()], localDiagnostics);
+      expect(outcome).toMatchObject({ published: 0, rejectedPlacement: 1 });
+
+      const record = localDiagnostics
+        .drain()
+        .find((entry) => entry.code === "publish.finding_rejected_placement");
+      // One rejected RIGHT attempt, one rejected LEFT (deletion-side) attempt, one rejected
+      // file-level attempt — the complete tally of every anchor kind this finding tried.
+      expect(record?.counts).toStrictEqual({ line: 1, deletion: 1, file: 1 });
+    });
+
+    it("tallies a deleted-file rejection as the single file-level attempt it actually made", async () => {
+      context = {
+        ...context,
+        items: new Map([
+          [
+            "tests/pin.test.ts",
+            item({
+              path: repoPath("tests/pin.test.ts"),
+              status: "D",
+              classification: { kind: "reviewed-as-deletion" },
+            }),
+          ],
+        ]),
+      };
+      api.rejectWith.set("file", 422);
+      const localDiagnostics = createSilentDiagnostics();
+      const outcome = await publishFindings(
+        context,
+        [finding({ path: repoPath("tests/pin.test.ts") })],
+        localDiagnostics,
+      );
+      expect(outcome).toMatchObject({ published: 0, rejectedPlacement: 1 });
+
+      const record = localDiagnostics
+        .drain()
+        .find((entry) => entry.code === "publish.finding_rejected_placement");
+      // A deletion never had a line-anchored attempt to make — the ladder is file-only from the
+      // start, so the honest tally is one attempt, not a fabricated line/deletion pair.
+      expect(record?.counts).toStrictEqual({ file: 1 });
+    });
+
+    it("tallies each finding's rejection independently when only some of several findings are rejected", async () => {
+      context = {
+        ...context,
+        items: new Map([
+          ["src/retry.ts", item()],
+          ["src/other.ts", item({ path: repoPath("src/other.ts") })],
+        ]),
+      };
+      // Only src/other.ts is doomed — src/retry.ts's ladder is untouched and succeeds on RIGHT.
+      api.rejectPaths.add("src/other.ts");
+      const localDiagnostics = createSilentDiagnostics();
+      const outcome = await publishFindings(
+        context,
+        [finding(), finding({ path: repoPath("src/other.ts"), startLine: 40, endLine: 42 })],
+        localDiagnostics,
+      );
+      expect(outcome).toMatchObject({ published: 1, rejectedPlacement: 1 });
+      expect(api.created).toHaveLength(1);
+      expect(api.created[0]?.path).toBe("src/retry.ts");
+
+      // Exactly one rejection event, carrying only the rejected finding's own tally — the
+      // successfully-published finding must not leak into or dilute it.
+      const rejections = localDiagnostics
+        .drain()
+        .filter((entry) => entry.code === "publish.finding_rejected_placement");
+      expect(rejections).toHaveLength(1);
+      expect(rejections[0]?.counts).toStrictEqual({ line: 1, deletion: 1, file: 1 });
+    });
+
+    /**
+     * Keiko-for-Quality#63's explicit acceptance shape: "A file-level-published finding is a
+     * published finding: it counts in published, carries its marker, participates in dedup." This
+     * already holds on unmodified source — placement is not part of a finding's identity — but it
+     * is exactly the property the fallback above would be worthless without, so it is pinned here
+     * rather than left to accident.
+     */
+    it("suppresses a repost of a finding that was previously published at file level", async () => {
+      api.rejectWith.set("RIGHT", 422);
+      api.rejectWith.set("LEFT", 422);
+      const firstRun = await publishFindings(context, [finding()], diagnostics);
+      expect(firstRun).toMatchObject({ published: 1 });
+      expect(api.created).toHaveLength(1);
+      expect(api.created[0]?.line).toBeUndefined();
+
+      // A second run would succeed if it ever tried a line anchor — proving the suppression below
+      // is genuine deduplication, not an artifact of every placement still failing.
+      api.rejectWith.clear();
+      const secondRun = await publishFindings(context, [finding()], diagnostics);
+      expect(secondRun).toMatchObject({
+        published: 0,
+        suppressed: 1,
+        suppressedExactDuplicate: 1,
+      });
+      expect(api.created).toHaveLength(1);
     });
 
     it("does not treat a non-422 failure as a reason to try a different anchor", async () => {

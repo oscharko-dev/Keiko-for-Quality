@@ -44,3 +44,24 @@ export function describePlacement(input: ReviewCommentInput): "line" | "deletion
   if (input.line === undefined) return "file";
   return input.side === "LEFT" ? "deletion" : "line";
 }
+
+/**
+ * Tallies a fully-exhausted ladder's attempts by placement kind.
+ *
+ * Meaningful only once every rung has already been rejected (Keiko-for-Quality#63): the ladder
+ * always ends with a file-level attempt, so this is never a partial picture of what was tried — it
+ * is the complete record of every anchor kind the finding attempted, including the file-level retry,
+ * before the run gave up on it. Keyed by the same three-value vocabulary `describePlacement` already
+ * reports on success, and bounded to counts alone, which is what makes it safe for a diagnostic to
+ * carry: never the rejection's own message, never the finding's content.
+ */
+export function tallyPlacementAttempts(
+  ladder: readonly ReviewCommentInput[],
+): Readonly<Record<string, number>> {
+  const tally: Record<string, number> = {};
+  for (const attempt of ladder) {
+    const kind = describePlacement(attempt);
+    tally[kind] = (tally[kind] ?? 0) + 1;
+  }
+  return tally;
+}
