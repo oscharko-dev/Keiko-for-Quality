@@ -10,6 +10,20 @@ export interface ResolvedIdentity {
 }
 
 /**
+ * Builds the client with the environment's own GraphQL endpoint when Actions supplied one.
+ *
+ * Actions sets `GITHUB_GRAPHQL_URL` to the correct host on GitHub Enterprise Server; `GitHubClient`
+ * already falls back to github.com's endpoint on its own, so this only forwards a value that exists
+ * rather than ever passing `undefined` where the constructor expects a string.
+ */
+function buildClient(apiBase: string, token: string, env: NodeJS.ProcessEnv): GitHubClient {
+  const graphqlBase = env.GITHUB_GRAPHQL_URL;
+  return graphqlBase === undefined
+    ? new GitHubClient(apiBase, token)
+    : new GitHubClient(apiBase, token, graphqlBase);
+}
+
+/**
  * Establishes who this run posts as.
  *
  * Two modes are supported, and the difference matters for more than presentation.
@@ -37,7 +51,11 @@ export async function resolveIdentity(
   if (appId !== "" && privateKey !== "") {
     const minted = await mintInstallationToken(apiBase, appId, privateKey, owner, repo, nowSeconds);
     diagnostics.record("publish.identity_resolved");
-    return { client: new GitHubClient(apiBase, minted.token), login: minted.login, usedApp: true };
+    return {
+      client: buildClient(apiBase, minted.token, env),
+      login: minted.login,
+      usedApp: true,
+    };
   }
 
   const token = (env.INPUT_GITHUB_TOKEN ?? "").trim();
@@ -46,7 +64,7 @@ export async function resolveIdentity(
     return undefined;
   }
 
-  const client = new GitHubClient(apiBase, token);
+  const client = buildClient(apiBase, token, env);
   const login = (await client.resolveViewerLogin()) ?? "github-actions[bot]";
   diagnostics.record("publish.identity_resolved");
   return { client, login, usedApp: false };

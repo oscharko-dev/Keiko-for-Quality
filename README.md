@@ -164,9 +164,10 @@ you authored, never the candidate content the review itself treats as hostile.
 ### The bot identity
 
 Configure the GitHub App. Deduplication only suppresses a repost when the existing conversation was
-authored by _this_ reviewer — and a marker is a public string in a public comment. Under the shared
-`github-actions[bot]` identity, any other workflow in the repository can author a comment carrying a
-valid-looking marker and silence a real finding.
+authored by _this_ reviewer — true of both dedup stages, the exact marker and the phrasing-
+independent similarity check described below — and a marker is a public string in a public comment.
+Under the shared `github-actions[bot]` identity, any other workflow in the repository can author a
+comment carrying a valid-looking marker and silence a real finding.
 
 1. Create a GitHub App with **Pull requests: read & write** and **Contents: read**.
 2. Install it on the repository.
@@ -174,6 +175,27 @@ valid-looking marker and silence a real finding.
 
 Without them the action falls back to `github_token` and posts as the shared Actions identity. It
 works; it is weaker; the fallback exists so you can try the reviewer before registering an App.
+
+### Deduplication
+
+A finding is suppressed only when it is the same finding this reviewer already published, checked
+in two stages:
+
+1. **Exact marker.** Every published conversation carries a hidden fingerprint of its content. A
+   later run recomputes the same fingerprint for the same defect and suppresses the repost.
+2. **Phrasing-independent similarity.** A model asked to describe the same defect twice does not
+   always word it identically, which changes the fingerprint above. This second stage suppresses a
+   candidate only when an existing, still-open conversation this reviewer authored anchors the same
+   file, its line range overlaps the candidate's within a small tolerance, and the two bodies are
+   conservatively similar — a shared quoted code snippet, or enough shared content vocabulary. Two
+   different defects at the same or an adjacent line are deliberately not similar enough to match,
+   and an uncertain comparison publishes rather than suppresses.
+
+Both stages ignore a **resolved or outdated** conversation: once a conversation is no longer open,
+whatever it described can recur and be republished. Resolution state comes from a best-effort
+GraphQL lookup the `Pull requests` permission above already covers; if a token or platform cannot
+answer it, every conversation is simply treated as open, which is exactly how deduplication behaved
+before this lookup existed.
 
 ## Known limitations
 
@@ -201,6 +223,14 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
    that line exists, not whether the reviewer reasons about prototype chains. A benchmark you tune
    until it goes green has stopped being a benchmark. If this class matters to you, the deterministic
    gates in your own repository are the right place to catch it.
+
+7. **The similarity dedup stage is a bag-of-words measure.** It compares content vocabulary, not
+   meaning, so it can occasionally score "the same defect, reworded" and "a different defect
+   described in the same sentence template with one key identifier swapped" the wrong way around —
+   the second can share more words than a genuine paraphrase does. Calibrated to catch every
+   paraphrase pattern observed in production; biased, when a comparison is uncertain, toward
+   publishing rather than suppressing, because a missed finding is worse than an occasional
+   duplicate.
 
 ## Measured quality
 
