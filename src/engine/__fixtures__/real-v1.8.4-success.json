@@ -1,0 +1,31 @@
+{
+  "status": "success",
+  "summary": {
+    "files_reviewed": 1,
+    "comments": 1,
+    "total_tokens": 6796,
+    "input_tokens": 6640,
+    "output_tokens": 156,
+    "cache_read_tokens": 4992,
+    "elapsed": "4s"
+  },
+  "tool_calls": {
+    "total": 1,
+    "by_tool": {
+      "code_comment": 1
+    }
+  },
+  "comments": [
+    {
+      "path": "auth.ts",
+      "content": "Seeded defect body redacted for the fixture; only shape matters here.",
+      "suggestion_code": "  return provided === expected;",
+      "existing_code": "  return provided.slice(0, 8) === expected.slice(0, 8);",
+      "start_line": 3,
+      "end_line": 3,
+      "category": "security",
+      "severity": "critical"
+    }
+  ],
+  "session_id": "00000000-0000-0000-0000-000000000000"
+}

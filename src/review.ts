@@ -213,6 +213,10 @@ export async function performReview(
   let settlement: Settlement;
   try {
     settlement = await executeEngine(request, inventory, diagnostics);
+    diagnostics.record(
+      settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
+      { headSha: request.head },
+    );
   } catch {
     return settleIncomplete(request, inventory, "settlement.incomplete.engine_error", diagnostics);
   }

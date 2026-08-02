@@ -50,6 +50,8 @@ function inventory(paths: readonly string[]): Inventory {
 function result(overrides: Partial<EngineResult> = {}): EngineResult {
   return {
     manifestPresent: true,
+    status: "success",
+    filesReviewed: 1,
     schemaVersion: SUPPORTED_MANIFEST_SCHEMA,
     terminalState: "complete",
     coverage: {
@@ -96,21 +98,6 @@ describe("settle", () => {
         });
       },
     );
-
-    // The engine answers this way for a skipped run. Before this case existed it settled as a
-    // malformed engine error, which sent an operator looking for the wrong problem.
-    it("reports an absent manifest as such, not as a malformed result", () => {
-      const outcome = settle(
-        inventory(["src/a.ts"]),
-        result({ manifestPresent: false, schemaVersion: "", terminalState: "unknown" }),
-        PROFILE,
-        CONFIG,
-      );
-      expect(outcome).toMatchObject({
-        status: "incomplete",
-        reason: "settlement.incomplete.missing_manifest",
-      });
-    });
 
     it("rejects an unfamiliar manifest schema rather than guessing at its fields", () => {
       const outcome = settle(
@@ -239,5 +226,96 @@ describe("settle", () => {
         reason: "settlement.incomplete.engine_error",
       });
     });
+  });
+});
+
+/**
+ * The path a digest-pinned engine release actually takes.
+ *
+ * No published release emits a run manifest — `internal/session/manifest.go` exists only on the
+ * upstream default branch — so this is not an edge case, it is the normal path today. It was found
+ * by running the pinned binary against a live model, not by reading source: the source was read
+ * from `main` while the binary was pinned to a release, and they did not agree.
+ */
+describe("counted settlement (no manifest)", () => {
+  function released(overrides: Partial<EngineResult> = {}): EngineResult {
+    return result({
+      manifestPresent: false,
+      schemaVersion: "",
+      terminalState: "unknown",
+      coverage: { selected: [], completed: [], reused: [], failed: [], waived: [] },
+      status: "success",
+      filesReviewed: 1,
+      ...overrides,
+    });
+  }
+
+  it("settles a successful run whose file count matches the inventory", () => {
+    const outcome = settle(inventory(["src/a.ts"]), released(), PROFILE, CONFIG);
+    expect(outcome).toMatchObject({ status: "complete", mode: "counted" });
+  });
+
+  it("reports the weaker mode rather than claiming a reconciled result", () => {
+    const outcome = settle(inventory(["src/a.ts"]), released(), PROFILE, CONFIG);
+    expect(outcome.mode).toBe("counted");
+  });
+
+  // The check that still catches the engine's path filters disagreeing with the review profile.
+  it("detects that fewer files were reviewed than the inventory requires", () => {
+    const outcome = settle(
+      inventory(["src/a.ts", "src/b.ts", "src/c.ts"]),
+      released({ filesReviewed: 2 }),
+      PROFILE,
+      CONFIG,
+    );
+    expect(outcome).toMatchObject({
+      status: "incomplete",
+      mode: "counted",
+      reason: "settlement.incomplete.coverage_gap",
+    });
+    if (outcome.status === "incomplete") {
+      expect(outcome.counts.gap).toBe(1);
+      expect(outcome.counts.reviewed).toBe(2);
+    }
+  });
+
+  it.each(["skipped", "failed", "unknown"] as const)("rejects run status %s", (status) => {
+    const outcome = settle(inventory(["src/a.ts"]), released({ status }), PROFILE, CONFIG);
+    expect(outcome).toMatchObject({
+      status: "incomplete",
+      mode: "counted",
+      reason: "settlement.incomplete.terminal_state",
+    });
+  });
+
+  it("still enforces the warning allowlist", () => {
+    const outcome = settle(
+      inventory(["src/a.ts"]),
+      released({ warnings: [{ type: "model_refused", file: "src/a.ts" }] }),
+      PROFILE,
+      CONFIG,
+    );
+    expect(outcome).toMatchObject({
+      status: "incomplete",
+      reason: "settlement.incomplete.warning_not_allowlisted",
+    });
+  });
+
+  it("still enforces the token budget", () => {
+    const outcome = settle(
+      inventory(["src/a.ts"]),
+      released({ budgetExceeded: true }),
+      PROFILE,
+      CONFIG,
+    );
+    expect(outcome).toMatchObject({
+      status: "incomplete",
+      reason: "settlement.incomplete.budget_exceeded",
+    });
+  });
+
+  it("prefers the reconciled path whenever a manifest is present", () => {
+    const outcome = settle(inventory(["src/a.ts"]), result(), PROFILE, CONFIG);
+    expect(outcome.mode).toBe("reconciled");
   });
 });
