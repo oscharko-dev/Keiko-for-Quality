@@ -462,6 +462,7 @@ function buildBotMetrics(arenaId, records, duplicateClusters, crossBotClusters) 
  * per pull request, without needing a live fetch.
  */
 export function buildPrRecord(pr, conversations) {
+  const commits = pr.commits ?? [];
   const byBot = {};
   const duplicateClustersByBot = {};
   const distinctFindingsByBot = {};
@@ -501,6 +502,7 @@ export function buildPrRecord(pr, conversations) {
     bots,
     duplicateClusters,
     crossBotClusters: crossBotClusters.filter((cluster) => cluster.bots.length > 1),
+    actedUpon: buildActedUponForPr(distinctFindingsByBot, commits),
   };
 }
 
@@ -534,7 +536,263 @@ export function buildAggregate(prRecords) {
   for (const arenaId of ARENA_BOT_ORDER) {
     bots[arenaId] = sumBotMetrics(prRecords.map((pr) => pr.bots[arenaId]));
   }
-  return { prCount: prRecords.length, bots };
+  return { prCount: prRecords.length, bots, actedUpon: buildActedUponAggregate(prRecords) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Acted-upon linking (issue #56).
+//
+// Turns thread-resolution status — which a human or bot can toggle for reasons unrelated to the
+// code (closing a stale conversation, resolving in bulk) — into a second, git-grounded signal: did
+// a commit pushed to the pull request *after* the finding was posted actually change the region it
+// anchors to? This needs no model call and no trust in "resolved": only the pull request's own
+// commit timeline, already fetched by `corpus/arena-fetch.mjs`'s `fetchPullRequestCommitTimeline`.
+//
+// Classification is one of four values, in the same spirit as `threadStatus`'s three above it:
+//   - `acted_upon`              — a later commit's own diff touches the finding's anchored region.
+//   - `resolved_without_change` — the thread is resolved, but no later commit touched the region.
+//   - `open_unaddressed`        — the thread is unresolved, and no later commit touched the region.
+//   - `outdated_by_rebase`      — the file no longer exists at the current head, or this run could
+//     not tell (a commit that touched the file carried no parseable patch — GitHub omits `patch`
+//     for a binary or very large diff). Bundled under one name because both are the same practical
+//     answer to a reader: this finding's anchor cannot be trusted against the current tree.
+//
+// A finding with no commit at all after it (`hadOpportunity: false`) still gets one of the four
+// labels above — usually `open_unaddressed`, since by definition nothing later touched it — but is
+// excluded from the *opportunity-adjusted* rate, mirroring the manual calibration pass recorded on
+// issue #56: a finding posted after the last push never had a chance to be acted upon, and counting
+// it against a bot's rate the same as one that did have a chance is not a fair comparison.
+//
+// This is a proxy, not a correctness judgement, and a coarser one than a human tracing the code: it
+// checks the *same file*, not a fix that lands in a different file for the same root cause, and it
+// does not track a line's own drift across a *chain* of later commits — each later commit is
+// checked independently against the finding's original anchor window. See the pull request that
+// introduced this section for a worked comparison against a hand-verified pass over a real PR.
+// ---------------------------------------------------------------------------------------------
+
+/** The default +/- line tolerance for matching a finding's anchor against a commit's diff hunks. */
+export const ACTED_UPON_LINE_TOLERANCE = 3;
+
+const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/**
+ * Parses a unified diff's hunk headers into `{ oldStart, oldCount, newStart, newCount }` records.
+ * An omitted count (`@@ -5 +5 @@`, no comma) means a one-line hunk, per the unified diff format —
+ * not a zero-line one, so it defaults to 1, not 0. Ignores every other line in the patch: this tool
+ * only needs to know *which lines a commit's diff touched*, never the content of the change.
+ */
+export function parseUnifiedDiffHunks(patch) {
+  if (!patch) return [];
+  const hunks = [];
+  for (const line of patch.split("\n")) {
+    const match = HUNK_HEADER.exec(line);
+    if (!match) continue;
+    hunks.push({
+      oldStart: Number(match[1]),
+      oldCount: match[2] === undefined ? 1 : Number(match[2]),
+      newStart: Number(match[3]),
+      newCount: match[4] === undefined ? 1 : Number(match[4]),
+    });
+  }
+  return hunks;
+}
+
+/**
+ * The line span one side of a hunk covers, expanded by `tolerance`. A 0-count side (a pure
+ * insertion has no old-side width; a pure deletion has no new-side width) still occupies its
+ * boundary line, so the tolerance window centers on something rather than matching everywhere.
+ */
+function hunkSideSpan(start, count, tolerance) {
+  const end = start + Math.max(count, 1) - 1;
+  return { start: start - tolerance, end: end + tolerance };
+}
+
+function spanContainsWindow(window, span) {
+  if (window.isFileLevel) return true;
+  return window.startLine <= span.end && span.start <= window.endLine;
+}
+
+/**
+ * Whether `hunk` overlaps `window` (a finding's `{ startLine, endLine, isFileLevel }`) within
+ * `tolerance` lines, checked against both the hunk's old-side and new-side line ranges — a fix that
+ * inserts a guard clause right after the flagged line is still "touching" it, not just a fix that
+ * edits the flagged line itself.
+ */
+export function hunkOverlapsWindow(hunk, window, tolerance) {
+  return (
+    spanContainsWindow(window, hunkSideSpan(hunk.oldStart, hunk.oldCount, tolerance)) ||
+    spanContainsWindow(window, hunkSideSpan(hunk.newStart, hunk.newCount, tolerance))
+  );
+}
+
+/** Finds `path`'s file entry in one commit's file list, following a rename either direction. */
+function findFileEntry(files, path) {
+  return files.find((file) => file.path === path || file.previousPath === path);
+}
+
+/**
+ * Whether `commit` changed the region `finding` anchors to: `"touched"`, `"untouched"`, or
+ * `"unmappable"` (the file's own patch was not available to check). Removing or renaming-away a
+ * file always counts as `"touched"` — a deleted file cannot still hold an unmodified region — and a
+ * file-level finding (no specific line) is touched by any commit that names the file at all.
+ */
+function fileRegionTouchedByCommit(finding, commit, tolerance) {
+  const fileEntry = findFileEntry(commit.files, finding.path);
+  if (!fileEntry) return "untouched";
+  if (fileEntry.status === "removed") return "touched";
+  if (finding.isFileLevel) return "touched";
+  if (!fileEntry.patch) return "unmappable";
+  const window = { startLine: finding.startLine, endLine: finding.endLine, isFileLevel: false };
+  const hunks = parseUnifiedDiffHunks(fileEntry.patch);
+  return hunks.some((hunk) => hunkOverlapsWindow(hunk, window, tolerance))
+    ? "touched"
+    : "untouched";
+}
+
+/**
+ * Folds a pull request's full commit history (every commit, not only those after one finding) into
+ * whether `path` still exists, under any name, at the end of the sequence. Seeded `true`: a finding
+ * was validly anchored to `path` at some point, so this can only end in `false` when a commit in
+ * this timeline removed it — a path that no commit here ever mentions is assumed to still exist,
+ * since this run has no evidence otherwise, and a path removed by something outside the pull
+ * request's own commits (a base-branch merge) is a known gap, not silently claimed as certain.
+ */
+function fileExistsAtHead(commits, path) {
+  let currentPath = path;
+  let exists = true;
+  for (const commit of commits) {
+    const fileEntry = findFileEntry(commit.files, currentPath);
+    if (!fileEntry) continue;
+    exists = fileEntry.status !== "removed";
+    currentPath = fileEntry.path;
+  }
+  return exists;
+}
+
+/** The latest `committedDate` across `commits`, or `null` if there are none. */
+function latestCommitDate(commits) {
+  if (commits.length === 0) return null;
+  return commits.reduce(
+    (latest, commit) =>
+      commit.committedDate.localeCompare(latest) > 0 ? commit.committedDate : latest,
+    commits[0].committedDate,
+  );
+}
+
+/**
+ * Classifies one finding against a pull request's commit timeline (issue #56). `commits` need not
+ * be pre-sorted — this sorts its own working copy chronologically so the first later commit found
+ * to touch the region is always the earliest one, deterministically, regardless of fetch order.
+ */
+export function classifyActedUpon(finding, commits, tolerance = ACTED_UPON_LINE_TOLERANCE) {
+  const laterCommits = commits
+    .filter((commit) => commit.committedDate.localeCompare(finding.createdAt) > 0)
+    .sort((a, b) => a.committedDate.localeCompare(b.committedDate) || a.sha.localeCompare(b.sha));
+  const hadOpportunity = laterCommits.length > 0;
+  let sawUnmappable = false;
+  for (const commit of laterCommits) {
+    const outcome = fileRegionTouchedByCommit(finding, commit, tolerance);
+    if (outcome === "touched") {
+      return { classification: "acted_upon", hadOpportunity, resolvedByCommit: commit.sha };
+    }
+    if (outcome === "unmappable") sawUnmappable = true;
+  }
+  if (sawUnmappable || !fileExistsAtHead(commits, finding.path)) {
+    return { classification: "outdated_by_rebase", hadOpportunity, resolvedByCommit: null };
+  }
+  return {
+    classification: finding.isResolved ? "resolved_without_change" : "open_unaddressed",
+    hadOpportunity,
+    resolvedByCommit: null,
+  };
+}
+
+function buildActedUponEntry(arenaId, finding, commits, tolerance) {
+  const result = classifyActedUpon(finding, commits, tolerance);
+  return {
+    arenaId,
+    databaseId: finding.databaseId,
+    path: finding.path,
+    startLine: finding.startLine,
+    endLine: finding.endLine,
+    isFileLevel: finding.isFileLevel,
+    isResolved: finding.isResolved,
+    classification: result.classification,
+    hadOpportunity: result.hadOpportunity,
+    resolvedByCommit: result.resolvedByCommit,
+  };
+}
+
+function emptyActedUponSummary() {
+  return {
+    total: 0,
+    actedUpon: 0,
+    resolvedWithoutChange: 0,
+    openUnaddressed: 0,
+    outdatedByRebase: 0,
+    hadOpportunity: 0,
+    actedUponWithOpportunity: 0,
+  };
+}
+
+/** Maps a `classification` value to the summary field it increments. */
+const ACTED_UPON_SUMMARY_FIELD = {
+  acted_upon: "actedUpon",
+  resolved_without_change: "resolvedWithoutChange",
+  open_unaddressed: "openUnaddressed",
+  outdated_by_rebase: "outdatedByRebase",
+};
+
+function summarizeActedUpon(entries) {
+  const summary = emptyActedUponSummary();
+  for (const entry of entries) {
+    summary.total += 1;
+    summary[ACTED_UPON_SUMMARY_FIELD[entry.classification]] += 1;
+    if (entry.hadOpportunity) {
+      summary.hadOpportunity += 1;
+      if (entry.classification === "acted_upon") summary.actedUponWithOpportunity += 1;
+    }
+  }
+  return summary;
+}
+
+/**
+ * Builds the acted-upon section of one pull request's record: each bot's already-deduplicated
+ * findings (`distinctFindingsByBot`, the same population the cross-bot overlap cluster reads),
+ * classified against `commits` and summarized. `tolerance` is threaded through rather than read from
+ * the constant directly so a fixture test can probe a different tolerance without patching a
+ * module-level export.
+ */
+function buildActedUponForPr(
+  distinctFindingsByBot,
+  commits,
+  tolerance = ACTED_UPON_LINE_TOLERANCE,
+) {
+  const byBot = {};
+  for (const arenaId of ARENA_BOT_ORDER) {
+    const entries = (distinctFindingsByBot[arenaId] ?? [])
+      .map((finding) => buildActedUponEntry(arenaId, finding, commits, tolerance))
+      .sort(compareClusterOrder);
+    byBot[arenaId] = { summary: summarizeActedUpon(entries), findings: entries };
+  }
+  return { lastPushAt: latestCommitDate(commits), toleranceLines: tolerance, byBot };
+}
+
+function sumActedUponSummary(summaries) {
+  const totals = emptyActedUponSummary();
+  for (const summary of summaries) {
+    for (const key of Object.keys(totals)) totals[key] += summary[key];
+  }
+  return totals;
+}
+
+/** Sums every per-PR acted-upon summary into one aggregate row per bot, in `ARENA_BOT_ORDER`. */
+function buildActedUponAggregate(prRecords) {
+  const bots = {};
+  for (const arenaId of ARENA_BOT_ORDER) {
+    bots[arenaId] = sumActedUponSummary(prRecords.map((pr) => pr.actedUpon.byBot[arenaId].summary));
+  }
+  return bots;
 }
 
 const HEURISTICS_METADATA = {
@@ -561,6 +819,20 @@ const HEURISTICS_METADATA = {
       "fixed sentence Keiko for Quality's publisher emits for a settlement notice. Calibrated on " +
       "this reviewer; other bots are checked against the same phrase for symmetry but are not " +
       "expected to match it.",
+  },
+  actedUpon: {
+    method: "later-commit-hunk-overlap-v1",
+    toleranceLines: ACTED_UPON_LINE_TOLERANCE,
+    note:
+      "A finding is acted_upon when a commit pushed to the pull request after the finding was " +
+      "posted changes its anchored region: the same file, within the line tolerance, found by " +
+      "parsing that commit's own unified-diff hunk headers — thread-resolved status plays no part " +
+      "in this check. A finding with no later commit at all had no opportunity to be acted upon " +
+      "and is excluded from the opportunity-adjusted rate. A same-file, same-line-window proxy " +
+      "misses a fix landing in a different file for the same root cause, and checks each later " +
+      "commit against the finding's original anchor independently rather than tracking a line's " +
+      "drift through a chain of commits — see corpus/arena-lib.mjs and the pull request that " +
+      "introduced this heuristic for a worked comparison against a hand-verified pass.",
   },
   disclaimer:
     "Duplicate-variant and cross-bot-overlap counts are heuristic estimates for a repeatable " +
@@ -708,6 +980,72 @@ function renderClusterList(title, clusters, describeMembers) {
   return `${title}:\n\n${items.join("\n")}`;
 }
 
+const ACTED_UPON_HEADER = [
+  "Bot",
+  "Distinct",
+  "Had opportunity",
+  "Acted upon",
+  "Resolved w/o change",
+  "Open unaddressed",
+  "Outdated/unmappable",
+  "Rate (raw)",
+  "Rate (adjusted)",
+];
+
+/** A percentage string rounded to the nearest whole point, or `"n/a"` for a zero denominator. */
+function formatRate(numerator, denominator) {
+  if (denominator === 0) return "n/a";
+  return `${String(Math.round((numerator / denominator) * 100))}%`;
+}
+
+function actedUponRow(arenaId, summary) {
+  return [
+    displayName(arenaId),
+    summary.total,
+    summary.hadOpportunity,
+    summary.actedUpon,
+    summary.resolvedWithoutChange,
+    summary.openUnaddressed,
+    summary.outdatedByRebase,
+    formatRate(summary.actedUpon, summary.total),
+    formatRate(summary.actedUponWithOpportunity, summary.hadOpportunity),
+  ].map(String);
+}
+
+/** Unwraps a per-PR `actedUpon.byBot` map down to just its summaries, for the aggregate-shaped renderer. */
+function extractActedUponSummaries(byBot) {
+  const summaries = {};
+  for (const arenaId of ARENA_BOT_ORDER) summaries[arenaId] = byBot[arenaId].summary;
+  return summaries;
+}
+
+function renderActedUponTable(summaries) {
+  const rows = ARENA_BOT_ORDER.map((arenaId) => actedUponRow(arenaId, summaries[arenaId]));
+  return renderTable(ACTED_UPON_HEADER, rows);
+}
+
+/**
+ * Lists every distinct finding's acted-upon classification, one bot at a time — the same
+ * per-finding transparency `renderClusterList` gives duplicate and cross-bot clusters, so a reader
+ * can audit a specific verdict instead of trusting only the summarized rate above it.
+ */
+function renderActedUponLedger(byBot) {
+  const sections = [];
+  for (const arenaId of ARENA_BOT_ORDER) {
+    const { findings } = byBot[arenaId];
+    if (findings.length === 0) continue;
+    const items = findings.map((entry) => {
+      const commitNote = entry.resolvedByCommit
+        ? ` (commit \`${entry.resolvedByCommit.slice(0, 12)}\`)`
+        : "";
+      const opportunityNote = entry.hadOpportunity ? "" : ", no push followed it";
+      return `- ${formatLocation(entry)} — ${entry.classification}${commitNote}${opportunityNote}`;
+    });
+    sections.push(`**${displayName(arenaId)}:**\n\n${items.join("\n")}`);
+  }
+  return sections.length === 0 ? "Acted-upon ledger: none." : sections.join("\n\n");
+}
+
 function renderPrSection(pr) {
   const heading = `### Pull request #${String(pr.number)} (head \`${pr.headSha.slice(0, 12)}\`)`;
   const duplicates = renderClusterList(
@@ -722,7 +1060,26 @@ function renderPrSection(pr) {
   const overlaps = renderClusterList("Cross-bot overlap clusters", pr.crossBotClusters, (cluster) =>
     cluster.bots.map((id) => displayName(id)).join(" + "),
   );
-  return [heading, "", renderScoreboardTable(pr.bots), "", duplicates, "", overlaps].join("\n");
+  const actedUponHeading =
+    `#### Acted-upon linking (last push ${pr.actedUpon.lastPushAt ?? "n/a"}, ` +
+    `±${String(pr.actedUpon.toleranceLines)} line tolerance)`;
+  const actedUponTable = renderActedUponTable(extractActedUponSummaries(pr.actedUpon.byBot));
+  const actedUponLedger = renderActedUponLedger(pr.actedUpon.byBot);
+  return [
+    heading,
+    "",
+    renderScoreboardTable(pr.bots),
+    "",
+    duplicates,
+    "",
+    overlaps,
+    "",
+    actedUponHeading,
+    "",
+    actedUponTable,
+    "",
+    actedUponLedger,
+  ].join("\n");
 }
 
 function renderIdentityTable(identity) {
@@ -762,6 +1119,8 @@ export function renderMarkdown(document) {
       `${String(document.heuristics.duplicateSimilarity.threshold)}): ${document.heuristics.duplicateSimilarity.note}`,
     `- **Cross-bot overlap** (\`${document.heuristics.crossBotOverlap.method}\`): ${document.heuristics.crossBotOverlap.note}`,
     `- **Incomplete notice** (\`${document.heuristics.incompleteNotice.method}\`): ${document.heuristics.incompleteNotice.note}`,
+    `- **Acted-upon linking** (\`${document.heuristics.actedUpon.method}\`, ` +
+      `±${String(document.heuristics.actedUpon.toleranceLines)} lines): ${document.heuristics.actedUpon.note}`,
     "",
     `> ${document.heuristics.disclaimer}`,
     "",
@@ -771,6 +1130,10 @@ export function renderMarkdown(document) {
     `## Aggregate across ${String(document.aggregate.prCount)} pull request(s)`,
     "",
     renderScoreboardTable(document.aggregate.bots),
+    "",
+    "### Acted-upon linking (aggregate)",
+    "",
+    renderActedUponTable(document.aggregate.actedUpon),
     "",
   ];
   return sections.join("\n");
