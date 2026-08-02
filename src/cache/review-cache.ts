@@ -66,10 +66,39 @@ import type { EngineFinding } from "../engine/result.js";
  * names for the model credential and the publishing identity: the platform does not prevent a
  * reviewed, merged change to the protected base from doing this, and it is that review gate, not a
  * property of the cache format, that is the actual defense.
+ *
+ * **Why `prPathSetDigest` exists (v0.10.0, issue #50).** The six inputs above prove a file's own
+ * content, rule text, and engine were byte-identical across two runs — they say nothing about the
+ * *rest* of the pull request. Since v0.6.0 the reviewer verifies claims against the repository
+ * before publishing, so a verdict for one file can depend on another file's import surface, a
+ * caller, or configuration that changed while the first file's own bytes did not. Replaying it
+ * without looking again is exactly that staleness, and this field bounds it: every entry also
+ * carries a digest of the sorted set of changed path *names* across the whole pull request at the
+ * time it was written, and a lookup additionally requires that digest to equal the current run's
+ * (`computePathSetDigest`). Names, never blobs — a per-file content digest would already differ on
+ * every touched file and defeat memoization outright, so this deliberately asks a coarser, cheaper
+ * question instead: did the *shape* of the changed-file set move? A rename folds the path it moved
+ * from into its token rather than contributing only its new name, because an old path silently
+ * disappearing from the diff is exactly the kind of context change an unrelated file's cached
+ * verdict cannot see for itself. This is a bound, not a fix: a push that only edits files already
+ * in the diff still replays their untouched neighbours unconditionally, which is the same
+ * staleness every content/commit-scoped incremental reviewer on the market accepts. Sound
+ * dependency-closure invalidation is left to a later version; this is the cheap, O(1) mitigation
+ * that kills the sharpest edge — a brand-new file introducing new import surface next to memoized
+ * neighbours.
  */
 
-/** The store schema this module reads and writes. Bump on any incompatible shape change. */
-export const SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v1";
+/**
+ * The store schema this module reads and writes. Bump on any incompatible shape change.
+ *
+ * v2 (v0.10.0, issue #50) added `prPathSetDigest` to every entry. There is deliberately no
+ * migration: a store still carrying the retired v1 marker fails this exact-match check the same
+ * way any other unrecognised schema does, and the run starts from an empty store. Memoization is a
+ * pure optimization layer, so losing one session's worth of entries costs only re-review spend,
+ * never coverage — see this module's own "why an incomplete run must never write an entry"
+ * reasoning above for the sibling case this mirrors.
+ */
+export const SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v2";
 
 declare const cacheBrand: unique symbol;
 type CacheBrand<T, B extends string> = T & { readonly [cacheBrand]: B };
@@ -160,6 +189,42 @@ export function computeKey(
   return createHash("sha256").update(material, "utf8").digest("hex") as CacheKey;
 }
 
+/**
+ * Plain code-unit ordering, spelled out rather than left to `Array.prototype.sort`'s argument-less
+ * default.
+ *
+ * Deliberately not `String.prototype.localeCompare`: this order feeds a content digest that must
+ * come out identical on every runner a store's Actions cache entry might be restored on, and
+ * `localeCompare` collates by the runtime's default locale — which can differ across machines,
+ * ICU builds, and Node versions. A `<`/`>` comparison is exactly what `sort()` already does with no
+ * comparator at all; naming it explicitly only makes that intentional rather than an oversight a
+ * static analyzer cannot tell apart from a forgotten comparator (typescript:S2871).
+ */
+export function byCodeUnit(a: string, b: string): number {
+  if (a < b) return -1;
+  if (a > b) return 1;
+  return 0;
+}
+
+/**
+ * The bound on cross-file context drift between two runs (v0.10.0, issue #50): a digest over the
+ * NUL-separated, lexicographically sorted set of every changed path's set-membership token in the
+ * pull request's inventory. See this module's top-of-file comment for why this exists and why it
+ * hashes path names, never blob content.
+ *
+ * This function has no notion of what a rename looks like — `memoize.ts`'s caller folds a rename
+ * into a single `"<old>-><new>"` token before any token ever reaches here, the same way callers of
+ * `computeKey` extract branded field values before calling it. Sorting first makes the result
+ * independent of the order `pathTokens` arrived in, matching `git diff`'s own path ordering being
+ * an implementation detail this digest must not be sensitive to.
+ */
+export function computePathSetDigest(pathTokens: readonly string[]): Sha256 {
+  const material = [...pathTokens].sort(byCodeUnit).join(FIELD_SEPARATOR);
+  // Same guaranteed-shape reasoning as `computeKey`'s own cast, immediately above: a freshly
+  // computed sha256 hex digest is never untrusted input.
+  return createHash("sha256").update(material, "utf8").digest("hex") as Sha256;
+}
+
 /** One file's replayable review outcome, self-describing via the digests that formed its key. */
 export interface CacheEntry {
   readonly key: CacheKey;
@@ -167,6 +232,12 @@ export interface CacheEntry {
   readonly headBlob: BlobId;
   readonly ruleDigest: Sha256;
   readonly engineDigest: Sha256;
+  /**
+   * The pull request's whole changed-path-set digest when this entry was written (v0.10.0, issue
+   * #50) — deliberately not part of `key`, so a replay must satisfy both independently. See this
+   * file's top-of-file comment for the full reasoning.
+   */
+  readonly prPathSetDigest: Sha256;
   readonly modelId: ModelId;
   readonly protocol: Protocol;
   /** Same shape as `EngineFinding`. An empty list is a real, deliberate negative — not an omission. */
@@ -230,6 +301,7 @@ const ENTRY_KEYS = [
   "headBlob",
   "ruleDigest",
   "engineDigest",
+  "prPathSetDigest",
   "modelId",
   "protocol",
   "findings",
@@ -259,6 +331,13 @@ function parseEntry(value: unknown, index: number): CacheEntry {
     asString(object.engineDigest, `${scope}.engineDigest`, 64),
     `${scope}.engineDigest`,
   );
+  // Validated the same way as `ruleDigest`/`engineDigest` immediately above — a well-formed sha256
+  // hex string — but never re-derived: unlike `key`, nothing else in the entry determines what this
+  // value should be, since it describes the pull request's state, not this file's own content.
+  const pathSet = sha256(
+    asString(object.prPathSetDigest, `${scope}.prPathSetDigest`, 64),
+    `${scope}.prPathSetDigest`,
+  );
   const model = modelId(
     asString(object.modelId, `${scope}.modelId`, PARSE_LIMITS.maxModelIdChars),
     `${scope}.modelId`,
@@ -276,6 +355,7 @@ function parseEntry(value: unknown, index: number): CacheEntry {
     headBlob: head,
     ruleDigest: rule,
     engineDigest: engine,
+    prPathSetDigest: pathSet,
     modelId: model,
     protocol: proto,
     findings: parseFindings(object.findings, `${scope}.findings`),
@@ -406,6 +486,7 @@ function canonicalEntry(entry: CacheEntry): Record<string, unknown> {
     headBlob: entry.headBlob,
     ruleDigest: entry.ruleDigest,
     engineDigest: entry.engineDigest,
+    prPathSetDigest: entry.prPathSetDigest,
     modelId: entry.modelId,
     protocol: entry.protocol,
     findings: entry.findings.map(canonicalFinding),
