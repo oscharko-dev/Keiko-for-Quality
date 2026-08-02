@@ -73,6 +73,28 @@ describe("buildRuleFile", () => {
     }
     expect(rule).toContain("Do not emit HTML, images, links or URLs");
   });
+
+  /**
+   * Found by running the reviewer over real merged Keiko commits rather than constructed fixtures.
+   * It reported a genuine cross-platform defect — `git diff --no-index -- /dev/null <path>` fails on
+   * Windows — and the finding was discarded, because `<path>` matches the HTML check. The guard is
+   * correct and stays; what changed is that the rule now tells the model not to write placeholders
+   * that way. This pins both halves so they cannot drift apart again.
+   */
+  it("warns about the placeholder shape that the publisher rejects", () => {
+    const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    expect(
+      sanitizeFindingBody("Use a null device.\n\nIt runs `diff -- /dev/null <path>` today."),
+    ).toEqual({
+      ok: false,
+      reason: "html",
+    });
+    expect(rule).toContain("Never write a placeholder in angle brackets");
+    // A comparison must remain writable — `<` followed by a space is not a tag.
+    expect(
+      sanitizeFindingBody("Fix the bound.\n\nThe guard `i < items.length` became `i <= n`.").ok,
+    ).toBe(true);
+  });
 });
 
 describe("serializeRuleFile", () => {
