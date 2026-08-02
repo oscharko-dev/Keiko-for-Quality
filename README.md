@@ -275,7 +275,7 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 ## Measured quality
 
 "The reviews are good" is not a claim anyone can check, so there is a corpus that turns it into one.
-`corpus/cases.mjs` holds 23 two-commit fixtures — 18 with exactly one seeded defect, 5 that are
+`corpus/cases.mjs` holds 28 two-commit fixtures — 24 with exactly one seeded defect, 4 that are
 clean and must produce silence — run against the real pinned engine and a real model. No mocks: the
 question is about judgement, and judgement is what a mock cannot stand in for.
 
