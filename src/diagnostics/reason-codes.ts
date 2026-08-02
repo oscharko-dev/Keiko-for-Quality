@@ -91,6 +91,10 @@ export const REASON_CODES = [
   "cache.store_rejected",
   "cache.store_write_failed",
   "cache.hits",
+  // A content-key match a stored entry's own `prPathSetDigest` refused to replay because the pull
+  // request's changed-file set moved since that entry was written (v0.10.0, issue #50). Distinct
+  // from an ordinary content miss so production can tell the two apart.
+  "cache.context_invalidated",
   "cache.appended",
 ] as const;
 
