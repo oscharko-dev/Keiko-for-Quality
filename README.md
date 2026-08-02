@@ -197,6 +197,39 @@ GraphQL lookup the `Pull requests` permission above already covers; if a token o
 answer it, every conversation is simply treated as open, which is exactly how deduplication behaved
 before this lookup existed.
 
+### The run-summary comment
+
+In addition to per-finding conversations, the reviewer maintains one top-level pull-request
+comment — created on the first run and updated in place on every run after, never duplicated. It
+is identified by a hidden marker, the same technique findings use, but fixed per pull request
+rather than derived from content: the summary is the one comment that must be found and updated
+regardless of what changed or which head a given run reviewed. Only a comment authored by this
+reviewer's own identity is recognized as the existing summary; a look-alike marker inside someone
+else's comment is ignored and a fresh comment is created alongside it — the same authorship rule
+deduplication enforces for findings.
+
+The comment states, for every settlement outcome including `incomplete` and `abandoned`:
+
+- the outcome (`complete` / `incomplete` with its reason code / `abandoned`), the reviewed head SHA
+  in short form, the triggering event's own timestamp, and the engine and action version
+  identifiers;
+- a compact table of counts: total, reviewable, excluded, and mechanically-clean paths; paths
+  replayed from the review-cache store versus freshly reviewed; findings published; and duplicates
+  suppressed, broken out by dedup stage (exact marker, phrasing-independent similarity);
+- the per-run token budget, and the engine-reported spend when it is available.
+
+It carries no finding body, no file content, and no free-form model text — every field is a
+number, a closed-vocabulary reason code, or a branded identifier, enforced by the composer's own
+parameter type rather than by convention alone.
+
+**An issue comment carries no `commit_id`.** Unlike a review comment, it is not bound to the commit
+it describes, which is why it states its reviewed head in its own text and is reissued — updated,
+never left stale — on every run against a new head. Read it as describing exactly the head it
+names, never as a live status of the pull request's current head.
+
+Disable it with `run_summary: false` (default `true`). Disabled means exactly that: no
+issue-comment API call is made at all, not even to check whether one already exists.
+
 ## Known limitations
 
 Stated plainly, because a reviewer that overstates its coverage is worse than none.
@@ -231,6 +264,13 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
    paraphrase pattern observed in production; biased, when a comparison is uncertain, toward
    publishing rather than suppressing, because a missed finding is worse than an occasional
    duplicate.
+8. **The run-summary comment is not commit-bound.** An issue comment carries no `commit_id`, so
+   nothing on GitHub's side ties it to the head it describes the way a review comment is tied to
+   one. It states its reviewed head in its own text for exactly this reason — trust that text, not
+   the comment's mere presence, as the description of which head a given version of it covers.
+9. **The run-summary comment is not archived when a pull request closes.** It is updated in place
+   on every eligible run and otherwise left as it last stood; deciding whether and how to clean it
+   up on closure is a deliberately deferred, separate concern.
 
 ## Measured quality
 

@@ -27,7 +27,12 @@ export interface PublishContext {
 
 export interface PublishOutcome {
   readonly published: number;
+  /** Total suppressed as an already-published duplicate — the sum of the two fields below. */
   readonly suppressed: number;
+  /** Suppressed by the exact-marker stage (a byte-for-byte, cosmetically-normalized repeat). */
+  readonly suppressedExactDuplicate: number;
+  /** Suppressed by the phrasing-independent similarity stage (Keiko-for-Quality#38). */
+  readonly suppressedSimilar: number;
   readonly rejectedSanitization: number;
   readonly rejectedPlacement: number;
   readonly readbackFailures: number;
@@ -121,6 +126,8 @@ async function verifyPublication(
 interface Counters {
   published: number;
   suppressed: number;
+  suppressedExactDuplicate: number;
+  suppressedSimilar: number;
   rejectedSanitization: number;
   rejectedPlacement: number;
   readbackFailures: number;
@@ -221,6 +228,8 @@ async function publishOne(
   );
   if (suppression !== undefined) {
     counters.suppressed += 1;
+    if (suppression === "exact") counters.suppressedExactDuplicate += 1;
+    else counters.suppressedSimilar += 1;
     const code =
       suppression === "exact"
         ? "publish.finding_suppressed_duplicate"
@@ -243,6 +252,8 @@ export async function publishFindings(
   const counters: Counters = {
     published: 0,
     suppressed: 0,
+    suppressedExactDuplicate: 0,
+    suppressedSimilar: 0,
     rejectedSanitization: 0,
     rejectedPlacement: 0,
     readbackFailures: 0,

@@ -10,11 +10,14 @@ import { parseGuidelinePaths } from "../config/guidelines.js";
 import { loadReviewProfile } from "../config/profile.js";
 import { createDiagnostics, type Diagnostics } from "../diagnostics/sink.js";
 import { parseJson } from "../core/validate.js";
+import { ENGINE_PIN } from "../engine/pinned-release.js";
+import { maintainRunSummary } from "../publish/summary.js";
 import { performReview, type ReviewReport } from "../review.js";
 import { evaluateEligibility } from "./eligibility.js";
-import { resolveIdentity } from "./identity.js";
+import { resolveIdentity, type ResolvedIdentity } from "./identity.js";
 import {
   parseEventContext,
+  readBooleanInput,
   readInput,
   readRequiredInput,
   runtimeConfigFromInputs,
@@ -41,7 +44,10 @@ async function loadEvent(env: NodeJS.ProcessEnv): Promise<EventContext> {
   return parseEventContext(payload);
 }
 
-function reportOutputs(report: ReviewReport): Record<string, string> {
+function reportOutputs(
+  report: ReviewReport,
+  summaryCommentUrl: string | undefined,
+): Record<string, string> {
   return {
     outcome: report.outcome,
     reason: report.reason ?? "",
@@ -50,6 +56,7 @@ function reportOutputs(report: ReviewReport): Record<string, string> {
     findings_suppressed: String(report.publish?.suppressed ?? 0),
     cache_hits: String(report.cacheHits),
     cache_misses: String(report.cacheMisses),
+    summary_comment_url: summaryCommentUrl ?? "",
   };
 }
 
@@ -130,6 +137,48 @@ async function maybeSaveCacheStore(
     return;
   }
   await saveCacheStore(storePath, report.updatedCacheStore, report.cacheAppended, diagnostics);
+}
+
+/**
+ * Maintains the run-summary comment (Keiko-for-Quality#31), gated by the `run_summary` input
+ * documented in `action.yml` (default on). Disabled means exactly that: no issue-comment API call is
+ * made at all — not even a listing call — so the only trace of the switch being off is the
+ * diagnostic recorded here.
+ *
+ * Reached for every settlement outcome (`complete`, `incomplete`, `abandoned`) alike, because it
+ * runs after `performReview` has already returned — the same eligibility gate in `admit` that
+ * decides whether findings can be published at all also decides, for free, whether this is ever
+ * reached: an ineligible event returns from `runAction` before `performReview` runs.
+ */
+async function maybeMaintainSummary(
+  env: NodeJS.ProcessEnv,
+  event: EventContext,
+  identity: ResolvedIdentity,
+  report: ReviewReport,
+  diagnostics: Diagnostics,
+): Promise<string | undefined> {
+  if (!readBooleanInput(env, "run_summary", true)) {
+    diagnostics.record("publish.summary_disabled");
+    return undefined;
+  }
+  return maintainRunSummary(
+    {
+      client: identity.client,
+      ref: { owner: event.owner, repo: event.repo },
+      pullNumber: event.pullNumber,
+      identity: identity.login,
+    },
+    {
+      report,
+      headSha: event.head,
+      eventTimestamp: event.eventTimestamp,
+      engineVersion: ENGINE_PIN.version,
+      // Set by Actions for a step that `uses:` a JS action — the exact ref/SHA the consumer's own
+      // workflow pinned this run to. Empty outside Actions (a local invocation, a test).
+      actionVersion: env.GITHUB_ACTION_REF ?? "",
+    },
+    diagnostics,
+  );
 }
 
 /**
@@ -214,8 +263,9 @@ export async function runAction(
   );
 
   await maybeSaveCacheStore(storePath, report, diagnostics);
+  const summaryCommentUrl = await maybeMaintainSummary(env, event, identity, report, diagnostics);
 
-  writeOutputs(env, reportOutputs(report));
+  writeOutputs(env, reportOutputs(report, summaryCommentUrl));
   return report;
 }
 

@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { composeBody, extractMarker, fingerprint, hasMarker, renderMarker } from "./marker.js";
+import {
+  composeBody,
+  extractMarker,
+  fingerprint,
+  hasMarker,
+  renderMarker,
+  summaryMarker,
+} from "./marker.js";
 
 const BASE = {
   repository: "acme/widget",
@@ -97,5 +104,46 @@ describe("marker rendering", () => {
   it("keeps the marker as the only HTML in the composed body", () => {
     const body = composeBody("Plain prose finding.", fingerprint(BASE));
     expect(body.match(/</g)).toHaveLength(1);
+  });
+});
+
+/**
+ * The run-summary marker (Keiko-for-Quality#31) must do the opposite of a finding's or a notice's:
+ * stay fixed across every run of the same pull request, however the counts or the head changed, so
+ * the upsert finds and updates the same one comment instead of creating a new one every time.
+ */
+describe("summaryMarker", () => {
+  it("is stable across repeated calls for the same repository and pull request", () => {
+    expect(summaryMarker("acme/widget", 7)).toBe(summaryMarker("acme/widget", 7));
+  });
+
+  it("produces a compact hexadecimal token in the same shape every other marker uses", () => {
+    expect(summaryMarker("acme/widget", 7)).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it("changes when the repository changes", () => {
+    expect(summaryMarker("acme/widget", 7)).not.toBe(summaryMarker("acme/other", 7));
+  });
+
+  it("changes when the pull request changes", () => {
+    expect(summaryMarker("acme/widget", 7)).not.toBe(summaryMarker("acme/widget", 8));
+  });
+
+  it("is unaffected by which head is being described — a fresh push must not mint a new marker", () => {
+    // There is no `head` parameter to vary here at all: unlike `fingerprint`'s optional `head`
+    // field, `summaryMarker` never accepts one, which is what makes the comment head-independent by
+    // construction rather than by a caller remembering to omit an argument.
+    expect(summaryMarker("acme/widget", 7)).toBe(summaryMarker("acme/widget", 7));
+  });
+
+  it("differs from an ordinary finding marker for the same repository and pull request", () => {
+    const findingMarker = fingerprint({
+      repository: "acme/widget",
+      pullNumber: 7,
+      path: "src/retry.ts",
+      rule: "bug",
+      body: "run-summary",
+    });
+    expect(summaryMarker("acme/widget", 7)).not.toBe(findingMarker);
   });
 });

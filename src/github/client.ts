@@ -71,6 +71,35 @@ export interface ReviewCommentApi {
   getReviewComment(ref: RepoRef, id: number): Promise<ReviewComment>;
 }
 
+/**
+ * A top-level pull-request conversation comment.
+ *
+ * Distinct from `ReviewComment`: this is GitHub's *issue* comment family
+ * (`/issues/{number}/comments`), not the *review* comment family (`/pulls/{number}/comments`). An
+ * issue comment is not anchored to a diff position and carries no `commit_id` — it is not bound to
+ * the commit it was written about the way a review comment is, which is exactly why the run summary
+ * that uses this surface must state its reviewed head in its own text (see `publish/summary.ts`).
+ */
+export interface IssueComment {
+  readonly id: number;
+  readonly body: string;
+  readonly authorLogin: string;
+  readonly url: string;
+}
+
+/**
+ * The issue-comment surface the run-summary upsert depends on.
+ *
+ * Kept as its own narrow interface, the same reasoning as `ReviewCommentApi`: the summary's own
+ * security property — updating only a comment this reviewer's own identity authored, never a
+ * foreign comment that merely carries a look-alike marker — is worth testing without a network.
+ */
+export interface IssueCommentApi {
+  listIssueComments(ref: RepoRef, number: number): Promise<IssueComment[]>;
+  createIssueComment(ref: RepoRef, number: number, body: string): Promise<IssueComment>;
+  updateIssueComment(ref: RepoRef, id: number, body: string): Promise<IssueComment>;
+}
+
 export class GitHubApiError extends Error {
   public readonly status: number;
 
@@ -152,7 +181,7 @@ function nextThreadsCursor(page: ReviewThreadsPage): string | undefined {
  *  GitHub Enterprise Server; this is only the fallback for a caller that does not supply one. */
 const DEFAULT_GRAPHQL_BASE = "https://api.github.com/graphql";
 
-export class GitHubClient implements ReviewCommentApi {
+export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
   private readonly apiBase: string;
   private readonly token: string;
   private readonly graphqlBase: string;
@@ -328,6 +357,45 @@ export class GitHubClient implements ReviewCommentApi {
       return undefined;
     }
   }
+
+  /** Lists every top-level issue comment on the pull request, following pagination to the end. */
+  public async listIssueComments(ref: RepoRef, number: number): Promise<IssueComment[]> {
+    const comments: IssueComment[] = [];
+    for (let page = 1; page <= 20; page += 1) {
+      const batch = (await this.json(
+        `/repos/${ref.owner}/${ref.repo}/issues/${String(number)}/comments?per_page=100&page=${String(page)}`,
+      )) as unknown[];
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      for (const entry of batch) comments.push(toIssueComment(entry as Record<string, unknown>));
+      if (batch.length < 100) break;
+    }
+    return comments;
+  }
+
+  /** Posts a new top-level issue comment. Never the review-comments or reviews endpoint. */
+  public async createIssueComment(
+    ref: RepoRef,
+    number: number,
+    body: string,
+  ): Promise<IssueComment> {
+    const created = (await this.json(
+      `/repos/${ref.owner}/${ref.repo}/issues/${String(number)}/comments`,
+      { method: "POST", body: JSON.stringify({ body }) },
+    )) as Record<string, unknown>;
+    return toIssueComment(created);
+  }
+
+  /** Replaces an existing issue comment's body in place — an upsert's "update" half. */
+  public async updateIssueComment(ref: RepoRef, id: number, body: string): Promise<IssueComment> {
+    const updated = (await this.json(
+      `/repos/${ref.owner}/${ref.repo}/issues/comments/${String(id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ body }),
+      },
+    )) as Record<string, unknown>;
+    return toIssueComment(updated);
+  }
 }
 
 /**
@@ -365,5 +433,16 @@ function toReviewComment(raw: Record<string, unknown>): ReviewComment {
     url: text(raw.html_url),
     ...(line !== undefined ? { line } : {}),
     ...(startLine !== undefined ? { startLine } : {}),
+  };
+}
+
+/** No diff position, no `commit_id` — an issue comment carries strictly less than a review comment. */
+function toIssueComment(raw: Record<string, unknown>): IssueComment {
+  const user = raw.user as Record<string, unknown> | undefined;
+  return {
+    id: typeof raw.id === "number" ? raw.id : 0,
+    body: text(raw.body),
+    authorLogin: text(user?.login),
+    url: text(raw.html_url),
   };
 }

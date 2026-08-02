@@ -76,6 +76,18 @@ export function mechanicallyCleanPaths(inventory: Inventory): readonly string[] 
     .map((item) => item.path as string);
 }
 
+/**
+ * Count of paths the profile's own `excluded` rules matched.
+ *
+ * Unlike `mechanicallyCleanPaths`, this is never threaded to the engine as an exclude: an excluded
+ * path never matched `reviewRelevant` in the first place, so the engine's own rule-file dispatch
+ * already skips it without help. This exists only for reporting — the run summary's own accounting
+ * of what a pull request touched and why each path did or did not reach the model.
+ */
+export function excludedPathCount(inventory: Inventory): number {
+  return inventory.items.filter((item) => item.classification.kind === "excluded").length;
+}
+
 export async function buildInventory(
   ctx: GitContext,
   profile: CompiledProfile,

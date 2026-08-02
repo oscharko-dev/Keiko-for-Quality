@@ -18,5 +18,15 @@
       "reason": "binary assets carry no reviewable source"
     }
   ],
-  "benignWarnings": []
+  "benignWarnings": [],
+  "pathInstructions": [
+    {
+      "paths": ["src/**/*.test.ts"],
+      "instructions": "When a test asserts on an error, prefer the error class or a stable code over full message strings; message-text assertions break on harmless rewording."
+    },
+    {
+      "paths": ["scripts/**"],
+      "instructions": "Scripts run in CI where output is the only trace: a failure exit must name the file or gate that failed."
+    }
+  ]
 }
