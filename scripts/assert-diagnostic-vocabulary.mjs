@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
+import { cliPathArgument } from "./cli-args.mjs";
 
 /**
  * Asserts that emitted diagnostics stay inside the closed vocabulary.
@@ -10,11 +11,9 @@ import { readFileSync } from "node:fs";
  */
 const ALLOWED_FIELDS = new Set(["code", "headSha", "digest", "version", "counts", "durationMs"]);
 
-const path = process.argv[2];
-if (path === undefined) {
-  console.error("usage: assert-diagnostic-vocabulary.mjs <diagnostics-file>");
-  process.exit(2);
-}
+const path = cliPathArgument(process.argv[2], {
+  usage: "usage: assert-diagnostic-vocabulary.mjs <diagnostics-file>",
+});
 
 const lines = readFileSync(path, "utf8")
   .trim()

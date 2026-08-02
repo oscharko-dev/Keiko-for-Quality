@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildBinding } from "./binding.mjs";
+import { FIXED_PATH } from "./fixed-path.mjs";
 import { CASES } from "./cases.mjs";
 // Rule generation and the .js→.ts resolve hook live in rule-source.mjs so node --test can cover
 // them in-process (this file is a script with top-level side effects and cannot be imported).
@@ -84,7 +85,7 @@ function git(args, cwd) {
     cwd,
     encoding: "utf8",
     env: {
-      PATH: process.env.PATH ?? "",
+      PATH: FIXED_PATH,
       GIT_AUTHOR_NAME: "corpus",
       GIT_AUTHOR_EMAIL: "corpus@example.test",
       GIT_COMMITTER_NAME: "corpus",
@@ -126,7 +127,7 @@ function runEngine(dir) {
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
       env: {
-        PATH: process.env.PATH ?? "",
+        PATH: FIXED_PATH,
         HOME: home,
         LC_ALL: "C",
         OCR_LLM_URL: process.env.OCR_LLM_URL ?? "",
