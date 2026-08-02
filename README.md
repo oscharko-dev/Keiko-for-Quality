@@ -311,6 +311,39 @@ and gates nothing. Every run records what produced it (engine digest, rule diges
 adapter commit, model id), because recall is a property of a _pairing_, and the model is the input
 that can move without a commit.
 
+## Reviewer arena
+
+The seeded corpus measures this reviewer alone. Since activation, every eligible Keiko pull request
+is also reviewed by CodeRabbit and Codex on the identical head — a controlled, three-way comparison a
+solo history cannot provide. `corpus/arena.mjs` turns that into a repeatable scoreboard instead of
+something read by hand: it reads each bot's inline review threads through the GitHub API (read-only,
+no publication, no model call), attributes them by author login, and reports per bot — per pull
+request and in aggregate — findings posted, distinct files touched, thread resolution, paraphrase
+duplicates within one bot's own findings, and cross-bot location overlap as a consensus proxy. It
+scores none of this for correctness: the epic behind it (#26) is explicit that the tool records, a
+person judges.
+
+Every count beyond raw totals is a heuristic, and the tool says so in its own output rather than
+letting a number imply more precision than it has: a duplicate variant is two of one bot's own
+findings sharing a path, an overlapping line window, and a Jaccard similarity over normalized content
+words at or above 0.15; cross-bot overlap is the same path-and-window intersection with no content
+comparison at all. `corpus/arena-lib.test.mjs` pins both heuristics against fixtures shaped from a
+real pull request, including the case that motivated this tool: three textually different Keiko for
+Quality comments at one location on Keiko #2926, which the heuristic must collapse into one finding
+plus two duplicate variants (tracked as bug #38 — re-running the arena after that fix lands is the
+regression meter for it).
+
+```bash
+npm run arena -- 2926 2924          # writes corpus/evidence/arena-latest.{json,md}
+npm run arena -- --since 2026-07-01 # discovers pull requests instead of naming them
+node --test corpus/arena-lib.test.mjs # the pure computation's own tests; not part of `npm test`
+```
+
+The evidence committed under `corpus/evidence/` is the first live run, recorded as the v0.10.0
+baseline. Its JSON never carries a comment body — locations, counts, and hashes only, matching this
+repository's evidence-redaction discipline; a short quoted stub would still be another bot's
+generated prose distributed through this repository, not just this reviewer's own.
+
 ## Development
 
 ```bash

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import { buildRuleFile, serializeRuleFile } from "./rule-file.js";
@@ -292,6 +294,21 @@ describe("buildRuleFile", () => {
 describe("serializeRuleFile", () => {
   it("round-trips to the same document", () => {
     const file = buildRuleFile(profileWith({ generated: ["**/dist/**"] }));
+    expect(JSON.parse(serializeRuleFile(file))).toEqual(file);
+  });
+});
+
+describe("the qualification harness path", () => {
+  // Pins corpus/run.mjs's rule generation: the committed corpus profile must build through the
+  // production loader. #44 broke exactly this — the harness fed raw JSON into `buildRuleFile`,
+  // whose input only ever resembled a compiled profile by coincidence, and the corpus crashed at
+  // startup while every product path stayed green. The corpus is priced in model tokens, so no CI
+  // lane executes it; this hermetic test is what fails instead of the release-gate run.
+  it("builds the committed corpus profile through the production loader", () => {
+    const text = readFileSync(new URL("../../corpus/profile.json", import.meta.url), "utf8");
+    const file = buildRuleFile(loadReviewProfile(text, "corpus/profile.json"));
+    expect(file.rules).toHaveLength(1);
+    expect(file.rules[0]?.rule).toContain("Look before you claim");
     expect(JSON.parse(serializeRuleFile(file))).toEqual(file);
   });
 });
