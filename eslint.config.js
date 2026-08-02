@@ -69,7 +69,7 @@ export default tseslint.config(
 
   // Build and gate scripts are plain Node ESM, outside the TypeScript program.
   {
-    files: ["scripts/**/*.mjs", "*.js"],
+    files: ["scripts/**/*.mjs", "corpus/**/*.mjs", "*.js"],
     extends: [js.configs.recommended],
     languageOptions: {
       ecmaVersion: 2024,

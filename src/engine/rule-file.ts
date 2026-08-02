@@ -72,6 +72,8 @@ const CATCH_ALL_RULE = [
   "Set `category` to exactly one of: bug, security, performance, maintainability, test,",
   "documentation, other. Set `severity` to exactly one of: critical, high, medium, low.",
   "",
+  "Use `performance` only for the cost of code that is otherwise correct. A removed guard, timeout,\n  or limit is a `bug` — it changes behaviour under conditions the guard existed to handle, and\n  filing it as performance understates it.",
+  "",
   "Calibrate severity by consequence, not by how unusual the code looks:",
   "- critical — exploitable now, or silent data loss, or a broken trust boundary;",
   "- high — wrong behaviour on a reachable path, or a removed safety check;",
