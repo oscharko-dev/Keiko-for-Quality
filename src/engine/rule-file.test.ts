@@ -131,6 +131,23 @@ describe("buildRuleFile", () => {
    * changed together: bare placeholders still die, backticked ones survive, and the rule must say
    * exactly that. This pins both halves so they cannot drift apart again.
    */
+  /**
+   * The rule taught the exact shape another of its own rules forbids: it asked for a
+   * `Source: <path>` line while stating that bare angle brackets destroy the finding. In
+   * qualification the model obeyed the citation rule and filled the placeholder with the only
+   * "path" it could see — the name of a section of its own instructions — producing
+   * `Source: <current_file_diff>`, which the sanitizer rejected as html. A correct high-severity
+   * finding was lost to a contradiction between two rules, so no example in this file may show a
+   * `Source:` line with an angle bracket.
+   */
+  it("never teaches an angle-bracketed Source line", () => {
+    const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    expect(rule).toContain("Source:");
+    expect(rule).not.toMatch(/Source:\s*`?</);
+    // And the citation instruction must bound what may be named, not leave it open.
+    expect(rule).toContain("NEVER in angle brackets");
+  });
+
   it("keeps the placeholder guidance aligned with the real sanitizer", () => {
     const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
     expect(rule).toContain("Never write a bare placeholder in angle brackets");
