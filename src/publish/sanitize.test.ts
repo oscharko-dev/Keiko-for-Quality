@@ -163,4 +163,26 @@ describe("code-region masking (the corpus-blocking html false positive)", () => 
     const r = sanitizeFindingBody("```suggestion\nfixed()\n```\n" + PAD);
     expect(r).toEqual({ ok: false, reason: "suggestion_block" });
   });
+  it("masks an indented fence — CommonMark allows up to three spaces", () => {
+    const r = sanitizeFindingBody("Rendered form:\n\n   ```\n   <b>bold</b>\n   ```\n" + PAD);
+    expect(r.ok).toBe(true);
+  });
+  it("masks a tilde fence like a backtick fence", () => {
+    const r = sanitizeFindingBody(
+      "The template emits:\n\n~~~html\n<script>x()</script>\n~~~\n" + PAD,
+    );
+    expect(r.ok).toBe(true);
+  });
+  it("masks a double-backtick span whose content carries a single backtick", () => {
+    const r = sanitizeFindingBody("Escape it as `` `<td>` `` in the template." + PAD);
+    expect(r.ok).toBe(true);
+  });
+  it("stays strict when a tilde fence never closes", () => {
+    const r = sanitizeFindingBody("~~~\n<b>markup</b> after an unclosed fence." + PAD);
+    expect(r).toEqual({ ok: false, reason: "html" });
+  });
+  it("stays strict when the closing fence is shorter than the opening", () => {
+    const r = sanitizeFindingBody("Broken:\n\n`````\n<b>markup</b>\n```\n" + PAD);
+    expect(r).toEqual({ ok: false, reason: "html" });
+  });
 });

@@ -115,18 +115,30 @@ const MASKED_CHECKS: readonly { readonly pattern: RegExp; readonly reason: Rejec
 /**
  * Replaces the CONTENT of well-delimited code regions with `x` runs of equal length, keeping the
  * delimiters and all offsets stable. Fenced blocks first (their content may contain backticks),
- * then single-line inline spans (equal-length backtick delimiters, CommonMark-style). Unclosed
- * fences and unbalanced inline backticks mask nothing — the text stays subject to the masked
- * checks, which is the strict side of every ambiguity.
+ * then single-line inline spans. Fences follow CommonMark's envelope: backtick or tilde runs of
+ * three or more, up to three spaces of indentation, an info string (which a backtick fence
+ * forbids backticks in), and a closing run of the same character at least as long, alone on its
+ * line bar trailing blanks. Inline spans pair equal-length backtick runs, so a longer or
+ * shorter run inside stays content (``escape `this` here``). Unclosed fences and unbalanced
+ * inline backticks mask nothing — the text stays subject to the masked checks, which is the
+ * strict side of every ambiguity.
  */
 function maskCodeRegions(body: string): string {
-  let masked = body.replace(
-    /^(`{3,})([^\n]*)\n([\s\S]*?)\n(\1)`*$/gm,
-    (_whole, open: string, info: string, content: string, close: string) =>
-      `${open}${info}\n${content.replace(/[^\n]/g, "x")}\n${close}`,
-  );
+  const maskLines = (content: string): string => content.replace(/[^\n]/g, "x");
+  const maskFence = (
+    whole: string,
+    open: string,
+    info: string,
+    inner: string,
+    close: string,
+  ): string =>
+    close.trim().length >= open.trim().length
+      ? `${open}${info}\n${maskLines(inner)}\n${close}`
+      : whole;
+  let masked = body.replace(/^( {0,3}`{3,})([^`\n]*)\n([\s\S]*?)\n( {0,3}`{3,} *)$/gm, maskFence);
+  masked = masked.replace(/^( {0,3}~{3,})([^\n]*)\n([\s\S]*?)\n( {0,3}~{3,} *)$/gm, maskFence);
   masked = masked.replace(
-    /(`+)([^`\n]+)\1/g,
+    /(?<!`)(`+)(?!`)((?:[^`\n]|`+)+?)\1(?!`)/g,
     (_whole, ticks: string, content: string) => `${ticks}${"x".repeat(content.length)}${ticks}`,
   );
   return masked;
