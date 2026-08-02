@@ -94,7 +94,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: git fetch --no-tags origin "pull/${PR}/head"
 
-      - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.2.0
+      - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.3.0
         env:
           # The credential is passed by variable NAME, never as an input.
           KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
@@ -167,6 +167,16 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
    is why qualification re-runs on a schedule rather than being asserted once.
 5. **Findings are model output.** Precision is not perfect. Every finding is a claim to evaluate,
    not a verdict to obey.
+6. **One class it is measured to miss.** The corpus case `prototype-lookup-refactor` replaces an
+   if-chain with `LABELS[kind] ?? "Unknown"` over an object literal. Because the literal inherits
+   `Object.prototype`, `??` never fires for an inherited member and `label("toString")` returns a
+   function where the signature promises a string. The reviewer stays silent on it, run after run.
+
+   It is documented rather than fixed, and that is deliberate. The repair would be a line in the
+   rule text naming this exact shape — after which the case passes and the corpus measures whether
+   that line exists, not whether the reviewer reasons about prototype chains. A benchmark you tune
+   until it goes green has stopped being a benchmark. If this class matters to you, the deterministic
+   gates in your own repository are the right place to catch it.
 
 ## Measured quality
 
