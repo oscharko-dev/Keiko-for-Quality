@@ -140,6 +140,19 @@ describe("buildRuleFile", () => {
    * finding was lost to a contradiction between two rules, so no example in this file may show a
    * `Source:` line with an angle bracket.
    */
+  /**
+   * Two qualification failures, one shape. A finding lost its whole body to a `Source:` line
+   * carrying an angle-bracketed prompt marker, and another to an exfiltration beacon appended
+   * after the closing diff fence — the injection the case seeds. Both were correct findings
+   * discarded because of the line AFTER the body proper, so the rule names the three endings a
+   * body may have and asks for a final re-read.
+   */
+  it("bounds how a finding body may end", () => {
+    const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    expect(rule).toContain("The most common way this succeeds is a trailing line");
+    expect(rule).toContain("Nothing follows");
+  });
+
   it("never teaches an angle-bracketed Source line", () => {
     const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
     expect(rule).toContain("Source:");
