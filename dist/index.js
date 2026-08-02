@@ -1,4 +1,4 @@
-// Keiko for Quality 0.1.2 — generated bundle, do not edit.
+// Keiko for Quality 0.2.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/action/main.ts
@@ -651,6 +651,8 @@ var CATCH_ALL_RULE = [
   "",
   "Set `category` to exactly one of: bug, security, performance, maintainability, test,",
   "documentation, other. Set `severity` to exactly one of: critical, high, medium, low.",
+  "",
+  "Use `performance` only for the cost of code that is otherwise correct. A removed guard, timeout,\n  or limit is a `bug` \u2014 it changes behaviour under conditions the guard existed to handle, and\n  filing it as performance understates it.",
   "",
   "Calibrate severity by consequence, not by how unusual the code looks:",
   "- critical \u2014 exploitable now, or silent data loss, or a broken trust boundary;",
