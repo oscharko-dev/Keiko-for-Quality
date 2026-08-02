@@ -179,8 +179,8 @@ works; it is weaker; the fallback exists so you can try the reviewer before regi
 
 ### Deduplication
 
-A finding is suppressed only when it is the same finding this reviewer already published, checked
-in two stages:
+A finding is suppressed only when it is the same finding this reviewer already published, or the
+same finding at a location someone already gave a considered answer to, checked in three stages:
 
 1. **Exact marker.** Every published conversation carries a hidden fingerprint of its content. A
    later run recomputes the same fingerprint for the same defect and suppresses the repost.
@@ -191,12 +191,21 @@ in two stages:
    conservatively similar — a shared quoted code snippet, or enough shared content vocabulary. Two
    different defects at the same or an adjacent line are deliberately not similar enough to match,
    and an uncertain comparison publishes rather than suppresses.
+3. **Dispositioned recurrence.** The first two stages both ignore a resolved conversation, so a
+   genuinely recurred defect always stays publishable — but on a long-lived pull request this let a
+   finding someone had already reasoned through and resolved reappear on every later push, arguing
+   the same point again each time. This stage suppresses a same-location, same-substance match of a
+   _resolved_ conversation, but only when its last reply is a substantive disposition — at least 80
+   characters once signature lines (an automation footer, a `Co-Authored-By:` trailer) are stripped —
+   never a bare "resolved" click with no reply, or a resolve with no reply at all. Counted separately
+   as `dedup.dispositioned` so it is never confused with the two stages above.
 
-Both stages ignore a **resolved or outdated** conversation: once a conversation is no longer open,
-whatever it described can recur and be republished. Resolution state comes from a best-effort
-GraphQL lookup the `Pull requests` permission above already covers; if a token or platform cannot
-answer it, every conversation is simply treated as open, which is exactly how deduplication behaved
-before this lookup existed.
+Every stage but the third ignores a **resolved or outdated** conversation: once a conversation is no
+longer open, whatever it described can recur and be republished. Resolution state, and — for a
+genuinely resolved thread — its last reply's author and body, come from a best-effort GraphQL lookup
+the `Pull requests` permission above already covers; if a token or platform cannot answer it, every
+conversation is simply treated as open, which is exactly how deduplication behaved before this lookup
+existed.
 
 ### The run-summary comment
 
@@ -272,6 +281,12 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 9. **The run-summary comment is not archived when a pull request closes.** It is updated in place
    on every eligible run and otherwise left as it last stood; deciding whether and how to clean it
    up on closure is a deliberately deferred, separate concern.
+10. **The dispositioned-recurrence stage's 80-character floor is a heuristic, not a semantic
+    judgment.** A long-winded reply that never actually engages with the finding could clear it, and
+    a terse but genuinely conclusive one ("Wrong — this path is dead code, see line 40.") could fall
+    just short. Biased the same direction as the similarity stage: an uncertain call republishes
+    rather than suppresses, because a re-opened settled question costs a reply, while a wrongly
+    suppressed genuine recurrence costs a defect nobody sees again.
 
 ## Measured quality
 

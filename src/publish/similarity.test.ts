@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  findsDispositionedConversation,
   findsSimilarOpenConversation,
   type ExistingConversation,
   type SimilarityCandidate,
@@ -24,6 +25,7 @@ function thread(overrides: Partial<ExistingConversation> = {}): ExistingConversa
     path: PATH,
     authorLogin: IDENTITY,
     resolved: false,
+    dispositioned: false,
     body: "Restore the route's fallback connector construction when the primary endpoint is unset.",
     startLine: 236,
     endLine: 236,
@@ -190,6 +192,89 @@ describe("findsSimilarOpenConversation", () => {
     const found = findsSimilarOpenConversation(
       candidate({ body: "これは最初の欠陥に関する説明です。" }),
       [thread({ body: "これは二番目の全く異なる欠陥に関する説明です。" })],
+      IDENTITY,
+    );
+    expect(found).toBe(false);
+  });
+});
+
+/**
+ * Keiko-for-Quality#64: `findsSimilarOpenConversation` above deliberately never suppresses on a
+ * resolved thread, so a genuinely recurred defect stays publishable. This is the narrower,
+ * deliberately separate case: a resolved thread this reviewer authored whose last reply was a
+ * substantive disposition (`thread.dispositioned`) should suppress a matching recurrence, to stop
+ * the argue-with-the-bot loop a long-lived pull request otherwise falls into.
+ */
+describe("findsDispositionedConversation", () => {
+  it("returns false for an empty existing-thread list", () => {
+    expect(findsDispositionedConversation(candidate(), [], IDENTITY)).toBe(false);
+  });
+
+  it("suppresses a matching finding at a resolved, dispositioned location", () => {
+    const found = findsDispositionedConversation(
+      candidate(),
+      [thread({ resolved: true, dispositioned: true })],
+      IDENTITY,
+    );
+    expect(found).toBe(true);
+  });
+
+  it("suppresses a paraphrase of the same defect at a dispositioned location, not just an exact repeat", () => {
+    const found = findsDispositionedConversation(
+      candidate({
+        body: "Restore the route's default connector construction when the primary endpoint is missing.",
+      }),
+      [thread({ resolved: true, dispositioned: true })],
+      IDENTITY,
+    );
+    expect(found).toBe(true);
+  });
+
+  // The exact case Keiko-for-Quality#38 protects and #64 must not regress: a resolved thread with
+  // no substantive reply (`dispositioned: false`, the fixture default) never suppresses, so a
+  // genuinely recurred defect stays publishable.
+  it("does not suppress a resolved thread that was never dispositioned", () => {
+    const found = findsDispositionedConversation(
+      candidate(),
+      [thread({ resolved: true, dispositioned: false })],
+      IDENTITY,
+    );
+    expect(found).toBe(false);
+  });
+
+  it("does not suppress an open (unresolved) thread even if it were somehow flagged dispositioned", () => {
+    const found = findsDispositionedConversation(
+      candidate(),
+      [thread({ resolved: false, dispositioned: true })],
+      IDENTITY,
+    );
+    expect(found).toBe(false);
+  });
+
+  it("does not suppress a genuinely different defect at the same dispositioned location", () => {
+    const found = findsDispositionedConversation(
+      candidate({
+        body: "This handler never validates that the uploaded file size is below the configured limit.",
+      }),
+      [thread({ resolved: true, dispositioned: true, body: "Restore the fallback connector." })],
+      IDENTITY,
+    );
+    expect(found).toBe(false);
+  });
+
+  it("does not suppress a dispositioned conversation authored by someone else", () => {
+    const found = findsDispositionedConversation(
+      candidate(),
+      [thread({ resolved: true, dispositioned: true, authorLogin: "contributor" })],
+      IDENTITY,
+    );
+    expect(found).toBe(false);
+  });
+
+  it("does not suppress once the drift exceeds the line tolerance, even at a dispositioned location", () => {
+    const found = findsDispositionedConversation(
+      candidate({ startLine: 239, endLine: 239 }),
+      [thread({ resolved: true, dispositioned: true, startLine: 236, endLine: 236 })],
       IDENTITY,
     );
     expect(found).toBe(false);
