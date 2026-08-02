@@ -67,16 +67,24 @@ reissued on every run against a new head so it can never describe a superseded c
 looking current. A failure to upsert it is caught and recorded as a diagnostic; it never fails the
 run or changes the settlement outcome the rest of that run already reached.
 
-**Deduplication verifies authorship, on both of its stages.** A finding is suppressed only when an
-existing conversation was authored by this reviewer's own runtime-resolved identity — whether the
-match is the exact marker every publication carries, or the second, phrasing-independent stage that
-compares a candidate against this reviewer's own open conversations at the same location by line
-overlap and content similarity (added for Keiko-for-Quality#38: a model that words the same defect
-differently on a re-run changes the marker, and exact matching alone then republishes it as new). A
-marker or a similar-looking body inside anyone else's comment is spoofing and never suppresses
-publication under either stage. A resolved or outdated conversation is excluded from both stages, so
-a finding that recurs after its earlier conversation was resolved is republished rather than
-silenced permanently.
+**Deduplication verifies authorship, on every one of its three stages.** A finding is suppressed
+only when an existing conversation was authored by this reviewer's own runtime-resolved identity.
+The first stage matches the exact marker every publication carries. The second is
+phrasing-independent: it compares a candidate against this reviewer's own OPEN conversations at the
+same location by line overlap and content similarity (Keiko-for-Quality#38 — a model that words the
+same defect differently on a re-run changes the marker, and exact matching alone republishes it as
+new). The third matches this reviewer's own RESOLVED conversations, and only those whose last reply
+is a substantive disposition rather than a bare resolve (Keiko-for-Quality#64 — observed on
+oscharko-dev/Keiko#2931, where a finding answered in a reasoned reply and then resolved returned as
+"fresh" on every later run, because the second stage's resolved-thread exclusion has no memory of
+why a thread was resolved). A marker or a similar-looking body inside anyone else's comment is
+spoofing and never suppresses publication under any of the three.
+
+The resolved-conversation rule differs by stage, deliberately. Stages one and two ignore resolved
+and outdated conversations, so a defect that genuinely recurs after its conversation was resolved is
+republished rather than silenced permanently. Stage three exists precisely to read them — but only
+where a human wrote a considered answer, which is what separates "this was decided" from "this was
+clicked away."
 
 **Incomplete never reads as clean.** Partial, skipped, failed, unknown, unlisted-warning-bearing,
 budget-exhausted, timed-out, and malformed results all settle as incomplete.

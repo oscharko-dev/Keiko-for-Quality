@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildBinding } from "./binding.mjs";
+import { classifyMeasurement } from "./measurement.mjs";
 import { FIXED_PATH } from "./fixed-path.mjs";
 import { CASES } from "./cases.mjs";
 // Rule generation and the .js→.ts resolve hook live in rule-source.mjs so node --test can cover
@@ -354,20 +355,44 @@ const tokens = results.reduce((sum, r) => sum + r.tokens, 0);
 const seeded = cases.filter((c) => c.defect !== null).length;
 const clean = cases.length - seeded;
 
-console.log("");
-console.log(`recall         ${String(found.length)}/${String(seeded)} seeded defects found`);
-console.log(
-  `classified     ${String(classified.length)}/${String(found.length)} with the expected category and severity` +
-    (adjacent.length > 0 ? ` (${String(adjacent.length)} off by one severity step)` : ""),
-);
-console.log(`precision      ${String(silent.length)}/${String(clean)} clean changes left silent`);
-console.log(
-  `publishable    ${String(results.length - unpublishable.length)}/${String(results.length)} cases emitted only publishable bodies`,
-);
-console.log(`noise          ${String(noise)} finding(s) not about the seeded defect`);
-console.log(
-  `tokens         ${String(tokens)} total, ${String(Math.round(tokens / Math.max(1, results.length)))} per case`,
-);
+// An instrument must report its own failure as a failure to MEASURE, never as a result.
+//
+// A misconfigured endpoint makes every case throw before the model is reached. Each one lands in
+// the error branch above with zero tokens, and the scoreboard then prints "recall 0/19,
+// precision 0/4" — a number that reads as total collapse of review quality and is nothing of the
+// kind. That exact output cost a night of debugging: the endpoint wanted a different path shape,
+// and this harness answered "how good is the reviewer" when the honest answer was "I did not
+// measure it". Same failure as the `--only` denominator note above, one layer up and far more
+// expensive, because a plausible catastrophe invites a hunt for a regression that never existed.
+//
+// So: refuse to score a run that reached the model for no case at all, and say so when cases were
+// lost to errors rather than to the reviewer. `measured` in the report is what a release gate
+// reads — a run that is not measured can never be evidence for anything.
+const { measured, reason, errored } = classifyMeasurement(results, tokens);
+if (errored > 0 && measured) {
+  console.log("");
+  console.log(
+    `WARNING        ${String(errored)} case(s) threw before reaching the model — harness or` +
+      " connection failures, not review misses; the scores below cover the rest",
+  );
+}
+
+if (measured) {
+  console.log("");
+  console.log(`recall         ${String(found.length)}/${String(seeded)} seeded defects found`);
+  console.log(
+    `classified     ${String(classified.length)}/${String(found.length)} with the expected category and severity` +
+      (adjacent.length > 0 ? ` (${String(adjacent.length)} off by one severity step)` : ""),
+  );
+  console.log(`precision      ${String(silent.length)}/${String(clean)} clean changes left silent`);
+  console.log(
+    `publishable    ${String(results.length - unpublishable.length)}/${String(results.length)} cases emitted only publishable bodies`,
+  );
+  console.log(`noise          ${String(noise)} finding(s) not about the seeded defect`);
+  console.log(
+    `tokens         ${String(tokens)} total, ${String(Math.round(tokens / Math.max(1, results.length)))} per case`,
+  );
+}
 
 const binding = buildBinding({
   binary: BINARY,
@@ -383,8 +408,43 @@ console.log(
     ` · model ${binding.model.id}`,
 );
 
+// The binding above is printed for every run, measured or not: it is pure, free, and the evidence
+// that startup, rule generation, and digest derivation all worked — which is what
+// src/engine/corpus-harness.test.ts pins. What follows is the honest verdict on whether anything
+// was actually measured, and it never dresses a broken instrument as a result.
+if (!measured) {
+  console.error("");
+  if (reason === "no_cases") {
+    console.error("NO CASES SELECTED — nothing was run, so there is nothing to report.");
+    console.error("  a --only value that matches no case id lands here; check the spelling");
+  } else {
+    console.error("NOT MEASURED — no case reached the model, so these results describe the");
+    console.error("connection, not the reviewer. No scoreboard is printed for them.");
+    console.error(
+      `  attempted ${String(results.length)}, errored ${String(errored)}, tokens ${String(tokens)}`,
+    );
+    console.error(
+      "  check OCR_LLM_URL, OCR_LLM_TOKEN, OCR_LLM_MODEL, and that the deployment answers",
+    );
+  }
+  if (process.env.OCR_REPORT) {
+    writeFileSync(
+      process.env.OCR_REPORT,
+      JSON.stringify({ measured: false, reason, binding, results, tokens }, null, 2),
+    );
+    console.error(`  report    ${process.env.OCR_REPORT}`);
+  }
+  process.exit(2);
+}
+
 if (process.env.OCR_REPORT) {
-  writeFileSync(process.env.OCR_REPORT, JSON.stringify({ binding, results, tokens }, null, 2));
+  // `measured: true` is carried explicitly rather than implied by the file existing: a release
+  // gate that reads a report must be able to tell a measurement from a connection failure without
+  // re-deriving the rule, and the not-measured branch above writes a report too.
+  writeFileSync(
+    process.env.OCR_REPORT,
+    JSON.stringify({ measured: true, binding, results, tokens }, null, 2),
+  );
   console.log(`report         ${process.env.OCR_REPORT}`);
 }
 
