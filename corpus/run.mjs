@@ -5,31 +5,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { registerHooks } from "node:module";
-
 import { buildBinding } from "./binding.mjs";
 import { CASES } from "./cases.mjs";
+// Rule generation and the .js→.ts resolve hook live in rule-source.mjs so node --test can cover
+// them in-process (this file is a script with top-level side effects and cannot be imported).
+// The hook must be registered before the production import below — dynamic imports resolve at
+// runtime, static ones during link, before any code here has run.
+import { generateRuleDocument, registerTsExtensionHooks } from "./rule-source.mjs";
 
-// Node strips types from a file it is told to load as `.ts`, but the product sources import each
-// other by their compiled `.js` names (verbatimModuleSyntax) — under plain `node` that chain dies
-// at the first internal import. Vitest resolves it, which is why every test stays green while the
-// harness breaks. Map a `.js` specifier that fails to resolve inside `src/` onto its `.ts`
-// sibling, then import the production modules *after* the hook is registered — dynamic imports
-// resolve at runtime, static ones during link, before any code here has run.
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    try {
-      return nextResolve(specifier, context);
-    } catch (error) {
-      if (specifier.endsWith(".js") && (context.parentURL ?? "").includes("/src/")) {
-        return nextResolve(`${specifier.slice(0, -3)}.ts`, context);
-      }
-      throw error;
-    }
-  },
-});
-const { loadReviewProfile } = await import("../src/config/profile.ts");
-const { buildRuleFile, serializeRuleFile } = await import("../src/engine/rule-file.ts");
+registerTsExtensionHooks();
 const { sanitizeFindingBody } = await import("../src/publish/sanitize.ts");
 
 /**
@@ -73,22 +57,19 @@ if (!BINARY) {
   process.exit(2);
 }
 
-function generateRuleFile() {
-  // Through the production loader, not JSON.parse: `buildRuleFile` takes a *compiled* profile,
-  // and the raw shape only ever resembled it by coincidence. #44 ended the coincidence — the
-  // compiler defaults `pathInstructions`, so a raw profile crashed the builder here while every
-  // product path stayed green. Same fixture rule as the sanitizer note above: restating a
-  // production step (here: validation) instead of calling it is how a harness silently diverges.
-  const compiled = loadReviewProfile(readFileSync(join(HERE, "profile.json"), "utf8"));
+async function generateRuleFile() {
+  // Through the production loader — see generateRuleDocument's doc comment for why routing
+  // through `loadReviewProfile` (not JSON.parse) is the load-bearing part.
+  const document = await generateRuleDocument(readFileSync(join(HERE, "profile.json"), "utf8"));
   const dir = mkdtempSync(join(tmpdir(), "kfq-rule-"));
   const path = join(dir, "rule.json");
-  writeFileSync(path, serializeRuleFile(buildRuleFile(compiled)));
+  writeFileSync(path, document);
   return { path, dir };
 }
 
 // `dir` is null when the rule came from OCR_RULE: that file belongs to whoever passed it, and
 // removing it would delete an experiment's input out from under them.
-const generated = process.env.OCR_RULE === undefined ? generateRuleFile() : null;
+const generated = process.env.OCR_RULE === undefined ? await generateRuleFile() : null;
 const RULE = generated?.path ?? process.env.OCR_RULE;
 
 const onlyIndex = process.argv.indexOf("--only");
