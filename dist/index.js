@@ -681,6 +681,14 @@ var REASON_CODES = [
   "publish.api_failed",
   "publish.incomplete_notice_published",
   "publish.abandoned_stale_head",
+  // Deduplication against a settled disposition (Keiko-for-Quality#64), distinct from the two
+  // `publish.finding_suppressed_*` codes above: those suppress against a still-open conversation,
+  // this one suppresses against a RESOLVED one whose last reply was a substantive disposition —
+  // never a bare resolve, which must keep a genuinely recurred defect publishable (Keiko-for-
+  // Quality#38's contract, unchanged). A separate top-level prefix rather than another
+  // `publish.finding_suppressed_*` variant because the decision it reports on belongs to a
+  // different question: not "is this the same finding" but "did someone already settle it."
+  "dedup.dispositioned",
   // Run-summary comment (Keiko-for-Quality#31): a single, marker-identified issue comment this
   // reviewer upserts once per pull request, independent of every finding conversation above. Never
   // affects completeness — the same "pure add-on layer" posture as memoization below.
@@ -880,7 +888,8 @@ function countRows(counts) {
     ["Freshly reviewed", counts.freshlyReviewed],
     ["Findings published", counts.findingsPublished],
     ["Suppressed (exact duplicate)", counts.suppressedExactDuplicate],
-    ["Suppressed (similar)", counts.suppressedSimilar]
+    ["Suppressed (similar)", counts.suppressedSimilar],
+    ["Suppressed (dispositioned)", counts.suppressedDispositioned]
   ];
   return rows.map(([label2, value]) => `| ${label2} | ${String(value)} |`);
 }
@@ -937,7 +946,8 @@ function buildSummaryReport(input, diagnostics) {
     freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits),
     findingsPublished: publish?.published ?? 0,
     suppressedExactDuplicate: publish?.suppressedExactDuplicate ?? 0,
-    suppressedSimilar: publish?.suppressedSimilar ?? 0
+    suppressedSimilar: publish?.suppressedSimilar ?? 0,
+    suppressedDispositioned: publish?.suppressedDispositioned ?? 0
   };
   return {
     outcome: report.outcome,
@@ -2085,17 +2095,27 @@ var RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: In
           isResolved
           isOutdated
           comments(first: 100) { nodes { databaseId } }
+          lastComment: comments(last: 1) { nodes { author { login } body } }
         }
         pageInfo { hasNextPage endCursor }
       }
     }
   }
 }`;
-function collectResolvedIds(nodes, into) {
+function extractLastReply(node) {
+  const last = node.lastComment?.nodes?.[0];
+  const authorLogin = last?.author?.login;
+  const body = last?.body;
+  if (typeof authorLogin !== "string" || typeof body !== "string") return void 0;
+  return { authorLogin, body };
+}
+function collectThreadOverlays(nodes, into) {
   for (const node of nodes) {
-    if (node.isResolved !== true && node.isOutdated !== true) continue;
+    const isResolved = node.isResolved === true;
+    if (!isResolved && node.isOutdated !== true) continue;
+    const lastReply = isResolved ? extractLastReply(node) : void 0;
     for (const comment of node.comments?.nodes ?? []) {
-      if (typeof comment.databaseId === "number") into.add(comment.databaseId);
+      if (typeof comment.databaseId === "number") into.set(comment.databaseId, lastReply);
     }
   }
 }
@@ -2190,15 +2210,25 @@ var GitHubClient = class {
    * lookup — it never turns a dedup optimization into a reason the review itself fails.
    */
   async markResolved(ref, number, comments) {
-    const resolvedIds = await this.fetchResolvedCommentIds(ref, number);
-    if (resolvedIds.size === 0) return [...comments];
-    return comments.map(
-      (comment) => resolvedIds.has(comment.id) ? { ...comment, resolved: true } : comment
-    );
+    const overlays = await this.fetchThreadOverlays(ref, number);
+    if (overlays.size === 0) return [...comments];
+    return comments.map((comment) => {
+      if (!overlays.has(comment.id)) return comment;
+      const lastReply = overlays.get(comment.id);
+      return {
+        ...comment,
+        resolved: true,
+        ...lastReply !== void 0 ? { lastReply } : {}
+      };
+    });
   }
-  /** Bounded, best-effort GraphQL walk of every review thread, returning comment ids to mark resolved. */
-  async fetchResolvedCommentIds(ref, number) {
-    const resolved = /* @__PURE__ */ new Set();
+  /**
+   * Bounded, best-effort GraphQL walk of every review thread, returning a map of every comment id
+   * belonging to a resolved-or-outdated thread to that thread's last reply (Keiko-for-Quality#64) —
+   * see `collectThreadOverlays` for exactly what "that thread's last reply" means per thread state.
+   */
+  async fetchThreadOverlays(ref, number) {
+    const overlays = /* @__PURE__ */ new Map();
     try {
       let cursor = null;
       for (let page = 1; page <= 20; page += 1) {
@@ -2210,15 +2240,15 @@ var GitHubClient = class {
         });
         const threads = reviewThreadsPage(raw);
         if (threads === void 0) break;
-        collectResolvedIds(threads.nodes ?? [], resolved);
+        collectThreadOverlays(threads.nodes ?? [], overlays);
         const next = nextThreadsCursor(threads);
         if (next === void 0) break;
         cursor = next;
       }
     } catch {
-      return /* @__PURE__ */ new Set();
+      return /* @__PURE__ */ new Map();
     }
-    return resolved;
+    return overlays;
   }
   async createReviewComment(ref, number, input) {
     const payload = {
@@ -2320,6 +2350,19 @@ function toIssueComment(raw) {
     authorLogin: text(user?.login),
     url: text(raw.html_url)
   };
+}
+
+// src/publish/disposition.ts
+var MIN_SUBSTANTIVE_CHARS = 80;
+var FOOTER_LINE = /^\s*(?:🤖\s*)?(?:generated with|co-authored-by:)/i;
+var HTML_COMMENT = /<!--[\s\S]*?-->/g;
+function substantiveText(body) {
+  return body.replace(HTML_COMMENT, " ").split("\n").filter((line) => !FOOTER_LINE.test(line)).join("\n").replace(/\s+/g, " ").trim();
+}
+function isSubstantiveDisposition(lastReply, identity) {
+  if (lastReply === void 0) return false;
+  if (lastReply.authorLogin === identity) return false;
+  return substantiveText(lastReply.body).length >= MIN_SUBSTANTIVE_CHARS;
 }
 
 // src/publish/placement.ts
@@ -2432,9 +2475,17 @@ function linesOverlap(candidate, existing) {
   if (existing.startLine === void 0 || existing.endLine === void 0) return false;
   return candidate.startLine <= existing.endLine + LINE_TOLERANCE && existing.startLine <= candidate.endLine + LINE_TOLERANCE;
 }
+function isSameFindingAtSameLocation(candidate, thread, identity) {
+  return thread.authorLogin === identity && thread.path === candidate.path && linesOverlap(candidate, thread) && bodiesAreSimilar(candidate.body, thread.body);
+}
 function findsSimilarOpenConversation(candidate, existing, identity) {
   return existing.some(
-    (thread) => thread.authorLogin === identity && !thread.resolved && thread.path === candidate.path && linesOverlap(candidate, thread) && bodiesAreSimilar(candidate.body, thread.body)
+    (thread) => !thread.resolved && isSameFindingAtSameLocation(candidate, thread, identity)
+  );
+}
+function findsDispositionedConversation(candidate, existing, identity) {
+  return existing.some(
+    (thread) => thread.resolved && thread.dispositioned && isSameFindingAtSameLocation(candidate, thread, identity)
   );
 }
 
@@ -2448,11 +2499,12 @@ function ownMarkers(comments, identity) {
   }
   return markers;
 }
-function toExistingConversation(comment) {
+function toExistingConversation(comment, identity) {
   return {
     path: comment.path,
     authorLogin: comment.authorLogin,
     resolved: comment.resolved === true,
+    dispositioned: isSubstantiveDisposition(comment.lastReply, identity),
     body: comment.body,
     startLine: comment.startLine ?? comment.line,
     endLine: comment.line
@@ -2485,7 +2537,9 @@ function classifySuppression(finding, sanitizedBody, marker, existingMarkers, ex
     endLine: finding.endLine,
     body: sanitizedBody
   };
-  return findsSimilarOpenConversation(candidate, existingThreads, identity) ? "similar" : void 0;
+  if (findsSimilarOpenConversation(candidate, existingThreads, identity)) return "similar";
+  if (findsDispositionedConversation(candidate, existingThreads, identity)) return "dispositioned";
+  return void 0;
 }
 async function publishComposedFinding(context, finding, marker, sanitizedBody, counters, diagnostics) {
   const ladder = placementLadder(finding, context.items.get(finding.path), context.headSha);
@@ -2540,8 +2594,9 @@ async function publishOne(context, finding, existing, existingThreads, counters,
   if (suppression !== void 0) {
     counters.suppressed += 1;
     if (suppression === "exact") counters.suppressedExactDuplicate += 1;
-    else counters.suppressedSimilar += 1;
-    const code = suppression === "exact" ? "publish.finding_suppressed_duplicate" : "publish.finding_suppressed_similar";
+    else if (suppression === "similar") counters.suppressedSimilar += 1;
+    else counters.suppressedDispositioned += 1;
+    const code = suppression === "exact" ? "publish.finding_suppressed_duplicate" : suppression === "similar" ? "publish.finding_suppressed_similar" : "dedup.dispositioned";
     diagnostics.record(code, { headSha: context.headSha });
     return;
   }
@@ -2550,12 +2605,15 @@ async function publishOne(context, finding, existing, existingThreads, counters,
 async function publishFindings(context, findings, diagnostics) {
   const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
   const existing = ownMarkers(comments, context.identity);
-  const existingThreads = comments.map(toExistingConversation);
+  const existingThreads = comments.map(
+    (comment) => toExistingConversation(comment, context.identity)
+  );
   const counters = {
     published: 0,
     suppressed: 0,
     suppressedExactDuplicate: 0,
     suppressedSimilar: 0,
+    suppressedDispositioned: 0,
     rejectedSanitization: 0,
     rejectedPlacement: 0,
     readbackFailures: 0

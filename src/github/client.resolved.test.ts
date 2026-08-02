@@ -141,6 +141,187 @@ describe("GitHubClient.listReviewComments resolved/outdated merge", () => {
     expect(comments.find((c) => c.id === 41)?.resolved).toBe(true);
   });
 
+  /**
+   * Keiko-for-Quality#64: extends the `lastComment` alias's `comments(last: 1)` fetch — the thread's
+   * true last reply, not "the last of the first 100" — through the same GraphQL walk. These pin the
+   * new field's data fidelity independently of the disposition decision built on top of it in
+   * `publish/disposition.ts`.
+   */
+  describe("last-reply capture (Keiko-for-Quality#64)", () => {
+    it("captures a resolved thread's last reply author and body", async () => {
+      globalThis.fetch = routingFetch(
+        [[restComment(80)]],
+        [
+          threadsResponse([
+            {
+              isResolved: true,
+              comments: { nodes: [{ databaseId: 80 }] },
+              lastComment: {
+                nodes: [{ author: { login: "a-contributor" }, body: "Fixed in commit abc1234." }],
+              },
+            },
+          ]),
+        ],
+      );
+      const client = new GitHubClient("https://api.example.test", "token");
+
+      const comments = await client.listReviewComments(REF, 1);
+
+      expect(comments.find((c) => c.id === 80)?.lastReply).toStrictEqual({
+        authorLogin: "a-contributor",
+        body: "Fixed in commit abc1234.",
+      });
+    });
+
+    // A merely-outdated thread never had anyone decide anything — resolution and staleness are
+    // different facts, and only the first one has a disposition worth reporting.
+    it("does not report a last reply for a thread that is merely outdated, not resolved", async () => {
+      globalThis.fetch = routingFetch(
+        [[restComment(81)]],
+        [
+          threadsResponse([
+            {
+              isOutdated: true,
+              isResolved: false,
+              comments: { nodes: [{ databaseId: 81 }] },
+              // Present in the raw response, but must not surface: this thread is outdated, not
+              // genuinely resolved, so nothing here counts as a considered disposition.
+              lastComment: { nodes: [{ author: { login: "someone" }, body: "A stray reply." }] },
+            },
+          ]),
+        ],
+      );
+      const client = new GitHubClient("https://api.example.test", "token");
+
+      const comments = await client.listReviewComments(REF, 1);
+
+      const comment = comments.find((c) => c.id === 81);
+      expect(comment?.resolved).toBe(true);
+      expect(comment?.lastReply).toBeUndefined();
+    });
+
+    it("reports no last reply when the thread's own root comment is the only comment (a bare resolve)", async () => {
+      globalThis.fetch = routingFetch(
+        [[restComment(82)]],
+        [
+          threadsResponse([
+            {
+              isResolved: true,
+              comments: { nodes: [{ databaseId: 82 }] },
+              // The thread's only comment, reported back as its own "last" one — no reply exists.
+              lastComment: {
+                nodes: [{ author: { login: "keiko-for-quality[bot]" }, body: "The finding body." }],
+              },
+            },
+          ]),
+        ],
+      );
+      const client = new GitHubClient("https://api.example.test", "token");
+
+      const comments = await client.listReviewComments(REF, 1);
+
+      // The client itself has no opinion on whether this counts as a disposition — it reports the
+      // reply faithfully; `publish/disposition.ts` is what excludes this reviewer's own identity.
+      expect(comments.find((c) => c.id === 82)?.lastReply).toStrictEqual({
+        authorLogin: "keiko-for-quality[bot]",
+        body: "The finding body.",
+      });
+    });
+
+    it("degrades to no last reply when the last comment's author is null (a deleted account)", async () => {
+      globalThis.fetch = routingFetch(
+        [[restComment(83)]],
+        [
+          threadsResponse([
+            {
+              isResolved: true,
+              comments: { nodes: [{ databaseId: 83 }] },
+              lastComment: { nodes: [{ author: null, body: "Some reply text." }] },
+            },
+          ]),
+        ],
+      );
+      const client = new GitHubClient("https://api.example.test", "token");
+
+      const comments = await client.listReviewComments(REF, 1);
+
+      expect(comments.find((c) => c.id === 83)?.lastReply).toBeUndefined();
+    });
+
+    it("degrades to no last reply when the thread reports no comment in the `last: 1` connection", async () => {
+      globalThis.fetch = routingFetch(
+        [[restComment(84)]],
+        [
+          threadsResponse([
+            {
+              isResolved: true,
+              comments: { nodes: [{ databaseId: 84 }] },
+              lastComment: { nodes: [] },
+            },
+          ]),
+        ],
+      );
+      const client = new GitHubClient("https://api.example.test", "token");
+
+      const comments = await client.listReviewComments(REF, 1);
+
+      expect(comments.find((c) => c.id === 84)?.lastReply).toBeUndefined();
+    });
+
+    /**
+     * The consumer pull request that surfaced Keiko-for-Quality#64 (oscharko-dev/Keiko#2931) had
+     * well over a hundred review threads. The outer `reviewThreads` walk already follows
+     * `pageInfo.hasNextPage`/`endCursor` across pages (see "follows GraphQL pagination across
+     * multiple thread pages" above) — this proves the new `lastComment` field survives that same
+     * walk unchanged, on a thread from the *second* page, not just the first.
+     */
+    it("captures each page's own last-reply data across multiple thread pages", async () => {
+      globalThis.fetch = routingFetch(
+        [[restComment(90), restComment(91)]],
+        [
+          threadsResponse(
+            [
+              {
+                isResolved: true,
+                comments: { nodes: [{ databaseId: 90 }] },
+                lastComment: {
+                  nodes: [{ author: { login: "page-one-author" }, body: "Resolved on page one." }],
+                },
+              },
+            ],
+            true,
+            "cursor-1",
+          ),
+          threadsResponse(
+            [
+              {
+                isResolved: true,
+                comments: { nodes: [{ databaseId: 91 }] },
+                lastComment: {
+                  nodes: [{ author: { login: "page-two-author" }, body: "Resolved on page two." }],
+                },
+              },
+            ],
+            false,
+            null,
+          ),
+        ],
+      );
+      const client = new GitHubClient("https://api.example.test", "token");
+
+      const comments = await client.listReviewComments(REF, 1);
+
+      expect(comments.find((c) => c.id === 90)?.lastReply).toStrictEqual({
+        authorLogin: "page-one-author",
+        body: "Resolved on page one.",
+      });
+      expect(comments.find((c) => c.id === 91)?.lastReply).toStrictEqual({
+        authorLogin: "page-two-author",
+        body: "Resolved on page two.",
+      });
+    });
+  });
+
   it("degrades to unresolved for everyone when the GraphQL call fails, without throwing", async () => {
     // 403, not a retryable status: this is the realistic shape of the failure (a token without
     // GraphQL scope), and it keeps the test from paying the retry/backoff delay a 5xx would trigger.
