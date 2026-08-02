@@ -208,7 +208,14 @@ describe("publishFindings", () => {
     it("suppresses a repost of its own still-open finding", async () => {
       api.existing = [markedComment(IDENTITY, BODY)];
       const outcome = await publishFindings(context, [finding()], diagnostics);
-      expect(outcome).toMatchObject({ published: 0, suppressed: 1 });
+      // The exact-marker stage claims this one, not the similarity stage — see the run summary's
+      // (Keiko-for-Quality#31/#50) two-stage visibility requirement, which depends on this split.
+      expect(outcome).toMatchObject({
+        published: 0,
+        suppressed: 1,
+        suppressedExactDuplicate: 1,
+        suppressedSimilar: 0,
+      });
     });
 
     // A marker is a public string in a public comment. Without the author check, anyone who can
@@ -264,7 +271,14 @@ describe("publishFindings", () => {
     it("suppresses a rephrased repost of the same finding at the same location", async () => {
       api.existing = [openComment(REPHRASED_SAME_DEFECT)];
       const outcome = await publishFindings(context, [finding()], diagnostics);
-      expect(outcome).toMatchObject({ published: 0, suppressed: 1 });
+      // The similarity stage claims this one, not the exact-marker stage — the two counts must stay
+      // distinguishable so an operator (or the run summary) can tell the mechanisms apart.
+      expect(outcome).toMatchObject({
+        published: 0,
+        suppressed: 1,
+        suppressedExactDuplicate: 0,
+        suppressedSimilar: 1,
+      });
       expect(api.created).toHaveLength(0);
     });
 

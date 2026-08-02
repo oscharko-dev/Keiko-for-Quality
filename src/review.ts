@@ -31,6 +31,7 @@ import type { GitContext } from "./git/plumbing.js";
 import type { InventoryItem } from "./inventory/classify.js";
 import {
   buildInventory,
+  excludedPathCount,
   mechanicallyCleanPaths,
   resolveReviewPair,
   type Inventory,
@@ -70,7 +71,14 @@ export type ReviewOutcome = "complete" | "incomplete" | "abandoned";
 export interface ReviewReport {
   readonly outcome: ReviewOutcome;
   readonly reason?: ReasonCode;
+  /** Total changed paths classified, whatever the classification. */
   readonly inventorySize: number;
+  /** Paths the engine must account for — `inventory.reviewablePaths.size`. */
+  readonly reviewablePaths: number;
+  /** Paths the profile's own `excluded` rules matched. */
+  readonly excludedPaths: number;
+  /** Paths downgraded to mechanically-clean (a pure rename today) — never sent to the engine. */
+  readonly mechanicallyClean: number;
   readonly publish?: PublishOutcome;
   /** Cache-eligible paths a stored entry answered instead of the engine. Always 0 when inert. */
   readonly cacheHits: number;
@@ -178,6 +186,24 @@ async function headIsCurrent(request: ReviewRequest): Promise<boolean> {
 
 function itemIndex(inventory: Inventory): ReadonlyMap<string, InventoryItem> {
   return new Map(inventory.items.map((item) => [item.path as string, item]));
+}
+
+/**
+ * The inventory-derived counts every report-construction site below needs, computed once from the
+ * same `Inventory` each of them already has in scope — never a second, independent pass over the
+ * changed paths. This is what lets the run-summary comment (Keiko-for-Quality#31) report path
+ * accounting without `main.ts` ever seeing the `Inventory` type itself: it reads these fields off
+ * the same `ReviewReport` its action outputs already come from.
+ */
+function inventoryCounts(
+  inventory: Inventory,
+): Pick<ReviewReport, "inventorySize" | "reviewablePaths" | "excludedPaths" | "mechanicallyClean"> {
+  return {
+    inventorySize: inventory.items.length,
+    reviewablePaths: inventory.reviewablePaths.size,
+    excludedPaths: excludedPathCount(inventory),
+    mechanicallyClean: mechanicallyCleanPaths(inventory).length,
+  };
 }
 
 /** The one `PublishContext` shape every publish call in this file needs, built from the same two inputs. */
@@ -321,7 +347,7 @@ async function settleIncomplete(
   return {
     outcome: "incomplete",
     reason,
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     cacheAppended: 0,
     ...cacheCounts(memo),
     ...(publish === undefined ? {} : { publish }),
@@ -453,7 +479,7 @@ async function publishSettledFindings(
   const finalized = finalizeCacheStore(request, inventory, memo, settlement.findings);
   return {
     outcome: "complete",
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     publish,
     cacheAppended: finalized?.appended ?? 0,
     ...cacheCounts(memo),
@@ -472,7 +498,7 @@ async function publishSettledFindings(
 function emptyReviewReport(inventory: Inventory): ReviewReport {
   return {
     outcome: "complete",
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     cacheHits: 0,
     cacheMisses: 0,
     cacheAppended: 0,
@@ -483,7 +509,7 @@ function emptyReviewReport(inventory: Inventory): ReviewReport {
 function abandonedReport(inventory: Inventory, memo: MemoContext): ReviewReport {
   return {
     outcome: "abandoned",
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     ...cacheCounts(memo),
     cacheAppended: 0,
   };

@@ -237,6 +237,11 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(report.outcome).toBe("complete");
     expect(report.cacheHits).toBe(1);
     expect(report.cacheMisses).toBe(1);
+    // Both changed files matched `reviewRelevant` and are ordinary edits — neither excluded nor a
+    // pure rename — which is what the run summary's (Keiko-for-Quality#31) path accounting reports.
+    expect(report.reviewablePaths).toBe(2);
+    expect(report.excludedPaths).toBe(0);
+    expect(report.mechanicallyClean).toBe(0);
     // src/a.ts's original entry survives untouched; src/b.ts is newly admitted.
     expect(report.updatedCacheStore?.entries).toHaveLength(2);
   });

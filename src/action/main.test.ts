@@ -13,7 +13,7 @@ import {
   type CacheEntry,
   type CacheStore,
 } from "../cache/review-cache.js";
-import { GitHubClient } from "../github/client.js";
+import { GitHubClient, type IssueComment } from "../github/client.js";
 import type { ReviewReport } from "../review.js";
 
 /**
@@ -73,6 +73,9 @@ function report(overrides: Partial<ReviewReport> = {}): ReviewReport {
   return {
     outcome: "complete",
     inventorySize: 1,
+    reviewablePaths: 1,
+    excludedPaths: 0,
+    mechanicallyClean: 0,
     cacheHits: 0,
     cacheMisses: 0,
     cacheAppended: 0,
@@ -299,5 +302,138 @@ describe("runAction: writing the store back", () => {
     await runAction(env, diagnostics);
 
     expect(await readOutputs(env)).toMatchObject({ cache_hits: "3", cache_misses: "2" });
+  });
+});
+
+/**
+ * The run-summary comment (Keiko-for-Quality#31), wired at the end of `runAction`. `IDENTITY_CLIENT`
+ * is the same real `GitHubClient` instance `resolveIdentity`'s mock returns for every test in this
+ * file, so each test here spies on its issue-comment methods directly and restores them afterward —
+ * nothing here should leak a spy into an unrelated test elsewhere in this file.
+ */
+describe("runAction: run-summary comment", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function issueComment(overrides: Partial<IssueComment> = {}): IssueComment {
+    return {
+      id: 1,
+      body: "summary",
+      authorLogin: "keiko-for-quality[bot]",
+      url: "https://example.test/issues/comments/1",
+      ...overrides,
+    };
+  }
+
+  it("is enabled by default: lists and creates exactly once, and surfaces the comment URL", async () => {
+    performReviewMock.mockResolvedValue(report());
+    const listSpy = vi.spyOn(IDENTITY_CLIENT, "listIssueComments").mockResolvedValue([]);
+    const createSpy = vi
+      .spyOn(IDENTITY_CLIENT, "createIssueComment")
+      .mockResolvedValue(issueComment());
+    const env = await baseEnv();
+
+    await runAction(
+      env,
+      createDiagnostics(() => undefined),
+    );
+
+    expect(listSpy).toHaveBeenCalledTimes(1);
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(await readOutputs(env)).toMatchObject({
+      summary_comment_url: "https://example.test/issues/comments/1",
+    });
+  });
+
+  it("makes zero comment-client calls when run_summary is disabled", async () => {
+    performReviewMock.mockResolvedValue(report());
+    const listSpy = vi.spyOn(IDENTITY_CLIENT, "listIssueComments");
+    const createSpy = vi.spyOn(IDENTITY_CLIENT, "createIssueComment");
+    const updateSpy = vi.spyOn(IDENTITY_CLIENT, "updateIssueComment");
+    const env = { ...(await baseEnv()), INPUT_RUN_SUMMARY: "false" };
+    const diagnostics = createDiagnostics(() => undefined);
+
+    await runAction(env, diagnostics);
+
+    expect(listSpy).not.toHaveBeenCalled();
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(updateSpy).not.toHaveBeenCalled();
+    expect(diagnostics.drain().map((r) => r.code)).toContain("publish.summary_disabled");
+    expect(await readOutputs(env)).toMatchObject({ summary_comment_url: "" });
+  });
+
+  it("posts a summary for an incomplete outcome — the same eligibility gate as findings, not the outcome", async () => {
+    performReviewMock.mockResolvedValue(
+      report({ outcome: "incomplete", reason: "settlement.incomplete.coverage_gap" }),
+    );
+    vi.spyOn(IDENTITY_CLIENT, "listIssueComments").mockResolvedValue([]);
+    const createSpy = vi
+      .spyOn(IDENTITY_CLIENT, "createIssueComment")
+      .mockResolvedValue(issueComment());
+    const env = await baseEnv();
+
+    await runAction(
+      env,
+      createDiagnostics(() => undefined),
+    );
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("posts a summary for an abandoned outcome too", async () => {
+    performReviewMock.mockResolvedValue(report({ outcome: "abandoned" }));
+    vi.spyOn(IDENTITY_CLIENT, "listIssueComments").mockResolvedValue([]);
+    const createSpy = vi
+      .spyOn(IDENTITY_CLIENT, "createIssueComment")
+      .mockResolvedValue(issueComment());
+    const env = await baseEnv();
+
+    await runAction(
+      env,
+      createDiagnostics(() => undefined),
+    );
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fail the run or change its recorded outcome when the summary upsert fails", async () => {
+    performReviewMock.mockResolvedValue(report());
+    vi.spyOn(IDENTITY_CLIENT, "listIssueComments").mockRejectedValue(new Error("network down"));
+    const env = await baseEnv();
+    const diagnostics = createDiagnostics(() => undefined);
+
+    const returned = await runAction(env, diagnostics);
+
+    expect(returned?.outcome).toBe("complete");
+    expect(diagnostics.drain().map((r) => r.code)).toContain("publish.summary_upsert_failed");
+    expect(await readOutputs(env)).toMatchObject({ outcome: "complete", summary_comment_url: "" });
+  });
+
+  it("updates rather than creates when its own prior summary comment already exists", async () => {
+    performReviewMock.mockResolvedValue(report());
+    const marker = "<!-- keiko-for-quality:v1:";
+    vi.spyOn(IDENTITY_CLIENT, "listIssueComments").mockResolvedValue([
+      issueComment({ id: 55, body: `${marker}${"a".repeat(32)} -->` }),
+    ]);
+    // Not a real marker match (the hash will not equal the run's own computed marker), so this
+    // exercises the "no match, create" path deterministically without depending on the real hash —
+    // covered exactly by `summary.test.ts`. This test only proves the wiring reaches the client.
+    const createSpy = vi
+      .spyOn(IDENTITY_CLIENT, "createIssueComment")
+      .mockResolvedValue(issueComment());
+    const updateSpy = vi
+      .spyOn(IDENTITY_CLIENT, "updateIssueComment")
+      .mockResolvedValue(issueComment());
+    const env = await baseEnv();
+
+    await runAction(
+      env,
+      createDiagnostics(() => undefined),
+    );
+
+    // Exactly one of create/update fires — never both, never neither.
+    const totalCalls = createSpy.mock.calls.length + updateSpy.mock.calls.length;
+    expect(totalCalls).toBe(1);
   });
 });

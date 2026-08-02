@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { composeFindingBody, composeIncompleteNotice, splitTitle } from "./presentation.js";
+import { commitSha, versionTag } from "../core/brands.js";
+import type { ReasonCode } from "../diagnostics/reason-codes.js";
+import {
+  composeFindingBody,
+  composeIncompleteNotice,
+  composeSummaryBody,
+  splitTitle,
+  type SummaryCounts,
+  type SummaryReport,
+} from "./presentation.js";
 import { sanitizeFindingBody } from "./sanitize.js";
 
 const MARKER = `keiko-for-quality:v1:${"a".repeat(32)}`;
@@ -134,5 +143,185 @@ describe("composeIncompleteNotice", () => {
 
   it("ends with the marker", () => {
     expect(notice.trimEnd().endsWith(`<!-- ${MARKER} -->`)).toBe(true);
+  });
+});
+
+describe("composeSummaryBody", () => {
+  const HEAD = commitSha("a".repeat(40));
+  const OTHER_HEAD = commitSha("b".repeat(40));
+
+  const COUNTS: SummaryCounts = {
+    totalPaths: 42,
+    reviewablePaths: 30,
+    excludedPaths: 8,
+    mechanicallyClean: 4,
+    cacheHits: 5,
+    freshlyReviewed: 25,
+    findingsPublished: 3,
+    suppressedExactDuplicate: 1,
+    suppressedSimilar: 2,
+  };
+
+  function summaryReport(overrides: Partial<SummaryReport> = {}): SummaryReport {
+    return {
+      outcome: "complete",
+      reason: undefined,
+      headSha: HEAD,
+      eventTimestamp: "2026-08-02T10:15:00Z",
+      engineVersion: versionTag("v1.8.4"),
+      actionVersion: "a1b2c3d4",
+      counts: COUNTS,
+      budget: { allotted: 1_200_000, spent: undefined },
+      ...overrides,
+    };
+  }
+
+  it("is deterministic: identical input produces a byte-identical body", () => {
+    expect(composeSummaryBody(summaryReport(), MARKER)).toBe(
+      composeSummaryBody(summaryReport(), MARKER),
+    );
+  });
+
+  it("changes only the line naming the head when only the head changes", () => {
+    const a = composeSummaryBody(summaryReport(), MARKER).split("\n");
+    const b = composeSummaryBody(summaryReport({ headSha: OTHER_HEAD }), MARKER).split("\n");
+    expect(a).toHaveLength(b.length);
+    const changedLines = a.filter((line, i) => line !== b[i]);
+    expect(changedLines).toHaveLength(1);
+    expect(changedLines[0] ?? "").toContain(HEAD.slice(0, 7));
+  });
+
+  it("ends with the marker", () => {
+    expect(
+      composeSummaryBody(summaryReport(), MARKER).trimEnd().endsWith(`<!-- ${MARKER} -->`),
+    ).toBe(true);
+  });
+
+  it("states the head SHA in short form", () => {
+    expect(composeSummaryBody(summaryReport(), MARKER)).toContain("`aaaaaaa`");
+  });
+
+  it("states the engine and action version identifiers already available to the run", () => {
+    const body = composeSummaryBody(summaryReport(), MARKER);
+    expect(body).toContain("`v1.8.4`");
+    expect(body).toContain("`a1b2c3d4`");
+  });
+
+  it("states the event timestamp verbatim, never a wall-clock substitute", () => {
+    expect(composeSummaryBody(summaryReport(), MARKER)).toContain("2026-08-02T10:15:00Z");
+  });
+
+  it("omits the timestamp segment cleanly when the event carried none", () => {
+    const withTimestamp = composeSummaryBody(summaryReport(), MARKER);
+    const without = composeSummaryBody(summaryReport({ eventTimestamp: "" }), MARKER);
+    expect(without).not.toContain("2026-08-02T10:15:00Z");
+    expect(without.split("\n")[2]).not.toContain("··");
+    expect(withTimestamp).not.toBe(without);
+  });
+
+  it("stays within the target compactness budget of 30 lines", () => {
+    expect(composeSummaryBody(summaryReport(), MARKER).split("\n").length).toBeLessThanOrEqual(30);
+  });
+
+  describe("outcome line", () => {
+    it("renders a bare outcome with no reason code for 'complete'", () => {
+      const body = composeSummaryBody(summaryReport({ outcome: "complete" }), MARKER);
+      expect(body).toContain("complete");
+      expect(body).not.toContain("(`");
+    });
+
+    it("renders 'incomplete' with its reason code in parentheses", () => {
+      const body = composeSummaryBody(
+        summaryReport({ outcome: "incomplete", reason: "settlement.incomplete.coverage_gap" }),
+        MARKER,
+      );
+      expect(body).toContain("incomplete (`settlement.incomplete.coverage_gap`)");
+    });
+
+    it("renders a bare 'abandoned' with no reason code, matching the outcome-line contract", () => {
+      const body = composeSummaryBody(summaryReport({ outcome: "abandoned" }), MARKER);
+      expect(body).toContain("abandoned");
+      expect(body).not.toContain("(`");
+    });
+  });
+
+  describe("counts table", () => {
+    it("renders every documented count", () => {
+      const body = composeSummaryBody(summaryReport(), MARKER);
+      expect(body).toContain("| Total paths | 42 |");
+      expect(body).toContain("| Reviewable | 30 |");
+      expect(body).toContain("| Excluded | 8 |");
+      expect(body).toContain("| Mechanically clean | 4 |");
+      expect(body).toContain("| Replayed from cache | 5 |");
+      expect(body).toContain("| Freshly reviewed | 25 |");
+      expect(body).toContain("| Findings published | 3 |");
+      expect(body).toContain("| Suppressed (exact duplicate) | 1 |");
+      expect(body).toContain("| Suppressed (similar) | 2 |");
+    });
+
+    // Keiko-for-Quality#50's visibility requirement: replay staleness and dedup behaviour must stay
+    // visible, which is why the two duplicate-suppression stages (#38's exact marker, #51's
+    // phrasing-independent similarity) are surfaced as two counts, never folded into one.
+    it("carries the two duplicate-suppression stages separately, never merged into one count", () => {
+      const body = composeSummaryBody(
+        summaryReport({ counts: { ...COUNTS, suppressedExactDuplicate: 9, suppressedSimilar: 4 } }),
+        MARKER,
+      );
+      expect(body).toContain("| Suppressed (exact duplicate) | 9 |");
+      expect(body).toContain("| Suppressed (similar) | 4 |");
+    });
+
+    it("never lists an individual path — aggregate counts only", () => {
+      const body = composeSummaryBody(summaryReport(), MARKER);
+      expect(body).not.toMatch(/\.ts`|\.js`|\.md`/);
+    });
+  });
+
+  describe("budget line", () => {
+    it("shows only the allotted budget when no spend was reported", () => {
+      const body = composeSummaryBody(
+        summaryReport({ budget: { allotted: 1_200_000, spent: undefined } }),
+        MARKER,
+      );
+      expect(body).toContain("Budget: 1200000 tokens allotted");
+      expect(body).not.toContain("reported");
+    });
+
+    it("shows both the allotted budget and the reported spend when both are known", () => {
+      const body = composeSummaryBody(
+        summaryReport({ budget: { allotted: 1_200_000, spent: 980_000 } }),
+        MARKER,
+      );
+      expect(body).toContain("Budget: 1200000 tokens allotted, 980000 reported");
+    });
+
+    it("omits the budget line entirely when neither was recorded, rather than fabricating a zero", () => {
+      const body = composeSummaryBody(
+        summaryReport({ budget: { allotted: undefined, spent: undefined } }),
+        MARKER,
+      );
+      expect(body).not.toContain("Budget:");
+    });
+  });
+
+  /**
+   * `SummaryReport.reason` is typed `ReasonCode | undefined`, which already stops any ordinary
+   * caller from constructing a non-enum value at compile time — there is no wider `string` field it
+   * could flow through instead. This proves the second half of that guarantee: even a caller that
+   * bypasses the type checker entirely (a raw cast, exactly what a defect elsewhere in the pipeline
+   * could produce) cannot make a hostile value reach the published body, because `composeSummaryBody`
+   * re-validates against the closed vocabulary at runtime rather than trusting the static type.
+   */
+  describe("redaction: the closed reason-code vocabulary cannot be bypassed", () => {
+    it("never renders a value outside the closed vocabulary, even if the type system is bypassed", () => {
+      const hostile = "hostile <script>alert(1)</script> injected-value" as unknown as ReasonCode;
+      const body = composeSummaryBody(
+        summaryReport({ outcome: "incomplete", reason: hostile }),
+        MARKER,
+      );
+      expect(body).not.toContain("hostile");
+      expect(body).not.toContain("<script>");
+      expect(body).toContain("incomplete (`unknown`)");
+    });
   });
 });

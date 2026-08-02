@@ -71,6 +71,14 @@ export const REASON_CODES = [
   "publish.incomplete_notice_published",
   "publish.abandoned_stale_head",
 
+  // Run-summary comment (Keiko-for-Quality#31): a single, marker-identified issue comment this
+  // reviewer upserts once per pull request, independent of every finding conversation above. Never
+  // affects completeness — the same "pure add-on layer" posture as memoization below.
+  "publish.summary_published",
+  "publish.summary_updated",
+  "publish.summary_upsert_failed",
+  "publish.summary_disabled",
+
   // Configuration
   "config.invalid",
   "config.loaded",
