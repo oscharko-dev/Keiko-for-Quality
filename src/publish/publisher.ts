@@ -11,7 +11,7 @@ import {
 } from "../github/client.js";
 import { extractMarker, fingerprint, markerComment } from "./marker.js";
 import { composeFindingBody, composeIncompleteNotice } from "./presentation.js";
-import { describePlacement, placementLadder } from "./placement.js";
+import { describePlacement, placementLadder, tallyPlacementAttempts } from "./placement.js";
 import { sanitizeFindingBody } from "./sanitize.js";
 import { findsSimilarOpenConversation, type ExistingConversation } from "./similarity.js";
 
@@ -178,7 +178,14 @@ async function publishComposedFinding(
   const result = await publishWithLadder(context, ladder, document);
   if (result === undefined) {
     counters.rejectedPlacement += 1;
-    diagnostics.record("publish.finding_rejected_placement", { headSha: context.headSha });
+    // Keiko-for-Quality#63: the ladder above already retried at file level before reaching here, so
+    // every rung — line-anchored and file-level alike — was attempted and rejected. Recording the
+    // tally is what lets an operator tell "only a line anchor was tried" apart from "the file-level
+    // retry ran too, and GitHub refused that as well" instead of collapsing both into one flat code.
+    diagnostics.record("publish.finding_rejected_placement", {
+      headSha: context.headSha,
+      counts: tallyPlacementAttempts(ladder),
+    });
     return;
   }
 
