@@ -86,12 +86,44 @@ jobs:
         with:
           persist-credentials: false
 
-      # A synthetic fork-originated event. It exercises the whole entrypoint — bundle load, event
-      # parsing, eligibility, output writing — and settles before any credential or model call is
-      # needed, so the smoke test needs no secrets.
-      - name: Write synthetic event
+      # Proves the committed bundle actually executes under the node24 action runtime, against a
+      # real GitHub event payload. Every other job runs the TypeScript source through Vitest and
+      # would not notice a dist/index.js that fails to load — which is the only form consumers run.
+      #
+      # This pull request targets `main`, so declaring `dev` as the only eligible branch makes the
+      # run settle at eligibility, before any credential or model call is needed.
+      - name: Run the action against this pull request
+        id: smoke
+        uses: ./
+        with:
+          profile: examples/review-profile.json
+          model_endpoint: https://example.invalid/v1
+          model_id: unused-on-this-path
+          model_protocol: anthropic
+          model_token_env: SMOKE_UNUSED_TOKEN
+          target_branches: dev
+
+      - name: Assert it settled at eligibility with a reason
+        env:
+          OUTCOME: ${{ steps.smoke.outputs.outcome }}
+          REASON: ${{ steps.smoke.outputs.reason }}
         run: |
-          cat > "${RUNNER_TEMP}/event.json" <<'JSON'
+          echo "outcome=${OUTCOME} reason=${REASON}"
+          test "${OUTCOME}" = "skipped"
+          test "${REASON}" = "eligibility.skipped.base_branch"
+
+      # The runner owns GITHUB_EVENT_PATH and ignores a step-level override, so the eligibility
+      # matrix is driven by invoking the bundle directly. Same artifact, controlled payload.
+      - name: Assert a fork head is refused
+        env:
+          INPUT_PROFILE: examples/review-profile.json
+          INPUT_MODEL_ENDPOINT: https://example.invalid/v1
+          INPUT_MODEL_ID: unused-on-this-path
+          INPUT_MODEL_PROTOCOL: anthropic
+          INPUT_MODEL_TOKEN_ENV: SMOKE_UNUSED_TOKEN
+          INPUT_TARGET_BRANCHES: dev
+        run: |
+          cat > "${RUNNER_TEMP}/fork-event.json" <<'JSON'
           {
             "action": "synchronize",
             "pull_request": {
@@ -109,28 +141,35 @@ jobs:
             }
           }
           JSON
+          GITHUB_EVENT_PATH="${RUNNER_TEMP}/fork-event.json" \
+          GITHUB_OUTPUT="${RUNNER_TEMP}/fork-output.txt" \
+            node dist/index.js
+          cat "${RUNNER_TEMP}/fork-output.txt"
+          grep -qx 'outcome=skipped' "${RUNNER_TEMP}/fork-output.txt"
+          grep -qx 'reason=eligibility.skipped.fork' "${RUNNER_TEMP}/fork-output.txt"
 
-      # Proves the committed bundle actually executes under the node24 action runtime on a real
-      # runner. Everything else in this workflow runs the source through Vitest, which would not
-      # notice a bundle that fails to load.
-      - name: Run the action against the synthetic event
-        id: smoke
-        uses: ./
-        env:
-          GITHUB_EVENT_PATH: ${{ runner.temp }}/event.json
-        with:
-          profile: examples/review-profile.json
-          model_endpoint: https://example.invalid/v1
-          model_id: unused-in-this-path
-          model_protocol: anthropic
-          model_token_env: SMOKE_UNUSED_TOKEN
-          target_branches: dev
-
-      - name: Assert the fork head was skipped, with a reason
-        env:
-          OUTCOME: ${{ steps.smoke.outputs.outcome }}
-          REASON: ${{ steps.smoke.outputs.reason }}
+      # The redaction contract is a claim about what reaches a log. Assert it on real output.
+      - name: Assert diagnostics carry no free-form text
         run: |
-          echo "outcome=${OUTCOME} reason=${REASON}"
-          test "${OUTCOME}" = "skipped"
-          test "${REASON}" = "eligibility.skipped.fork"
+          cat > "${RUNNER_TEMP}/draft-event.json" <<'JSON'
+          {
+            "action": "opened",
+            "pull_request": {
+              "number": 2,
+              "draft": true,
+              "head": {
+                "sha": "3333333333333333333333333333333333333333",
+                "repo": { "full_name": "oscharko-dev/Keiko-for-Quality" }
+              },
+              "base": {
+                "sha": "4444444444444444444444444444444444444444",
+                "ref": "dev",
+                "repo": { "full_name": "oscharko-dev/Keiko-for-Quality" }
+              }
+            }
+          }
+          JSON
+          GITHUB_EVENT_PATH="${RUNNER_TEMP}/draft-event.json" \
+            node dist/index.js > "${RUNNER_TEMP}/diagnostics.txt"
+          cat "${RUNNER_TEMP}/diagnostics.txt"
+          node scripts/assert-diagnostic-vocabulary.mjs "${RUNNER_TEMP}/diagnostics.txt"
