@@ -9,7 +9,7 @@ import type { RuntimeConfig } from "./config/runtime.js";
 import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
 import { acquireEngine } from "./engine/acquire.js";
-import { parseEngineResult } from "./engine/result.js";
+import { parseEngineResult, type EngineFinding } from "./engine/result.js";
 import { runEngine } from "./engine/run.js";
 import { settle, type Settlement } from "./engine/settle.js";
 import type { GitContext } from "./git/plumbing.js";
@@ -78,13 +78,47 @@ function itemIndex(inventory: Inventory): ReadonlyMap<string, InventoryItem> {
   return new Map(inventory.items.map((item) => [item.path as string, item]));
 }
 
+/**
+ * Reports a run that fell short — and publishes whatever it managed to find.
+ *
+ * The notice is what blocks, and it still does. What changed is that the findings alongside it are
+ * no longer thrown away. A partial run used to publish the blocking notice and nothing else, so a
+ * pull request whose review covered 86 files out of 87 received the same message as one the
+ * reviewer never looked at. That is not caution, it is discarding work: on a large change a single
+ * failed file is the ordinary case, not the exception, so the reviewer went quiet exactly where it
+ * had the most to say.
+ *
+ * Publishing them softens nothing. The outcome stays `incomplete`, the conversation stays open, and
+ * the notice says in its own words that resolving it does not make the review complete.
+ */
 async function settleIncomplete(
   request: ReviewRequest,
   inventory: Inventory,
   reason: ReasonCode,
   diagnostics: Diagnostics,
+  findings: readonly EngineFinding[] = [],
 ): Promise<ReviewReport> {
   diagnostics.record(reason, { headSha: request.head });
+
+  // Findings first. If publication is interrupted, a reader is better served by findings without
+  // the caveat than by a caveat with no findings — the first is incomplete information, the second
+  // is none.
+  const publish =
+    findings.length === 0
+      ? undefined
+      : await publishFindings(
+          {
+            client: request.client,
+            ref: request.ref,
+            pullNumber: request.pullNumber,
+            headSha: request.head,
+            identity: request.identity,
+            items: itemIndex(inventory),
+          },
+          findings,
+          diagnostics,
+        );
+
   const anchor = noticeAnchor(inventory);
   if (anchor !== undefined) {
     await publishIncompleteNotice(
@@ -101,7 +135,12 @@ async function settleIncomplete(
       diagnostics,
     );
   }
-  return { outcome: "incomplete", reason, inventorySize: inventory.items.length };
+  return {
+    outcome: "incomplete",
+    reason,
+    inventorySize: inventory.items.length,
+    ...(publish === undefined ? {} : { publish }),
+  };
 }
 
 async function executeEngine(
@@ -181,6 +220,30 @@ async function publishSettledFindings(
   return { outcome: "complete", inventorySize: inventory.items.length, publish };
 }
 
+/**
+ * Runs the engine and records the settlement mode, or reports the failure.
+ *
+ * Returns a `ReviewReport` when the engine itself could not be run — a spawn failure, a timeout, a
+ * non-zero exit. There is nothing to publish in that case: no result reached the parser, so there
+ * are no findings to carry forward, only the fact that the review did not happen.
+ */
+async function settleOrReport(
+  request: ReviewRequest,
+  inventory: Inventory,
+  diagnostics: Diagnostics,
+): Promise<Settlement | ReviewReport> {
+  try {
+    const settlement = await executeEngine(request, inventory, diagnostics);
+    diagnostics.record(
+      settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
+      { headSha: request.head },
+    );
+    return settlement;
+  } catch {
+    return settleIncomplete(request, inventory, "settlement.incomplete.engine_error", diagnostics);
+  }
+}
+
 export async function performReview(
   request: ReviewRequest,
   diagnostics: Diagnostics,
@@ -213,23 +276,21 @@ export async function performReview(
     return { outcome: "complete", inventorySize: inventory.items.length };
   }
 
-  let settlement: Settlement;
-  try {
-    settlement = await executeEngine(request, inventory, diagnostics);
-    diagnostics.record(
-      settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
-      { headSha: request.head },
-    );
-  } catch {
-    return settleIncomplete(request, inventory, "settlement.incomplete.engine_error", diagnostics);
-  }
+  const settlement = await settleOrReport(request, inventory, diagnostics);
+  if ("outcome" in settlement) return settlement;
 
   if (!(await headIsCurrent(request))) {
     diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
     return { outcome: "abandoned", inventorySize: inventory.items.length };
   }
   if (settlement.status === "incomplete") {
-    return settleIncomplete(request, inventory, settlement.reason, diagnostics);
+    return settleIncomplete(
+      request,
+      inventory,
+      settlement.reason,
+      diagnostics,
+      settlement.findings,
+    );
   }
   return publishSettledFindings(request, inventory, settlement, started, diagnostics);
 }

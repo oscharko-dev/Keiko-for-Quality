@@ -1,4 +1,4 @@
-// Keiko for Quality 0.6.0 — generated bundle, do not edit.
+// Keiko for Quality 0.7.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/action/main.ts
@@ -881,8 +881,8 @@ async function runEngine(options2, diagnostics) {
 }
 
 // src/engine/settle.ts
-function incomplete(mode, reason, counts = {}) {
-  return { status: "incomplete", mode, reason, counts };
+function incomplete(mode, reason, findings, counts = {}) {
+  return { status: "incomplete", mode, reason, counts, findings };
 }
 function coveredPaths(result) {
   const covered = /* @__PURE__ */ new Set();
@@ -908,15 +908,17 @@ function unlistedWarnings(profile, result) {
 function commonDisqualifier(mode, result, profile, config) {
   const unlisted = unlistedWarnings(profile, result);
   if (unlisted > 0) {
-    return incomplete(mode, "settlement.incomplete.warning_not_allowlisted", { unlisted });
+    return incomplete(mode, "settlement.incomplete.warning_not_allowlisted", result.findings, {
+      unlisted
+    });
   }
   if (result.budgetExceeded || result.totalTokens > config.tokenBudget) {
-    return incomplete(mode, "settlement.incomplete.budget_exceeded", {
+    return incomplete(mode, "settlement.incomplete.budget_exceeded", result.findings, {
       tokens: result.totalTokens
     });
   }
   if (result.findings.length > config.maxFindings) {
-    return incomplete(mode, "settlement.incomplete.engine_error", {
+    return incomplete(mode, "settlement.incomplete.engine_error", result.findings, {
       findings: result.findings.length
     });
   }
@@ -924,19 +926,19 @@ function commonDisqualifier(mode, result, profile, config) {
 }
 function settleReconciled(inventory, result, profile, config) {
   if (result.schemaVersion !== SUPPORTED_MANIFEST_SCHEMA) {
-    return incomplete("reconciled", "engine.run.schema_rejected");
+    return incomplete("reconciled", "engine.run.schema_rejected", []);
   }
   if (result.terminalState !== "complete") {
-    return incomplete("reconciled", "settlement.incomplete.terminal_state");
+    return incomplete("reconciled", "settlement.incomplete.terminal_state", result.findings);
   }
   if (result.coverage.failed.length > 0) {
-    return incomplete("reconciled", "settlement.incomplete.coverage_failed", {
+    return incomplete("reconciled", "settlement.incomplete.coverage_failed", result.findings, {
       failed: result.coverage.failed.length
     });
   }
   const gap = findCoverageGap(inventory, result);
   if (gap > 0) {
-    return incomplete("reconciled", "settlement.incomplete.coverage_gap", {
+    return incomplete("reconciled", "settlement.incomplete.coverage_gap", result.findings, {
       gap,
       reviewable: inventory.reviewablePaths.size
     });
@@ -949,11 +951,11 @@ function settleReconciled(inventory, result, profile, config) {
 }
 function settleCounted(inventory, result, profile, config) {
   if (result.status !== "success") {
-    return incomplete("counted", "settlement.incomplete.terminal_state");
+    return incomplete("counted", "settlement.incomplete.terminal_state", result.findings);
   }
   const expected = inventory.reviewablePaths.size;
   if (result.filesReviewed < expected) {
-    return incomplete("counted", "settlement.incomplete.coverage_gap", {
+    return incomplete("counted", "settlement.incomplete.coverage_gap", result.findings, {
       gap: expected - result.filesReviewed,
       reviewable: expected,
       reviewed: result.filesReviewed
@@ -1613,8 +1615,20 @@ async function headIsCurrent(request) {
 function itemIndex(inventory) {
   return new Map(inventory.items.map((item) => [item.path, item]));
 }
-async function settleIncomplete(request, inventory, reason, diagnostics) {
+async function settleIncomplete(request, inventory, reason, diagnostics, findings = []) {
   diagnostics.record(reason, { headSha: request.head });
+  const publish = findings.length === 0 ? void 0 : await publishFindings(
+    {
+      client: request.client,
+      ref: request.ref,
+      pullNumber: request.pullNumber,
+      headSha: request.head,
+      identity: request.identity,
+      items: itemIndex(inventory)
+    },
+    findings,
+    diagnostics
+  );
   const anchor = noticeAnchor(inventory);
   if (anchor !== void 0) {
     await publishIncompleteNotice(
@@ -1631,7 +1645,12 @@ async function settleIncomplete(request, inventory, reason, diagnostics) {
       diagnostics
     );
   }
-  return { outcome: "incomplete", reason, inventorySize: inventory.items.length };
+  return {
+    outcome: "incomplete",
+    reason,
+    inventorySize: inventory.items.length,
+    ...publish === void 0 ? {} : { publish }
+  };
 }
 async function executeEngine(request, inventory, diagnostics) {
   const workspace = await mkdtemp2(join3(tmpdir2(), "kfq-engine-bin-"));
@@ -1688,6 +1707,18 @@ async function publishSettledFindings(request, inventory, settlement, startedAt,
   });
   return { outcome: "complete", inventorySize: inventory.items.length, publish };
 }
+async function settleOrReport(request, inventory, diagnostics) {
+  try {
+    const settlement = await executeEngine(request, inventory, diagnostics);
+    diagnostics.record(
+      settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
+      { headSha: request.head }
+    );
+    return settlement;
+  } catch {
+    return settleIncomplete(request, inventory, "settlement.incomplete.engine_error", diagnostics);
+  }
+}
 async function performReview(request, diagnostics) {
   const started = Date.now();
   diagnostics.record("run.started", { headSha: request.head });
@@ -1711,22 +1742,20 @@ async function performReview(request, diagnostics) {
     });
     return { outcome: "complete", inventorySize: inventory.items.length };
   }
-  let settlement;
-  try {
-    settlement = await executeEngine(request, inventory, diagnostics);
-    diagnostics.record(
-      settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
-      { headSha: request.head }
-    );
-  } catch {
-    return settleIncomplete(request, inventory, "settlement.incomplete.engine_error", diagnostics);
-  }
+  const settlement = await settleOrReport(request, inventory, diagnostics);
+  if ("outcome" in settlement) return settlement;
   if (!await headIsCurrent(request)) {
     diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
     return { outcome: "abandoned", inventorySize: inventory.items.length };
   }
   if (settlement.status === "incomplete") {
-    return settleIncomplete(request, inventory, settlement.reason, diagnostics);
+    return settleIncomplete(
+      request,
+      inventory,
+      settlement.reason,
+      diagnostics,
+      settlement.findings
+    );
   }
   return publishSettledFindings(request, inventory, settlement, started, diagnostics);
 }
