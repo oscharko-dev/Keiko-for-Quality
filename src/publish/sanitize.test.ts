@@ -128,3 +128,46 @@ describe("sanitizeFindingBody", () => {
     });
   });
 });
+
+describe("code-region masking (the corpus-blocking html false positive)", () => {
+  // Its own paragraph, so a case ending in a fence keeps that fence alone on its line.
+  const PAD = "\n\nPadding so the body clears the minimum length check.";
+
+  it.each([
+    ["inline code containing generics", "Indexing a plain `Record<string, string>` resolves it."],
+    ["markup inside a backtick fence", "It renders:\n\n```html\n<script>alert(1)</script>\n```"],
+    ["an indented fence (three spaces are allowed)", "Shown as:\n\n   ```\n   <b>bold</b>\n   ```"],
+    ["a tilde fence", "The template emits:\n\n~~~html\n<script>x()</script>\n~~~"],
+    ["a double-backtick span holding a single backtick", "Escape it as `` `<td>` `` there."],
+    ["an image inside inline code", "The diff adds `![alt](url)` handling."],
+  ])("accepts %s", (_name, body) => {
+    expect(sanitizeFindingBody(body + PAD).ok).toBe(true);
+  });
+
+  it.each([
+    ["a bare tag outside any code region", "This body smuggles <b>markup</b> in the open.", "html"],
+    ["an inline span that never closes", "Unbalanced `tick then <b>markup</b> after it.", "html"],
+    ["a tilde fence that never closes", "~~~\n<b>markup</b> after an unclosed fence.", "html"],
+    ["a closing fence shorter than its opening", "Broken:\n\n`````\n<b>markup</b>\n```", "html"],
+    ["an image outside any code region", "Look: ![beacon](x)", "image"],
+    ["a credential inside a fenced block", "```\nghp_abcdefghijklmnop1234\n```", "credential"],
+    ["a suggestion fence", "```suggestion\nfixed()\n```", "suggestion_block"],
+  ])("still rejects %s", (_name, body, reason) => {
+    expect(sanitizeFindingBody(body + PAD)).toEqual({ ok: false, reason });
+  });
+
+  /**
+   * A regression pin, not a benchmark. The first masking implementation paired inline spans with
+   * `(?:[^`\n]|`+)+?`, which lets one backtick run decompose many ways and backtracks
+   * exponentially — reachable denial of service, since every body here is model output produced
+   * while reading attacker-influenced material. The bound is deliberately loose: the linear
+   * implementation returns in single-digit milliseconds, so a second is only ever crossed by a
+   * return to a backtracking construct.
+   */
+  it("does not backtrack catastrophically on a body of backticks", () => {
+    const hostile = "`".repeat(2000) + "<b>x</b>" + "`".repeat(2000);
+    const started = performance.now();
+    sanitizeFindingBody(hostile);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+});
