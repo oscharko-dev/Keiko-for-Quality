@@ -42,14 +42,29 @@ export type Settlement =
       readonly mode: SettlementMode;
       readonly reason: ReasonCode;
       readonly counts: Readonly<Record<string, number>>;
+      /**
+       * What the engine did return before the run fell short.
+       *
+       * Carried rather than dropped, because "the coverage was incomplete" and "there is nothing
+       * to report" are different facts and the second one is usually false. Measured on Keiko
+       * PR #2926: 89 files, 87 reviewed, 19 KB of engine output — and because a partial run
+       * discarded its findings, the pull request received a blocking notice and not one finding.
+       * On a large change a single failed file is the ordinary case, so dropping the rest makes the
+       * reviewer useless exactly where it is worth the most.
+       *
+       * Publishing them does not soften the outcome: the run is still incomplete, the notice still
+       * blocks, and nothing here may be read as a clean review.
+       */
+      readonly findings: readonly EngineFinding[];
     };
 
 function incomplete(
   mode: SettlementMode,
   reason: ReasonCode,
+  findings: readonly EngineFinding[],
   counts: Record<string, number> = {},
 ): Settlement {
-  return { status: "incomplete", mode, reason, counts };
+  return { status: "incomplete", mode, reason, counts, findings };
 }
 
 /** Paths the engine claims it actually reviewed, or safely reused a prior review for. */
@@ -93,17 +108,19 @@ function commonDisqualifier(
 ): Settlement | undefined {
   const unlisted = unlistedWarnings(profile, result);
   if (unlisted > 0) {
-    return incomplete(mode, "settlement.incomplete.warning_not_allowlisted", { unlisted });
+    return incomplete(mode, "settlement.incomplete.warning_not_allowlisted", result.findings, {
+      unlisted,
+    });
   }
   if (result.budgetExceeded || result.totalTokens > config.tokenBudget) {
-    return incomplete(mode, "settlement.incomplete.budget_exceeded", {
+    return incomplete(mode, "settlement.incomplete.budget_exceeded", result.findings, {
       tokens: result.totalTokens,
     });
   }
   // A result carrying more findings than the consumer believes plausible is more likely a
   // misconfigured model or a prompt-injection success than a genuinely terrible change.
   if (result.findings.length > config.maxFindings) {
-    return incomplete(mode, "settlement.incomplete.engine_error", {
+    return incomplete(mode, "settlement.incomplete.engine_error", result.findings, {
       findings: result.findings.length,
     });
   }
@@ -119,19 +136,20 @@ function settleReconciled(
   // An unfamiliar manifest schema means every field below may have shifted meaning. Reading it
   // anyway would be guessing about whether a review happened.
   if (result.schemaVersion !== SUPPORTED_MANIFEST_SCHEMA) {
-    return incomplete("reconciled", "engine.run.schema_rejected");
+    // Nothing to carry: the result did not parse, so no finding from it is trustworthy.
+    return incomplete("reconciled", "engine.run.schema_rejected", []);
   }
   if (result.terminalState !== "complete") {
-    return incomplete("reconciled", "settlement.incomplete.terminal_state");
+    return incomplete("reconciled", "settlement.incomplete.terminal_state", result.findings);
   }
   if (result.coverage.failed.length > 0) {
-    return incomplete("reconciled", "settlement.incomplete.coverage_failed", {
+    return incomplete("reconciled", "settlement.incomplete.coverage_failed", result.findings, {
       failed: result.coverage.failed.length,
     });
   }
   const gap = findCoverageGap(inventory, result);
   if (gap > 0) {
-    return incomplete("reconciled", "settlement.incomplete.coverage_gap", {
+    return incomplete("reconciled", "settlement.incomplete.coverage_gap", result.findings, {
       gap,
       reviewable: inventory.reviewablePaths.size,
     });
@@ -160,11 +178,11 @@ function settleCounted(
   config: RuntimeConfig,
 ): Settlement {
   if (result.status !== "success") {
-    return incomplete("counted", "settlement.incomplete.terminal_state");
+    return incomplete("counted", "settlement.incomplete.terminal_state", result.findings);
   }
   const expected = inventory.reviewablePaths.size;
   if (result.filesReviewed < expected) {
-    return incomplete("counted", "settlement.incomplete.coverage_gap", {
+    return incomplete("counted", "settlement.incomplete.coverage_gap", result.findings, {
       gap: expected - result.filesReviewed,
       reviewable: expected,
       reviewed: result.filesReviewed,

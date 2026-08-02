@@ -319,3 +319,64 @@ describe("counted settlement (no manifest)", () => {
     expect(outcome.mode).toBe("reconciled");
   });
 });
+
+/**
+ * Found on the reviewer's first large production pull request: Keiko #2926, 89 files, 87 reviewed,
+ * 19 KB of engine output — and because a partial run discarded its findings, the pull request
+ * received a blocking notice and not a single finding. On a change that size one failed file is
+ * the ordinary case, so the reviewer went silent exactly where it had the most to say.
+ */
+describe("a partial run keeps what it found", () => {
+  const FOUND = [
+    {
+      path: repoPath("src/a.ts"),
+      content: "Close the handle.",
+      startLine: 1,
+      endLine: 1,
+      severity: "high",
+      category: "bug",
+    },
+  ];
+
+  it.each([
+    ["a non-success terminal state", { manifestPresent: false, status: "failed" as const }],
+    ["a coverage shortfall", { manifestPresent: false, filesReviewed: 0 }],
+    ["an exhausted budget", { budgetExceeded: true }],
+  ])("carries the findings through %s", (_name, overrides) => {
+    const settlement = settle(
+      inventory(["src/a.ts"]),
+      result({ ...overrides, findings: FOUND }),
+      PROFILE,
+      CONFIG,
+    );
+    expect(settlement.status).toBe("incomplete");
+    if (settlement.status !== "incomplete") return;
+    expect(settlement.findings).toEqual(FOUND);
+  });
+
+  /**
+   * The one case with nothing to carry. A result that failed to parse cannot be trusted in part
+   * either — "some of this malformed output is fine" is not a judgement anything here can make.
+   */
+  it("carries nothing when the result did not parse", () => {
+    const settlement = settle(
+      inventory(["src/a.ts"]),
+      result({ schemaVersion: "ocr.run-manifest/v99", findings: FOUND }),
+      PROFILE,
+      CONFIG,
+    );
+    expect(settlement.status).toBe("incomplete");
+    if (settlement.status !== "incomplete") return;
+    expect(settlement.findings).toEqual([]);
+  });
+
+  it("still refuses to call the run complete", () => {
+    const settlement = settle(
+      inventory(["src/a.ts"]),
+      result({ manifestPresent: false, status: "failed", findings: FOUND }),
+      PROFILE,
+      CONFIG,
+    );
+    expect(settlement.status).not.toBe("complete");
+  });
+});
