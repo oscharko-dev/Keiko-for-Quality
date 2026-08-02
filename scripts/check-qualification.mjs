@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs";
 
 import { CASES } from "../corpus/cases.mjs";
+import { cliPathArgument } from "./cli-args.mjs";
 
 /**
  * Applies the promotion thresholds to a corpus report.
@@ -27,11 +28,10 @@ const THRESHOLDS = {
   publishable: 1,
 };
 
-const reportPath = process.argv[2];
-if (reportPath === undefined) {
-  console.error("usage: check-qualification.mjs <report.json>");
-  process.exit(2);
-}
+const reportPath = cliPathArgument(process.argv[2], {
+  usage: "usage: check-qualification.mjs <report.json>",
+  mustEndWith: ".json",
+});
 
 const report = JSON.parse(readFileSync(reportPath, "utf8"));
 const byId = new Map((report.results ?? []).map((r) => [r.id, r]));

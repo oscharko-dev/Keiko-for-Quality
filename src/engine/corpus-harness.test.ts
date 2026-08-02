@@ -30,4 +30,20 @@ describe("corpus harness startup", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("binding");
   });
+
+  // The same startup guarantee for the real-diffs harness, which carried the second instance of
+  // the #48 loader bypass. Missing arguments must die at the usage line — cleanly, before any
+  // profile, engine, or model concern — proving the script parses and links under plain node.
+  it("real-diffs refuses a missing argument with its usage line", () => {
+    const script = fileURLToPath(new URL("../../corpus/real-diffs.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script], {
+      cwd: fileURLToPath(new URL("../..", import.meta.url)),
+      encoding: "utf8",
+      timeout: 60_000,
+      env: { OCR_BINARY: process.execPath, PATH: process.env.PATH ?? "" },
+    });
+    expect(result.stderr).not.toMatch(/TypeError|ERR_MODULE_NOT_FOUND/);
+    expect(result.stderr).toContain("usage:");
+    expect(result.status).toBe(2);
+  });
 });
