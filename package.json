@@ -35,7 +35,8 @@
     "check:engine-pin": "node scripts/check-engine-pin.mjs",
     "corpus": "node corpus/run.mjs",
     "fetch:engine": "node scripts/fetch-engine.mjs",
-    "check:qualification": "node scripts/check-qualification.mjs"
+    "check:qualification": "node scripts/check-qualification.mjs",
+    "corpus:real": "node corpus/real-diffs.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",
