@@ -99,7 +99,7 @@ function parseJson(text3, field) {
 }
 
 // src/cache/review-cache.ts
-var SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v1";
+var SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v2";
 var CACHE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 var PROTOCOLS = /* @__PURE__ */ new Set(["openai", "anthropic"]);
 var FIELD_SEPARATOR = "\0";
@@ -130,6 +130,10 @@ function computeKey(baseBlob, headBlob, ruleDigest, engineDigest, model, proto) 
   const material = [baseBlob, headBlob, ruleDigest, engineDigest, model, proto].join(
     FIELD_SEPARATOR
   );
+  return createHash("sha256").update(material, "utf8").digest("hex");
+}
+function computePathSetDigest(pathTokens) {
+  const material = [...pathTokens].sort().join(FIELD_SEPARATOR);
   return createHash("sha256").update(material, "utf8").digest("hex");
 }
 function optionalToken(value, field) {
@@ -167,6 +171,7 @@ var ENTRY_KEYS = [
   "headBlob",
   "ruleDigest",
   "engineDigest",
+  "prPathSetDigest",
   "modelId",
   "protocol",
   "findings"
@@ -186,6 +191,10 @@ function parseEntry(value, index) {
     asString(object.engineDigest, `${scope}.engineDigest`, 64),
     `${scope}.engineDigest`
   );
+  const pathSet = sha256(
+    asString(object.prPathSetDigest, `${scope}.prPathSetDigest`, 64),
+    `${scope}.prPathSetDigest`
+  );
   const model = modelId(
     asString(object.modelId, `${scope}.modelId`, PARSE_LIMITS.maxModelIdChars),
     `${scope}.modelId`
@@ -201,6 +210,7 @@ function parseEntry(value, index) {
     headBlob: head,
     ruleDigest: rule,
     engineDigest: engine,
+    prPathSetDigest: pathSet,
     modelId: model,
     protocol: proto,
     findings: parseFindings(object.findings, `${scope}.findings`)
@@ -282,6 +292,7 @@ function canonicalEntry(entry) {
     headBlob: entry.headBlob,
     ruleDigest: entry.ruleDigest,
     engineDigest: entry.engineDigest,
+    prPathSetDigest: entry.prPathSetDigest,
     modelId: entry.modelId,
     protocol: entry.protocol,
     findings: entry.findings.map(canonicalFinding)
@@ -545,8 +556,19 @@ import { join as join3 } from "node:path";
 function isCacheEligible(item) {
   return item.classification.kind === "reviewed" && (item.status === "M" || item.status === "A") && item.baseBlob !== void 0 && item.headBlob !== void 0;
 }
-var EMPTY_LOOKUP = { hits: /* @__PURE__ */ new Map(), eligiblePaths: /* @__PURE__ */ new Set() };
-function lookupMemoized(store, inventory, ruleDigest, engineDigest, config) {
+function pathSetToken(item) {
+  const path = item.path;
+  return item.oldPath === void 0 ? path : `${item.oldPath}->${path}`;
+}
+function computePrPathSetDigest(inventory) {
+  return computePathSetDigest(inventory.items.map(pathSetToken));
+}
+var EMPTY_LOOKUP = {
+  hits: /* @__PURE__ */ new Map(),
+  eligiblePaths: /* @__PURE__ */ new Set(),
+  contextInvalidated: 0
+};
+function lookupMemoized(store, inventory, ruleDigest, engineDigest, config, pathSetDigest) {
   if (store === void 0 || engineDigest === void 0) return EMPTY_LOOKUP;
   let model;
   try {
@@ -556,6 +578,7 @@ function lookupMemoized(store, inventory, ruleDigest, engineDigest, config) {
   }
   const hits = /* @__PURE__ */ new Map();
   const eligiblePaths = /* @__PURE__ */ new Set();
+  let contextInvalidated = 0;
   for (const item of inventory.items) {
     if (!isCacheEligible(item) || item.baseBlob === void 0 || item.headBlob === void 0) {
       continue;
@@ -571,9 +594,11 @@ function lookupMemoized(store, inventory, ruleDigest, engineDigest, config) {
       config.protocol
     );
     const entry = lookup(store, key);
-    if (entry !== void 0) hits.set(path, entry);
+    if (entry === void 0) continue;
+    if (entry.prPathSetDigest === pathSetDigest) hits.set(path, entry);
+    else contextInvalidated += 1;
   }
-  return { hits, eligiblePaths };
+  return { hits, eligiblePaths, contextInvalidated };
 }
 function combinedExcludes(mechanicallyClean, hitPaths) {
   return [.../* @__PURE__ */ new Set([...mechanicallyClean, ...hitPaths])];
@@ -621,6 +646,7 @@ function buildNewEntries(inputs) {
       headBlob: item.headBlob,
       ruleDigest: inputs.ruleDigest,
       engineDigest: inputs.engineDigest,
+      prPathSetDigest: inputs.pathSetDigest,
       modelId: model,
       protocol: proto,
       findings: byPath.get(path) ?? []
@@ -2312,7 +2338,9 @@ var INERT_MEMO = {
   hitPaths: /* @__PURE__ */ new Set(),
   eligiblePaths: /* @__PURE__ */ new Set(),
   ruleDigest: void 0,
-  engineDigest: void 0
+  engineDigest: void 0,
+  pathSetDigest: void 0,
+  contextInvalidated: 0
 };
 function cacheCounts(memo) {
   return { cacheHits: memo.hits.size, cacheMisses: memo.eligiblePaths.size - memo.hits.size };
@@ -2321,23 +2349,31 @@ function prepareMemoization(request, inventory, diagnostics) {
   if (request.cacheStore === void 0) return INERT_MEMO;
   const ruleDigest = promptIdentityDigest(request.profile, request.guidelines);
   const engineDigest = currentPlatformDigest();
-  const { hits, eligiblePaths } = lookupMemoized(
+  const pathSetDigest = computePrPathSetDigest(inventory);
+  const { hits, eligiblePaths, contextInvalidated } = lookupMemoized(
     request.cacheStore,
     inventory,
     ruleDigest,
     engineDigest,
-    request.config
+    request.config,
+    pathSetDigest
   );
   const memo = {
     hits,
     hitPaths: new Set(hits.keys()),
     eligiblePaths,
     ruleDigest,
-    engineDigest
+    engineDigest,
+    pathSetDigest,
+    contextInvalidated
   };
   diagnostics.record("cache.hits", {
     headSha: request.head,
     counts: { hits: hits.size, misses: eligiblePaths.size - hits.size }
+  });
+  diagnostics.record("cache.context_invalidated", {
+    headSha: request.head,
+    counts: { invalidated: contextInvalidated }
   });
   return memo;
 }
@@ -2398,7 +2434,9 @@ function publicationDegraded(outcome) {
 }
 function finalizeCacheStore(request, inventory, memo, engineFindings) {
   if (request.cacheStore === void 0) return void 0;
-  if (memo.ruleDigest === void 0 || memo.engineDigest === void 0) return void 0;
+  if (memo.ruleDigest === void 0 || memo.engineDigest === void 0 || memo.pathSetDigest === void 0) {
+    return void 0;
+  }
   const newEntries = buildNewEntries({
     inventory,
     eligiblePaths: memo.eligiblePaths,
@@ -2406,6 +2444,7 @@ function finalizeCacheStore(request, inventory, memo, engineFindings) {
     findings: engineFindings,
     ruleDigest: memo.ruleDigest,
     engineDigest: memo.engineDigest,
+    pathSetDigest: memo.pathSetDigest,
     config: request.config
   });
   if (newEntries.length === 0) return { store: request.cacheStore, appended: 0 };

@@ -8,6 +8,7 @@ import {
   appendEntries,
   blobId,
   computeKey,
+  computePathSetDigest,
   lookup,
   modelId,
   protocol,
@@ -27,6 +28,10 @@ const RULE_DIGEST: Sha256 = sha256("1".repeat(64));
 const ENGINE_DIGEST: Sha256 = sha256("2".repeat(64));
 const MODEL_ID = modelId("claude-sonnet-4-5");
 const PROTOCOL = protocol("anthropic");
+// An arbitrary but fixed changed-path-set digest (v0.10.0, issue #50). Its actual value is never
+// the point in this file — only `memoize.test.ts` exercises path-set semantics — so every fixture
+// below shares this one constant unless a test overrides it explicitly.
+const PATH_SET_DIGEST: Sha256 = sha256("5".repeat(64));
 
 interface Inputs {
   readonly base: BlobId;
@@ -71,13 +76,18 @@ function finding(overrides: Partial<EngineFinding> = {}): EngineFinding {
   };
 }
 
-function entryFor(inputs: Inputs, findings: readonly EngineFinding[]): CacheEntry {
+function entryFor(
+  inputs: Inputs,
+  findings: readonly EngineFinding[],
+  pathSetDigest: Sha256 = PATH_SET_DIGEST,
+): CacheEntry {
   return {
     key: keyFor(inputs),
     baseBlob: inputs.base,
     headBlob: inputs.head,
     ruleDigest: inputs.rule,
     engineDigest: inputs.engine,
+    prPathSetDigest: pathSetDigest,
     modelId: inputs.model,
     protocol: inputs.proto,
     findings,
@@ -230,6 +240,7 @@ describe("serializeStore", () => {
       findings: entry.findings,
       protocol: entry.protocol,
       modelId: entry.modelId,
+      prPathSetDigest: entry.prPathSetDigest,
       engineDigest: entry.engineDigest,
       ruleDigest: entry.ruleDigest,
       headBlob: entry.headBlob,
@@ -284,6 +295,17 @@ describe("readStore: malformed input is rejected whole", () => {
     expect(readStore(text)).toEqual({ ok: false, reason: "cache.store.schema_invalid" });
   });
 
+  it("rejects a store still carrying the retired v1 schema marker (no migration, v0.10.0 issue #50)", () => {
+    // v1 predates `prPathSetDigest`. There is deliberately no migration path: a store written under
+    // it fails this exact-match check like any other unrecognised schema, and the run starts from
+    // an empty store rather than trying to interpret v1 entries as v2 ones.
+    const text = JSON.stringify({
+      schemaVersion: "keiko-for-quality.review-cache/v1",
+      entries: [],
+    });
+    expect(readStore(text)).toEqual({ ok: false, reason: "cache.store.schema_invalid" });
+  });
+
   it("rejects a document with more entries than the parser allows", () => {
     const tooMany = Array.from({ length: PARSE_LIMITS.maxEntries + 1 }, () => ({}));
     const text = JSON.stringify({ schemaVersion: SUPPORTED_STORE_SCHEMA, entries: tooMany });
@@ -330,6 +352,73 @@ describe("readStore: malformed input is rejected whole", () => {
     const text = serializeStore(EMPTY_STORE);
     const result = readStore(text);
     expect(result).toEqual({ ok: true, store: EMPTY_STORE });
+  });
+});
+
+describe("readStore: a tampered prPathSetDigest is rejected whole (v0.10.0, issue #50)", () => {
+  function withTamperedPathSetDigest(value: unknown): string {
+    const good = entryFor(baseline(), []);
+    const text = serializeStore({ schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [good] });
+    const parsed = JSON.parse(text) as { entries: Record<string, unknown>[] };
+    const onlyEntry = parsed.entries[0];
+    if (onlyEntry === undefined) throw new Error("fixture invariant violated");
+    onlyEntry.prPathSetDigest = value;
+    return JSON.stringify(parsed);
+  }
+
+  // Matches this parser's existing policy for every other stored digest (`ruleDigest`,
+  // `engineDigest`): any structural problem discards the whole store, not just the one entry.
+  it.each([
+    ["the wrong length", "abc123"],
+    ["non-hex characters", "g".repeat(64)],
+    ["an empty string", ""],
+    ["unicode", "🙂".repeat(20)],
+  ])("rejects the whole store when prPathSetDigest has %s", (_name, bad) => {
+    const result = readStore(withTamperedPathSetDigest(bad));
+    expect(result).toEqual({ ok: false, reason: "cache.store.entry_invalid" });
+  });
+
+  it("rejects the whole store when prPathSetDigest is missing entirely", () => {
+    const good = entryFor(baseline(), []);
+    const text = serializeStore({ schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [good] });
+    const parsed = JSON.parse(text) as { entries: Record<string, unknown>[] };
+    const onlyEntry = parsed.entries[0];
+    if (onlyEntry === undefined) throw new Error("fixture invariant violated");
+    delete onlyEntry.prPathSetDigest;
+    const result = readStore(JSON.stringify(parsed));
+    expect(result).toEqual({ ok: false, reason: "cache.store.entry_invalid" });
+  });
+});
+
+describe("computePathSetDigest", () => {
+  it("is a 64-character lowercase hex digest", () => {
+    expect(computePathSetDigest(["src/a.ts"])).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("is stable for identical inputs", () => {
+    expect(computePathSetDigest(["src/a.ts", "src/b.ts"])).toBe(
+      computePathSetDigest(["src/a.ts", "src/b.ts"]),
+    );
+  });
+
+  it("does not depend on the order tokens arrive in", () => {
+    expect(computePathSetDigest(["c", "a", "b"])).toBe(computePathSetDigest(["a", "b", "c"]));
+  });
+
+  it("changes when a path is added", () => {
+    expect(computePathSetDigest(["a", "b"])).not.toBe(computePathSetDigest(["a", "b", "c"]));
+  });
+
+  it("changes when a path is removed", () => {
+    expect(computePathSetDigest(["a", "b", "c"])).not.toBe(computePathSetDigest(["a", "b"]));
+  });
+
+  it("is well-defined for an empty set", () => {
+    expect(computePathSetDigest([])).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("does not let two tokens split differently collide, mirroring computeKey's own NUL-safety", () => {
+    expect(computePathSetDigest(["ab", "c"])).not.toBe(computePathSetDigest(["a", "bc"]));
   });
 });
 
