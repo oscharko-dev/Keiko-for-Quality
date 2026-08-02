@@ -1,0 +1,99 @@
+name: Keiko for Quality
+description: >-
+  Hardened pull-request reviewer. Publishes model-backed findings as native, resolvable review
+  conversations bound to the exact reviewed head, with no raw review material in logs or artifacts.
+author: oscharko-dev
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  profile:
+    description: >-
+      Path to the review profile JSON, relative to the workspace. It declares which paths are
+      review-relevant, which deletions are review-critical, which are generated, and every other
+      exclusion with its justification. Read from the trusted base checkout.
+    required: true
+
+  model_endpoint:
+    description: HTTPS endpoint of the model provider. Must be https.
+    required: true
+  model_id:
+    description: Model identifier. Pin a provider snapshot where one is offered.
+    required: true
+  model_protocol:
+    description: "Wire protocol: `openai` or `anthropic`."
+    required: true
+  model_token_env:
+    description: >-
+      NAME of the environment variable holding the model credential — not the credential itself.
+      Set that variable from a secret in the job's `env:`. Passing the value as an input would put
+      it in the step context, where every other action in the job can read it.
+    required: true
+
+  app_id:
+    description: >-
+      GitHub App id for the reviewer's own posting identity. Strongly recommended: deduplication
+      only suppresses a repost when the existing conversation was authored by this reviewer, and a
+      shared identity weakens that check.
+    required: false
+  app_private_key:
+    description: GitHub App private key (PEM) used to mint a short-lived installation token.
+    required: false
+  github_token:
+    description: >-
+      Fallback token used only when no App credentials are supplied. Findings are then authored by
+      the shared Actions identity.
+    required: false
+    default: ${{ github.token }}
+
+  target_branches:
+    description: Comma-separated base branches eligible for review.
+    required: false
+    default: dev
+  language:
+    description: Review output language.
+    required: false
+    default: English
+  concurrency:
+    description: Engine review concurrency.
+    required: false
+    default: "4"
+  file_timeout_seconds:
+    description: Per-file model timeout.
+    required: false
+    default: "300"
+  review_timeout_seconds:
+    description: Whole-review wall-clock ceiling.
+    required: false
+    default: "1800"
+  token_budget:
+    description: Hard token ceiling for one review. Exceeding it settles the run as incomplete.
+    required: false
+    default: "2000000"
+  max_findings:
+    description: >-
+      Findings above this count are treated as implausible and settle the run as incomplete, on the
+      basis that a flood is more likely a misconfigured model than a genuinely terrible change.
+    required: false
+    default: "50"
+  rename_detection_percent:
+    description: Git rename-detection similarity threshold.
+    required: false
+    default: "50"
+
+outputs:
+  outcome:
+    description: "`complete`, `incomplete`, `abandoned`, or `skipped`. Never finding content."
+  reason:
+    description: Redacted reason code when the outcome is not complete.
+  inventory_size:
+    description: Number of changed paths classified.
+  findings_published:
+    description: Number of findings published as review conversations.
+  findings_suppressed:
+    description: Number of findings suppressed as already-open duplicates.
+
+runs:
+  using: node24
+  main: dist/index.js

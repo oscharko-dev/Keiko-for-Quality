@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "reviewRelevant": [
+    "src/**/*.{ts,tsx,js,jsx,mjs,cjs}",
+    "scripts/**",
+    ".github/workflows/**",
+    ".github/actions/**",
+    "package.json",
+    "package-lock.json"
+  ],
+  "deletionCritical": [
+    "**/*.test.{ts,tsx,js}",
+    "tests/**",
+    "docs/adr/**",
+    ".github/workflows/**",
+    "scripts/**"
+  ],
+  "generated": ["dist/**", "build/**", "coverage/**", "**/*.min.js"],
+  "excluded": [
+    {
+      "pattern": "docs/**/*.md",
+      "reason": "prose documentation; reviewed by people, not by the model"
+    },
+    {
+      "pattern": "**/*.{png,jpg,svg,ico,woff,woff2}",
+      "reason": "binary assets carry no reviewable source"
+    },
+    {
+      "pattern": "**/__snapshots__/**",
+      "reason": "generated snapshots; the assertions that produce them are review-relevant"
+    },
+    {
+      "pattern": "**/*",
+      "reason": "catch-all: no remaining path is treated as review-relevant by this profile"
+    }
+  ],
+  "benignWarnings": [
+    {
+      "type": "context_truncated",
+      "justification": "expected on files larger than the model context window; the file is still reviewed, in part"
+    }
+  ]
+}
