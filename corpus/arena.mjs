@@ -59,6 +59,11 @@ export function parseArgs(argv) {
     const arg = argv[i];
     const next = () => {
       i += 1;
+      // A flag with nothing after it must fail here, with a message that names the flag — not
+      // later, as `undefined` silently flowing into `--repo`'s `.split("/")`, `--since`'s
+      // `options.since !== null` check (which `undefined` still passes), or the evidence
+      // document's own `generatedAt` field.
+      if (i >= argv.length) throw new Error(`${arg} requires a value`);
       return argv[i];
     };
     if (arg === "--repo") options.repo = next();

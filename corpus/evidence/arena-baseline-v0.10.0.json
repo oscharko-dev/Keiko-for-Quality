@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-08-02T16:12:23.681Z",
+  "generatedAt": "2026-08-02T17:01:53.881Z",
   "targetRepo": "oscharko-dev/Keiko",
   "heuristics": {
     "duplicateSimilarity": {
@@ -59,7 +59,7 @@
         "typename": "Bot",
         "arenaId": "kfq",
         "identityMismatch": false,
-        "commentCount": 64
+        "commentCount": 71
       },
       {
         "rawLogin": "oscharko",
@@ -67,7 +67,7 @@
         "typename": "User",
         "arenaId": null,
         "identityMismatch": false,
-        "commentCount": 20
+        "commentCount": 102
       }
     ]
   },
@@ -139,20 +139,20 @@
     },
     {
       "number": 2926,
-      "headSha": "c827cdb3805695654e7225d943bf6b7f0d509270",
+      "headSha": "19672bfa0ad0fffef98ac675e98d8f3316d238f5",
       "bots": {
         "kfq": {
-          "findingsPosted": 59,
-          "distinctFindings": 44,
-          "duplicateVariants": 15,
+          "findingsPosted": 66,
+          "distinctFindings": 49,
+          "duplicateVariants": 17,
           "incompleteNotices": 4,
-          "filesTouched": 35,
+          "filesTouched": 37,
           "threads": {
-            "resolved": 14,
-            "unresolved": 36,
-            "outdated": 13
+            "resolved": 59,
+            "unresolved": 11,
+            "outdated": 0
           },
-          "uniqueToBot": 31,
+          "uniqueToBot": 36,
           "coFound": {
             "kfq": null,
             "coderabbit": 9,
@@ -167,9 +167,9 @@
           "incompleteNotices": 0,
           "filesTouched": 36,
           "threads": {
-            "resolved": 33,
-            "unresolved": 18,
-            "outdated": 1
+            "resolved": 52,
+            "unresolved": 0,
+            "outdated": 0
           },
           "uniqueToBot": 40,
           "coFound": {
@@ -186,9 +186,9 @@
           "incompleteNotices": 0,
           "filesTouched": 18,
           "threads": {
-            "resolved": 3,
-            "unresolved": 8,
-            "outdated": 10
+            "resolved": 21,
+            "unresolved": 0,
+            "outdated": 0
           },
           "uniqueToBot": 10,
           "coFound": {
@@ -209,6 +209,16 @@
           "databaseId": 3699453432,
           "memberCount": 2,
           "memberDatabaseIds": [3699453432, 3699595289]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-memory-vault/src/vault.ts",
+          "startLine": 634,
+          "endLine": 641,
+          "isFileLevel": false,
+          "databaseId": 3699453526,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699453526, 3699809035]
         },
         {
           "arenaId": "kfq",
@@ -264,11 +274,11 @@
           "arenaId": "kfq",
           "path": "packages/keiko-server/src/memory-maintenance-handlers.ts",
           "startLine": 575,
-          "endLine": 599,
+          "endLine": 601,
           "isFileLevel": false,
           "databaseId": 3699138183,
-          "memberCount": 3,
-          "memberDatabaseIds": [3699138183, 3699387649, 3699595420]
+          "memberCount": 4,
+          "memberDatabaseIds": [3699138183, 3699387649, 3699595420, 3699809129]
         },
         {
           "arenaId": "kfq",
@@ -447,16 +457,16 @@
     "prCount": 2,
     "bots": {
       "kfq": {
-        "findingsPosted": 59,
-        "distinctFindings": 44,
-        "duplicateVariants": 15,
+        "findingsPosted": 66,
+        "distinctFindings": 49,
+        "duplicateVariants": 17,
         "incompleteNotices": 5,
-        "filesTouched": 36,
-        "uniqueToBot": 31,
+        "filesTouched": 38,
+        "uniqueToBot": 36,
         "threads": {
-          "resolved": 15,
-          "unresolved": 36,
-          "outdated": 13
+          "resolved": 60,
+          "unresolved": 11,
+          "outdated": 0
         },
         "coFound": {
           "kfq": null,
@@ -473,9 +483,9 @@
         "filesTouched": 37,
         "uniqueToBot": 41,
         "threads": {
-          "resolved": 34,
-          "unresolved": 18,
-          "outdated": 1
+          "resolved": 53,
+          "unresolved": 0,
+          "outdated": 0
         },
         "coFound": {
           "kfq": 9,
@@ -492,9 +502,9 @@
         "filesTouched": 19,
         "uniqueToBot": 11,
         "threads": {
-          "resolved": 4,
-          "unresolved": 8,
-          "outdated": 10
+          "resolved": 22,
+          "unresolved": 0,
+          "outdated": 0
         },
         "coFound": {
           "kfq": 8,

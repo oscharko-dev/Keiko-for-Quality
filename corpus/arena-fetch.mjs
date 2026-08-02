@@ -133,12 +133,17 @@ function mergePage(threads, response, owner, repo, number) {
   };
 }
 
+/** However large a real pull request's review-thread list could plausibly be paginated to. */
+const MAX_THREAD_PAGES = 50;
+
 /**
  * Fetches every review thread on one pull request, following both pagination dimensions: the
  * thread list itself, and — defensively — the comments within a single thread, though no thread
  * observed while building this tool carried more than two. A thread whose reply count this run
- * could not fully page is reported rather than silently truncated, so a future pull request with an
- * unusually long conversation cannot quietly lose data to a hard page size.
+ * could not fully page is reported rather than silently truncated (`truncatedThreadCount`), and the
+ * same discipline applies to the outer page limit: a pull request with more review threads than
+ * `MAX_THREAD_PAGES` pages can hold throws instead of silently returning a partial list, so a
+ * partial scoreboard is never mistaken for a complete one.
  *
  * `runGhImpl` defaults to the real, network-calling `runGh` and is overridden in tests with a fake
  * that returns canned GraphQL responses, so the pagination and error-handling logic above is
@@ -149,21 +154,24 @@ export function fetchPullRequestReviewThreads(owner, repo, number, runGhImpl = r
   let headSha = null;
   let after = null;
   let truncatedThreadCount = 0;
-  for (let page = 0; page < 50; page += 1) {
+  for (let page = 0; page < MAX_THREAD_PAGES; page += 1) {
     const response = runGraphql(runGhImpl, { owner, repo, number }, after);
     const merged = mergePage(threads, response, owner, repo, number);
     headSha = merged.headSha;
     truncatedThreadCount += merged.truncatedThreadCount;
-    if (!merged.pageInfo.hasNextPage) break;
+    if (!merged.pageInfo.hasNextPage) return { headSha, threads, truncatedThreadCount };
     after = merged.pageInfo.endCursor;
   }
-  return { headSha, threads, truncatedThreadCount };
+  throw new Error(
+    `pull request ${owner}/${repo}#${String(number)} has more than ${String(MAX_THREAD_PAGES)} ` +
+      "pages of review threads — this run cannot page all of them",
+  );
 }
 
 /**
- * Lists pull request numbers created on or after `sinceDate` (an ISO date, `YYYY-MM-DD`), newest
- * first. Used only by `--since`; a caller that already knows which pull requests to measure has no
- * reason to call this. `runGhImpl` is injectable for the same reason as above.
+ * Lists pull request numbers created on or after `sinceDate` (an ISO date, `YYYY-MM-DD`), in
+ * ascending number order. Used only by `--since`; a caller that already knows which pull requests
+ * to measure has no reason to call this. `runGhImpl` is injectable for the same reason as above.
  */
 export function discoverPullRequestNumbers(
   owner,

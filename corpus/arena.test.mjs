@@ -56,6 +56,33 @@ test("parseArgs throws on an argument it does not recognize", () => {
   assert.throws(() => parseArgs(["--unknown-flag"]), /unrecognized argument: --unknown-flag/);
 });
 
+/**
+ * Regression pin: a flag as the last argument with nothing after it used to store `undefined`
+ * without a check, and the failure surfaced later in a confusing way — `--repo` fed `undefined`
+ * into `splitRepo`'s `.split("/")` (an uncaught `TypeError`, not this module's own error message),
+ * `--since` left `options.since` as `undefined`, which the `!== null` check downstream still
+ * treats as "given", and `--generated-at` would have written the literal `undefined` into the
+ * evidence document's timestamp. Every value-taking flag must fail at the point it is missing its
+ * value, not somewhere downstream that has to guess why.
+ */
+test("parseArgs throws immediately when a flag is given with no value after it", () => {
+  for (const flag of [
+    "--repo",
+    "--since",
+    "--state",
+    "--generated-at",
+    "--out-dir",
+    "--out-json",
+    "--out-md",
+  ]) {
+    assert.throws(
+      () => parseArgs([flag]),
+      new RegExp(`${flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} requires a value`),
+      `${flag} with no value must throw, not store undefined`,
+    );
+  }
+});
+
 test("resolvePrNumbers deduplicates and sorts explicit pull request numbers ascending", () => {
   const options = { since: null, prNumbers: [2926, 17, 2926, 3] };
   assert.deepEqual(resolvePrNumbers(options, "owner", "repo"), [3, 17, 2926]);

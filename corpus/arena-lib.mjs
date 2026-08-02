@@ -13,10 +13,12 @@ import { createHash } from "node:crypto";
  * lets `corpus/arena-lib.test.mjs` exercise attribution, the duplicate heuristic, and the
  * cross-bot overlap against fixtures instead of a live pull request.
  *
- * Redaction: nothing exported from here ever carries a comment body. A body is read only long
- * enough to compute a similarity token set, an incomplete-notice match, and a SHA-256 digest, all
- * before the record is placed in any structure this module returns. `arena.test.mjs` pins that
- * property directly by asserting the assembled document never contains a fixture body substring.
+ * Redaction: the evidence document `buildEvidenceDocument` returns never carries a comment body.
+ * `arena-lib.test.mjs` pins that property directly by asserting the assembled document never
+ * contains a fixture body substring. One exported value is deliberately not redacted:
+ * `extractConversations`'s own result keeps `body` on each conversation, because
+ * `clusterDuplicateFindings` still needs it to compute a similarity token set — treat that result as
+ * unredacted intermediate state, never something to serialize or write to disk directly.
  *
  * `arenaId` throughout is one of the three keys in `ARENA_BOT_ORDER` — never a raw GitHub login,
  * which varies by API (REST appends `[bot]`; GraphQL does not) and could drift if a bot migrates
@@ -233,6 +235,20 @@ function unionWindow(memberIndexes, windows) {
   return { startLine, endLine, isFileLevel: false };
 }
 
+/**
+ * The final, always-numeric tiebreak: the smallest member id, which every cluster shape populates
+ * (`memberDatabaseIds`, already sorted ascending) and `databaseId` does not — a cross-bot cluster
+ * has no single representative id of its own. Two same-bot, same-path, same-window clusters (a
+ * realistic case: two of one bot's file-level findings on one file, kept apart by the within-bot
+ * similarity check but otherwise identical in location) would otherwise tie on `databaseId ??
+ * undefined` on both sides, and `undefined - undefined` is `NaN` — a comparator that returns `NaN`
+ * makes the sort order unspecified, which is exactly what a document promising byte-identical
+ * output for byte-identical input cannot afford.
+ */
+function clusterSortKey(cluster) {
+  return cluster.databaseId ?? cluster.memberDatabaseIds[0];
+}
+
 function compareClusterOrder(a, b) {
   if (a.path !== b.path) return a.path.localeCompare(b.path);
   const aStart = a.startLine ?? -1;
@@ -241,7 +257,7 @@ function compareClusterOrder(a, b) {
   const aEnd = a.endLine ?? -1;
   const bEnd = b.endLine ?? -1;
   if (aEnd !== bEnd) return aEnd - bEnd;
-  return a.databaseId - b.databaseId;
+  return clusterSortKey(a) - clusterSortKey(b);
 }
 
 /**
@@ -697,7 +713,11 @@ function renderPrSection(pr) {
   const duplicates = renderClusterList(
     "Duplicate-variant clusters",
     pr.duplicateClusters,
-    (cluster) => `${displayName(cluster.arenaId)}, ${String(cluster.memberCount)} variants`,
+    // "1 finding + N duplicate variants", not "N variants" — the cluster's `memberCount` includes
+    // the finding itself, and the Duplicates column reports only the extra members beyond it. The
+    // two must read as the same number, or a reader cannot reconcile the table with this list.
+    (cluster) =>
+      `${displayName(cluster.arenaId)}, 1 finding + ${String(cluster.memberCount - 1)} duplicate variant(s)`,
   );
   const overlaps = renderClusterList("Cross-bot overlap clusters", pr.crossBotClusters, (cluster) =>
     cluster.bots.map((id) => displayName(id)).join(" + "),

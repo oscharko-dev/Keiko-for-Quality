@@ -1,6 +1,6 @@
 # Reviewer arena scoreboard
 
-Generated 2026-08-02T16:12:23.681Z for `oscharko-dev/Keiko`.
+Generated 2026-08-02T17:01:53.881Z for `oscharko-dev/Keiko`.
 
 ## Identity
 
@@ -10,8 +10,8 @@ Every login this run observed, and which arena bot (if any) it resolved to — s
 | ------------------------- | ------------ | ----------------- | -------- | ---- |
 | `chatgpt-codex-connector` | Bot          | Codex             | 22       |      |
 | `coderabbitai`            | Bot          | CodeRabbit        | 53       |      |
-| `keiko-for-quality`       | Bot          | Keiko for Quality | 64       |      |
-| `oscharko`                | User         | (unattributed)    | 20       |      |
+| `keiko-for-quality`       | Bot          | Keiko for Quality | 71       |      |
+| `oscharko`                | User         | (unattributed)    | 102      |      |
 
 ## Heuristics
 
@@ -35,27 +35,28 @@ Duplicate-variant clusters: none.
 
 Cross-bot overlap clusters: none.
 
-### Pull request #2926 (head `c827cdb38056`)
+### Pull request #2926 (head `19672bfa0ad0`)
 
 | Bot               | Posted | Distinct | Duplicates | Notices | Files | Resolved | Unresolved | Outdated | Unique | vs Keiko for Quality | vs CodeRabbit | vs Codex | All three |
 | ----------------- | ------ | -------- | ---------- | ------- | ----- | -------- | ---------- | -------- | ------ | -------------------- | ------------- | -------- | --------- |
-| Keiko for Quality | 59     | 44       | 15         | 4       | 35    | 14       | 36         | 13       | 31     | —                    | 9             | 8        | 4         |
-| CodeRabbit        | 52     | 52       | 0          | 0       | 36    | 33       | 18         | 1        | 40     | 9                    | —             | 7        | 4         |
-| Codex             | 21     | 21       | 0          | 0       | 18    | 3        | 8          | 10       | 10     | 8                    | 7             | —        | 4         |
+| Keiko for Quality | 66     | 49       | 17         | 4       | 37    | 59       | 11         | 0        | 36     | —                    | 9             | 8        | 4         |
+| CodeRabbit        | 52     | 52       | 0          | 0       | 36    | 52       | 0          | 0        | 40     | 9                    | —             | 7        | 4         |
+| Codex             | 21     | 21       | 0          | 0       | 18    | 21       | 0          | 0        | 10     | 8                    | 7             | —        | 4         |
 
 Duplicate-variant clusters:
 
-- packages/keiko-contracts/src/voice-session-recap.ts — Keiko for Quality, 2 variants
-- packages/keiko-server/src/coding-context/codingContextRoutes.ts:235-236 — Keiko for Quality, 3 variants
-- packages/keiko-server/src/deps.ts:3584-3585 — Keiko for Quality, 2 variants
-- packages/keiko-server/src/gateway-setup.test.ts — Keiko for Quality, 2 variants
-- packages/keiko-server/src/grounded-orchestrator.ts:3216-3217 — Keiko for Quality, 2 variants
-- packages/keiko-server/src/memory-capture-policy.ts:207-212 — Keiko for Quality, 2 variants
-- packages/keiko-server/src/memory-maintenance-handlers.ts:575-599 — Keiko for Quality, 3 variants
-- packages/keiko-server/src/runtime/containerRunner.ts:382-387 — Keiko for Quality, 2 variants
-- packages/keiko-server/src/update-remediation.ts:331-338 — Keiko for Quality, 3 variants
-- packages/keiko-server/src/update-session-lock.ts:250-262 — Keiko for Quality, 2 variants
-- packages/keiko-ui/src/app/components/desktop/modals/GatewaySetupDialog.tsx:2040-2044 — Keiko for Quality, 3 variants
+- packages/keiko-contracts/src/voice-session-recap.ts — Keiko for Quality, 1 finding + 1 duplicate variant(s)
+- packages/keiko-memory-vault/src/vault.ts:634-641 — Keiko for Quality, 1 finding + 1 duplicate variant(s)
+- packages/keiko-server/src/coding-context/codingContextRoutes.ts:235-236 — Keiko for Quality, 1 finding + 2 duplicate variant(s)
+- packages/keiko-server/src/deps.ts:3584-3585 — Keiko for Quality, 1 finding + 1 duplicate variant(s)
+- packages/keiko-server/src/gateway-setup.test.ts — Keiko for Quality, 1 finding + 1 duplicate variant(s)
+- packages/keiko-server/src/grounded-orchestrator.ts:3216-3217 — Keiko for Quality, 1 finding + 1 duplicate variant(s)
+- packages/keiko-server/src/memory-capture-policy.ts:207-212 — Keiko for Quality, 1 finding + 1 duplicate variant(s)
+- packages/keiko-server/src/memory-maintenance-handlers.ts:575-601 — Keiko for Quality, 1 finding + 3 duplicate variant(s)
+- packages/keiko-server/src/runtime/containerRunner.ts:382-387 — Keiko for Quality, 1 finding + 1 duplicate variant(s)
+- packages/keiko-server/src/update-remediation.ts:331-338 — Keiko for Quality, 1 finding + 2 duplicate variant(s)
+- packages/keiko-server/src/update-session-lock.ts:250-262 — Keiko for Quality, 1 finding + 1 duplicate variant(s)
+- packages/keiko-ui/src/app/components/desktop/modals/GatewaySetupDialog.tsx:2040-2044 — Keiko for Quality, 1 finding + 2 duplicate variant(s)
 
 Cross-bot overlap clusters:
 
@@ -80,6 +81,6 @@ Cross-bot overlap clusters:
 
 | Bot               | Posted | Distinct | Duplicates | Notices | Files | Resolved | Unresolved | Outdated | Unique | vs Keiko for Quality | vs CodeRabbit | vs Codex | All three |
 | ----------------- | ------ | -------- | ---------- | ------- | ----- | -------- | ---------- | -------- | ------ | -------------------- | ------------- | -------- | --------- |
-| Keiko for Quality | 59     | 44       | 15         | 5       | 36    | 15       | 36         | 13       | 31     | —                    | 9             | 8        | 4         |
-| CodeRabbit        | 53     | 53       | 0          | 0       | 37    | 34       | 18         | 1        | 41     | 9                    | —             | 7        | 4         |
-| Codex             | 22     | 22       | 0          | 0       | 19    | 4        | 8          | 10       | 11     | 8                    | 7             | —        | 4         |
+| Keiko for Quality | 66     | 49       | 17         | 5       | 38    | 60       | 11         | 0        | 36     | —                    | 9             | 8        | 4         |
+| CodeRabbit        | 53     | 53       | 0          | 0       | 37    | 53       | 0          | 0        | 41     | 9                    | —             | 7        | 4         |
+| Codex             | 22     | 22       | 0          | 0       | 19    | 22       | 0          | 0        | 11     | 8                    | 7             | —        | 4         |

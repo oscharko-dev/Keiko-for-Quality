@@ -31,7 +31,7 @@ function comment({
   createdAt,
   body,
   replyTo = null,
-  commit = "092f356678aa1b2c3d4e5f60718293a4b5c6d7e",
+  commit = "092f356678aa1b2c3d4e5f60718293a4b5c6d7e8",
 }) {
   return {
     databaseId,

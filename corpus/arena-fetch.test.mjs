@@ -128,6 +128,31 @@ test("fetchPullRequestReviewThreads follows pagination and merges threads across
   );
 });
 
+/**
+ * Regression pin: the page loop originally had no failure mode of its own — if `hasNextPage` was
+ * still `true` after the 50th page, the loop simply ended and returned a partial thread list with
+ * no signal, contradicting the same module's own documented discipline for the inner, per-thread
+ * reply cap (`truncatedThreadCount`). A pull request would need thousands of review threads to
+ * reach this in practice, but a silent truncation at either level is the one thing this function's
+ * own docstring promises never happens.
+ */
+test("fetchPullRequestReviewThreads throws, rather than silently truncating, when a pull request has more pages of review threads than it can page", () => {
+  const alwaysAnotherPage = graphqlPage("headsha1", [threadFixture("t", "someone")], {
+    hasNextPage: true,
+    endCursor: "keep-going",
+  });
+  let calls = 0;
+  const fakeRunGh = () => {
+    calls += 1;
+    return JSON.stringify(alwaysAnotherPage);
+  };
+  assert.throws(
+    () => fetchPullRequestReviewThreads("owner", "repo", 1, fakeRunGh),
+    /more than 50 pages/,
+  );
+  assert.equal(calls, 50, "must attempt exactly the documented page cap before giving up");
+});
+
 test("fetchPullRequestReviewThreads counts a thread whose replies were not fully paged in", () => {
   const thread = threadFixture("t1", "someone");
   thread.comments.totalCount = 5; // more replies than the single node included above

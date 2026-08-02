@@ -15,6 +15,7 @@ import {
   extractConversations,
   buildPrRecord,
   buildEvidenceDocument,
+  renderMarkdown,
 } from "./arena-lib.mjs";
 import {
   PR_2926_RAW_THREADS,
@@ -278,6 +279,48 @@ test("clusterAcrossBots never joins two findings from the same bot, even at an i
   assert.ok(clusters.every((cluster) => cluster.bots.length === 1 && cluster.bots[0] === "kfq"));
 });
 
+/**
+ * Regression pin: two singleton cross-bot clusters that tie on path, start, and end (exactly the
+ * shape above) have no `databaseId` of their own to break the tie with — only `memberDatabaseIds`.
+ * Before this was fixed, the final tiebreak read `a.databaseId - b.databaseId`, `undefined -
+ * undefined`, `NaN`; a comparator that returns `NaN` leaves `Array.prototype.sort`'s output order
+ * unspecified by the language, which a document that promises byte-identical bytes for identical
+ * input cannot tolerate even when one engine's sort happens to look stable. Asserting the exact
+ * order — smallest member id first — is what a `NaN` regression would fail, where asserting only
+ * `clusters.length` (the test above) would not.
+ */
+test("clusterAcrossBots orders two ties on path, start, and end by their smallest member id", () => {
+  const shared = {
+    path: "x.ts",
+    startLine: 1,
+    endLine: 5,
+    isFileLevel: false,
+    createdAt: "2026-01-01T00:00:00Z",
+  };
+  const byBot = {
+    kfq: [
+      { ...shared, databaseId: 20 },
+      { ...shared, databaseId: 10 },
+    ],
+    coderabbit: [],
+    codex: [],
+  };
+  const clusters = clusterAcrossBots(byBot);
+  assert.deepEqual(
+    clusters.map((cluster) => cluster.memberDatabaseIds),
+    [[10], [20]],
+    "the cluster whose member id is smaller must sort first, deterministically",
+  );
+  // Confirms the ordering is actually stable across repeated calls, not merely non-crashing once —
+  // a NaN comparator can look consistent on one run and still be unspecified by the language.
+  for (let i = 0; i < 5; i += 1) {
+    assert.deepEqual(
+      clusterAcrossBots(byBot).map((cluster) => cluster.memberDatabaseIds),
+      [[10], [20]],
+    );
+  }
+});
+
 test("a finding with no overlapping counterpart from another bot forms its own unique singleton cluster", () => {
   const byBot = {
     kfq: [],
@@ -319,7 +362,7 @@ test("extractConversations marks the two ADR incomplete-review notices and exclu
 test("extractConversations captures the commit each conversation's root comment was posted against", () => {
   const { conversations } = extractConversations(PR_2926_RAW_THREADS);
   const first = conversations.find((c) => c.databaseId === 5001);
-  assert.equal(first.commitOid, "092f356678aa1b2c3d4e5f60718293a4b5c6d7e");
+  assert.equal(first.commitOid, "092f356678aa1b2c3d4e5f60718293a4b5c6d7e8");
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -443,4 +486,25 @@ test("buildEvidenceDocument's identity table reports both API shapes of the Code
   );
   assert.ok(humanEntry, "a human reply's login must still appear in the identity table");
   assert.equal(humanEntry.arenaId, null);
+});
+
+/**
+ * Regression pin: the duplicate-cluster list originally rendered `cluster.memberCount` labeled
+ * "variants" (3, for the pinned trio), while the scoreboard table's Duplicates column reports
+ * `duplicateVariants` (2 — the two *extra* members beyond the finding itself). A reader could not
+ * reconcile "3 variants" in the list against "2" in the table for the very same cluster.
+ */
+test("renderMarkdown's duplicate-cluster wording reconciles with the Duplicates column", () => {
+  const prs = [
+    { number: 2926, headSha: PR_2926_HEAD_SHA, ...extractConversations(PR_2926_RAW_THREADS) },
+  ];
+  const document = buildEvidenceDocument({ repo: "oscharko-dev/Keiko", generatedAt: "x", prs });
+  const kfqDuplicates = document.aggregate.bots.kfq.duplicateVariants;
+  assert.equal(kfqDuplicates, 2, "fixture setup: the pinned trio contributes exactly 2 duplicates");
+  const markdown = renderMarkdown(document);
+  assert.ok(
+    markdown.includes(`1 finding + ${String(kfqDuplicates)} duplicate variant(s)`),
+    "the list entry's count must be the same number as the Duplicates column, not the raw member count",
+  );
+  assert.ok(!markdown.includes("3 variants"), "must not render the pre-fix, unreconciled wording");
 });
