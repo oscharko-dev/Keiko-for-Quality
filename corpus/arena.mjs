@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { buildEvidenceDocument, extractConversations, renderMarkdown } from "./arena-lib.mjs";
 import { discoverPullRequestNumbers, fetchPullRequestReviewThreads } from "./arena-fetch.mjs";
@@ -31,9 +32,19 @@ import { discoverPullRequestNumbers, fetchPullRequestReviewThreads } from "./are
  * `--generated-at` exists so a caller can pin the document's timestamp for a reproducible archival
  * copy; omitted, it is the wall clock at invocation, which is why that clock lives here and nowhere
  * inside `corpus/arena-lib.mjs`.
+ *
+ * `parseArgs` and `resolvePrNumbers` raise a plain `Error` on invalid input rather than calling
+ * `process.exit` themselves — only `main` does that, in one place, after catching. That is what
+ * makes both functions testable in `corpus/arena.test.mjs` without a test run being able to
+ * terminate itself.
  */
 
-function parseArgs(argv) {
+export const USAGE =
+  "usage: node corpus/arena.mjs [--repo owner/name] [--generated-at ISO8601] " +
+  "[--out-dir dir] [--out-json path] [--out-md path] " +
+  "(<prNumber> [prNumber...] | --since YYYY-MM-DD [--state open|closed|all])";
+
+export function parseArgs(argv) {
   const options = {
     repo: "oscharko-dev/Keiko",
     since: null,
@@ -58,33 +69,32 @@ function parseArgs(argv) {
     else if (arg === "--out-json") options.outJson = next();
     else if (arg === "--out-md") options.outMd = next();
     else if (/^\d+$/.test(arg)) options.prNumbers.push(Number(arg));
-    else {
-      console.error(`unrecognized argument: ${arg}`);
-      process.exit(2);
-    }
+    else throw new Error(`unrecognized argument: ${arg}`);
   }
   return options;
 }
 
-function usageAndExit() {
-  console.error(
-    "usage: node corpus/arena.mjs [--repo owner/name] [--generated-at ISO8601] " +
-      "[--out-dir dir] [--out-json path] [--out-md path] " +
-      "(<prNumber> [prNumber...] | --since YYYY-MM-DD [--state open|closed|all])",
-  );
-  process.exit(2);
-}
-
-function resolvePrNumbers(options, owner, repoName) {
+/**
+ * Decides which pull request numbers to measure: the ones named explicitly (deduplicated and
+ * sorted), or the result of `--since` discovery. `discover` is injectable so this decision — not
+ * the network call `discoverPullRequestNumbers` itself makes — is what `arena.test.mjs` verifies.
+ */
+export function resolvePrNumbers(options, owner, repoName, discover = discoverPullRequestNumbers) {
   if (options.since !== null) {
     if (options.prNumbers.length > 0) {
-      console.error("pass either explicit pull request numbers or --since, not both");
-      process.exit(2);
+      throw new Error("pass either explicit pull request numbers or --since, not both");
     }
-    return discoverPullRequestNumbers(owner, repoName, options.since, options.state);
+    return discover(owner, repoName, options.since, options.state);
   }
-  if (options.prNumbers.length === 0) usageAndExit();
+  if (options.prNumbers.length === 0) throw new Error(USAGE);
   return [...new Set(options.prNumbers)].sort((a, b) => a - b);
+}
+
+/** Splits `owner/name` into its parts, or throws — the one shape every downstream call assumes. */
+export function splitRepo(repo) {
+  const [owner, repoName] = repo.split("/");
+  if (!owner || !repoName) throw new Error(`--repo must be "owner/name", got: ${repo}`);
+  return { owner, repoName };
 }
 
 function loadPr(owner, repoName, number) {
@@ -113,18 +123,11 @@ function writeOutputs(options, document, markdown) {
   console.log(`wrote ${mdPath}`);
 }
 
-function main() {
+function run() {
   const options = parseArgs(process.argv.slice(2));
-  const [owner, repoName] = options.repo.split("/");
-  if (!owner || !repoName) {
-    console.error(`--repo must be "owner/name", got: ${options.repo}`);
-    process.exit(2);
-  }
+  const { owner, repoName } = splitRepo(options.repo);
   const prNumbers = resolvePrNumbers(options, owner, repoName);
-  if (prNumbers.length === 0) {
-    console.error("no pull requests to measure");
-    process.exit(2);
-  }
+  if (prNumbers.length === 0) throw new Error("no pull requests to measure");
   console.log(`arena: ${options.repo}, pull request(s) ${prNumbers.join(", ")}`);
   const prs = prNumbers.map((number) => loadPr(owner, repoName, number));
   const document = buildEvidenceDocument({
@@ -137,4 +140,16 @@ function main() {
   writeOutputs(options, document, markdown);
 }
 
-main();
+function main() {
+  try {
+    run();
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(2);
+  }
+}
+
+// Only run when executed directly (`node corpus/arena.mjs`), not when imported by a test.
+if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main();
+}
