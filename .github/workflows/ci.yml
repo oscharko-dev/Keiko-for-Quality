@@ -178,3 +178,67 @@ jobs:
             node dist/index.js > "${RUNNER_TEMP}/diagnostics.txt"
           cat "${RUNNER_TEMP}/diagnostics.txt"
           node scripts/assert-diagnostic-vocabulary.mjs "${RUNNER_TEMP}/diagnostics.txt"
+
+  sonar:
+    name: SonarCloud
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The token lives in this environment rather than at repository scope, so only a job that
+    # declares it can read it — same pattern as the qualification workflow's model credential.
+    environment: sonarcloud
+    # Forked pull requests receive no secrets, so the scanner cannot authenticate from them; the
+    # job is skipped rather than left to fail half-way through. Same-repo pull requests and pushes
+    # to main analyze normally.
+    if: >-
+      github.event_name == 'push' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Check out
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Full history: the SCM sensor attributes changed lines by blame, and a shallow clone
+          # would mark every line new on every analysis.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      - name: Test with coverage
+        run: npm run test:coverage
+
+      - name: Read the project version
+        id: sonar-version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # Downloaded and checksum-verified directly rather than through a marketplace action —
+      # the same digest-pinned archive the Keiko consumer verifies (scanner 8.1.0.6389).
+      - name: Download Sonar Scanner CLI
+        run: |
+          set -euo pipefail
+          scanner_zip="$RUNNER_TEMP/sonar-scanner-cli.zip"
+          curl --proto '=https' -sSfL -o "$scanner_zip" "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-8.1.0.6389-linux-x64.zip"
+          echo "bb8f709f9cb73352f8d1260a3b3c506c0f41146754bc630762c126d795499d0b  $scanner_zip" | sha256sum --check
+          unzip -q "$scanner_zip" -d "$RUNNER_TEMP"
+          echo "SONAR_SCANNER_HOME=$RUNNER_TEMP/sonar-scanner-8.1.0.6389-linux-x64" >> "$GITHUB_ENV"
+
+      - name: SonarCloud CI-based analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_VERSION: ${{ steps.sonar-version.outputs.version }}
+          # Pull-request runs analyze the merge ref, whose SHA differs from the head; pin the
+          # analysis revision so changed lines attribute to the real head commit.
+          SONAR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          "$SONAR_SCANNER_HOME/bin/sonar-scanner" \
+            -Dsonar.projectBaseDir="$GITHUB_WORKSPACE" \
+            -Dsonar.projectVersion="$SONAR_VERSION" \
+            -Dsonar.scm.revision="$SONAR_HEAD_SHA" \
+            -Dsonar.qualitygate.wait=true \
+            -Dsonar.working.directory="$RUNNER_TEMP/sonar-work"

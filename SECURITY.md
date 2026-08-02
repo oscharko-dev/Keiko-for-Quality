@@ -73,9 +73,9 @@ consumers implicitly trust inside a job holding a private key.
 
 ### What is out of scope
 
-- **Fork-originated pull requests.** They are skipped in version 0.1. Model budget and the
+- **Fork-originated pull requests.** They are skipped and recorded as such. Model budget and the
   credential-bearing path are not exposed to arbitrary external heads.
-- **Availability.** Version 0.1 publishes no required status check, so a workflow that never runs
+- **Availability.** The reviewer publishes no required status check, so a workflow that never runs
   cannot be detected by this bot. That is a consumer-side branch-protection concern.
 - **Model correctness.** Findings are claims to evaluate. Precision is measured, not guaranteed.
 - **The consumer's own workflow.** If the consumer checks out the candidate head instead of the
@@ -83,4 +83,6 @@ consumers implicitly trust inside a job holding a private key.
 
 ## Supported versions
 
-Version 0.1 is the current release line and the only one receiving fixes.
+Only the newest release line — currently 0.8 — receives fixes. There are no maintenance branches
+for older lines. Because consumers pin this action to a full commit SHA, a fix takes effect only
+when the pin is advanced to a release that carries it.
