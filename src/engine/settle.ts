@@ -75,18 +75,30 @@ function coveredPaths(result: EngineResult): ReadonlySet<string> {
   return covered;
 }
 
+/** No memoization: every existing caller that does not pass one gets today's exact behaviour. */
+const NO_MEMOIZED_PATHS: ReadonlySet<string> = new Set();
+
 /**
  * The reconciliation the engine cannot perform for itself.
  *
  * The engine reports what it selected and finished. Only an independently computed inventory can
  * answer whether what it selected was everything that changed — which is the question that matters
  * when the engine's own path filters differ from the consumer's review profile.
+ *
+ * `memoizedPaths` (v0.9.0) is a reviewable path a cache hit answered instead of the engine. It was
+ * excluded from the engine's own dispatch on purpose (see `buildRuleFile`'s exclude threading), so
+ * it can never appear in `coveredPaths` — without crediting it here, every memoized path would
+ * read as a permanent, un-fixable coverage gap instead of the deliberate skip it is.
  */
-function findCoverageGap(inventory: Inventory, result: EngineResult): number {
+function findCoverageGap(
+  inventory: Inventory,
+  result: EngineResult,
+  memoizedPaths: ReadonlySet<string>,
+): number {
   const covered = coveredPaths(result);
   let gap = 0;
   for (const path of inventory.reviewablePaths) {
-    if (!covered.has(path)) gap += 1;
+    if (!covered.has(path) && !memoizedPaths.has(path)) gap += 1;
   }
   return gap;
 }
@@ -132,6 +144,7 @@ function settleReconciled(
   result: EngineResult,
   profile: CompiledProfile,
   config: RuntimeConfig,
+  memoizedPaths: ReadonlySet<string>,
 ): Settlement {
   // An unfamiliar manifest schema means every field below may have shifted meaning. Reading it
   // anyway would be guessing about whether a review happened.
@@ -147,7 +160,7 @@ function settleReconciled(
       failed: result.coverage.failed.length,
     });
   }
-  const gap = findCoverageGap(inventory, result);
+  const gap = findCoverageGap(inventory, result, memoizedPaths);
   if (gap > 0) {
     return incomplete("reconciled", "settlement.incomplete.coverage_gap", result.findings, {
       gap,
@@ -170,17 +183,23 @@ function settleReconciled(
  * inventory is weaker than matching identities, but it is not nothing: it is exactly the check that
  * catches the engine's path filters disagreeing with the consumer's review profile, which is the
  * omission this adapter exists to prevent.
+ *
+ * A memoized path (v0.9.0) was excluded from the engine's dispatch the same way, so it can never
+ * contribute to `files_reviewed` either. The expected count shrinks by exactly the memoized count
+ * rather than the reported count growing to match — shrinking the denominator is what still lets a
+ * genuinely missing, non-memoized file register as a real shortfall.
  */
 function settleCounted(
   inventory: Inventory,
   result: EngineResult,
   profile: CompiledProfile,
   config: RuntimeConfig,
+  memoizedPaths: ReadonlySet<string>,
 ): Settlement {
   if (result.status !== "success") {
     return incomplete("counted", "settlement.incomplete.terminal_state", result.findings);
   }
-  const expected = inventory.reviewablePaths.size;
+  const expected = Math.max(0, inventory.reviewablePaths.size - memoizedPaths.size);
   if (result.filesReviewed < expected) {
     return incomplete("counted", "settlement.incomplete.coverage_gap", result.findings, {
       gap: expected - result.filesReviewed,
@@ -197,13 +216,18 @@ function settleCounted(
   );
 }
 
+/**
+ * @param memoizedPaths Reviewable paths a review-cache hit answered instead of the engine (v0.9.0).
+ *   Defaults to empty, so every pre-existing caller keeps today's exact behaviour unchanged.
+ */
 export function settle(
   inventory: Inventory,
   result: EngineResult,
   profile: CompiledProfile,
   config: RuntimeConfig,
+  memoizedPaths: ReadonlySet<string> = NO_MEMOIZED_PATHS,
 ): Settlement {
   return result.manifestPresent
-    ? settleReconciled(inventory, result, profile, config)
-    : settleCounted(inventory, result, profile, config);
+    ? settleReconciled(inventory, result, profile, config, memoizedPaths)
+    : settleCounted(inventory, result, profile, config, memoizedPaths);
 }

@@ -1,4 +1,4 @@
-import type { RepoPath } from "../core/brands.js";
+import type { BlobId, RepoPath } from "../core/brands.js";
 import type { CompiledProfile } from "../config/profile.js";
 import {
   MODE_ABSENT,
@@ -51,6 +51,15 @@ export interface InventoryItem {
    * a submodule pointer is never reviewable.
    */
   readonly changedLines: number;
+  /**
+   * The Git blob on each side of the change, carried through from `RawChange` for the review-cache
+   * key (v0.9.0) — the exact base and head content addresses a cached finding list is replayable
+   * against. Optional so a hand-built fixture never has to supply either; `toItem` always sets both,
+   * because `RawChange` always carries them (the all-zero id stands in for "no blob" on an addition
+   * or a deletion, and is itself a valid, meaningful `BlobId`).
+   */
+  readonly baseBlob?: BlobId;
+  readonly headBlob?: BlobId;
 }
 
 function isMode(change: RawChange, mode: string): boolean {
@@ -190,5 +199,7 @@ export function toItem(profile: CompiledProfile, change: RawChange): InventoryIt
     modeChanged,
     reviewable: isReviewable(classification),
     changedLines: change.changedLines,
+    baseBlob: change.oldBlob,
+    headBlob: change.newBlob,
   };
 }
