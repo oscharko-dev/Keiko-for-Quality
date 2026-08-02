@@ -1,8 +1,11 @@
-// Keiko for Quality 0.8.0 — generated bundle, do not edit.
+// Keiko for Quality 0.9.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/action/main.ts
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile as writeFile3 } from "node:fs/promises";
+
+// src/cache/review-cache.ts
+import { createHash } from "node:crypto";
 
 // src/core/brands.ts
 var FULL_SHA = /^[0-9a-f]{40}$/;
@@ -45,6 +48,250 @@ function repoPath(value, field = "path") {
   const segments = value.split("/");
   if (segments.some((s) => s === ".." || s === "." || s === "")) throw new ValidationError(field);
   return value;
+}
+function hasControlCharacters(value) {
+  return CONTROL_CHARACTERS.test(value);
+}
+
+// src/core/validate.ts
+function asObject(value, field) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ValidationError(field);
+  }
+  return value;
+}
+function asString(value, field, max = 4096) {
+  if (typeof value !== "string" || value.length === 0 || value.length > max) {
+    throw new ValidationError(field);
+  }
+  return value;
+}
+function asInteger(value, field, min, max) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    throw new ValidationError(field);
+  }
+  return value;
+}
+function asArray(value, field, max = 4096) {
+  if (!Array.isArray(value) || value.length > max) throw new ValidationError(field);
+  return value;
+}
+function asStringArray(value, field, max = 4096) {
+  return asArray(value, field, max).map((entry, i) => asString(entry, `${field}[${String(i)}]`));
+}
+function rejectUnknownKeys(object, known, field) {
+  const allowed = new Set(known);
+  for (const key of Object.keys(object)) {
+    if (!allowed.has(key)) throw new ValidationError(`${field}.${key}`);
+  }
+}
+function requireKeys(object, required, field) {
+  for (const key of required) {
+    if (!(key in object)) throw new ValidationError(`${field}.${key}`);
+  }
+}
+function parseJson(text3, field) {
+  try {
+    return JSON.parse(text3);
+  } catch {
+    throw new ValidationError(field);
+  }
+}
+
+// src/cache/review-cache.ts
+var SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v1";
+var CACHE_KEY_PATTERN = /^[0-9a-f]{64}$/;
+var PROTOCOLS = /* @__PURE__ */ new Set(["openai", "anthropic"]);
+var FIELD_SEPARATOR = "\0";
+var PARSE_LIMITS = {
+  maxStoreBytes: 4 * 1024 * 1024,
+  maxEntries: 2e4,
+  maxFindingsPerEntry: 1e3,
+  maxFindingContentChars: 2e4,
+  maxLine: 1e7,
+  maxModelIdChars: 256
+};
+function modelId(value, field = "modelId") {
+  if (value.length === 0 || value.length > PARSE_LIMITS.maxModelIdChars) {
+    throw new ValidationError(field);
+  }
+  if (hasControlCharacters(value)) throw new ValidationError(field);
+  return value;
+}
+function protocol(value, field = "protocol") {
+  if (!PROTOCOLS.has(value)) throw new ValidationError(field);
+  return value;
+}
+function toCacheKey(value, field) {
+  if (!CACHE_KEY_PATTERN.test(value)) throw new ValidationError(field);
+  return value;
+}
+function computeKey(baseBlob, headBlob, ruleDigest, engineDigest, model, proto) {
+  const material = [baseBlob, headBlob, ruleDigest, engineDigest, model, proto].join(
+    FIELD_SEPARATOR
+  );
+  return createHash("sha256").update(material, "utf8").digest("hex");
+}
+function optionalToken(value, field) {
+  if (value === void 0 || value === null || value === "") return void 0;
+  const token = asString(value, field, 64);
+  if (!/^[a-z][a-z0-9_-]*$/i.test(token)) throw new ValidationError(field);
+  return token;
+}
+var FINDING_REQUIRED = ["path", "content", "startLine", "endLine"];
+var FINDING_KEYS = [...FINDING_REQUIRED, "severity", "category"];
+function parseFinding(value, field) {
+  const object = asObject(value, field);
+  requireKeys(object, FINDING_REQUIRED, field);
+  rejectUnknownKeys(object, FINDING_KEYS, field);
+  const start = asInteger(object.startLine, `${field}.startLine`, 0, PARSE_LIMITS.maxLine);
+  const end = asInteger(object.endLine, `${field}.endLine`, 0, PARSE_LIMITS.maxLine);
+  if (end < start) throw new ValidationError(`${field}.endLine`);
+  return {
+    path: repoPath(asString(object.path, `${field}.path`), `${field}.path`),
+    content: asString(object.content, `${field}.content`, PARSE_LIMITS.maxFindingContentChars),
+    startLine: start,
+    endLine: end,
+    severity: optionalToken(object.severity, `${field}.severity`),
+    category: optionalToken(object.category, `${field}.category`)
+  };
+}
+function parseFindings(value, field) {
+  return asArray(value, field, PARSE_LIMITS.maxFindingsPerEntry).map(
+    (entry, i) => parseFinding(entry, `${field}[${String(i)}]`)
+  );
+}
+var ENTRY_KEYS = [
+  "key",
+  "baseBlob",
+  "headBlob",
+  "ruleDigest",
+  "engineDigest",
+  "modelId",
+  "protocol",
+  "findings"
+];
+function parseEntry(value, index) {
+  const scope = `store.entries[${String(index)}]`;
+  const object = asObject(value, scope);
+  requireKeys(object, ENTRY_KEYS, scope);
+  rejectUnknownKeys(object, ENTRY_KEYS, scope);
+  const base = blobId(asString(object.baseBlob, `${scope}.baseBlob`, 64), `${scope}.baseBlob`);
+  const head = blobId(asString(object.headBlob, `${scope}.headBlob`, 64), `${scope}.headBlob`);
+  const rule = sha256(
+    asString(object.ruleDigest, `${scope}.ruleDigest`, 64),
+    `${scope}.ruleDigest`
+  );
+  const engine = sha256(
+    asString(object.engineDigest, `${scope}.engineDigest`, 64),
+    `${scope}.engineDigest`
+  );
+  const model = modelId(
+    asString(object.modelId, `${scope}.modelId`, PARSE_LIMITS.maxModelIdChars),
+    `${scope}.modelId`
+  );
+  const proto = protocol(asString(object.protocol, `${scope}.protocol`, 32), `${scope}.protocol`);
+  const key = toCacheKey(asString(object.key, `${scope}.key`, 64), `${scope}.key`);
+  if (key !== computeKey(base, head, rule, engine, model, proto)) {
+    throw new ValidationError(`${scope}.key`);
+  }
+  return {
+    key,
+    baseBlob: base,
+    headBlob: head,
+    ruleDigest: rule,
+    engineDigest: engine,
+    modelId: model,
+    protocol: proto,
+    findings: parseFindings(object.findings, `${scope}.findings`)
+  };
+}
+var STORE_KEYS = ["schemaVersion", "entries"];
+function parseStore(value) {
+  const object = asObject(value, "store");
+  requireKeys(object, STORE_KEYS, "store");
+  rejectUnknownKeys(object, STORE_KEYS, "store");
+  if (object.schemaVersion !== SUPPORTED_STORE_SCHEMA) {
+    throw new ValidationError("store.schemaVersion");
+  }
+  if (!Array.isArray(object.entries)) throw new ValidationError("store.entries.type");
+  if (object.entries.length > PARSE_LIMITS.maxEntries) {
+    throw new ValidationError("store.entries.count");
+  }
+  return {
+    schemaVersion: SUPPORTED_STORE_SCHEMA,
+    entries: object.entries.map((entry, i) => parseEntry(entry, i))
+  };
+}
+function classifyRejection(field) {
+  if (field === "store.entries.count") return "cache.store.entry_overflow";
+  if (field.startsWith("store.entries[")) return "cache.store.entry_invalid";
+  return "cache.store.schema_invalid";
+}
+function readStore(text3) {
+  if (text3.length === 0 || text3.length > PARSE_LIMITS.maxStoreBytes) {
+    return { ok: false, reason: "cache.store.oversized" };
+  }
+  let parsed;
+  try {
+    parsed = parseJson(text3, "store.json");
+  } catch {
+    return { ok: false, reason: "cache.store.malformed_json" };
+  }
+  try {
+    return { ok: true, store: parseStore(parsed) };
+  } catch (error) {
+    const field = error instanceof ValidationError ? error.field : "store";
+    return { ok: false, reason: classifyRejection(field) };
+  }
+}
+function lookup(store, key) {
+  return store.entries.find((entry) => entry.key === key);
+}
+function lastOccurrenceIndexes(entries) {
+  const lastIndexByKey = /* @__PURE__ */ new Map();
+  entries.forEach((entry, index) => lastIndexByKey.set(entry.key, index));
+  return new Set(lastIndexByKey.values());
+}
+function appendEntries(store, entries, limits) {
+  const admissible = entries.filter((entry) => entry.findings.length <= limits.maxFindingsPerEntry);
+  const keep = lastOccurrenceIndexes(admissible);
+  const deduped = admissible.filter((_entry, index) => keep.has(index));
+  const touchedKeys = new Set(deduped.map((entry) => entry.key));
+  const retained = store.entries.filter((entry) => !touchedKeys.has(entry.key));
+  const merged = [...retained, ...deduped];
+  const bounded = merged.length > limits.maxEntries ? merged.slice(merged.length - limits.maxEntries) : merged;
+  return { schemaVersion: store.schemaVersion, entries: bounded };
+}
+function canonicalFinding(finding) {
+  return {
+    path: finding.path,
+    content: finding.content,
+    startLine: finding.startLine,
+    endLine: finding.endLine,
+    // `JSON.stringify` omits a property whose value is `undefined`, so an absent optional field on
+    // read and an omitted one on write are the same representation without any conditional here.
+    severity: finding.severity,
+    category: finding.category
+  };
+}
+function canonicalEntry(entry) {
+  return {
+    key: entry.key,
+    baseBlob: entry.baseBlob,
+    headBlob: entry.headBlob,
+    ruleDigest: entry.ruleDigest,
+    engineDigest: entry.engineDigest,
+    modelId: entry.modelId,
+    protocol: entry.protocol,
+    findings: entry.findings.map(canonicalFinding)
+  };
+}
+function serializeStore(store) {
+  return JSON.stringify({
+    schemaVersion: store.schemaVersion,
+    entries: store.entries.map(canonicalEntry)
+  });
 }
 
 // src/config/guidelines.ts
@@ -132,51 +379,6 @@ var GlobSet = class {
     return this.matchers.length;
   }
 };
-
-// src/core/validate.ts
-function asObject(value, field) {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new ValidationError(field);
-  }
-  return value;
-}
-function asString(value, field, max = 4096) {
-  if (typeof value !== "string" || value.length === 0 || value.length > max) {
-    throw new ValidationError(field);
-  }
-  return value;
-}
-function asInteger(value, field, min, max) {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
-    throw new ValidationError(field);
-  }
-  return value;
-}
-function asArray(value, field, max = 4096) {
-  if (!Array.isArray(value) || value.length > max) throw new ValidationError(field);
-  return value;
-}
-function asStringArray(value, field, max = 4096) {
-  return asArray(value, field, max).map((entry, i) => asString(entry, `${field}[${String(i)}]`));
-}
-function rejectUnknownKeys(object, known, field) {
-  const allowed = new Set(known);
-  for (const key of Object.keys(object)) {
-    if (!allowed.has(key)) throw new ValidationError(`${field}.${key}`);
-  }
-}
-function requireKeys(object, required, field) {
-  for (const key of required) {
-    if (!(key in object)) throw new ValidationError(`${field}.${key}`);
-  }
-}
-function parseJson(text3, field) {
-  try {
-    return JSON.parse(text3);
-  } catch {
-    throw new ValidationError(field);
-  }
-}
 
 // src/config/profile.ts
 var PROFILE_KEYS = [
@@ -287,8 +489,96 @@ import { mkdtemp as mkdtemp2, rm as rm2 } from "node:fs/promises";
 import { tmpdir as tmpdir2 } from "node:os";
 import { join as join3 } from "node:path";
 
+// src/cache/memoize.ts
+function isCacheEligible(item) {
+  return item.classification.kind === "reviewed" && (item.status === "M" || item.status === "A") && item.baseBlob !== void 0 && item.headBlob !== void 0;
+}
+var EMPTY_LOOKUP = { hits: /* @__PURE__ */ new Map(), eligiblePaths: /* @__PURE__ */ new Set() };
+function lookupMemoized(store, inventory, ruleDigest, engineDigest, config) {
+  if (store === void 0 || engineDigest === void 0) return EMPTY_LOOKUP;
+  let model;
+  try {
+    model = modelId(config.model);
+  } catch {
+    return EMPTY_LOOKUP;
+  }
+  const hits = /* @__PURE__ */ new Map();
+  const eligiblePaths = /* @__PURE__ */ new Set();
+  for (const item of inventory.items) {
+    if (!isCacheEligible(item) || item.baseBlob === void 0 || item.headBlob === void 0) {
+      continue;
+    }
+    const path = item.path;
+    eligiblePaths.add(path);
+    const key = computeKey(
+      item.baseBlob,
+      item.headBlob,
+      ruleDigest,
+      engineDigest,
+      model,
+      config.protocol
+    );
+    const entry = lookup(store, key);
+    if (entry !== void 0) hits.set(path, entry);
+  }
+  return { hits, eligiblePaths };
+}
+function combinedExcludes(mechanicallyClean, hitPaths) {
+  return [.../* @__PURE__ */ new Set([...mechanicallyClean, ...hitPaths])];
+}
+function mergeHitFindings(engineFindings, hits) {
+  if (hits.size === 0) return engineFindings;
+  const cached = [...hits.values()].flatMap((entry) => entry.findings);
+  return [...engineFindings, ...cached];
+}
+function findingsByPath(findings) {
+  const byPath = /* @__PURE__ */ new Map();
+  for (const finding of findings) {
+    const path = finding.path;
+    const existing = byPath.get(path);
+    if (existing === void 0) byPath.set(path, [finding]);
+    else existing.push(finding);
+  }
+  return byPath;
+}
+function buildNewEntries(inputs) {
+  let model;
+  try {
+    model = modelId(inputs.config.model);
+  } catch {
+    return [];
+  }
+  const proto = inputs.config.protocol;
+  const byPath = findingsByPath(inputs.findings);
+  const entries = [];
+  for (const item of inputs.inventory.items) {
+    const path = item.path;
+    if (!inputs.eligiblePaths.has(path) || inputs.hitPaths.has(path)) continue;
+    if (item.baseBlob === void 0 || item.headBlob === void 0) continue;
+    const key = computeKey(
+      item.baseBlob,
+      item.headBlob,
+      inputs.ruleDigest,
+      inputs.engineDigest,
+      model,
+      proto
+    );
+    entries.push({
+      key,
+      baseBlob: item.baseBlob,
+      headBlob: item.headBlob,
+      ruleDigest: inputs.ruleDigest,
+      engineDigest: inputs.engineDigest,
+      modelId: model,
+      protocol: proto,
+      findings: byPath.get(path) ?? []
+    });
+  }
+  return entries;
+}
+
 // src/engine/acquire.ts
-import { createHash } from "node:crypto";
+import { createHash as createHash2 } from "node:crypto";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -323,6 +613,9 @@ function assetUrl(pin, asset) {
 function platformKey(platform, arch) {
   return `${platform}-${arch}`;
 }
+function currentPlatformDigest(pin = ENGINE_PIN, platform = process.platform, arch = process.arch) {
+  return pin.platforms[platformKey(platform, arch)]?.sha256;
+}
 
 // src/engine/acquire.ts
 var AcquisitionError = class extends Error {
@@ -346,7 +639,7 @@ async function download(url) {
   return bytes;
 }
 function digestOf(bytes) {
-  return createHash("sha256").update(bytes).digest("hex");
+  return createHash2("sha256").update(bytes).digest("hex");
 }
 async function acquireEngine(directory, diagnostics, pin = ENGINE_PIN, platform = process.platform, arch = process.arch) {
   const key = platformKey(platform, arch);
@@ -418,7 +711,7 @@ function parseLine(value, field) {
   }
   return value;
 }
-function parseFindings(value, field) {
+function parseFindings2(value, field) {
   if (value === void 0 || value === null) return [];
   return asArray(value, field, LIMITS.maxFindings).map((entry, i) => {
     const scope = `${field}[${String(i)}]`;
@@ -433,12 +726,12 @@ function parseFindings(value, field) {
       content: asString(object.content, `${scope}.content`, LIMITS.maxBodyChars),
       startLine: start,
       endLine: end,
-      severity: optionalToken(object.severity, `${scope}.severity`),
-      category: optionalToken(object.category, `${scope}.category`)
+      severity: optionalToken2(object.severity, `${scope}.severity`),
+      category: optionalToken2(object.category, `${scope}.category`)
     };
   });
 }
-function optionalToken(value, field) {
+function optionalToken2(value, field) {
   if (value === void 0 || value === null || value === "") return void 0;
   const token = asString(value, field, 64);
   if (!/^[a-z][a-z0-9_-]*$/i.test(token)) throw new ValidationError(field);
@@ -491,142 +784,15 @@ function parseEngineResult(text3) {
     schemaVersion: manifestPresent ? asString(manifest.schema_version, "result.manifest.schema_version", 128) : "",
     terminalState: parseTerminalState(manifest.terminal_state),
     coverage: manifestPresent ? parseCoverage(manifest.coverage, "result.manifest.coverage") : { selected: [], completed: [], reused: [], failed: [], waived: [] },
-    findings: parseFindings(root.comments, "result.comments"),
+    findings: parseFindings2(root.comments, "result.comments"),
     warnings: parseWarnings(root.warnings, "result.warnings"),
     totalTokens: summary.totalTokens,
     budgetExceeded: summary.budgetExceeded
   };
 }
 
-// src/engine/run.ts
-import { createHash as createHash2 } from "node:crypto";
-import { mkdir as mkdir2, mkdtemp, rm, writeFile as writeFile2 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join as join2 } from "node:path";
-
-// src/config/runtime.ts
-var PROTOCOLS = /* @__PURE__ */ new Set(["openai", "anthropic"]);
-var KEYS = [
-  "protocol",
-  "endpoint",
-  "model",
-  "tokenEnvName",
-  "language",
-  "concurrency",
-  "fileTimeoutSeconds",
-  "reviewTimeoutSeconds",
-  "tokenBudget",
-  "maxFindings",
-  "renameDetectionPercent"
-];
-function parseEndpoint(value, field) {
-  const raw = asString(value, field, 2048);
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new ValidationError(field);
-  }
-  if (url.protocol !== "https:") throw new ValidationError(field);
-  if (url.username !== "" || url.password !== "") throw new ValidationError(field);
-  return url.toString();
-}
-function parseTokenEnvName(value, field) {
-  const name = asString(value, field, 128);
-  if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new ValidationError(field);
-  if (name === "GITHUB_TOKEN" || name.startsWith("ACTIONS_")) throw new ValidationError(field);
-  return name;
-}
-function parseRuntimeConfig(input, field = "config") {
-  const object = asObject(input, field);
-  requireKeys(object, [...KEYS], field);
-  rejectUnknownKeys(object, [...KEYS], field);
-  const protocol = asString(object.protocol, `${field}.protocol`, 32);
-  if (!PROTOCOLS.has(protocol)) throw new ValidationError(`${field}.protocol`);
-  return {
-    protocol,
-    endpoint: parseEndpoint(object.endpoint, `${field}.endpoint`),
-    model: asString(object.model, `${field}.model`, 256),
-    tokenEnvName: parseTokenEnvName(object.tokenEnvName, `${field}.tokenEnvName`),
-    language: asString(object.language, `${field}.language`, 64),
-    concurrency: asInteger(object.concurrency, `${field}.concurrency`, 1, 32),
-    fileTimeoutSeconds: asInteger(
-      object.fileTimeoutSeconds,
-      `${field}.fileTimeoutSeconds`,
-      5,
-      3600
-    ),
-    reviewTimeoutSeconds: asInteger(
-      object.reviewTimeoutSeconds,
-      `${field}.reviewTimeoutSeconds`,
-      30,
-      21600
-    ),
-    tokenBudget: asInteger(object.tokenBudget, `${field}.tokenBudget`, 1e3, 1e8),
-    maxFindings: asInteger(object.maxFindings, `${field}.maxFindings`, 1, 500),
-    renameDetectionPercent: asInteger(
-      object.renameDetectionPercent,
-      `${field}.renameDetectionPercent`,
-      1,
-      100
-    )
-  };
-}
-function readModelToken(config, env) {
-  const value = env[config.tokenEnvName];
-  return value !== void 0 && value.length > 0 ? value : void 0;
-}
-
-// src/git/exec.ts
-import { execFile } from "node:child_process";
-var ExecFailure = class extends Error {
-  code;
-  constructor(command, code) {
-    super(`${command} exited with ${String(code)}`);
-    this.name = "ExecFailure";
-    this.code = code;
-  }
-};
-function run(command, args, options2) {
-  return new Promise((resolve, reject) => {
-    execFile(
-      command,
-      [...args],
-      {
-        cwd: options2.cwd,
-        timeout: options2.timeoutMs,
-        maxBuffer: options2.maxBuffer,
-        encoding: "buffer",
-        env: options2.env ?? {},
-        shell: false,
-        windowsHide: true
-      },
-      (error, stdout, stderr) => {
-        const out = Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout));
-        const err = Buffer.isBuffer(stderr) ? stderr.toString("utf8") : String(stderr);
-        if (error === null) {
-          resolve({ stdout: out, stderr: err, code: 0 });
-          return;
-        }
-        const code = typeof error.code === "number" ? error.code : 1;
-        reject(new ExecFailure(command, code));
-      }
-    );
-  });
-}
-function gitEnvironment(pathValue) {
-  return {
-    PATH: pathValue,
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_SYSTEM: "/dev/null",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_ASKPASS: "",
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_ALLOW_PROTOCOL: "file:https",
-    LC_ALL: "C"
-  };
-}
+// src/engine/rule-identity.ts
+import { createHash as createHash3 } from "node:crypto";
 
 // src/engine/rule-file.ts
 var CATCH_ALL_RULE = [
@@ -793,6 +959,142 @@ function serializeRuleFile(file) {
   return JSON.stringify(file, null, 2);
 }
 
+// src/engine/rule-identity.ts
+function promptIdentityDigest(profile, guidelines) {
+  const body = serializeRuleFile(buildRuleFile(profile, guidelines));
+  return sha256(createHash3("sha256").update(body).digest("hex"));
+}
+
+// src/engine/run.ts
+import { createHash as createHash4 } from "node:crypto";
+import { mkdir as mkdir2, mkdtemp, rm, writeFile as writeFile2 } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join as join2 } from "node:path";
+
+// src/config/runtime.ts
+var PROTOCOLS2 = /* @__PURE__ */ new Set(["openai", "anthropic"]);
+var KEYS = [
+  "protocol",
+  "endpoint",
+  "model",
+  "tokenEnvName",
+  "language",
+  "concurrency",
+  "fileTimeoutSeconds",
+  "reviewTimeoutSeconds",
+  "tokenBudget",
+  "maxFindings",
+  "renameDetectionPercent"
+];
+function parseEndpoint(value, field) {
+  const raw = asString(value, field, 2048);
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ValidationError(field);
+  }
+  if (url.protocol !== "https:") throw new ValidationError(field);
+  if (url.username !== "" || url.password !== "") throw new ValidationError(field);
+  return url.toString();
+}
+function parseTokenEnvName(value, field) {
+  const name = asString(value, field, 128);
+  if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new ValidationError(field);
+  if (name === "GITHUB_TOKEN" || name.startsWith("ACTIONS_")) throw new ValidationError(field);
+  return name;
+}
+function parseRuntimeConfig(input, field = "config") {
+  const object = asObject(input, field);
+  requireKeys(object, [...KEYS], field);
+  rejectUnknownKeys(object, [...KEYS], field);
+  const protocol2 = asString(object.protocol, `${field}.protocol`, 32);
+  if (!PROTOCOLS2.has(protocol2)) throw new ValidationError(`${field}.protocol`);
+  return {
+    protocol: protocol2,
+    endpoint: parseEndpoint(object.endpoint, `${field}.endpoint`),
+    model: asString(object.model, `${field}.model`, 256),
+    tokenEnvName: parseTokenEnvName(object.tokenEnvName, `${field}.tokenEnvName`),
+    language: asString(object.language, `${field}.language`, 64),
+    concurrency: asInteger(object.concurrency, `${field}.concurrency`, 1, 32),
+    fileTimeoutSeconds: asInteger(
+      object.fileTimeoutSeconds,
+      `${field}.fileTimeoutSeconds`,
+      5,
+      3600
+    ),
+    reviewTimeoutSeconds: asInteger(
+      object.reviewTimeoutSeconds,
+      `${field}.reviewTimeoutSeconds`,
+      30,
+      21600
+    ),
+    tokenBudget: asInteger(object.tokenBudget, `${field}.tokenBudget`, 1e3, 1e8),
+    maxFindings: asInteger(object.maxFindings, `${field}.maxFindings`, 1, 500),
+    renameDetectionPercent: asInteger(
+      object.renameDetectionPercent,
+      `${field}.renameDetectionPercent`,
+      1,
+      100
+    )
+  };
+}
+function readModelToken(config, env) {
+  const value = env[config.tokenEnvName];
+  return value !== void 0 && value.length > 0 ? value : void 0;
+}
+
+// src/git/exec.ts
+import { execFile } from "node:child_process";
+var ExecFailure = class extends Error {
+  code;
+  constructor(command, code) {
+    super(`${command} exited with ${String(code)}`);
+    this.name = "ExecFailure";
+    this.code = code;
+  }
+};
+function run(command, args, options2) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      command,
+      [...args],
+      {
+        cwd: options2.cwd,
+        timeout: options2.timeoutMs,
+        maxBuffer: options2.maxBuffer,
+        encoding: "buffer",
+        env: options2.env ?? {},
+        shell: false,
+        windowsHide: true
+      },
+      (error, stdout, stderr) => {
+        const out = Buffer.isBuffer(stdout) ? stdout : Buffer.from(String(stdout));
+        const err = Buffer.isBuffer(stderr) ? stderr.toString("utf8") : String(stderr);
+        if (error === null) {
+          resolve({ stdout: out, stderr: err, code: 0 });
+          return;
+        }
+        const code = typeof error.code === "number" ? error.code : 1;
+        reject(new ExecFailure(command, code));
+      }
+    );
+  });
+}
+function gitEnvironment(pathValue) {
+  return {
+    PATH: pathValue,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_ALLOW_PROTOCOL: "file:https",
+    LC_ALL: "C"
+  };
+}
+
 // src/engine/run.ts
 var EngineRunError = class extends Error {
   reason;
@@ -832,7 +1134,7 @@ async function writeRuleFile(options2, home) {
   const ruleBody = serializeRuleFile(rule);
   const rulePath = join2(home, "keiko-rules.json");
   await writeFile2(rulePath, ruleBody, { mode: 384 });
-  return { rulePath, ruleDigest: sha256(createHash2("sha256").update(ruleBody).digest("hex")) };
+  return { rulePath, ruleDigest: sha256(createHash4("sha256").update(ruleBody).digest("hex")) };
 }
 function reviewArguments(options2, rulePath) {
   return [
@@ -901,11 +1203,12 @@ function coveredPaths(result) {
   for (const entry of result.coverage.reused) covered.add(entry.path);
   return covered;
 }
-function findCoverageGap(inventory, result) {
+var NO_MEMOIZED_PATHS = /* @__PURE__ */ new Set();
+function findCoverageGap(inventory, result, memoizedPaths) {
   const covered = coveredPaths(result);
   let gap = 0;
   for (const path of inventory.reviewablePaths) {
-    if (!covered.has(path)) gap += 1;
+    if (!covered.has(path) && !memoizedPaths.has(path)) gap += 1;
   }
   return gap;
 }
@@ -935,7 +1238,7 @@ function commonDisqualifier(mode, result, profile, config) {
   }
   return void 0;
 }
-function settleReconciled(inventory, result, profile, config) {
+function settleReconciled(inventory, result, profile, config, memoizedPaths) {
   if (result.schemaVersion !== SUPPORTED_MANIFEST_SCHEMA) {
     return incomplete("reconciled", "engine.run.schema_rejected", []);
   }
@@ -947,7 +1250,7 @@ function settleReconciled(inventory, result, profile, config) {
       failed: result.coverage.failed.length
     });
   }
-  const gap = findCoverageGap(inventory, result);
+  const gap = findCoverageGap(inventory, result, memoizedPaths);
   if (gap > 0) {
     return incomplete("reconciled", "settlement.incomplete.coverage_gap", result.findings, {
       gap,
@@ -960,11 +1263,11 @@ function settleReconciled(inventory, result, profile, config) {
     findings: result.findings
   };
 }
-function settleCounted(inventory, result, profile, config) {
+function settleCounted(inventory, result, profile, config, memoizedPaths) {
   if (result.status !== "success") {
     return incomplete("counted", "settlement.incomplete.terminal_state", result.findings);
   }
-  const expected = inventory.reviewablePaths.size;
+  const expected = Math.max(0, inventory.reviewablePaths.size - memoizedPaths.size);
   if (result.filesReviewed < expected) {
     return incomplete("counted", "settlement.incomplete.coverage_gap", result.findings, {
       gap: expected - result.filesReviewed,
@@ -978,8 +1281,8 @@ function settleCounted(inventory, result, profile, config) {
     findings: result.findings
   };
 }
-function settle(inventory, result, profile, config) {
-  return result.manifestPresent ? settleReconciled(inventory, result, profile, config) : settleCounted(inventory, result, profile, config);
+function settle(inventory, result, profile, config, memoizedPaths = NO_MEMOIZED_PATHS) {
+  return result.manifestPresent ? settleReconciled(inventory, result, profile, config, memoizedPaths) : settleCounted(inventory, result, profile, config, memoizedPaths);
 }
 
 // src/git/plumbing.ts
@@ -1191,7 +1494,9 @@ function toItem(profile, change) {
     classification,
     modeChanged,
     reviewable: isReviewable(classification),
-    changedLines: change.changedLines
+    changedLines: change.changedLines,
+    baseBlob: change.oldBlob,
+    headBlob: change.newBlob
   };
 }
 
@@ -1359,7 +1664,7 @@ function toReviewComment(raw) {
 }
 
 // src/publish/marker.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 var MARKER_PREFIX = "keiko-for-quality";
 var MARKER_PATTERN = new RegExp(`<!--\\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\\s*-->`);
 function normalizeForFingerprint(body) {
@@ -1373,7 +1678,7 @@ function fingerprint(input) {
     input.rule,
     normalizeForFingerprint(input.body)
   ].join("\0");
-  return createHash3("sha256").update(material).digest("hex").slice(0, 32);
+  return createHash5("sha256").update(material).digest("hex").slice(0, 32);
 }
 function extractMarker(body) {
   return MARKER_PATTERN.exec(body)?.[1];
@@ -1668,6 +1973,10 @@ var PER_LINE_TOKENS = 60;
 var ALLOTMENT_MARGIN = 1.3;
 var ALLOTMENT_FLOOR = 8e4;
 var ALLOTMENT_CEILING = 6e6;
+var RETENTION = {
+  maxEntries: PARSE_LIMITS.maxEntries,
+  maxFindingsPerEntry: PARSE_LIMITS.maxFindingsPerEntry
+};
 function clamp(value, floor, ceiling) {
   return Math.min(ceiling, Math.max(floor, value));
 }
@@ -1701,7 +2010,41 @@ async function headIsCurrent(request) {
 function itemIndex(inventory) {
   return new Map(inventory.items.map((item) => [item.path, item]));
 }
-async function settleIncomplete(request, inventory, reason, diagnostics, findings = []) {
+var INERT_MEMO = {
+  hits: /* @__PURE__ */ new Map(),
+  hitPaths: /* @__PURE__ */ new Set(),
+  eligiblePaths: /* @__PURE__ */ new Set(),
+  ruleDigest: void 0,
+  engineDigest: void 0
+};
+function cacheCounts(memo) {
+  return { cacheHits: memo.hits.size, cacheMisses: memo.eligiblePaths.size - memo.hits.size };
+}
+function prepareMemoization(request, inventory, diagnostics) {
+  if (request.cacheStore === void 0) return INERT_MEMO;
+  const ruleDigest = promptIdentityDigest(request.profile, request.guidelines);
+  const engineDigest = currentPlatformDigest();
+  const { hits, eligiblePaths } = lookupMemoized(
+    request.cacheStore,
+    inventory,
+    ruleDigest,
+    engineDigest,
+    request.config
+  );
+  const memo = {
+    hits,
+    hitPaths: new Set(hits.keys()),
+    eligiblePaths,
+    ruleDigest,
+    engineDigest
+  };
+  diagnostics.record("cache.hits", {
+    headSha: request.head,
+    counts: { hits: hits.size, misses: eligiblePaths.size - hits.size }
+  });
+  return memo;
+}
+async function settleIncomplete(request, inventory, reason, diagnostics, findings = [], memo = INERT_MEMO) {
   diagnostics.record(reason, { headSha: request.head });
   const publish = findings.length === 0 ? void 0 : await publishFindings(
     {
@@ -1735,10 +2078,12 @@ async function settleIncomplete(request, inventory, reason, diagnostics, finding
     outcome: "incomplete",
     reason,
     inventorySize: inventory.items.length,
+    cacheAppended: 0,
+    ...cacheCounts(memo),
     ...publish === void 0 ? {} : { publish }
   };
 }
-async function executeEngine(request, inventory, diagnostics) {
+async function executeEngine(request, inventory, memo, diagnostics) {
   const workspace = await mkdtemp2(join3(tmpdir2(), "kfq-engine-bin-"));
   try {
     const engine = await acquireEngine(workspace, diagnostics);
@@ -1747,6 +2092,7 @@ async function executeEngine(request, inventory, diagnostics) {
       inventory.reviewablePaths.size,
       reviewableChangedLines(inventory)
     );
+    const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
     const output = await runEngine(
       {
         binaryPath: engine.binaryPath,
@@ -1758,12 +2104,12 @@ async function executeEngine(request, inventory, diagnostics) {
         env: request.env,
         pathValue: request.pathValue,
         allottedBudget,
-        mechanicallyCleanPaths: mechanicallyCleanPaths(inventory)
+        mechanicallyCleanPaths: excluded
       },
       diagnostics
     );
     const parsed = parseEngineResult(output.stdout);
-    return settle(inventory, parsed, request.profile, request.config);
+    return settle(inventory, parsed, request.profile, request.config, memo.hitPaths);
   } finally {
     await rm2(workspace, { recursive: true, force: true });
   }
@@ -1771,7 +2117,26 @@ async function executeEngine(request, inventory, diagnostics) {
 function publicationDegraded(outcome) {
   return outcome.rejectedSanitization > 0 || outcome.rejectedPlacement > 0 || outcome.readbackFailures > 0;
 }
-async function publishSettledFindings(request, inventory, settlement, startedAt, diagnostics) {
+function finalizeCacheStore(request, inventory, memo, engineFindings) {
+  if (request.cacheStore === void 0) return void 0;
+  if (memo.ruleDigest === void 0 || memo.engineDigest === void 0) return void 0;
+  const newEntries = buildNewEntries({
+    inventory,
+    eligiblePaths: memo.eligiblePaths,
+    hitPaths: memo.hitPaths,
+    findings: engineFindings,
+    ruleDigest: memo.ruleDigest,
+    engineDigest: memo.engineDigest,
+    config: request.config
+  });
+  if (newEntries.length === 0) return { store: request.cacheStore, appended: 0 };
+  return {
+    store: appendEntries(request.cacheStore, newEntries, RETENTION),
+    appended: newEntries.length
+  };
+}
+async function publishSettledFindings(request, inventory, settlement, memo, startedAt, diagnostics) {
+  const findings = mergeHitFindings(settlement.findings, memo.hits);
   const publish = await publishFindings(
     {
       client: request.client,
@@ -1781,7 +2146,7 @@ async function publishSettledFindings(request, inventory, settlement, startedAt,
       identity: request.identity,
       items: itemIndex(inventory)
     },
-    settlement.findings,
+    findings,
     diagnostics
   );
   if (publicationDegraded(publish)) {
@@ -1789,7 +2154,9 @@ async function publishSettledFindings(request, inventory, settlement, startedAt,
       request,
       inventory,
       "publish.finding_rejected_placement",
-      diagnostics
+      diagnostics,
+      [],
+      memo
     );
     return { ...report, publish };
   }
@@ -1798,18 +2165,50 @@ async function publishSettledFindings(request, inventory, settlement, startedAt,
     durationMs: Date.now() - startedAt,
     counts: { published: publish.published, suppressed: publish.suppressed }
   });
-  return { outcome: "complete", inventorySize: inventory.items.length, publish };
+  const finalized = finalizeCacheStore(request, inventory, memo, settlement.findings);
+  return {
+    outcome: "complete",
+    inventorySize: inventory.items.length,
+    publish,
+    cacheAppended: finalized?.appended ?? 0,
+    ...cacheCounts(memo),
+    ...finalized === void 0 ? {} : { updatedCacheStore: finalized.store }
+  };
 }
-async function settleOrReport(request, inventory, diagnostics) {
+function emptyReviewReport(inventory) {
+  return {
+    outcome: "complete",
+    inventorySize: inventory.items.length,
+    cacheHits: 0,
+    cacheMisses: 0,
+    cacheAppended: 0
+  };
+}
+function abandonedReport(inventory, memo) {
+  return {
+    outcome: "abandoned",
+    inventorySize: inventory.items.length,
+    ...cacheCounts(memo),
+    cacheAppended: 0
+  };
+}
+async function settleOrReport(request, inventory, memo, diagnostics) {
   try {
-    const settlement = await executeEngine(request, inventory, diagnostics);
+    const settlement = await executeEngine(request, inventory, memo, diagnostics);
     diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
       { headSha: request.head }
     );
     return settlement;
   } catch {
-    return settleIncomplete(request, inventory, "settlement.incomplete.engine_error", diagnostics);
+    return settleIncomplete(
+      request,
+      inventory,
+      "settlement.incomplete.engine_error",
+      diagnostics,
+      [],
+      memo
+    );
   }
 }
 async function performReview(request, diagnostics) {
@@ -1833,13 +2232,14 @@ async function performReview(request, diagnostics) {
       headSha: request.head,
       durationMs: Date.now() - started
     });
-    return { outcome: "complete", inventorySize: inventory.items.length };
+    return emptyReviewReport(inventory);
   }
-  const settlement = await settleOrReport(request, inventory, diagnostics);
+  const memo = prepareMemoization(request, inventory, diagnostics);
+  const settlement = await settleOrReport(request, inventory, memo, diagnostics);
   if ("outcome" in settlement) return settlement;
   if (!await headIsCurrent(request)) {
     diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
-    return { outcome: "abandoned", inventorySize: inventory.items.length };
+    return abandonedReport(inventory, memo);
   }
   if (settlement.status === "incomplete") {
     return settleIncomplete(
@@ -1847,10 +2247,11 @@ async function performReview(request, diagnostics) {
       inventory,
       settlement.reason,
       diagnostics,
-      settlement.findings
+      mergeHitFindings(settlement.findings, memo.hits),
+      memo
     );
   }
-  return publishSettledFindings(request, inventory, settlement, started, diagnostics);
+  return publishSettledFindings(request, inventory, settlement, memo, started, diagnostics);
 }
 
 // src/action/eligibility.ts
@@ -2026,6 +2427,7 @@ function parseEventContext(payload) {
 
 // src/action/main.ts
 var DEFAULT_API_BASE = "https://api.github.com";
+var EMPTY_STORE = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
 function targetBranches(env) {
   const raw = readInput(env, "target_branches");
   const parsed = raw.split(",").map((entry) => entry.trim()).filter((entry) => entry !== "");
@@ -2043,8 +2445,47 @@ function reportOutputs(report) {
     reason: report.reason ?? "",
     inventory_size: String(report.inventorySize),
     findings_published: String(report.publish?.published ?? 0),
-    findings_suppressed: String(report.publish?.suppressed ?? 0)
+    findings_suppressed: String(report.publish?.suppressed ?? 0),
+    cache_hits: String(report.cacheHits),
+    cache_misses: String(report.cacheMisses)
   };
+}
+function isEnoent(error) {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
+}
+async function loadCacheStore(path, diagnostics) {
+  let text3;
+  try {
+    text3 = await readFile(path, "utf8");
+  } catch (error) {
+    if (isEnoent(error)) {
+      diagnostics.record("cache.store_loaded", { counts: { entries: 0 } });
+      return EMPTY_STORE;
+    }
+    diagnostics.record("cache.store_rejected");
+    return EMPTY_STORE;
+  }
+  const result = readStore(text3);
+  if (!result.ok) {
+    diagnostics.record("cache.store_rejected");
+    return EMPTY_STORE;
+  }
+  diagnostics.record("cache.store_loaded", { counts: { entries: result.store.entries.length } });
+  return result.store;
+}
+async function saveCacheStore(path, store, appended, diagnostics) {
+  try {
+    await writeFile3(path, serializeStore(store), "utf8");
+    diagnostics.record("cache.appended", { counts: { entries: appended } });
+  } catch {
+    diagnostics.record("cache.store_write_failed");
+  }
+}
+async function maybeSaveCacheStore(storePath, report, diagnostics) {
+  if (storePath === "" || report.outcome !== "complete" || report.updatedCacheStore === void 0) {
+    return;
+  }
+  await saveCacheStore(storePath, report.updatedCacheStore, report.cacheAppended, diagnostics);
 }
 function admit(env, event, diagnostics) {
   const eligibility = evaluateEligibility(
@@ -2085,6 +2526,8 @@ async function runAction(env, diagnostics) {
   const profile = loadReviewProfile(await readFile(profilePath, "utf8"));
   const guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
   diagnostics.record("config.loaded", { headSha: event.head });
+  const storePath = readInput(env, "review_store_path");
+  const cacheStore = storePath === "" ? void 0 : await loadCacheStore(storePath, diagnostics);
   const report = await performReview(
     {
       client: identity.client,
@@ -2098,10 +2541,12 @@ async function runAction(env, diagnostics) {
       guidelines,
       identity: identity.login,
       env,
-      pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin"
+      pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+      ...cacheStore === void 0 ? {} : { cacheStore }
     },
     diagnostics
   );
+  await maybeSaveCacheStore(storePath, report, diagnostics);
   writeOutputs(env, reportOutputs(report));
   return report;
 }

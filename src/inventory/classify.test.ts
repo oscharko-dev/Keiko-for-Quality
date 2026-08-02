@@ -260,4 +260,31 @@ describe("toItem", () => {
     const item = toItem(compiled, change({ path: "src/a.ts", newMode: MODE_SYMLINK }));
     expect(item.reviewable).toBe(true);
   });
+
+  /**
+   * The review-cache key (v0.9.0) is computed from exactly these two fields. `RawChange` always
+   * carries both — the all-zero id stands in for "no blob" on an addition — so `toItem` can copy
+   * them through unconditionally rather than guessing which statuses have one.
+   */
+  describe("base and head blob", () => {
+    it("carries the change's own blob ids onto the item, unchanged", () => {
+      const item = toItem(compiled, change({ path: "src/a.ts" }));
+      expect(item.baseBlob).toBe(OLD_BLOB);
+      expect(item.headBlob).toBe(NEW_BLOB);
+    });
+
+    it("carries the all-zero base blob through for an addition", () => {
+      const item = toItem(
+        compiled,
+        change({
+          path: "src/new.ts",
+          status: "A",
+          oldMode: MODE_ABSENT,
+          oldBlob: blobId("0".repeat(40)),
+        }),
+      );
+      expect(item.baseBlob).toBe("0".repeat(40));
+      expect(item.headBlob).toBe(NEW_BLOB);
+    });
+  });
 });
