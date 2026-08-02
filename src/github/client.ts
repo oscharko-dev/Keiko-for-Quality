@@ -32,6 +32,19 @@ export interface ReviewComment {
   readonly authorLogin: string;
   readonly commitId: string;
   readonly url: string;
+  /** The diff line this comment anchors, when it is line-anchored rather than file-level. */
+  readonly line?: number;
+  /** Present only for a multi-line comment; a single-line comment carries `line` alone. */
+  readonly startLine?: number;
+  /**
+   * True once this comment's review thread is resolved or its diff hunk is outdated.
+   *
+   * Best-effort, sourced from a separate GraphQL lookup the REST comments endpoint cannot answer
+   * (GitHub exposes thread resolution only through `PullRequestReviewThread.isResolved`/
+   * `isOutdated`). Absent — not `false` — means the lookup did not run or did not resolve this
+   * comment; callers must treat an absent value the same as `false` rather than as "known open".
+   */
+  readonly resolved?: boolean;
 }
 
 export interface PullRequestState {
@@ -72,19 +85,88 @@ export class GitHubApiError extends Error {
 const RETRYABLE: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
 
+/**
+ * Walks every review thread on the pull request, each carrying whether it is resolved or outdated
+ * and the database id — the same id the REST comments endpoint returns — of every comment inside it.
+ * `first: 100` on the inner `comments` connection is generous: a single review thread with more than
+ * a hundred replies has never been observed, and undercounting a thread's later replies here still
+ * leaves its first comment (where this reviewer's own marker or finding lives) correctly identified.
+ */
+const RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        nodes {
+          isResolved
+          isOutdated
+          comments(first: 100) { nodes { databaseId } }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}`;
+
+interface ReviewThreadNode {
+  readonly isResolved?: unknown;
+  readonly isOutdated?: unknown;
+  readonly comments?: { readonly nodes?: readonly { readonly databaseId?: unknown }[] };
+}
+
+interface ReviewThreadsPage {
+  readonly nodes?: readonly ReviewThreadNode[];
+  readonly pageInfo?: { readonly hasNextPage?: unknown; readonly endCursor?: unknown };
+}
+
+interface ReviewThreadsResponse {
+  readonly data?: {
+    readonly repository?: { readonly pullRequest?: { readonly reviewThreads?: ReviewThreadsPage } };
+  };
+  readonly errors?: unknown;
+}
+
+/** A thread counts as no-longer-blocking dedup once resolved or outdated — see `ReviewComment.resolved`. */
+function collectResolvedIds(nodes: readonly ReviewThreadNode[], into: Set<number>): void {
+  for (const node of nodes) {
+    if (node.isResolved !== true && node.isOutdated !== true) continue;
+    for (const comment of node.comments?.nodes ?? []) {
+      if (typeof comment.databaseId === "number") into.add(comment.databaseId);
+    }
+  }
+}
+
+/** A GraphQL error response, or one with no page at all, ends the walk with nothing more to add. */
+function reviewThreadsPage(raw: ReviewThreadsResponse): ReviewThreadsPage | undefined {
+  if (raw.errors !== undefined) return undefined;
+  return raw.data?.repository?.pullRequest?.reviewThreads;
+}
+
+/** The cursor for the next page, or `undefined` once GitHub reports there is none. */
+function nextThreadsCursor(page: ReviewThreadsPage): string | undefined {
+  if (page.pageInfo?.hasNextPage !== true) return undefined;
+  const cursor = page.pageInfo.endCursor;
+  return typeof cursor === "string" ? cursor : undefined;
+}
+
+/** GitHub's default GraphQL endpoint. Actions sets `GITHUB_GRAPHQL_URL` to the correct value on
+ *  GitHub Enterprise Server; this is only the fallback for a caller that does not supply one. */
+const DEFAULT_GRAPHQL_BASE = "https://api.github.com/graphql";
+
 export class GitHubClient implements ReviewCommentApi {
   private readonly apiBase: string;
   private readonly token: string;
+  private readonly graphqlBase: string;
 
-  public constructor(apiBase: string, token: string) {
+  public constructor(apiBase: string, token: string, graphqlBase: string = DEFAULT_GRAPHQL_BASE) {
     this.apiBase = apiBase.replace(/\/+$/, "");
     this.token = token;
+    this.graphqlBase = graphqlBase;
   }
 
-  private async request(path: string, init: RequestInit = {}): Promise<Response> {
+  private async requestUrl(url: string, init: RequestInit = {}): Promise<Response> {
     let lastStatus = 0;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      const response = await fetch(`${this.apiBase}${path}`, {
+      const response = await fetch(url, {
         ...init,
         headers: {
           authorization: `Bearer ${this.token}`,
@@ -104,8 +186,21 @@ export class GitHubClient implements ReviewCommentApi {
     throw new GitHubApiError(lastStatus);
   }
 
+  private async request(path: string, init: RequestInit = {}): Promise<Response> {
+    return this.requestUrl(`${this.apiBase}${path}`, init);
+  }
+
   private async json(path: string, init?: RequestInit): Promise<unknown> {
     const response = await this.request(path, init);
+    return await response.json();
+  }
+
+  /** A GraphQL POST, sharing the same retry/backoff and auth as every REST call above. */
+  private async graphqlJson(query: string, variables: Record<string, unknown>): Promise<unknown> {
+    const response = await this.requestUrl(this.graphqlBase, {
+      method: "POST",
+      body: JSON.stringify({ query, variables }),
+    });
     return await response.json();
   }
 
@@ -135,7 +230,57 @@ export class GitHubClient implements ReviewCommentApi {
       for (const entry of batch) comments.push(toReviewComment(entry as Record<string, unknown>));
       if (batch.length < 100) break;
     }
-    return comments;
+    return this.markResolved(ref, number, comments);
+  }
+
+  /**
+   * Layers resolved/outdated thread state onto comments already read from REST.
+   *
+   * The REST comments endpoint has no notion of thread resolution — only GraphQL's
+   * `PullRequestReviewThread.isResolved`/`isOutdated` answer it. This is deliberately best-effort:
+   * a lookup failure (a token without the right scope, a transient error, GHES without the feature)
+   * degrades to "nothing known to be resolved", which is exactly today's behaviour without this
+   * lookup — it never turns a dedup optimization into a reason the review itself fails.
+   */
+  private async markResolved(
+    ref: RepoRef,
+    number: number,
+    comments: readonly ReviewComment[],
+  ): Promise<ReviewComment[]> {
+    const resolvedIds = await this.fetchResolvedCommentIds(ref, number);
+    if (resolvedIds.size === 0) return [...comments];
+    return comments.map((comment) =>
+      resolvedIds.has(comment.id) ? { ...comment, resolved: true } : comment,
+    );
+  }
+
+  /** Bounded, best-effort GraphQL walk of every review thread, returning comment ids to mark resolved. */
+  private async fetchResolvedCommentIds(
+    ref: RepoRef,
+    number: number,
+  ): Promise<ReadonlySet<number>> {
+    const resolved = new Set<number>();
+    try {
+      let cursor: string | null = null;
+      for (let page = 1; page <= 20; page += 1) {
+        const raw = (await this.graphqlJson(RESOLVED_THREADS_QUERY, {
+          owner: ref.owner,
+          repo: ref.repo,
+          number,
+          cursor,
+        })) as ReviewThreadsResponse;
+        const threads = reviewThreadsPage(raw);
+        if (threads === undefined) break;
+        collectResolvedIds(threads.nodes ?? [], resolved);
+        const next = nextThreadsCursor(threads);
+        if (next === undefined) break;
+        cursor = next;
+      }
+    } catch {
+      // Best-effort: see `markResolved`'s doc comment. A failed lookup is not a failed review.
+      return new Set();
+    }
+    return resolved;
   }
 
   public async createReviewComment(
@@ -196,8 +341,21 @@ function text(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+/** A finite integer, or `undefined` for anything else — including a JSON `null`. */
+function optionalInteger(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) ? value : undefined;
+}
+
+/**
+ * Once a comment's diff position goes stale (a later push moved the hunk it anchored), GitHub nulls
+ * `line`/`start_line` and keeps the historical value in `original_line`/`original_start_line`. This
+ * still anchors the similarity stage's overlap check to where the comment *was*, which is exactly
+ * what "outdated" should mean for deduplication rather than "no longer has a location at all".
+ */
 function toReviewComment(raw: Record<string, unknown>): ReviewComment {
   const user = raw.user as Record<string, unknown> | undefined;
+  const line = optionalInteger(raw.line) ?? optionalInteger(raw.original_line);
+  const startLine = optionalInteger(raw.start_line) ?? optionalInteger(raw.original_start_line);
   return {
     id: typeof raw.id === "number" ? raw.id : 0,
     body: text(raw.body),
@@ -205,5 +363,7 @@ function toReviewComment(raw: Record<string, unknown>): ReviewComment {
     authorLogin: text(user?.login),
     commitId: text(raw.commit_id),
     url: text(raw.html_url),
+    ...(line !== undefined ? { line } : {}),
+    ...(startLine !== undefined ? { startLine } : {}),
   };
 }

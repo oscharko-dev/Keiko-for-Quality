@@ -1623,17 +1623,51 @@ var GitHubApiError = class extends Error {
 };
 var RETRYABLE = /* @__PURE__ */ new Set([429, 500, 502, 503, 504]);
 var MAX_ATTEMPTS = 3;
+var RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      reviewThreads(first: 100, after: $cursor) {
+        nodes {
+          isResolved
+          isOutdated
+          comments(first: 100) { nodes { databaseId } }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}`;
+function collectResolvedIds(nodes, into) {
+  for (const node of nodes) {
+    if (node.isResolved !== true && node.isOutdated !== true) continue;
+    for (const comment of node.comments?.nodes ?? []) {
+      if (typeof comment.databaseId === "number") into.add(comment.databaseId);
+    }
+  }
+}
+function reviewThreadsPage(raw) {
+  if (raw.errors !== void 0) return void 0;
+  return raw.data?.repository?.pullRequest?.reviewThreads;
+}
+function nextThreadsCursor(page) {
+  if (page.pageInfo?.hasNextPage !== true) return void 0;
+  const cursor = page.pageInfo.endCursor;
+  return typeof cursor === "string" ? cursor : void 0;
+}
+var DEFAULT_GRAPHQL_BASE = "https://api.github.com/graphql";
 var GitHubClient = class {
   apiBase;
   token;
-  constructor(apiBase, token) {
+  graphqlBase;
+  constructor(apiBase, token, graphqlBase = DEFAULT_GRAPHQL_BASE) {
     this.apiBase = apiBase.replace(/\/+$/, "");
     this.token = token;
+    this.graphqlBase = graphqlBase;
   }
-  async request(path, init = {}) {
+  async requestUrl(url, init = {}) {
     let lastStatus = 0;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      const response = await fetch(`${this.apiBase}${path}`, {
+      const response = await fetch(url, {
         ...init,
         headers: {
           authorization: `Bearer ${this.token}`,
@@ -1650,8 +1684,19 @@ var GitHubClient = class {
     }
     throw new GitHubApiError(lastStatus);
   }
+  async request(path, init = {}) {
+    return this.requestUrl(`${this.apiBase}${path}`, init);
+  }
   async json(path, init) {
     const response = await this.request(path, init);
+    return await response.json();
+  }
+  /** A GraphQL POST, sharing the same retry/backoff and auth as every REST call above. */
+  async graphqlJson(query, variables) {
+    const response = await this.requestUrl(this.graphqlBase, {
+      method: "POST",
+      body: JSON.stringify({ query, variables })
+    });
     return await response.json();
   }
   async getPullRequest(ref, number) {
@@ -1679,7 +1724,47 @@ var GitHubClient = class {
       for (const entry of batch) comments.push(toReviewComment(entry));
       if (batch.length < 100) break;
     }
-    return comments;
+    return this.markResolved(ref, number, comments);
+  }
+  /**
+   * Layers resolved/outdated thread state onto comments already read from REST.
+   *
+   * The REST comments endpoint has no notion of thread resolution — only GraphQL's
+   * `PullRequestReviewThread.isResolved`/`isOutdated` answer it. This is deliberately best-effort:
+   * a lookup failure (a token without the right scope, a transient error, GHES without the feature)
+   * degrades to "nothing known to be resolved", which is exactly today's behaviour without this
+   * lookup — it never turns a dedup optimization into a reason the review itself fails.
+   */
+  async markResolved(ref, number, comments) {
+    const resolvedIds = await this.fetchResolvedCommentIds(ref, number);
+    if (resolvedIds.size === 0) return [...comments];
+    return comments.map(
+      (comment) => resolvedIds.has(comment.id) ? { ...comment, resolved: true } : comment
+    );
+  }
+  /** Bounded, best-effort GraphQL walk of every review thread, returning comment ids to mark resolved. */
+  async fetchResolvedCommentIds(ref, number) {
+    const resolved = /* @__PURE__ */ new Set();
+    try {
+      let cursor = null;
+      for (let page = 1; page <= 20; page += 1) {
+        const raw = await this.graphqlJson(RESOLVED_THREADS_QUERY, {
+          owner: ref.owner,
+          repo: ref.repo,
+          number,
+          cursor
+        });
+        const threads = reviewThreadsPage(raw);
+        if (threads === void 0) break;
+        collectResolvedIds(threads.nodes ?? [], resolved);
+        const next = nextThreadsCursor(threads);
+        if (next === void 0) break;
+        cursor = next;
+      }
+    } catch {
+      return /* @__PURE__ */ new Set();
+    }
+    return resolved;
   }
   async createReviewComment(ref, number, input) {
     const payload = {
@@ -1723,15 +1808,22 @@ var GitHubClient = class {
 function text(value) {
   return typeof value === "string" ? value : "";
 }
+function optionalInteger(value) {
+  return typeof value === "number" && Number.isInteger(value) ? value : void 0;
+}
 function toReviewComment(raw) {
   const user = raw.user;
+  const line = optionalInteger(raw.line) ?? optionalInteger(raw.original_line);
+  const startLine = optionalInteger(raw.start_line) ?? optionalInteger(raw.original_start_line);
   return {
     id: typeof raw.id === "number" ? raw.id : 0,
     body: text(raw.body),
     path: text(raw.path),
     authorLogin: text(user?.login),
     commitId: text(raw.commit_id),
-    url: text(raw.html_url)
+    url: text(raw.html_url),
+    ...line !== void 0 ? { line } : {},
+    ...startLine !== void 0 ? { startLine } : {}
   };
 }
 
@@ -1739,6 +1831,7 @@ function toReviewComment(raw) {
 import { createHash as createHash5 } from "node:crypto";
 var MARKER_PREFIX = "keiko-for-quality";
 var MARKER_PATTERN = new RegExp(`<!--\\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\\s*-->`);
+var FIELD_SEPARATOR2 = "\0";
 function normalizeForFingerprint(body) {
   return body.toLowerCase().replace(/```[\s\S]*?```/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
 }
@@ -1748,8 +1841,9 @@ function fingerprint(input) {
     String(input.pullNumber),
     input.path,
     input.rule,
-    normalizeForFingerprint(input.body)
-  ].join("\0");
+    normalizeForFingerprint(input.body),
+    ...input.head !== void 0 ? [input.head] : []
+  ].join(FIELD_SEPARATOR2);
   return createHash5("sha256").update(material).digest("hex").slice(0, 32);
 }
 function extractMarker(body) {
@@ -1927,15 +2021,109 @@ function describePlacement(input) {
   return input.side === "LEFT" ? "deletion" : "line";
 }
 
+// src/publish/similarity.ts
+var LINE_TOLERANCE = 2;
+var SIMILARITY_THRESHOLD = 0.5;
+var MIN_SHARED_TOKENS = 4;
+var MAX_INPUT_CHARS = 2e4;
+var STOPWORDS = /* @__PURE__ */ new Set([
+  "the",
+  "and",
+  "for",
+  "are",
+  "this",
+  "that",
+  "with",
+  "from",
+  "when",
+  "does",
+  "not",
+  "but",
+  "was",
+  "were",
+  "been",
+  "have",
+  "has",
+  "had",
+  "will",
+  "would",
+  "into",
+  "than",
+  "then",
+  "there",
+  "their",
+  "which",
+  "while",
+  "should",
+  "could",
+  "about",
+  "your",
+  "you"
+]);
+function clip(text3) {
+  return text3.length > MAX_INPUT_CHARS ? text3.slice(0, MAX_INPUT_CHARS) : text3;
+}
+function codeBlocks(text3) {
+  const matches = clip(text3).match(/```[\s\S]*?```/g) ?? [];
+  return new Set(
+    matches.map((block) => block.replace(/\s+/g, " ").trim()).filter((block) => block.length > 8)
+  );
+}
+function shareCodeBlock(a, b) {
+  const blocksA = codeBlocks(a);
+  if (blocksA.size === 0) return false;
+  for (const block of codeBlocks(b)) {
+    if (blocksA.has(block)) return true;
+  }
+  return false;
+}
+function tokenize(text3) {
+  const withoutCode = clip(text3).replace(/```[\s\S]*?```/g, " ");
+  const words = withoutCode.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").split(" ").filter((word) => word.length >= 3 && !STOPWORDS.has(word));
+  return new Set(words);
+}
+function tokenOverlap(a, b) {
+  let shared = 0;
+  for (const token of a) {
+    if (b.has(token)) shared += 1;
+  }
+  const smaller = Math.min(a.size, b.size);
+  return { score: smaller === 0 ? 0 : shared / smaller, shared };
+}
+function bodiesAreSimilar(a, b) {
+  if (shareCodeBlock(a, b)) return true;
+  const { score, shared } = tokenOverlap(tokenize(a), tokenize(b));
+  return shared >= MIN_SHARED_TOKENS && score >= SIMILARITY_THRESHOLD;
+}
+function linesOverlap(candidate, existing) {
+  if (existing.startLine === void 0 || existing.endLine === void 0) return false;
+  return candidate.startLine <= existing.endLine + LINE_TOLERANCE && existing.startLine <= candidate.endLine + LINE_TOLERANCE;
+}
+function findsSimilarOpenConversation(candidate, existing, identity) {
+  return existing.some(
+    (thread) => thread.authorLogin === identity && !thread.resolved && thread.path === candidate.path && linesOverlap(candidate, thread) && bodiesAreSimilar(candidate.body, thread.body)
+  );
+}
+
 // src/publish/publisher.ts
 function ownMarkers(comments, identity) {
   const markers = /* @__PURE__ */ new Set();
   for (const comment of comments) {
-    if (comment.authorLogin !== identity) continue;
+    if (comment.authorLogin !== identity || comment.resolved === true) continue;
     const marker = extractMarker(comment.body);
     if (marker !== void 0) markers.add(marker);
   }
   return markers;
+}
+function toExistingConversation(comment) {
+  return {
+    path: comment.path,
+    authorLogin: comment.authorLogin,
+    resolved: comment.resolved === true,
+    body: comment.body,
+    startLine: comment.startLine ?? comment.line,
+    endLine: comment.line
+  };
 }
 async function publishWithLadder(context, ladder, body) {
   for (const attempt of ladder) {
@@ -1956,27 +2144,19 @@ async function verifyPublication(context, created, expectedMarker) {
   const readBack = await context.client.getReviewComment(context.ref, created.id);
   return readBack.id === created.id && readBack.authorLogin === context.identity && readBack.commitId === context.headSha && extractMarker(readBack.body) === expectedMarker;
 }
-async function publishOne(context, finding, existing, counters, diagnostics) {
-  const sanitized = sanitizeFindingBody(finding.content);
-  if (!sanitized.ok) {
-    counters.rejectedSanitization += 1;
-    diagnostics.record("publish.finding_rejected_sanitization", { headSha: context.headSha });
-    return;
-  }
-  const marker = fingerprint({
-    repository: `${context.ref.owner}/${context.ref.repo}`,
-    pullNumber: context.pullNumber,
+function classifySuppression(finding, sanitizedBody, marker, existingMarkers, existingThreads, identity) {
+  if (existingMarkers.has(marker)) return "exact";
+  const candidate = {
     path: finding.path,
-    rule: finding.category ?? "general",
-    body: sanitized.body
-  });
-  if (existing.has(marker)) {
-    counters.suppressed += 1;
-    diagnostics.record("publish.finding_suppressed_duplicate", { headSha: context.headSha });
-    return;
-  }
+    startLine: finding.startLine,
+    endLine: finding.endLine,
+    body: sanitizedBody
+  };
+  return findsSimilarOpenConversation(candidate, existingThreads, identity) ? "similar" : void 0;
+}
+async function publishComposedFinding(context, finding, marker, sanitizedBody, counters, diagnostics) {
   const ladder = placementLadder(finding, context.items.get(finding.path), context.headSha);
-  const document = composeFindingBody(sanitized.body, markerComment(marker), {
+  const document = composeFindingBody(sanitizedBody, markerComment(marker), {
     path: finding.path,
     line: finding.endLine > 0 ? finding.endLine : finding.startLine,
     severity: finding.severity,
@@ -1999,9 +2179,40 @@ async function publishOne(context, finding, existing, counters, diagnostics) {
     counts: { [result.placement]: 1 }
   });
 }
+async function publishOne(context, finding, existing, existingThreads, counters, diagnostics) {
+  const sanitized = sanitizeFindingBody(finding.content);
+  if (!sanitized.ok) {
+    counters.rejectedSanitization += 1;
+    diagnostics.record("publish.finding_rejected_sanitization", { headSha: context.headSha });
+    return;
+  }
+  const marker = fingerprint({
+    repository: `${context.ref.owner}/${context.ref.repo}`,
+    pullNumber: context.pullNumber,
+    path: finding.path,
+    rule: finding.category ?? "general",
+    body: sanitized.body
+  });
+  const suppression = classifySuppression(
+    finding,
+    sanitized.body,
+    marker,
+    existing,
+    existingThreads,
+    context.identity
+  );
+  if (suppression !== void 0) {
+    counters.suppressed += 1;
+    const code = suppression === "exact" ? "publish.finding_suppressed_duplicate" : "publish.finding_suppressed_similar";
+    diagnostics.record(code, { headSha: context.headSha });
+    return;
+  }
+  await publishComposedFinding(context, finding, marker, sanitized.body, counters, diagnostics);
+}
 async function publishFindings(context, findings, diagnostics) {
   const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
   const existing = ownMarkers(comments, context.identity);
+  const existingThreads = comments.map(toExistingConversation);
   const counters = {
     published: 0,
     suppressed: 0,
@@ -2010,7 +2221,7 @@ async function publishFindings(context, findings, diagnostics) {
     readbackFailures: 0
   };
   for (const finding of findings) {
-    await publishOne(context, finding, existing, counters, diagnostics);
+    await publishOne(context, finding, existing, existingThreads, counters, diagnostics);
   }
   return { ...counters };
 }
@@ -2020,7 +2231,11 @@ async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnost
     pullNumber: context.pullNumber,
     path: anchorPath,
     rule: "incomplete-review",
-    body: reasonCode
+    body: reasonCode,
+    // Unlike a finding, a notice's meaning is head-specific: "this exact commit was not covered".
+    // Excluding it would let a notice about a since-superseded head suppress the one a fresh run for
+    // the current head still needs to publish.
+    head: context.headSha
   });
   const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
   if (ownMarkers(comments, context.identity).has(marker)) return true;
@@ -2082,6 +2297,16 @@ async function headIsCurrent(request) {
 function itemIndex(inventory) {
   return new Map(inventory.items.map((item) => [item.path, item]));
 }
+function publishContextFor(request, inventory) {
+  return {
+    client: request.client,
+    ref: request.ref,
+    pullNumber: request.pullNumber,
+    headSha: request.head,
+    identity: request.identity,
+    items: itemIndex(inventory)
+  };
+}
 var INERT_MEMO = {
   hits: /* @__PURE__ */ new Map(),
   hitPaths: /* @__PURE__ */ new Set(),
@@ -2118,33 +2343,15 @@ function prepareMemoization(request, inventory, diagnostics) {
 }
 async function settleIncomplete(request, inventory, reason, diagnostics, findings = [], memo = INERT_MEMO) {
   diagnostics.record(reason, { headSha: request.head });
-  const publish = findings.length === 0 ? void 0 : await publishFindings(
-    {
-      client: request.client,
-      ref: request.ref,
-      pullNumber: request.pullNumber,
-      headSha: request.head,
-      identity: request.identity,
-      items: itemIndex(inventory)
-    },
-    findings,
-    diagnostics
-  );
+  if (!await headIsCurrent(request)) {
+    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+    return abandonedReport(inventory, memo);
+  }
+  const context = publishContextFor(request, inventory);
+  const publish = findings.length === 0 ? void 0 : await publishFindings(context, findings, diagnostics);
   const anchor = noticeAnchor(inventory);
   if (anchor !== void 0) {
-    await publishIncompleteNotice(
-      {
-        client: request.client,
-        ref: request.ref,
-        pullNumber: request.pullNumber,
-        headSha: request.head,
-        identity: request.identity,
-        items: itemIndex(inventory)
-      },
-      reason,
-      anchor,
-      diagnostics
-    );
+    await publishIncompleteNotice(context, reason, anchor, diagnostics);
   }
   return {
     outcome: "incomplete",
@@ -2210,14 +2417,7 @@ function finalizeCacheStore(request, inventory, memo, engineFindings) {
 async function publishSettledFindings(request, inventory, settlement, memo, startedAt, diagnostics) {
   const findings = mergeHitFindings(settlement.findings, memo.hits);
   const publish = await publishFindings(
-    {
-      client: request.client,
-      ref: request.ref,
-      pullNumber: request.pullNumber,
-      headSha: request.head,
-      identity: request.identity,
-      items: itemIndex(inventory)
-    },
+    publishContextFor(request, inventory),
     findings,
     diagnostics
   );
@@ -2309,10 +2509,6 @@ async function performReview(request, diagnostics) {
   const memo = prepareMemoization(request, inventory, diagnostics);
   const settlement = await settleOrReport(request, inventory, memo, diagnostics);
   if ("outcome" in settlement) return settlement;
-  if (!await headIsCurrent(request)) {
-    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
-    return abandonedReport(inventory, memo);
-  }
   if (settlement.status === "incomplete") {
     return settleIncomplete(
       request,
@@ -2322,6 +2518,10 @@ async function performReview(request, diagnostics) {
       mergeHitFindings(settlement.findings, memo.hits),
       memo
     );
+  }
+  if (!await headIsCurrent(request)) {
+    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+    return abandonedReport(inventory, memo);
   }
   return publishSettledFindings(request, inventory, settlement, memo, started, diagnostics);
 }
@@ -2394,20 +2594,28 @@ async function mintInstallationToken(apiBase, appId, privateKey, owner, repo, no
 }
 
 // src/action/identity.ts
+function buildClient(apiBase, token, env) {
+  const graphqlBase = env.GITHUB_GRAPHQL_URL;
+  return graphqlBase === void 0 ? new GitHubClient(apiBase, token) : new GitHubClient(apiBase, token, graphqlBase);
+}
 async function resolveIdentity(apiBase, env, owner, repo, diagnostics, nowSeconds) {
   const appId = (env.INPUT_APP_ID ?? "").trim();
   const privateKey = (env.INPUT_APP_PRIVATE_KEY ?? "").trim();
   if (appId !== "" && privateKey !== "") {
     const minted = await mintInstallationToken(apiBase, appId, privateKey, owner, repo, nowSeconds);
     diagnostics.record("publish.identity_resolved");
-    return { client: new GitHubClient(apiBase, minted.token), login: minted.login, usedApp: true };
+    return {
+      client: buildClient(apiBase, minted.token, env),
+      login: minted.login,
+      usedApp: true
+    };
   }
   const token = (env.INPUT_GITHUB_TOKEN ?? "").trim();
   if (token === "") {
     diagnostics.record("publish.identity_unresolved");
     return void 0;
   }
-  const client = new GitHubClient(apiBase, token);
+  const client = buildClient(apiBase, token, env);
   const login = await client.resolveViewerLogin() ?? "github-actions[bot]";
   diagnostics.record("publish.identity_resolved");
   return { client, login, usedApp: false };

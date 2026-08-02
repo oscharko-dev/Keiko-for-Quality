@@ -164,9 +164,10 @@ you authored, never the candidate content the review itself treats as hostile.
 ### The bot identity
 
 Configure the GitHub App. Deduplication only suppresses a repost when the existing conversation was
-authored by _this_ reviewer — and a marker is a public string in a public comment. Under the shared
-`github-actions[bot]` identity, any other workflow in the repository can author a comment carrying a
-valid-looking marker and silence a real finding.
+authored by _this_ reviewer — true of both dedup stages, the exact marker and the phrasing-
+independent similarity check described below — and a marker is a public string in a public comment.
+Under the shared `github-actions[bot]` identity, any other workflow in the repository can author a
+comment carrying a valid-looking marker and silence a real finding.
 
 1. Create a GitHub App with **Pull requests: read & write** and **Contents: read**.
 2. Install it on the repository.
@@ -174,6 +175,27 @@ valid-looking marker and silence a real finding.
 
 Without them the action falls back to `github_token` and posts as the shared Actions identity. It
 works; it is weaker; the fallback exists so you can try the reviewer before registering an App.
+
+### Deduplication
+
+A finding is suppressed only when it is the same finding this reviewer already published, checked
+in two stages:
+
+1. **Exact marker.** Every published conversation carries a hidden fingerprint of its content. A
+   later run recomputes the same fingerprint for the same defect and suppresses the repost.
+2. **Phrasing-independent similarity.** A model asked to describe the same defect twice does not
+   always word it identically, which changes the fingerprint above. This second stage suppresses a
+   candidate only when an existing, still-open conversation this reviewer authored anchors the same
+   file, its line range overlaps the candidate's within a small tolerance, and the two bodies are
+   conservatively similar — a shared quoted code snippet, or enough shared content vocabulary. Two
+   different defects at the same or an adjacent line are deliberately not similar enough to match,
+   and an uncertain comparison publishes rather than suppresses.
+
+Both stages ignore a **resolved or outdated** conversation: once a conversation is no longer open,
+whatever it described can recur and be republished. Resolution state comes from a best-effort
+GraphQL lookup the `Pull requests` permission above already covers; if a token or platform cannot
+answer it, every conversation is simply treated as open, which is exactly how deduplication behaved
+before this lookup existed.
 
 ## Known limitations
 
@@ -201,6 +223,14 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
    that line exists, not whether the reviewer reasons about prototype chains. A benchmark you tune
    until it goes green has stopped being a benchmark. If this class matters to you, the deterministic
    gates in your own repository are the right place to catch it.
+
+7. **The similarity dedup stage is a bag-of-words measure.** It compares content vocabulary, not
+   meaning, so it can occasionally score "the same defect, reworded" and "a different defect
+   described in the same sentence template with one key identifier swapped" the wrong way around —
+   the second can share more words than a genuine paraphrase does. Calibrated to catch every
+   paraphrase pattern observed in production; biased, when a comparison is uncertain, toward
+   publishing rather than suppressing, because a missed finding is worse than an occasional
+   duplicate.
 
 ## Measured quality
 
@@ -240,6 +270,39 @@ between runs — which is why classification is reported and not gated: severity
 and gates nothing. Every run records what produced it (engine digest, rule digest, corpus digest,
 adapter commit, model id), because recall is a property of a _pairing_, and the model is the input
 that can move without a commit.
+
+## Reviewer arena
+
+The seeded corpus measures this reviewer alone. Since activation, every eligible Keiko pull request
+is also reviewed by CodeRabbit and Codex on the identical head — a controlled, three-way comparison a
+solo history cannot provide. `corpus/arena.mjs` turns that into a repeatable scoreboard instead of
+something read by hand: it reads each bot's inline review threads through the GitHub API (read-only,
+no publication, no model call), attributes them by author login, and reports per bot — per pull
+request and in aggregate — findings posted, distinct files touched, thread resolution, paraphrase
+duplicates within one bot's own findings, and cross-bot location overlap as a consensus proxy. It
+scores none of this for correctness: the epic behind it (#26) is explicit that the tool records, a
+person judges.
+
+Every count beyond raw totals is a heuristic, and the tool says so in its own output rather than
+letting a number imply more precision than it has: a duplicate variant is two of one bot's own
+findings sharing a path, an overlapping line window, and a Jaccard similarity over normalized content
+words at or above 0.15; cross-bot overlap is the same path-and-window intersection with no content
+comparison at all. `corpus/arena-lib.test.mjs` pins both heuristics against fixtures shaped from a
+real pull request, including the case that motivated this tool: three textually different Keiko for
+Quality comments at one location on Keiko #2926, which the heuristic must collapse into one finding
+plus two duplicate variants (tracked as bug #38 — re-running the arena after that fix lands is the
+regression meter for it).
+
+```bash
+npm run arena -- 2926 2924          # writes corpus/evidence/arena-latest.{json,md}
+npm run arena -- --since 2026-07-01 # discovers pull requests instead of naming them
+node --test corpus/arena-lib.test.mjs # the pure computation's own tests; not part of `npm test`
+```
+
+The evidence committed under `corpus/evidence/` is the first live run, recorded as the v0.10.0
+baseline. Its JSON never carries a comment body — locations, counts, and hashes only, matching this
+repository's evidence-redaction discipline; a short quoted stub would still be another bot's
+generated prose distributed through this repository, not just this reviewer's own.
 
 ## Development
 

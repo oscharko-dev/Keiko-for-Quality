@@ -247,4 +247,108 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(report.cacheHits).toBe(0);
     expect(report.cacheMisses).toBe(0);
   });
+
+  /**
+   * Keiko-for-Quality#38's secondary defect: two byte-identical incomplete-review notices were
+   * published against the same head. `settleIncomplete` only checked whether the head was still
+   * current on the path reached after a real settlement decision; a run that instead settled
+   * incomplete via an unclassified path (found in seconds, before any engine work) or an engine
+   * failure (found only after the engine ran) could still publish a notice for a head the pull
+   * request had already moved past. These two prove that gap and that closing it makes the run
+   * abandon instead of publish.
+   */
+  describe("staleness guard on every settleIncomplete path", () => {
+    /** A client whose pull request has already moved to a different head than `request.head` uses. */
+    function staleClient(): GitHubClient {
+      const client = new GitHubClient("https://api.example.test", "unused");
+      vi.spyOn(client, "getPullRequest").mockResolvedValue({
+        headSha: commitSha("f".repeat(40)),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
+      return client;
+    }
+
+    it("abandons an unclassified-path settlement once the head has moved on", async () => {
+      // `reviewRelevant` must be non-empty to pass profile validation, but "docs/**" matches
+      // neither `src/a.ts` nor `src/b.ts`, so both fall through to `unclassified`.
+      const profile = compileProfile({
+        version: 1,
+        reviewRelevant: ["docs/**"],
+        deletionCritical: [],
+        generated: [],
+        excluded: [],
+        benignWarnings: [],
+        pathInstructions: [],
+      } satisfies ReviewProfile);
+      const client = staleClient();
+      const createSpy = vi.spyOn(client, "createReviewComment").mockResolvedValue({
+        id: 1,
+        body: "",
+        path: "src/a.ts",
+        authorLogin: "keiko-for-quality[bot]",
+        commitId: headSha,
+        url: "https://example.test/c",
+      });
+
+      const request: ReviewRequest = {
+        client,
+        ref: { owner: "acme", repo: "widget" },
+        pullNumber: 1,
+        base: commitSha(baseSha),
+        head: commitSha(headSha),
+        repositoryPath: repo,
+        config: CONFIG,
+        profile,
+        guidelines: { paths: [] },
+        identity: "keiko-for-quality[bot]",
+        env: {},
+        pathValue: process.env.PATH ?? "/usr/bin:/bin",
+      };
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("abandoned");
+      expect(createSpy).not.toHaveBeenCalled();
+    });
+
+    it("abandons an engine-failure settlement once the head has moved on", async () => {
+      acquireEngineMock.mockResolvedValue({
+        binaryPath: "/fake/engine",
+        digest: currentPlatformDigest(),
+      });
+      runEngineMock.mockRejectedValue(new Error("engine spawn failed"));
+      const client = staleClient();
+      const createSpy = vi.spyOn(client, "createReviewComment").mockResolvedValue({
+        id: 1,
+        body: "",
+        path: "src/a.ts",
+        authorLogin: "keiko-for-quality[bot]",
+        commitId: headSha,
+        url: "https://example.test/c",
+      });
+
+      const request: ReviewRequest = {
+        client,
+        ref: { owner: "acme", repo: "widget" },
+        pullNumber: 1,
+        base: commitSha(baseSha),
+        head: commitSha(headSha),
+        repositoryPath: repo,
+        config: CONFIG,
+        profile: PROFILE,
+        guidelines: { paths: [] },
+        identity: "keiko-for-quality[bot]",
+        env: {},
+        pathValue: process.env.PATH ?? "/usr/bin:/bin",
+      };
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("abandoned");
+      expect(createSpy).not.toHaveBeenCalled();
+    });
+  });
 });
