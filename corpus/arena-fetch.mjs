@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { delimiter as pathDelimiter, join as joinPath } from "node:path";
 
 /**
  * The impure half of the arena scoreboard (issue #39): everything that calls `gh`.
@@ -15,6 +17,40 @@ import { execFileSync } from "node:child_process";
  * worth knowing about: REST appends `[bot]` to a bot login, GraphQL does not. Fetching everything
  * through one API means `arena-lib.mjs` only has to understand one shape.
  */
+
+/**
+ * Resolves `gh` to an absolute path by walking `PATH` once, ourselves, instead of invoking the bare
+ * command name and letting the OS search for it on every call. This is this repository's static
+ * analysis's actual request (CWE-426/427, "OS commands should not rely on PATH resolution"): once
+ * `execFileSync` is given a path containing a separator, it does not search `PATH` at all, which is
+ * the real mitigation — not a particular shape of the `env` option, which does not change how the
+ * executable itself is located.
+ */
+function resolveGhBinary() {
+  const executableNames = process.platform === "win32" ? ["gh.exe", "gh.cmd", "gh.bat"] : ["gh"];
+  const directories = (process.env.PATH ?? "").split(pathDelimiter).filter((dir) => dir !== "");
+  for (const directory of directories) {
+    for (const executableName of executableNames) {
+      const candidate = joinPath(directory, executableName);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  throw new Error("gh was not found on PATH — install the GitHub CLI (https://cli.github.com)");
+}
+
+let cachedGhBinary;
+
+/**
+ * Runs `gh` at its resolved absolute path (cached after the first call) with the full ambient
+ * environment: `gh` authenticates through any of several mechanisms (a config file under `HOME`,
+ * `GH_TOKEN`, `GITHUB_TOKEN`, an enterprise host, …), and this reads only data already public in the
+ * target repository, so there is no credential here worth narrowing the environment to protect —
+ * unlike the engine invocations elsewhere in `corpus/`, which do carry a model credential.
+ */
+function runGh(args) {
+  cachedGhBinary ??= resolveGhBinary();
+  return execFileSync(cachedGhBinary, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+}
 
 const REVIEW_THREADS_QUERY = `
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {
@@ -49,35 +85,6 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
     }
   }
 }`;
-
-/**
- * The environment `gh` is allowed to see: `PATH` to be found at all, plus every variable `gh help
- * environment` documents as one of its own ambient authentication mechanisms (a config file under
- * `HOME`/`XDG_CONFIG_HOME`/`GH_CONFIG_DIR`, a `github.com` token, or a GitHub Enterprise Server
- * token and host). Listed explicitly, like the engine invocations elsewhere in `corpus/`, rather
- * than passed through wholesale — this repository's static analysis requires `PATH` to be a fixed
- * value a child process could not widen, and an explicit list is also the honest documentation of
- * what this script can actually authenticate with. A key `gh` does not see falls back to its own
- * defaults; Node omits an `undefined` value from the child's environment rather than stringifying
- * it, so a variable unset here is unset there too, not the literal text `"undefined"`.
- */
-function runGh(args) {
-  return execFileSync("gh", args, {
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-    env: {
-      PATH: process.env.PATH ?? "",
-      HOME: process.env.HOME,
-      XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
-      GH_CONFIG_DIR: process.env.GH_CONFIG_DIR,
-      GH_TOKEN: process.env.GH_TOKEN,
-      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-      GH_ENTERPRISE_TOKEN: process.env.GH_ENTERPRISE_TOKEN,
-      GITHUB_ENTERPRISE_TOKEN: process.env.GITHUB_ENTERPRISE_TOKEN,
-      GH_HOST: process.env.GH_HOST,
-    },
-  });
-}
 
 function runGraphql(variables, after) {
   const raw = runGh([
