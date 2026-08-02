@@ -17,7 +17,9 @@ await build({
   bundle: true,
   platform: "node",
   target: "node24",
-  format: "cjs",
+  // ESM, because package.json declares "type": "module": Node resolves the nearest package.json
+  // for dist/index.js and would reject a CommonJS bundle there with "require is not defined".
+  format: "esm",
   minify: false,
   sourcemap: false,
   legalComments: "none",

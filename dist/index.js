@@ -1,9 +1,8 @@
 // Keiko for Quality 0.1.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
-"use strict";
 
 // src/action/main.ts
-var import_promises5 = require("node:fs/promises");
+import { readFile } from "node:fs/promises";
 
 // src/core/glob.ts
 var REGEXP_SPECIALS = /* @__PURE__ */ new Set([
@@ -267,14 +266,14 @@ function createDiagnostics(writer) {
 }
 
 // src/review.ts
-var import_promises4 = require("node:fs/promises");
-var import_node_os2 = require("node:os");
-var import_node_path3 = require("node:path");
+import { mkdtemp as mkdtemp2, rm as rm2 } from "node:fs/promises";
+import { tmpdir as tmpdir2 } from "node:os";
+import { join as join3 } from "node:path";
 
 // src/engine/acquire.ts
-var import_node_crypto = require("node:crypto");
-var import_promises = require("node:fs/promises");
-var import_node_path = require("node:path");
+import { createHash } from "node:crypto";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 // src/engine/pinned-release.ts
 var VERSION2 = versionTag("v1.8.4");
@@ -330,7 +329,7 @@ async function download(url) {
   return bytes;
 }
 function digestOf(bytes) {
-  return (0, import_node_crypto.createHash)("sha256").update(bytes).digest("hex");
+  return createHash("sha256").update(bytes).digest("hex");
 }
 async function acquireEngine(directory, diagnostics, pin = ENGINE_PIN, platform = process.platform, arch = process.arch) {
   const key = platformKey(platform, arch);
@@ -349,10 +348,10 @@ async function acquireEngine(directory, diagnostics, pin = ENGINE_PIN, platform 
     });
     throw new AcquisitionError("engine.acquire.digest_mismatch");
   }
-  await (0, import_promises.mkdir)(directory, { recursive: true, mode: 448 });
-  const binaryPath = (0, import_node_path.join)(directory, "opencodereview");
-  await (0, import_promises.writeFile)(binaryPath, bytes, { mode: 448 });
-  await (0, import_promises.chmod)(binaryPath, 448);
+  await mkdir(directory, { recursive: true, mode: 448 });
+  const binaryPath = join(directory, "opencodereview");
+  await writeFile(binaryPath, bytes, { mode: 448 });
+  await chmod(binaryPath, 448);
   diagnostics.record("engine.acquire.verified", {
     version: pin.version,
     digest: target.sha256,
@@ -471,10 +470,10 @@ function parseEngineResult(text3) {
 }
 
 // src/engine/run.ts
-var import_node_crypto2 = require("node:crypto");
-var import_promises2 = require("node:fs/promises");
-var import_node_os = require("node:os");
-var import_node_path2 = require("node:path");
+import { createHash as createHash2 } from "node:crypto";
+import { mkdir as mkdir2, mkdtemp, rm, writeFile as writeFile2 } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join as join2 } from "node:path";
 
 // src/config/runtime.ts
 var PROTOCOLS = /* @__PURE__ */ new Set(["openai", "anthropic"]);
@@ -550,7 +549,7 @@ function readModelToken(config, env) {
 }
 
 // src/git/exec.ts
-var import_node_child_process = require("node:child_process");
+import { execFile } from "node:child_process";
 var ExecFailure = class extends Error {
   code;
   constructor(command, code) {
@@ -561,7 +560,7 @@ var ExecFailure = class extends Error {
 };
 function run(command, args, options2) {
   return new Promise((resolve, reject) => {
-    (0, import_node_child_process.execFile)(
+    execFile(
       command,
       [...args],
       {
@@ -673,9 +672,9 @@ async function configureEngine(options2, home, env) {
 }
 async function writeRuleFile(options2, home) {
   const ruleBody = serializeRuleFile(buildRuleFile(options2.profile));
-  const rulePath = (0, import_node_path2.join)(home, "keiko-rules.json");
-  await (0, import_promises2.writeFile)(rulePath, ruleBody, { mode: 384 });
-  return { rulePath, ruleDigest: sha256((0, import_node_crypto2.createHash)("sha256").update(ruleBody).digest("hex")) };
+  const rulePath = join2(home, "keiko-rules.json");
+  await writeFile2(rulePath, ruleBody, { mode: 384 });
+  return { rulePath, ruleDigest: sha256(createHash2("sha256").update(ruleBody).digest("hex")) };
 }
 function reviewArguments(options2, rulePath) {
   return [
@@ -697,10 +696,10 @@ function reviewArguments(options2, rulePath) {
 async function runEngine(options2, diagnostics) {
   const token = readModelToken(options2.config, options2.env);
   if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
-  const home = await (0, import_promises2.mkdtemp)((0, import_node_path2.join)((0, import_node_os.tmpdir)(), "kfq-engine-"));
+  const home = await mkdtemp(join2(tmpdir(), "kfq-engine-"));
   const started = Date.now();
   try {
-    await (0, import_promises2.mkdir)((0, import_node_path2.join)(home, "state"), { recursive: true, mode: 448 });
+    await mkdir2(join2(home, "state"), { recursive: true, mode: 448 });
     const { rulePath, ruleDigest } = await writeRuleFile(options2, home);
     const env = engineEnvironment(options2, token, home);
     await configureEngine(options2, home, env);
@@ -725,7 +724,7 @@ async function runEngine(options2, diagnostics) {
     });
     throw new EngineRunError(reason);
   } finally {
-    await (0, import_promises2.rm)(home, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
   }
 }
 
@@ -984,7 +983,7 @@ async function buildInventory(ctx, profile, pair, renamePercent, diagnostics) {
 }
 
 // src/github/client.ts
-var import_promises3 = require("node:timers/promises");
+import { setTimeout as delay } from "node:timers/promises";
 var GitHubApiError = class extends Error {
   status;
   constructor(status) {
@@ -1018,7 +1017,7 @@ var GitHubClient = class {
       if (response.ok) return response;
       lastStatus = response.status;
       if (!RETRYABLE.has(response.status)) throw new GitHubApiError(response.status);
-      await (0, import_promises3.setTimeout)(attempt * 1e3);
+      await delay(attempt * 1e3);
     }
     throw new GitHubApiError(lastStatus);
   }
@@ -1108,7 +1107,7 @@ function toReviewComment(raw) {
 }
 
 // src/publish/marker.ts
-var import_node_crypto3 = require("node:crypto");
+import { createHash as createHash3 } from "node:crypto";
 var MARKER_PREFIX = "keiko-for-quality";
 var MARKER_PATTERN = new RegExp(`<!--\\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\\s*-->`);
 function normalizeForFingerprint(body) {
@@ -1122,7 +1121,7 @@ function fingerprint(input) {
     input.rule,
     normalizeForFingerprint(input.body)
   ].join("\0");
-  return (0, import_node_crypto3.createHash)("sha256").update(material).digest("hex").slice(0, 32);
+  return createHash3("sha256").update(material).digest("hex").slice(0, 32);
 }
 function renderMarker(value) {
   return `<!-- ${MARKER_PREFIX}:v1:${value} -->`;
@@ -1357,7 +1356,7 @@ async function settleIncomplete(request, inventory, reason, diagnostics) {
   return { outcome: "incomplete", reason, inventorySize: inventory.items.length };
 }
 async function executeEngine(request, inventory, diagnostics) {
-  const workspace = await (0, import_promises4.mkdtemp)((0, import_node_path3.join)((0, import_node_os2.tmpdir)(), "kfq-engine-bin-"));
+  const workspace = await mkdtemp2(join3(tmpdir2(), "kfq-engine-bin-"));
   try {
     const engine = await acquireEngine(workspace, diagnostics);
     const output = await runEngine(
@@ -1375,7 +1374,7 @@ async function executeEngine(request, inventory, diagnostics) {
     const parsed = parseEngineResult(output.stdout);
     return settle(inventory, parsed, request.profile, request.config);
   } finally {
-    await (0, import_promises4.rm)(workspace, { recursive: true, force: true });
+    await rm2(workspace, { recursive: true, force: true });
   }
 }
 function publicationDegraded(outcome) {
@@ -1467,7 +1466,7 @@ function evaluateEligibility(facts, targetBranches2) {
 }
 
 // src/github/app-token.ts
-var import_node_crypto4 = require("node:crypto");
+import { createSign } from "node:crypto";
 function base64Url(input) {
   return Buffer.from(input).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
@@ -1477,7 +1476,7 @@ function createAppJwt(appId, privateKey, nowSeconds) {
     JSON.stringify({ iat: nowSeconds - 60, exp: nowSeconds + 540, iss: appId })
   );
   const signingInput = `${header}.${payload}`;
-  const signer = (0, import_node_crypto4.createSign)("RSA-SHA256");
+  const signer = createSign("RSA-SHA256");
   signer.update(signingInput);
   signer.end();
   return `${signingInput}.${base64Url(signer.sign(privateKey))}`;
@@ -1537,7 +1536,7 @@ async function resolveIdentity(apiBase, env, owner, repo, diagnostics, nowSecond
 }
 
 // src/action/inputs.ts
-var import_node_fs = require("node:fs");
+import { appendFileSync } from "node:fs";
 function inputKey(name) {
   return `INPUT_${name.replace(/ /g, "_").toUpperCase()}`;
 }
@@ -1560,7 +1559,7 @@ function writeOutputs(env, values) {
   const target = env.GITHUB_OUTPUT;
   if (target === void 0 || target === "") return;
   const lines = Object.entries(values).map(([key, value]) => `${key}=${value.replace(/[\r\n]+/g, " ")}`).join("\n");
-  (0, import_node_fs.appendFileSync)(target, `${lines}
+  appendFileSync(target, `${lines}
 `, "utf8");
 }
 function runtimeConfigFromInputs(env) {
@@ -1630,7 +1629,7 @@ function targetBranches(env) {
 async function loadEvent(env) {
   const path = env.GITHUB_EVENT_PATH;
   if (path === void 0 || path === "") throw new Error("missing event payload");
-  const payload = parseJson(await (0, import_promises5.readFile)(path, "utf8"), "event");
+  const payload = parseJson(await readFile(path, "utf8"), "event");
   return parseEventContext(payload);
 }
 function reportOutputs(report) {
@@ -1678,7 +1677,7 @@ async function runAction(env, diagnostics) {
   if (identity === void 0) throw new Error("no posting identity configured");
   const config = runtimeConfigFromInputs(env);
   const profilePath = readRequiredInput(env, "profile");
-  const profile = loadReviewProfile(await (0, import_promises5.readFile)(profilePath, "utf8"));
+  const profile = loadReviewProfile(await readFile(profilePath, "utf8"));
   diagnostics.record("config.loaded", { headSha: event.head });
   const report = await performReview(
     {
