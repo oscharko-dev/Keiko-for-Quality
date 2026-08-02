@@ -18,15 +18,32 @@ test("builds the committed corpus profile through the production loader", async 
   assert.equal(parsed.rules[0].merge_system_rule, true);
 });
 
-// The in-process pin for the #48 defect class: the shapes the harness historically fed the
-// builder — raw JSON.parse output, bare or wrapped as `{ profile: raw }` — must NOT survive it.
-// `{ profile: raw }` is the exact pre-fix call: it resembled a compiled profile closely enough to
-// work until #44 made the builder read a field only the production loader defaults.
-test("the historical raw profile shapes are rejected by the production builder", async () => {
+// Release criterion for v0.10.0 (#26): the qualification run must exercise a profile that
+// carries pathInstructions, so the shipped rule shape — including the #44 section — is what the
+// corpus measures. The entries in corpus/profile.json are deliberately neutral to the 23 cases:
+// none of the seeded defects hinges on either instruction, so recall/precision stay comparable
+// across releases while the rendering path is genuinely executed.
+test("the corpus profile renders its path-scoped guidance into the rule", async () => {
+  const document = await generateRuleDocument(PROFILE_TEXT);
+  const rule = JSON.parse(document).rules[0].rule;
+  assert.ok(rule.includes("Path-scoped guidance from the review profile"));
+  assert.ok(rule.includes("src/**/*.test.ts"));
+  assert.ok(rule.includes("scripts/**"));
+});
+
+// The in-process pin for the #48 defect class: shapes that bypass the production loader must NOT
+// survive the builder. `{ profile: raw }` is the exact pre-fix call — it resembled a compiled
+// profile closely enough to work until #44 made the builder read a field only the loader
+// defaults. The pin strips that field explicitly rather than relying on profile.json lacking it:
+// the committed profile now carries `pathInstructions`, and a pin contingent on fixture content
+// would have been defused by the very edit that added it (which is how this comment got written).
+test("shapes that bypass the production loader are rejected by the builder", async () => {
   registerTsExtensionHooks();
   const { buildRuleFile } = await import("../src/engine/rule-file.ts");
   const raw = JSON.parse(PROFILE_TEXT);
-  assert.throws(() => buildRuleFile({ profile: raw }), TypeError);
+  const withoutLoaderDefaults = { ...raw };
+  delete withoutLoaderDefaults.pathInstructions;
+  assert.throws(() => buildRuleFile({ profile: withoutLoaderDefaults }), TypeError);
   assert.throws(() => buildRuleFile(raw), TypeError);
 });
 
