@@ -34,6 +34,19 @@ export function readIntegerInput(env: NodeJS.ProcessEnv, name: string, fallback:
   return parsed;
 }
 
+/**
+ * Reads a `"true"`/`"false"` action input, matching the string-typed contract every Actions input
+ * has. Empty (the input was not supplied) resolves to `fallback` rather than an error, the same
+ * "absent means the default" contract `readIntegerInput` already applies.
+ */
+export function readBooleanInput(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const raw = readInput(env, name);
+  if (raw === "") return fallback;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  throw new ValidationError(`input.${name}`);
+}
+
 export function writeOutputs(
   env: NodeJS.ProcessEnv,
   values: Readonly<Record<string, string>>,
@@ -83,6 +96,14 @@ export interface EventContext {
   readonly headRepoFullName: string | undefined;
   readonly action: string | undefined;
   readonly previousBaseRef: string | undefined;
+  /**
+   * `pull_request.updated_at` from the webhook payload — GitHub's own server-assigned timestamp for
+   * this activity, never this process's wall clock. Empty when the payload carried none (an
+   * unexpected shape, or a synthetic event), which callers must treat as "unknown" rather than
+   * substituting `Date.now()`: a queued job's wall clock reflects when it happened to run, not when
+   * the event this run is reviewing actually occurred.
+   */
+  readonly eventTimestamp: string;
 }
 
 /** Reads a field as text only when it genuinely is text, so an object never becomes a value. */
@@ -132,5 +153,6 @@ export function parseEventContext(payload: unknown): EventContext {
     headRepoFullName: typeof headRepo.full_name === "string" ? headRepo.full_name : undefined,
     action: eventAction,
     previousBaseRef: typeof baseChange.from === "string" ? baseChange.from : undefined,
+    eventTimestamp: text(pull.updated_at),
   };
 }
