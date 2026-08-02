@@ -6,6 +6,9 @@ import {
   resolveGhBinary,
   fetchPullRequestReviewThreads,
   discoverPullRequestNumbers,
+  fetchPullRequestCommitShas,
+  fetchCommitWithFiles,
+  fetchPullRequestCommitTimeline,
 } from "./arena-fetch.mjs";
 
 /**
@@ -195,4 +198,138 @@ test("discoverPullRequestNumbers passes the requested state and since-date throu
   assert.ok(capturedArgs.includes("--state"));
   assert.ok(capturedArgs.includes("open"));
   assert.ok(capturedArgs.some((arg) => arg.includes("2026-06-15")));
+});
+
+// ---------------------------------------------------------------------------------------------
+// Commit timeline fetch (issue #56): fetchPullRequestCommitShas, fetchCommitWithFiles, and the
+// fetchPullRequestCommitTimeline orchestrator. Same hermetic discipline as the rest of this file —
+// only the injected `runGhImpl` fake is exercised, never a real `gh` process.
+// ---------------------------------------------------------------------------------------------
+
+test("fetchPullRequestCommitShas returns the sha of every commit gh reports, in the given order", () => {
+  const fakeRunGh = () =>
+    JSON.stringify([{ sha: "aaa1111" }, { sha: "bbb2222" }, { sha: "ccc3333" }]);
+  const shas = fetchPullRequestCommitShas("owner", "repo", 42, fakeRunGh);
+  assert.deepEqual(shas, ["aaa1111", "bbb2222", "ccc3333"]);
+});
+
+test("fetchPullRequestCommitShas requests the pull-request-commits endpoint with pagination", () => {
+  let capturedArgs;
+  const fakeRunGh = (args) => {
+    capturedArgs = args;
+    return "[]";
+  };
+  fetchPullRequestCommitShas("owner", "repo", 42, fakeRunGh);
+  assert.ok(capturedArgs.includes("repos/owner/repo/pulls/42/commits"));
+  assert.ok(capturedArgs.includes("--paginate"));
+});
+
+test("fetchPullRequestCommitShas does not throw when the reported commit count reaches the documented cap", () => {
+  const many = Array.from({ length: 250 }, (_, i) => ({ sha: `sha-${String(i)}` }));
+  const shas = fetchPullRequestCommitShas("owner", "repo", 42, () => JSON.stringify(many));
+  assert.equal(shas.length, 250, "still returns everything gh reported, warning aside");
+});
+
+function restCommitFixture({
+  sha = "abc123",
+  committerDate = "2026-08-02T12:00:00Z",
+  authorDate = null,
+  files = [{ filename: "a.ts", status: "modified", patch: "@@ -1,1 +1,1 @@\n-a\n+b\n" }],
+}) {
+  return {
+    sha,
+    commit: {
+      committer: committerDate === null ? undefined : { date: committerDate },
+      author: authorDate === null ? undefined : { date: authorDate },
+    },
+    files,
+  };
+}
+
+test("fetchCommitWithFiles normalizes GitHub's REST file shape into the camelCase shape arena-lib.mjs reads", () => {
+  const fixture = restCommitFixture({
+    files: [
+      {
+        filename: "new.ts",
+        previous_filename: "old.ts",
+        status: "renamed",
+        patch: "@@ -1,1 +1,1 @@\n",
+      },
+      { filename: "b.ts", status: "removed" },
+    ],
+  });
+  const commit = fetchCommitWithFiles("owner", "repo", "abc123", () => JSON.stringify(fixture));
+  assert.equal(commit.sha, "abc123");
+  assert.equal(commit.committedDate, "2026-08-02T12:00:00Z");
+  assert.deepEqual(commit.files, [
+    { path: "new.ts", previousPath: "old.ts", status: "renamed", patch: "@@ -1,1 +1,1 @@\n" },
+    { path: "b.ts", previousPath: null, status: "removed", patch: null },
+  ]);
+});
+
+test("fetchCommitWithFiles falls back to the author date when the committer date is absent", () => {
+  const fixture = restCommitFixture({ committerDate: null, authorDate: "2026-08-02T09:00:00Z" });
+  const commit = fetchCommitWithFiles("owner", "repo", "abc123", () => JSON.stringify(fixture));
+  assert.equal(commit.committedDate, "2026-08-02T09:00:00Z");
+});
+
+test("fetchCommitWithFiles reports an empty file list, not a crash, when GitHub omits files entirely", () => {
+  const fixture = restCommitFixture({});
+  delete fixture.files;
+  const commit = fetchCommitWithFiles("owner", "repo", "abc123", () => JSON.stringify(fixture));
+  assert.deepEqual(commit.files, []);
+});
+
+test("fetchCommitWithFiles requests the single-commit endpoint for the given sha", () => {
+  let capturedArgs;
+  const fakeRunGh = (args) => {
+    capturedArgs = args;
+    return JSON.stringify(restCommitFixture({}));
+  };
+  fetchCommitWithFiles("owner", "repo", "deadbeef", fakeRunGh);
+  assert.ok(capturedArgs.includes("repos/owner/repo/commits/deadbeef"));
+});
+
+test("fetchPullRequestCommitTimeline fetches the list once, then one call per commit, and sorts by committed date", () => {
+  const calls = [];
+  const fakeRunGh = (args) => {
+    calls.push(args);
+    if (args[1] === "repos/owner/repo/pulls/7/commits") {
+      return JSON.stringify([{ sha: "later" }, { sha: "earlier" }]);
+    }
+    if (args[1] === "repos/owner/repo/commits/later") {
+      return JSON.stringify(
+        restCommitFixture({ sha: "later", committerDate: "2026-08-02T18:00:00Z" }),
+      );
+    }
+    if (args[1] === "repos/owner/repo/commits/earlier") {
+      return JSON.stringify(
+        restCommitFixture({ sha: "earlier", committerDate: "2026-08-02T09:00:00Z" }),
+      );
+    }
+    throw new Error(`unexpected args: ${JSON.stringify(args)}`);
+  };
+  const commits = fetchPullRequestCommitTimeline("owner", "repo", 7, fakeRunGh);
+  assert.equal(calls.length, 3, "one list call plus one call per commit");
+  assert.deepEqual(
+    commits.map((c) => c.sha),
+    ["earlier", "later"],
+    "sorted chronologically regardless of the order gh listed them in",
+  );
+});
+
+test("fetchPullRequestCommitTimeline breaks a tie on identical committed dates by sha", () => {
+  const fakeRunGh = (args) => {
+    if (args[1] === "repos/owner/repo/pulls/7/commits") {
+      return JSON.stringify([{ sha: "zzz" }, { sha: "aaa" }]);
+    }
+    return JSON.stringify(
+      restCommitFixture({ sha: args[1].split("/").pop(), committerDate: "2026-08-02T12:00:00Z" }),
+    );
+  };
+  const commits = fetchPullRequestCommitTimeline("owner", "repo", 7, fakeRunGh);
+  assert.deepEqual(
+    commits.map((c) => c.sha),
+    ["aaa", "zzz"],
+  );
 });
