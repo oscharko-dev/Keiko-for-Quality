@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildRuleFile, serializeRuleFile } from "./rule-file.js";
+import { loadReviewProfile } from "../config/profile.js";
 import { sanitizeFindingBody } from "../publish/sanitize.js";
 
 /** Only the fields `buildRuleFile` reads. The rest of a compiled profile is irrelevant here. */
@@ -8,6 +9,7 @@ function profileWith(overrides: {
   reviewRelevant?: string[];
   generated?: string[];
   excluded?: { pattern: string; reason: string }[];
+  pathInstructions?: { paths: string[]; instructions: string }[];
 }): Parameters<typeof buildRuleFile>[0] {
   return {
     profile: {
@@ -17,6 +19,7 @@ function profileWith(overrides: {
       generated: overrides.generated ?? [],
       excluded: overrides.excluded ?? [],
       benignWarnings: [],
+      pathInstructions: overrides.pathInstructions ?? [],
     },
   } as unknown as Parameters<typeof buildRuleFile>[0];
 }
@@ -138,6 +141,151 @@ describe("buildRuleFile", () => {
     expect(
       sanitizeFindingBody("Fix the bound.\n\nThe guard `i < items.length` became `i <= n`.").ok,
     ).toBe(true);
+  });
+
+  describe("path-scoped instructions", () => {
+    it("renders no section, and changes nothing, when the profile declares none", () => {
+      const withoutField = buildRuleFile(profileWith({}));
+      const withEmptyArray = buildRuleFile(profileWith({ pathInstructions: [] }));
+      expect(withEmptyArray.rules[0]?.rule).toBe(withoutField.rules[0]?.rule);
+      expect(withoutField.rules[0]?.rule).not.toContain("Path-scoped guidance");
+    });
+
+    it("renders a clearly delimited section naming the globs and the guidance", () => {
+      const rule =
+        buildRuleFile(
+          profileWith({
+            pathInstructions: [
+              { paths: ["**/*.sql"], instructions: "Use snake_case identifiers." },
+            ],
+          }),
+        ).rules[0]?.rule ?? "";
+      expect(rule).toContain("## Path-scoped guidance from the review profile");
+      expect(rule).toContain("For files matching `**/*.sql`: Use snake_case identifiers.");
+    });
+
+    /**
+     * A second `rules[]` entry per pattern was the shape first proposed for this feature and
+     * rejected — see `pathInstructionsSection`'s doc comment in `rule-file.ts`. This pins the
+     * decision: any number of declared entries still produces exactly one rule for the engine.
+     */
+    it("still emits exactly one rules[] entry — guidance is prose inside it, not a second entry", () => {
+      const file = buildRuleFile(
+        profileWith({
+          pathInstructions: [
+            { paths: ["**/*.sql"], instructions: "First." },
+            { paths: ["**/*.md"], instructions: "Second." },
+          ],
+        }),
+      );
+      expect(file.rules).toHaveLength(1);
+      expect(file.rules[0]?.path).toBe("**/*");
+    });
+
+    it("renders entries in profile order, however they are declared", () => {
+      const forward =
+        buildRuleFile(
+          profileWith({
+            pathInstructions: [
+              { paths: ["**/*.sql"], instructions: "First." },
+              { paths: ["**/*.md"], instructions: "Second." },
+            ],
+          }),
+        ).rules[0]?.rule ?? "";
+      expect(forward.indexOf("First.")).toBeLessThan(forward.indexOf("Second."));
+
+      const reversed =
+        buildRuleFile(
+          profileWith({
+            pathInstructions: [
+              { paths: ["**/*.md"], instructions: "Second." },
+              { paths: ["**/*.sql"], instructions: "First." },
+            ],
+          }),
+        ).rules[0]?.rule ?? "";
+      expect(reversed.indexOf("Second.")).toBeLessThan(reversed.indexOf("First."));
+    });
+
+    /**
+     * `base` comes from calling `buildRuleFile` itself with no instructions declared, never from a
+     * hand-copied `CATCH_ALL_RULE` (private to `rule-file.ts`) — only the appended `section` below
+     * is this test's own expectation, and it exists to pin exactly that append contract.
+     */
+    it("byte-for-byte renders a two-entry profile as one appended, delimited section", () => {
+      const base = buildRuleFile(profileWith({ reviewRelevant: ["src/**/*.ts"] })).rules[0]?.rule;
+      const withInstructions = buildRuleFile(
+        profileWith({
+          reviewRelevant: ["src/**/*.ts"],
+          pathInstructions: [
+            {
+              paths: ["**/*.sql", "db/**"],
+              instructions: "Use snake_case identifiers and avoid `SELECT *`.",
+            },
+            { paths: ["**/*.md"], instructions: "Prefer active voice and short paragraphs." },
+          ],
+        }),
+      ).rules[0]?.rule;
+
+      const section = [
+        "",
+        "## Path-scoped guidance from the review profile",
+        "",
+        "The consumer's review profile attaches guidance below to specific path patterns. Apply an",
+        "entry only to files matching its patterns — it refines how you review them, not which paths",
+        "are reviewed; that is decided solely by review-relevant, deletion-critical, and excluded",
+        "above.",
+        "",
+        "- For files matching `**/*.sql`, `db/**`: Use snake_case identifiers and avoid `SELECT *`.",
+        "- For files matching `**/*.md`: Prefer active voice and short paragraphs.",
+      ].join("\n");
+
+      expect(withInstructions).toBe(`${base ?? ""}${section}`);
+    });
+  });
+
+  /**
+   * `profileWith` above hand-shapes a `CompiledProfile` and casts past the type checker, which is
+   * fast but proves nothing about `parsePathInstructions`/`compileProfile`. This block instead goes
+   * through `loadReviewProfile` — the same JSON-to-`CompiledProfile` path a consumer's own profile
+   * file takes — so a mismatch between how the parser shapes an entry and how the renderer reads it
+   * would fail here even if it happened to agree with `profileWith`'s fixture shape.
+   */
+  describe("path-scoped instructions through the real parser", () => {
+    const asJson = (pathInstructions?: unknown): string =>
+      JSON.stringify({
+        version: 1,
+        reviewRelevant: ["src/**/*.ts"],
+        deletionCritical: [],
+        generated: [],
+        excluded: [],
+        benignWarnings: [],
+        ...(pathInstructions === undefined ? {} : { pathInstructions }),
+      });
+
+    it("renders a path instruction declared in the profile's own JSON", () => {
+      const compiled = loadReviewProfile(
+        asJson([{ paths: ["**/*.sql"], instructions: "Use snake_case identifiers." }]),
+      );
+      const rule = buildRuleFile(compiled).rules[0]?.rule ?? "";
+      expect(rule).toContain("For files matching `**/*.sql`: Use snake_case identifiers.");
+    });
+
+    it("keeps two declared entries in profile order all the way through the real parser", () => {
+      const compiled = loadReviewProfile(
+        asJson([
+          { paths: ["**/*.sql"], instructions: "First." },
+          { paths: ["**/*.md"], instructions: "Second." },
+        ]),
+      );
+      const rule = buildRuleFile(compiled).rules[0]?.rule ?? "";
+      expect(rule.indexOf("First.")).toBeLessThan(rule.indexOf("Second."));
+    });
+
+    it("an absent pathInstructions key parses and renders exactly like an empty array", () => {
+      const a = buildRuleFile(loadReviewProfile(asJson())).rules[0]?.rule;
+      const b = buildRuleFile(loadReviewProfile(asJson([]))).rules[0]?.rule;
+      expect(a).toBe(b);
+    });
   });
 });
 

@@ -19,6 +19,7 @@ const PROFILE: ReviewProfile = {
   generated: ["dist/**"],
   excluded: [{ pattern: "vendor/**", reason: "third-party source, reviewed upstream" }],
   benignWarnings: [],
+  pathInstructions: [],
 };
 
 const compiled = compileProfile(PROFILE);

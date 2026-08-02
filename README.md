@@ -129,6 +129,12 @@ review-critical would otherwise inherit a coverage hole it never agreed to.
   ],
   "benignWarnings": [
     { "type": "context_truncated", "justification": "expected on files above the context window" }
+  ],
+  "pathInstructions": [
+    {
+      "paths": ["**/*.sql"],
+      "instructions": "Require snake_case identifiers and flag any SELECT * in production code."
+    }
   ]
 }
 ```
@@ -136,6 +142,24 @@ review-critical would otherwise inherit a coverage hole it never agreed to.
 A changed path matching none of these is **unclassified**, which fails the run. That is deliberate:
 an unclassified path is a gap in your coverage statement, and the alternative is a clean-looking
 review that quietly skipped something.
+
+`pathInstructions` attaches short natural-language guidance to specific path patterns — the
+capability CodeRabbit calls path instructions and Qodo calls extra instructions. It only changes
+_how_ a matching file is reviewed, never _which_ files are: that remains entirely `reviewRelevant`'s,
+`deletionCritical`'s, `generated`'s, and `excluded`'s decision. It is optional and additive, so a
+profile written before this field existed still parses and behaves exactly as before. It is also
+distinct from the action's `guidelines` input: an instruction is a short string inlined directly
+into the engine's rule prompt and scoped to specific globs, while a guideline is a whole document,
+named rather than inlined, and read from the trusted base checkout on demand everywhere.
+
+Every entry's `instructions` is rendered into the one rule document the engine reads for every file
+it reviews, so keep it short — a caption, not a style guide. It is bounded accordingly: at most 32
+entries, at most 16 `paths` globs per entry, at most 512 characters per glob, at most 1024 characters
+of `instructions` per entry, and at most 8192 characters of `instructions` summed across every entry.
+`paths` accepts the same glob dialect as `reviewRelevant`/`excluded`, and a declared glob may not
+repeat anywhere else in the list. Like the rest of this profile, it is read from the trusted base
+checkout, so its content carries the same trust level as `reviewRelevant`/`excluded` — configuration
+you authored, never the candidate content the review itself treats as hostile.
 
 ### The bot identity
 

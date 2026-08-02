@@ -13,6 +13,7 @@ const PROFILE = compileProfile({
   generated: [],
   excluded: [],
   benignWarnings: [],
+  pathInstructions: [],
 } satisfies ReviewProfile);
 
 const CONFIG: RuntimeConfig = {
