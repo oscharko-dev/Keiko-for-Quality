@@ -198,3 +198,87 @@ export function discoverPullRequestNumbers(
     .map((entry) => entry.number)
     .sort((a, b) => a - b);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Commit timeline fetch (issue #56): the git-data half of acted-upon linking.
+//
+// `corpus/arena-lib.mjs`'s "Acted-upon linking" section explains what this is for and how the
+// result is used; this half only turns "a repo and a pull request number" into the commit list
+// that computation reads. REST, not GraphQL, this time: a pull request's commit list and each
+// commit's per-file unified-diff patch are REST concepts with no GraphQL equivalent worth using,
+// unlike thread resolution above, which is why `fetchPullRequestReviewThreads` goes the other way.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * However many commits GitHub's pull-request-commits endpoint reliably returns; the endpoint is
+ * documented to cap out around this figure regardless of pagination, so a count at or above it is
+ * reported rather than trusted as complete — the same discipline `MAX_THREAD_PAGES` above applies
+ * to review threads.
+ */
+const MAX_PR_COMMITS = 250;
+
+/**
+ * Lists the SHAs of every commit currently in the pull request, oldest first as GitHub orders
+ * them. "Currently" matters: a force-push drops a superseded commit from this list even though it
+ * still exists in the repository's object database, which is exactly the signal issue #56's
+ * `outdated_by_rebase` classification needs — a finding anchored to a commit no longer reachable
+ * from here has, from this pull request's own perspective, had its history rewritten out from
+ * under it.
+ */
+export function fetchPullRequestCommitShas(owner, repo, number, runGhImpl = runGh) {
+  const raw = runGhImpl([
+    "api",
+    `repos/${owner}/${repo}/pulls/${String(number)}/commits`,
+    "--paginate",
+  ]);
+  const commits = JSON.parse(raw);
+  if (commits.length >= MAX_PR_COMMITS) {
+    console.error(
+      `warning: pull request ${owner}/${repo}#${String(number)} reports ${String(commits.length)} ` +
+        `commits — GitHub's pull-request-commits endpoint is not guaranteed to page past ` +
+        `${String(MAX_PR_COMMITS)}; the commit timeline used for acted-upon linking may be incomplete`,
+    );
+  }
+  return commits.map((commit) => commit.sha);
+}
+
+/** Renames GitHub's REST file-entry shape into the camelCase shape `corpus/arena-lib.mjs` reads. */
+function normalizeFileEntry(file) {
+  return {
+    path: file.filename,
+    previousPath: file.previous_filename ?? null,
+    status: file.status,
+    patch: file.patch ?? null,
+  };
+}
+
+/**
+ * Fetches one commit's committer date and per-file status/patch. `files` is absent from GitHub's
+ * response for a commit that changed an unusually large number of files, in which case this reports
+ * an empty list rather than guessing — the same "unmappable, not silently wrong" discipline
+ * `corpus/arena-lib.mjs` applies to one file's own missing `patch`.
+ */
+export function fetchCommitWithFiles(owner, repo, sha, runGhImpl = runGh) {
+  const raw = runGhImpl(["api", `repos/${owner}/${repo}/commits/${sha}`]);
+  const parsed = JSON.parse(raw);
+  return {
+    sha: parsed.sha,
+    committedDate: parsed.commit?.committer?.date ?? parsed.commit?.author?.date ?? null,
+    files: (parsed.files ?? []).map(normalizeFileEntry),
+  };
+}
+
+/**
+ * Fetches the pull request's full commit timeline for issue #56's acted-upon linking: every commit
+ * currently in the pull request, each with its own committer date and per-file diff. One
+ * `pulls/.../commits` call plus one `commits/{sha}` call per commit — a pull request with `n`
+ * commits costs `n + 1` read-only API calls. Sorted by committed date (SHA as a tiebreak) so every
+ * caller sees the same chronological order regardless of what GitHub happened to return.
+ */
+export function fetchPullRequestCommitTimeline(owner, repo, number, runGhImpl = runGh) {
+  const shas = fetchPullRequestCommitShas(owner, repo, number, runGhImpl);
+  const commits = shas.map((sha) => fetchCommitWithFiles(owner, repo, sha, runGhImpl));
+  return commits
+    .slice()
+    .sort((a, b) => a.committedDate.localeCompare(b.committedDate) || a.sha.localeCompare(b.sha));
+}

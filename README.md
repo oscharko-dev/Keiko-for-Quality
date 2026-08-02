@@ -334,14 +334,31 @@ Quality comments at one location on Keiko #2926, which the heuristic must collap
 plus two duplicate variants (tracked as bug #38 — re-running the arena after that fix lands is the
 regression meter for it).
 
+Thread-resolution status is a human or bot toggle, not proof a finding was addressed — a stale
+conversation gets resolved for reasons that have nothing to do with the code. Acted-upon linking
+(issue #56) adds a second, git-grounded signal per distinct finding: did a commit pushed to the pull
+request _after_ the finding was posted actually change the anchored region — same file, within
+±3 lines, found by parsing that commit's own unified-diff hunk headers? Every finding lands in one of
+four buckets — `acted_upon`, `resolved_without_change`, `open_unaddressed`, or `outdated_by_rebase`
+(the file is gone at the current head, or this run could not tell) — and each bot gets an
+opportunity-adjusted rate that excludes findings posted after the pull request's last push, which
+never had a chance to be acted upon. This is a coarser proxy than a human tracing the code: it cannot
+follow a fix that lands in a different file (or a distant function in the same file) for the same
+root cause, and it checks each later commit against the finding's original anchor independently
+rather than tracking a line's drift through a chain of commits. The pull request that introduced this
+heuristic ran it against Keiko #2930 and compared the result finding-by-finding against a hand-verified
+manual pass posted on issue #56, including the cases where the two disagree and why.
+
 ```bash
 npm run arena -- 2926 2924          # writes corpus/evidence/arena-latest.{json,md}
 npm run arena -- --since 2026-07-01 # discovers pull requests instead of naming them
 node --test corpus/arena-lib.test.mjs # the pure computation's own tests; not part of `npm test`
+node --test corpus/arena-fetch.test.mjs # the fetch layer's own tests, including the commit timeline
 ```
 
-The evidence committed under `corpus/evidence/` is the first live run, recorded as the v0.10.0
-baseline. Its JSON never carries a comment body — locations, counts, and hashes only, matching this
+The evidence committed under `corpus/evidence/` started with the first live run, recorded as the
+v0.10.0 baseline; the v0.11.0 baseline adds acted-upon linking, run live against Keiko #2930, #2926,
+and #2924. Its JSON never carries a comment body — locations, counts, and hashes only, matching this
 repository's evidence-redaction discipline; a short quoted stub would still be another bot's
 generated prose distributed through this repository, not just this reviewer's own.
 

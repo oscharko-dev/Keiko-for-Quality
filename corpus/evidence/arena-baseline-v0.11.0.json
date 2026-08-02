@@ -1,0 +1,3200 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-02T22:30:00.000Z",
+  "targetRepo": "oscharko-dev/Keiko",
+  "heuristics": {
+    "duplicateSimilarity": {
+      "method": "jaccard-token-set-v1",
+      "threshold": 0.15,
+      "note": "Two of one bot's own findings on the same pull request are treated as duplicate variants of one finding when they share a path, their line windows overlap, and the Jaccard similarity of their normalized content-word sets is at least the threshold. Estimates, not a correctness judgement — see corpus/arena-lib.mjs for the exact normalization."
+    },
+    "crossBotOverlap": {
+      "method": "path-and-line-window-intersection-v1",
+      "note": "A cross-bot overlap cluster groups distinct (already deduplicated) findings from different bots that share a path and an overlapping line window. No content comparison is applied across bots, so this is a proxy for consensus location, not for agreement on the claim."
+    },
+    "incompleteNotice": {
+      "method": "literal-phrase-match-v1",
+      "note": "A conversation is an incomplete-review notice, not a finding, when its body contains the fixed sentence Keiko for Quality's publisher emits for a settlement notice. Calibrated on this reviewer; other bots are checked against the same phrase for symmetry but are not expected to match it."
+    },
+    "actedUpon": {
+      "method": "later-commit-hunk-overlap-v1",
+      "toleranceLines": 3,
+      "note": "A finding is acted_upon when a commit pushed to the pull request after the finding was posted changes its anchored region: the same file, within the line tolerance, found by parsing that commit's own unified-diff hunk headers — thread-resolved status plays no part in this check. A finding with no later commit at all had no opportunity to be acted upon and is excluded from the opportunity-adjusted rate. A same-file, same-line-window proxy misses a fix landing in a different file for the same root cause, and checks each later commit against the finding's original anchor independently rather than tracking a line's drift through a chain of commits — see corpus/arena-lib.mjs and the pull request that introduced this heuristic for a worked comparison against a hand-verified pass."
+    },
+    "disclaimer": "Duplicate-variant and cross-bot-overlap counts are heuristic estimates for a repeatable scoreboard, not a human adjudication of correctness or noise. See the pull request that introduced this tool for calibration evidence."
+  },
+  "identity": {
+    "knownBots": [
+      {
+        "arenaId": "kfq",
+        "displayName": "Keiko for Quality",
+        "matchLogin": "keiko-for-quality"
+      },
+      {
+        "arenaId": "coderabbit",
+        "displayName": "CodeRabbit",
+        "matchLogin": "coderabbitai"
+      },
+      {
+        "arenaId": "codex",
+        "displayName": "Codex",
+        "matchLogin": "chatgpt-codex-connector"
+      }
+    ],
+    "observedLogins": [
+      {
+        "rawLogin": "chatgpt-codex-connector",
+        "normalizedLogin": "chatgpt-codex-connector",
+        "typename": "Bot",
+        "arenaId": "codex",
+        "identityMismatch": false,
+        "commentCount": 46
+      },
+      {
+        "rawLogin": "coderabbitai",
+        "normalizedLogin": "coderabbitai",
+        "typename": "Bot",
+        "arenaId": "coderabbit",
+        "identityMismatch": false,
+        "commentCount": 53
+      },
+      {
+        "rawLogin": "keiko-for-quality",
+        "normalizedLogin": "keiko-for-quality",
+        "typename": "Bot",
+        "arenaId": "kfq",
+        "identityMismatch": false,
+        "commentCount": 131
+      },
+      {
+        "rawLogin": "oscharko",
+        "normalizedLogin": "oscharko",
+        "typename": "User",
+        "arenaId": null,
+        "identityMismatch": false,
+        "commentCount": 113
+      }
+    ]
+  },
+  "pullRequests": [
+    {
+      "number": 2924,
+      "headSha": "da36cc152f1ba208f604046bd32b8293b442b6eb",
+      "bots": {
+        "kfq": {
+          "findingsPosted": 0,
+          "distinctFindings": 0,
+          "duplicateVariants": 0,
+          "incompleteNotices": 1,
+          "filesTouched": 1,
+          "threads": {
+            "resolved": 1,
+            "unresolved": 0,
+            "outdated": 0
+          },
+          "uniqueToBot": 0,
+          "coFound": {
+            "kfq": null,
+            "coderabbit": null,
+            "codex": null
+          },
+          "coFoundAllThree": 0
+        },
+        "coderabbit": {
+          "findingsPosted": 1,
+          "distinctFindings": 1,
+          "duplicateVariants": 0,
+          "incompleteNotices": 0,
+          "filesTouched": 1,
+          "threads": {
+            "resolved": 1,
+            "unresolved": 0,
+            "outdated": 0
+          },
+          "uniqueToBot": 1,
+          "coFound": {
+            "kfq": null,
+            "coderabbit": null,
+            "codex": null
+          },
+          "coFoundAllThree": 0
+        },
+        "codex": {
+          "findingsPosted": 1,
+          "distinctFindings": 1,
+          "duplicateVariants": 0,
+          "incompleteNotices": 0,
+          "filesTouched": 1,
+          "threads": {
+            "resolved": 1,
+            "unresolved": 0,
+            "outdated": 0
+          },
+          "uniqueToBot": 1,
+          "coFound": {
+            "kfq": null,
+            "coderabbit": null,
+            "codex": null
+          },
+          "coFoundAllThree": 0
+        }
+      },
+      "duplicateClusters": [],
+      "crossBotClusters": [],
+      "actedUpon": {
+        "lastPushAt": "2026-08-02T12:39:18Z",
+        "toleranceLines": 3,
+        "byBot": {
+          "kfq": {
+            "summary": {
+              "total": 0,
+              "actedUpon": 0,
+              "resolvedWithoutChange": 0,
+              "openUnaddressed": 0,
+              "outdatedByRebase": 0,
+              "hadOpportunity": 0,
+              "actedUponWithOpportunity": 0
+            },
+            "findings": []
+          },
+          "coderabbit": {
+            "summary": {
+              "total": 1,
+              "actedUpon": 1,
+              "resolvedWithoutChange": 0,
+              "openUnaddressed": 0,
+              "outdatedByRebase": 0,
+              "hadOpportunity": 1,
+              "actedUponWithOpportunity": 1
+            },
+            "findings": [
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699026223,
+                "path": "docs/qa/keiko-for-quality.md",
+                "startLine": 27,
+                "endLine": 29,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "da36cc152f1ba208f604046bd32b8293b442b6eb"
+              }
+            ]
+          },
+          "codex": {
+            "summary": {
+              "total": 1,
+              "actedUpon": 1,
+              "resolvedWithoutChange": 0,
+              "openUnaddressed": 0,
+              "outdatedByRebase": 0,
+              "hadOpportunity": 1,
+              "actedUponWithOpportunity": 1
+            },
+            "findings": [
+              {
+                "arenaId": "codex",
+                "databaseId": 3698794501,
+                "path": "docs/qa/keiko-for-quality.md",
+                "startLine": 31,
+                "endLine": 33,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "35fb2e9a6ed91067a3263bae70bb90c3fa184a82"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "number": 2926,
+      "headSha": "19672bfa0ad0fffef98ac675e98d8f3316d238f5",
+      "bots": {
+        "kfq": {
+          "findingsPosted": 66,
+          "distinctFindings": 49,
+          "duplicateVariants": 17,
+          "incompleteNotices": 4,
+          "filesTouched": 37,
+          "threads": {
+            "resolved": 59,
+            "unresolved": 11,
+            "outdated": 0
+          },
+          "uniqueToBot": 35,
+          "coFound": {
+            "kfq": null,
+            "coderabbit": 9,
+            "codex": 9
+          },
+          "coFoundAllThree": 4
+        },
+        "coderabbit": {
+          "findingsPosted": 52,
+          "distinctFindings": 52,
+          "duplicateVariants": 0,
+          "incompleteNotices": 0,
+          "filesTouched": 36,
+          "threads": {
+            "resolved": 52,
+            "unresolved": 0,
+            "outdated": 0
+          },
+          "uniqueToBot": 40,
+          "coFound": {
+            "kfq": 9,
+            "coderabbit": null,
+            "codex": 7
+          },
+          "coFoundAllThree": 4
+        },
+        "codex": {
+          "findingsPosted": 25,
+          "distinctFindings": 25,
+          "duplicateVariants": 0,
+          "incompleteNotices": 0,
+          "filesTouched": 19,
+          "threads": {
+            "resolved": 21,
+            "unresolved": 4,
+            "outdated": 0
+          },
+          "uniqueToBot": 13,
+          "coFound": {
+            "kfq": 9,
+            "coderabbit": 7,
+            "codex": null
+          },
+          "coFoundAllThree": 4
+        }
+      },
+      "duplicateClusters": [
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-contracts/src/voice-session-recap.ts",
+          "startLine": null,
+          "endLine": null,
+          "isFileLevel": true,
+          "databaseId": 3699453432,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699453432, 3699595289]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-memory-vault/src/vault.ts",
+          "startLine": 634,
+          "endLine": 641,
+          "isFileLevel": false,
+          "databaseId": 3699453526,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699453526, 3699809035]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/coding-context/codingContextRoutes.ts",
+          "startLine": 235,
+          "endLine": 236,
+          "isFileLevel": false,
+          "databaseId": 3698995241,
+          "memberCount": 3,
+          "memberDatabaseIds": [3698995241, 3699015416, 3699137979]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/deps.ts",
+          "startLine": 3584,
+          "endLine": 3585,
+          "isFileLevel": false,
+          "databaseId": 3699138068,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699138068, 3699387396]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/gateway-setup.test.ts",
+          "startLine": null,
+          "endLine": null,
+          "isFileLevel": true,
+          "databaseId": 3698995305,
+          "memberCount": 2,
+          "memberDatabaseIds": [3698995305, 3699453629]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/grounded-orchestrator.ts",
+          "startLine": 3216,
+          "endLine": 3217,
+          "isFileLevel": false,
+          "databaseId": 3698995321,
+          "memberCount": 2,
+          "memberDatabaseIds": [3698995321, 3699387494]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/memory-capture-policy.ts",
+          "startLine": 207,
+          "endLine": 212,
+          "isFileLevel": false,
+          "databaseId": 3699138115,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699138115, 3699387601]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/memory-maintenance-handlers.ts",
+          "startLine": 575,
+          "endLine": 601,
+          "isFileLevel": false,
+          "databaseId": 3699138183,
+          "memberCount": 4,
+          "memberDatabaseIds": [3699138183, 3699387649, 3699595420, 3699809129]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/runtime/containerRunner.ts",
+          "startLine": 382,
+          "endLine": 387,
+          "isFileLevel": false,
+          "databaseId": 3699015605,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699015605, 3699138233]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/update-remediation.ts",
+          "startLine": 331,
+          "endLine": 338,
+          "isFileLevel": false,
+          "databaseId": 3699015635,
+          "memberCount": 3,
+          "memberDatabaseIds": [3699015635, 3699138273, 3699387729]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/update-session-lock.ts",
+          "startLine": 250,
+          "endLine": 262,
+          "isFileLevel": false,
+          "databaseId": 3699387685,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699387685, 3699453879]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-ui/src/app/components/desktop/modals/GatewaySetupDialog.tsx",
+          "startLine": 2040,
+          "endLine": 2044,
+          "isFileLevel": false,
+          "databaseId": 3699138346,
+          "memberCount": 3,
+          "memberDatabaseIds": [3699138346, 3699387799, 3699595586]
+        }
+      ],
+      "crossBotClusters": [
+        {
+          "path": "packages/keiko-contracts/src/bff-wire.ts",
+          "startLine": 1547,
+          "endLine": 1548,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit", "codex"],
+          "memberDatabaseIds": [3698968790, 3698986623, 3699015361]
+        },
+        {
+          "path": "packages/keiko-contracts/src/voice-session-recap.ts",
+          "startLine": null,
+          "endLine": null,
+          "isFileLevel": true,
+          "bots": ["kfq", "coderabbit", "codex"],
+          "memberDatabaseIds": [3699155391, 3699423354, 3699453432]
+        },
+        {
+          "path": "packages/keiko-memory-vault/src/tombstones.ts",
+          "startLine": 51,
+          "endLine": 52,
+          "isFileLevel": false,
+          "bots": ["coderabbit", "codex"],
+          "memberDatabaseIds": [3698968781, 3698986624]
+        },
+        {
+          "path": "packages/keiko-memory-vault/src/vault.ts",
+          "startLine": 628,
+          "endLine": 641,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit"],
+          "memberDatabaseIds": [3699155398, 3699453526]
+        },
+        {
+          "path": "packages/keiko-server/src/coding-context/codingContextRoutes.ts",
+          "startLine": 235,
+          "endLine": 243,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit"],
+          "memberDatabaseIds": [3698986629, 3698995241]
+        },
+        {
+          "path": "packages/keiko-server/src/coding-sidecar-gateway.test.ts",
+          "startLine": 521,
+          "endLine": 543,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit"],
+          "memberDatabaseIds": [3698986637, 3699595335]
+        },
+        {
+          "path": "packages/keiko-server/src/deps.ts",
+          "startLine": 1054,
+          "endLine": 1062,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699015439, 3699830843]
+        },
+        {
+          "path": "packages/keiko-server/src/deps.ts",
+          "startLine": 3584,
+          "endLine": 3585,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699040175, 3699138068]
+        },
+        {
+          "path": "packages/keiko-server/src/gateway-instance-cache.ts",
+          "startLine": null,
+          "endLine": null,
+          "isFileLevel": true,
+          "bots": ["kfq", "coderabbit", "codex"],
+          "memberDatabaseIds": [3698986639, 3699040179, 3699453554]
+        },
+        {
+          "path": "packages/keiko-server/src/gateway-setup.test.ts",
+          "startLine": null,
+          "endLine": null,
+          "isFileLevel": true,
+          "bots": ["kfq", "coderabbit"],
+          "memberDatabaseIds": [3698986643, 3698995305]
+        },
+        {
+          "path": "packages/keiko-server/src/gateway-setup.ts",
+          "startLine": 350,
+          "endLine": 360,
+          "isFileLevel": false,
+          "bots": ["coderabbit", "codex"],
+          "memberDatabaseIds": [3698986644, 3699040168]
+        },
+        {
+          "path": "packages/keiko-server/src/memory-conv-handlers.ts",
+          "startLine": 495,
+          "endLine": 500,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit", "codex"],
+          "memberDatabaseIds": [3698986657, 3699040171, 3699387538]
+        },
+        {
+          "path": "packages/keiko-server/src/memory-handlers.ts",
+          "startLine": 638,
+          "endLine": 644,
+          "isFileLevel": false,
+          "bots": ["coderabbit", "codex"],
+          "memberDatabaseIds": [3698968787, 3698986658]
+        },
+        {
+          "path": "packages/keiko-server/src/memory-maintenance-handlers.ts",
+          "startLine": 575,
+          "endLine": 593,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699138183, 3699171842]
+        },
+        {
+          "path": "packages/keiko-server/src/run-engine.ts",
+          "startLine": 425,
+          "endLine": 426,
+          "isFileLevel": false,
+          "bots": ["kfq", "coderabbit"],
+          "memberDatabaseIds": [3698986670, 3699015576]
+        },
+        {
+          "path": "packages/keiko-server/src/runtime/containerRunner.ts",
+          "startLine": 385,
+          "endLine": 386,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699015605, 3699171835]
+        },
+        {
+          "path": "packages/keiko-server/src/update-remediation.ts",
+          "startLine": 331,
+          "endLine": 338,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699015635, 3699171841]
+        }
+      ],
+      "actedUpon": {
+        "lastPushAt": "2026-08-02T16:53:33Z",
+        "toleranceLines": 3,
+        "byBot": {
+          "kfq": {
+            "summary": {
+              "total": 49,
+              "actedUpon": 32,
+              "resolvedWithoutChange": 12,
+              "openUnaddressed": 5,
+              "outdatedByRebase": 0,
+              "hadOpportunity": 44,
+              "actedUponWithOpportunity": 32
+            },
+            "findings": [
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699015361,
+                "path": "packages/keiko-contracts/src/bff-wire.ts",
+                "startLine": 1548,
+                "endLine": 1548,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699453398,
+                "path": "packages/keiko-contracts/src/voice-session-recap.test.ts",
+                "startLine": 64,
+                "endLine": 67,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699453432,
+                "path": "packages/keiko-contracts/src/voice-session-recap.ts",
+                "startLine": null,
+                "endLine": null,
+                "isFileLevel": true,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699453471,
+                "path": "packages/keiko-memory-vault/src/tombstones.test.ts",
+                "startLine": 142,
+                "endLine": 153,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c827cdb3805695654e7225d943bf6b7f0d509270"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699453499,
+                "path": "packages/keiko-memory-vault/src/tombstones.ts",
+                "startLine": 255,
+                "endLine": 263,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c827cdb3805695654e7225d943bf6b7f0d509270"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699387339,
+                "path": "packages/keiko-memory-vault/src/tombstones.ts",
+                "startLine": 301,
+                "endLine": 310,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c827cdb3805695654e7225d943bf6b7f0d509270"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699137921,
+                "path": "packages/keiko-memory-vault/src/types.ts",
+                "startLine": null,
+                "endLine": null,
+                "isFileLevel": true,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c827cdb3805695654e7225d943bf6b7f0d509270"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699453526,
+                "path": "packages/keiko-memory-vault/src/vault.ts",
+                "startLine": 636,
+                "endLine": 641,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3698995241,
+                "path": "packages/keiko-server/src/coding-context/codingContextRoutes.ts",
+                "startLine": 235,
+                "endLine": 236,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699595335,
+                "path": "packages/keiko-server/src/coding-sidecar-gateway.test.ts",
+                "startLine": 522,
+                "endLine": 524,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699595394,
+                "path": "packages/keiko-server/src/coding-sidecar-gateway.ts",
+                "startLine": 176,
+                "endLine": 177,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699138025,
+                "path": "packages/keiko-server/src/deps.test.ts",
+                "startLine": 1026,
+                "endLine": 1031,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699015439,
+                "path": "packages/keiko-server/src/deps.ts",
+                "startLine": 1054,
+                "endLine": 1057,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699138068,
+                "path": "packages/keiko-server/src/deps.ts",
+                "startLine": 3584,
+                "endLine": 3585,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699015473,
+                "path": "packages/keiko-server/src/editor/localHistory/localHistoryCapture.ts",
+                "startLine": 89,
+                "endLine": 93,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699453554,
+                "path": "packages/keiko-server/src/gateway-instance-cache.ts",
+                "startLine": null,
+                "endLine": null,
+                "isFileLevel": true,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699809065,
+                "path": "packages/keiko-server/src/gateway-instance-cache.ts",
+                "startLine": 46,
+                "endLine": 48,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3698995305,
+                "path": "packages/keiko-server/src/gateway-setup.test.ts",
+                "startLine": null,
+                "endLine": null,
+                "isFileLevel": true,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699138155,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 582,
+                "endLine": 583,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699387458,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 2814,
+                "endLine": 2814,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699015547,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 3546,
+                "endLine": 3560,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699453585,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 3617,
+                "endLine": 3631,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3698995321,
+                "path": "packages/keiko-server/src/grounded-orchestrator.ts",
+                "startLine": 3216,
+                "endLine": 3217,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3698995269,
+                "path": "packages/keiko-server/src/grounded-qa-hybrid.test.ts",
+                "startLine": 1339,
+                "endLine": 1344,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699453699,
+                "path": "packages/keiko-server/src/grounded-qa-multi-source.ts",
+                "startLine": 1048,
+                "endLine": 1057,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699015505,
+                "path": "packages/keiko-server/src/grounded-qa.ts",
+                "startLine": 1275,
+                "endLine": 1282,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699138115,
+                "path": "packages/keiko-server/src/memory-capture-policy.ts",
+                "startLine": 207,
+                "endLine": 212,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699809094,
+                "path": "packages/keiko-server/src/memory-conv-handlers.test.ts",
+                "startLine": 577,
+                "endLine": 582,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699387538,
+                "path": "packages/keiko-server/src/memory-conv-handlers.ts",
+                "startLine": 495,
+                "endLine": 498,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699138183,
+                "path": "packages/keiko-server/src/memory-maintenance-handlers.ts",
+                "startLine": 575,
+                "endLine": 593,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699453749,
+                "path": "packages/keiko-server/src/routes.ts",
+                "startLine": 453,
+                "endLine": 457,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699453809,
+                "path": "packages/keiko-server/src/routes.ts",
+                "startLine": 1183,
+                "endLine": 1183,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699015576,
+                "path": "packages/keiko-server/src/run-engine.ts",
+                "startLine": 425,
+                "endLine": 426,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699015605,
+                "path": "packages/keiko-server/src/runtime/containerRunner.ts",
+                "startLine": 385,
+                "endLine": 386,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699595460,
+                "path": "packages/keiko-server/src/store-handlers.ts",
+                "startLine": 421,
+                "endLine": 428,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699809157,
+                "path": "packages/keiko-server/src/update-local-state.ts",
+                "startLine": 286,
+                "endLine": 293,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699015635,
+                "path": "packages/keiko-server/src/update-remediation.ts",
+                "startLine": 331,
+                "endLine": 338,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699453917,
+                "path": "packages/keiko-server/src/update-remediation.ts",
+                "startLine": 382,
+                "endLine": 391,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699138313,
+                "path": "packages/keiko-server/src/update-session-lock.ts",
+                "startLine": 177,
+                "endLine": 177,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699387685,
+                "path": "packages/keiko-server/src/update-session-lock.ts",
+                "startLine": 250,
+                "endLine": 260,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c827cdb3805695654e7225d943bf6b7f0d509270"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699595504,
+                "path": "packages/keiko-server/src/update-session-lock.ts",
+                "startLine": 310,
+                "endLine": 320,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699809186,
+                "path": "packages/keiko-server/src/update-session-lock.ts",
+                "startLine": 357,
+                "endLine": 367,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699595548,
+                "path": "packages/keiko-server/src/update-session.ts",
+                "startLine": 508,
+                "endLine": 512,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699387766,
+                "path": "packages/keiko-server/src/voice-handlers.ts",
+                "startLine": 427,
+                "endLine": 432,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c827cdb3805695654e7225d943bf6b7f0d509270"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699138346,
+                "path": "packages/keiko-ui/src/app/components/desktop/modals/GatewaySetupDialog.tsx",
+                "startLine": 2040,
+                "endLine": 2044,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699138379,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+                "startLine": 397,
+                "endLine": 404,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699015673,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+                "startLine": 1624,
+                "endLine": 1629,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699809207,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+                "startLine": 1694,
+                "endLine": 1702,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699595627,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+                "startLine": 1697,
+                "endLine": 1700,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              }
+            ]
+          },
+          "coderabbit": {
+            "summary": {
+              "total": 52,
+              "actedUpon": 48,
+              "resolvedWithoutChange": 4,
+              "openUnaddressed": 0,
+              "outdatedByRebase": 0,
+              "hadOpportunity": 52,
+              "actedUponWithOpportunity": 48
+            },
+            "findings": [
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699155389,
+                "path": "docs/adr/ADR-0109-voice-session-recap.md",
+                "startLine": 16,
+                "endLine": 25,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699492987,
+                "path": "docs/adr/ADR-0109-voice-session-recap.md",
+                "startLine": 310,
+                "endLine": 322,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986620,
+                "path": "docs/adr/ADR-0171-gateway-readiness-capability-reconciliation.md",
+                "startLine": 48,
+                "endLine": 51,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699492994,
+                "path": "docs/adr/ADR-0171-gateway-readiness-capability-reconciliation.md",
+                "startLine": 54,
+                "endLine": 60,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986623,
+                "path": "packages/keiko-contracts/src/bff-wire.ts",
+                "startLine": 1547,
+                "endLine": 1548,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699155391,
+                "path": "packages/keiko-contracts/src/voice-session-recap.ts",
+                "startLine": 98,
+                "endLine": 98,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986624,
+                "path": "packages/keiko-memory-vault/src/tombstones.ts",
+                "startLine": 51,
+                "endLine": 52,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699155393,
+                "path": "packages/keiko-memory-vault/src/tombstones.ts",
+                "startLine": 185,
+                "endLine": 252,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699155395,
+                "path": "packages/keiko-memory-vault/src/tombstones.ts",
+                "startLine": 266,
+                "endLine": 291,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699155398,
+                "path": "packages/keiko-memory-vault/src/vault.ts",
+                "startLine": 628,
+                "endLine": 638,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986628,
+                "path": "packages/keiko-memory-vault/src/vault.ts",
+                "startLine": 723,
+                "endLine": 725,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699492995,
+                "path": "packages/keiko-server/src/coding-context/codingContextRoutes.test.ts",
+                "startLine": 140,
+                "endLine": 162,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986629,
+                "path": "packages/keiko-server/src/coding-context/codingContextRoutes.ts",
+                "startLine": 235,
+                "endLine": 243,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699492999,
+                "path": "packages/keiko-server/src/coding-context/codingContextRoutes.ts",
+                "startLine": 241,
+                "endLine": 249,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986637,
+                "path": "packages/keiko-server/src/coding-sidecar-gateway.test.ts",
+                "startLine": 521,
+                "endLine": 543,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699493002,
+                "path": "packages/keiko-server/src/deps.test.ts",
+                "startLine": 1052,
+                "endLine": 1076,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699493005,
+                "path": "packages/keiko-server/src/deps.ts",
+                "startLine": 355,
+                "endLine": 356,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699493013,
+                "path": "packages/keiko-server/src/gateway-instance-cache.test.ts",
+                "startLine": 26,
+                "endLine": 41,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986639,
+                "path": "packages/keiko-server/src/gateway-instance-cache.ts",
+                "startLine": 34,
+                "endLine": 36,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986643,
+                "path": "packages/keiko-server/src/gateway-setup.test.ts",
+                "startLine": 311,
+                "endLine": 360,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699155400,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 344,
+                "endLine": 348,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986644,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 350,
+                "endLine": 360,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986649,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 561,
+                "endLine": 572,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986650,
+                "path": "packages/keiko-server/src/grounded-qa-hybrid.ts",
+                "startLine": 1008,
+                "endLine": 1009,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986656,
+                "path": "packages/keiko-server/src/memory-capture-autonomy.test.ts",
+                "startLine": 363,
+                "endLine": 368,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986657,
+                "path": "packages/keiko-server/src/memory-conv-handlers.ts",
+                "startLine": 495,
+                "endLine": 500,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699155406,
+                "path": "packages/keiko-server/src/memory-handlers.test.ts",
+                "startLine": 226,
+                "endLine": 265,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986658,
+                "path": "packages/keiko-server/src/memory-handlers.ts",
+                "startLine": 638,
+                "endLine": 640,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986660,
+                "path": "packages/keiko-server/src/memory-maintenance-handlers.test.ts",
+                "startLine": 252,
+                "endLine": 260,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986661,
+                "path": "packages/keiko-server/src/memory-maintenance-handlers.test.ts",
+                "startLine": 270,
+                "endLine": 285,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986664,
+                "path": "packages/keiko-server/src/relationship-handlers.test.ts",
+                "startLine": 178,
+                "endLine": 185,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986666,
+                "path": "packages/keiko-server/src/relationship-handlers.test.ts",
+                "startLine": 287,
+                "endLine": 320,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699493022,
+                "path": "packages/keiko-server/src/relationship-handlers.test.ts",
+                "startLine": 322,
+                "endLine": 395,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986668,
+                "path": "packages/keiko-server/src/run-engine.test.ts",
+                "startLine": 139,
+                "endLine": 139,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986669,
+                "path": "packages/keiko-server/src/run-engine.test.ts",
+                "startLine": 142,
+                "endLine": 145,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986670,
+                "path": "packages/keiko-server/src/run-engine.ts",
+                "startLine": 425,
+                "endLine": 426,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699493024,
+                "path": "packages/keiko-server/src/store-handlers.test.ts",
+                "startLine": 364,
+                "endLine": 371,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986671,
+                "path": "packages/keiko-server/src/update-remediation.test.ts",
+                "startLine": 398,
+                "endLine": 438,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986674,
+                "path": "packages/keiko-server/src/update-remediation.ts",
+                "startLine": 347,
+                "endLine": 361,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699493028,
+                "path": "packages/keiko-server/src/voice-action-governance.test.ts",
+                "startLine": 463,
+                "endLine": 477,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986679,
+                "path": "packages/keiko-server/src/voice-handlers.test.ts",
+                "startLine": 260,
+                "endLine": 285,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c827cdb3805695654e7225d943bf6b7f0d509270"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699155408,
+                "path": "packages/keiko-server/src/voice-recap.test.ts",
+                "startLine": 251,
+                "endLine": 261,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986682,
+                "path": "packages/keiko-server/src/workspace-root-identity.test.ts",
+                "startLine": 44,
+                "endLine": 47,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986687,
+                "path": "packages/keiko-tools/src/exec.test.ts",
+                "startLine": 130,
+                "endLine": 151,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699493030,
+                "path": "packages/keiko-tools/src/exec.test.ts",
+                "startLine": 152,
+                "endLine": 171,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699155410,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/cards/EditorRuntimeWidget.tsx",
+                "startLine": 6593,
+                "endLine": 6595,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986689,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.test.tsx",
+                "startLine": 685,
+                "endLine": 704,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699493034,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+                "startLine": 436,
+                "endLine": 447,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986693,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+                "startLine": 436,
+                "endLine": 451,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986694,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+                "startLine": 444,
+                "endLine": 451,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3699493038,
+                "path": "packages/keiko-ui/src/lib/api.ts",
+                "startLine": 404,
+                "endLine": 406,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "coderabbit",
+                "databaseId": 3698986697,
+                "path": "packages/keiko-ui/src/lib/api.ts",
+                "startLine": 675,
+                "endLine": 687,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              }
+            ]
+          },
+          "codex": {
+            "summary": {
+              "total": 25,
+              "actedUpon": 18,
+              "resolvedWithoutChange": 3,
+              "openUnaddressed": 4,
+              "outdatedByRebase": 0,
+              "hadOpportunity": 21,
+              "actedUponWithOpportunity": 18
+            },
+            "findings": [
+              {
+                "arenaId": "codex",
+                "databaseId": 3698968790,
+                "path": "packages/keiko-contracts/src/bff-wire.ts",
+                "startLine": 1547,
+                "endLine": 1548,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699423354,
+                "path": "packages/keiko-contracts/src/voice-session-recap.ts",
+                "startLine": 143,
+                "endLine": 143,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3698968781,
+                "path": "packages/keiko-memory-vault/src/tombstones.ts",
+                "startLine": 51,
+                "endLine": 52,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699830848,
+                "path": "packages/keiko-server/src/chat-handlers.ts",
+                "startLine": 1044,
+                "endLine": 1050,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699171838,
+                "path": "packages/keiko-server/src/chat-handlers.ts",
+                "startLine": 1268,
+                "endLine": 1271,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699830844,
+                "path": "packages/keiko-server/src/chat-handlers.ts",
+                "startLine": 1281,
+                "endLine": 1287,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699830843,
+                "path": "packages/keiko-server/src/deps.ts",
+                "startLine": 1057,
+                "endLine": 1062,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699040175,
+                "path": "packages/keiko-server/src/deps.ts",
+                "startLine": 3584,
+                "endLine": 3585,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699040179,
+                "path": "packages/keiko-server/src/gateway-instance-cache.ts",
+                "startLine": 34,
+                "endLine": 36,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699040160,
+                "path": "packages/keiko-server/src/gateway-readiness.ts",
+                "startLine": 1129,
+                "endLine": 1129,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699040168,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 350,
+                "endLine": 354,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699619451,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 3600,
+                "endLine": 3600,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699040171,
+                "path": "packages/keiko-server/src/memory-conv-handlers.ts",
+                "startLine": 495,
+                "endLine": 500,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699423352,
+                "path": "packages/keiko-server/src/memory-handlers.ts",
+                "startLine": 167,
+                "endLine": 168,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3698968787,
+                "path": "packages/keiko-server/src/memory-handlers.ts",
+                "startLine": 638,
+                "endLine": 644,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699171842,
+                "path": "packages/keiko-server/src/memory-maintenance-handlers.ts",
+                "startLine": 580,
+                "endLine": 591,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699171835,
+                "path": "packages/keiko-server/src/runtime/containerRunner.ts",
+                "startLine": 385,
+                "endLine": 385,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699171844,
+                "path": "packages/keiko-server/src/store-handlers.ts",
+                "startLine": 409,
+                "endLine": 413,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699830847,
+                "path": "packages/keiko-server/src/update-local-state.ts",
+                "startLine": 297,
+                "endLine": 300,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699171841,
+                "path": "packages/keiko-server/src/update-remediation.ts",
+                "startLine": 331,
+                "endLine": 338,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699423349,
+                "path": "packages/keiko-server/src/update-session-lock.ts",
+                "startLine": 171,
+                "endLine": 172,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "3ad49d305138fb34a0229b20e0c873f42f3f56bd"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3698968784,
+                "path": "packages/keiko-server/src/voice-recap.ts",
+                "startLine": 274,
+                "endLine": 276,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699619446,
+                "path": "packages/keiko-server/src/voice-recap.ts",
+                "startLine": 329,
+                "endLine": 329,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "19672bfa0ad0fffef98ac675e98d8f3316d238f5"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3698968795,
+                "path": "packages/keiko-tools/src/exec.ts",
+                "startLine": 595,
+                "endLine": 599,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3698968779,
+                "path": "packages/keiko-ui/src/app/components/desktop/modals/GatewaySetupDialog.tsx",
+                "startLine": 555,
+                "endLine": 557,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "c9b97f4c4db8fc7bb0f06482b67c7021f993de8a"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "number": 2930,
+      "headSha": "af705c16455102098192e6d48d249bf8642fb6d4",
+      "bots": {
+        "kfq": {
+          "findingsPosted": 58,
+          "distinctFindings": 46,
+          "duplicateVariants": 12,
+          "incompleteNotices": 2,
+          "filesTouched": 31,
+          "threads": {
+            "resolved": 6,
+            "unresolved": 38,
+            "outdated": 16
+          },
+          "uniqueToBot": 41,
+          "coFound": {
+            "kfq": null,
+            "coderabbit": null,
+            "codex": 4
+          },
+          "coFoundAllThree": 0
+        },
+        "coderabbit": {
+          "findingsPosted": 0,
+          "distinctFindings": 0,
+          "duplicateVariants": 0,
+          "incompleteNotices": 0,
+          "filesTouched": 0,
+          "threads": {
+            "resolved": 0,
+            "unresolved": 0,
+            "outdated": 0
+          },
+          "uniqueToBot": 0,
+          "coFound": {
+            "kfq": null,
+            "coderabbit": null,
+            "codex": null
+          },
+          "coFoundAllThree": 0
+        },
+        "codex": {
+          "findingsPosted": 20,
+          "distinctFindings": 20,
+          "duplicateVariants": 0,
+          "incompleteNotices": 0,
+          "filesTouched": 15,
+          "threads": {
+            "resolved": 5,
+            "unresolved": 7,
+            "outdated": 8
+          },
+          "uniqueToBot": 15,
+          "coFound": {
+            "kfq": 4,
+            "coderabbit": null,
+            "codex": null
+          },
+          "coFoundAllThree": 0
+        }
+      },
+      "duplicateClusters": [
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-memory-vault/src/tombstones.ts",
+          "startLine": 329,
+          "endLine": 334,
+          "isFileLevel": false,
+          "databaseId": 3700015448,
+          "memberCount": 2,
+          "memberDatabaseIds": [3700015448, 3700085882]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/grounded-qa-hybrid.ts",
+          "startLine": null,
+          "endLine": null,
+          "isFileLevel": true,
+          "databaseId": 3699887937,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699887937, 3700085933]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/update-local-state.ts",
+          "startLine": 286,
+          "endLine": 293,
+          "isFileLevel": false,
+          "databaseId": 3699849997,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699849997, 3699888057]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/update-local-state.ts",
+          "startLine": 331,
+          "endLine": 343,
+          "isFileLevel": false,
+          "databaseId": 3699905420,
+          "memberCount": 3,
+          "memberDatabaseIds": [3699905420, 3699940357, 3700086004]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-server/src/update-session-lock.ts",
+          "startLine": 236,
+          "endLine": 245,
+          "isFileLevel": false,
+          "databaseId": 3699850039,
+          "memberCount": 4,
+          "memberDatabaseIds": [3699850039, 3699940337, 3700086049, 3700171537]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-ui/src/app/components/desktop/hooks/useChatSession.ts",
+          "startLine": 2528,
+          "endLine": 2538,
+          "isFileLevel": false,
+          "databaseId": 3700015600,
+          "memberCount": 2,
+          "memberDatabaseIds": [3700015600, 3700171608]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-ui/src/app/components/desktop/modals/GatewaySetupDialog.tsx",
+          "startLine": 2040,
+          "endLine": 2044,
+          "isFileLevel": false,
+          "databaseId": 3699905485,
+          "memberCount": 2,
+          "memberDatabaseIds": [3699905485, 3699940383]
+        },
+        {
+          "arenaId": "kfq",
+          "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+          "startLine": 1703,
+          "endLine": 1713,
+          "isFileLevel": false,
+          "databaseId": 3699940411,
+          "memberCount": 3,
+          "memberDatabaseIds": [3699940411, 3700015616, 3700086078]
+        }
+      ],
+      "crossBotClusters": [
+        {
+          "path": "packages/keiko-server/src/editor/completionRoutes.ts",
+          "startLine": 103,
+          "endLine": 105,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699849912, 3699931037]
+        },
+        {
+          "path": "packages/keiko-server/src/gateway-setup.ts",
+          "startLine": 3399,
+          "endLine": 3410,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3700024862, 3700085951]
+        },
+        {
+          "path": "packages/keiko-server/src/update-session-lock.ts",
+          "startLine": 240,
+          "endLine": 245,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699850039, 3699931039, 3699954483]
+        },
+        {
+          "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+          "startLine": 1694,
+          "endLine": 1702,
+          "isFileLevel": false,
+          "bots": ["kfq", "codex"],
+          "memberDatabaseIds": [3699888145, 3699905506, 3699931048]
+        }
+      ],
+      "actedUpon": {
+        "lastPushAt": "2026-08-02T19:58:53Z",
+        "toleranceLines": 3,
+        "byBot": {
+          "kfq": {
+            "summary": {
+              "total": 46,
+              "actedUpon": 32,
+              "resolvedWithoutChange": 1,
+              "openUnaddressed": 13,
+              "outdatedByRebase": 0,
+              "hadOpportunity": 41,
+              "actedUponWithOpportunity": 32
+            },
+            "findings": [
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700085859,
+                "path": "packages/keiko-memory-vault/src/tombstones.test.ts",
+                "startLine": 56,
+                "endLine": 60,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700015418,
+                "path": "packages/keiko-memory-vault/src/tombstones.test.ts",
+                "startLine": 169,
+                "endLine": 172,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700015448,
+                "path": "packages/keiko-memory-vault/src/tombstones.ts",
+                "startLine": 329,
+                "endLine": 334,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700015473,
+                "path": "packages/keiko-memory-vault/src/vault.ts",
+                "startLine": null,
+                "endLine": null,
+                "isFileLevel": true,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700085903,
+                "path": "packages/keiko-memory-vault/src/vault.ts",
+                "startLine": 634,
+                "endLine": 634,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700171471,
+                "path": "packages/keiko-server/src/chat-handlers.ts",
+                "startLine": 1298,
+                "endLine": 1305,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699905319,
+                "path": "packages/keiko-server/src/coding-context/codingContextRoutes.ts",
+                "startLine": 281,
+                "endLine": 281,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699849912,
+                "path": "packages/keiko-server/src/editor/completionRoutes.ts",
+                "startLine": 103,
+                "endLine": 105,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "d14864ca15f10e8c78fcdae8c63db6bebd2b1115"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699905358,
+                "path": "packages/keiko-server/src/gateway-instance-cache.test.ts",
+                "startLine": 58,
+                "endLine": 64,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699849939,
+                "path": "packages/keiko-server/src/gateway-instance-cache.ts",
+                "startLine": 46,
+                "endLine": 48,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "d14864ca15f10e8c78fcdae8c63db6bebd2b1115"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700171512,
+                "path": "packages/keiko-server/src/gateway-readiness.test.ts",
+                "startLine": 805,
+                "endLine": 812,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699905337,
+                "path": "packages/keiko-server/src/gateway-readiness.ts",
+                "startLine": 1119,
+                "endLine": 1130,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699887905,
+                "path": "packages/keiko-server/src/gateway-readiness.ts",
+                "startLine": 1178,
+                "endLine": 1183,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "5cfcae3c1610effad5344ce453cc1a38df730c06"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700171522,
+                "path": "packages/keiko-server/src/gateway-setup.test.ts",
+                "startLine": 339,
+                "endLine": 350,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699849970,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 2866,
+                "endLine": 2866,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699887963,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 3370,
+                "endLine": 3372,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700085951,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 3402,
+                "endLine": 3410,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699887937,
+                "path": "packages/keiko-server/src/grounded-qa-hybrid.ts",
+                "startLine": 1008,
+                "endLine": 1011,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "5cfcae3c1610effad5344ce453cc1a38df730c06"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700015530,
+                "path": "packages/keiko-server/src/grounded-qa-multi-source.ts",
+                "startLine": 1060,
+                "endLine": 1068,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699887994,
+                "path": "packages/keiko-server/src/memory-capture-policy.ts",
+                "startLine": 207,
+                "endLine": 212,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700085968,
+                "path": "packages/keiko-server/src/memory-capture-policy.ts",
+                "startLine": 213,
+                "endLine": 218,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700015500,
+                "path": "packages/keiko-server/src/memory-conv-handlers.test.ts",
+                "startLine": 606,
+                "endLine": 609,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af2a252ab9f97b6e47928c78e5d139ce4a0a8043"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699940293,
+                "path": "packages/keiko-server/src/memory-conv-handlers.ts",
+                "startLine": 499,
+                "endLine": 502,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af2a252ab9f97b6e47928c78e5d139ce4a0a8043"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700085986,
+                "path": "packages/keiko-server/src/memory-handlers.ts",
+                "startLine": 693,
+                "endLine": 697,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699888008,
+                "path": "packages/keiko-server/src/memory-maintenance-handlers.ts",
+                "startLine": 458,
+                "endLine": 468,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699905385,
+                "path": "packages/keiko-server/src/memory-maintenance-handlers.ts",
+                "startLine": 465,
+                "endLine": 467,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699940310,
+                "path": "packages/keiko-server/src/memory-maintenance-handlers.ts",
+                "startLine": 594,
+                "endLine": 601,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700015550,
+                "path": "packages/keiko-server/src/runtime/containerRunner.ts",
+                "startLine": 376,
+                "endLine": 381,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699849997,
+                "path": "packages/keiko-server/src/update-local-state.ts",
+                "startLine": 286,
+                "endLine": 293,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "86a3e1af07e3ac9d0ea7c685be9c5eb7c45434d9"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699888095,
+                "path": "packages/keiko-server/src/update-local-state.ts",
+                "startLine": 295,
+                "endLine": 302,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "86a3e1af07e3ac9d0ea7c685be9c5eb7c45434d9"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699905420,
+                "path": "packages/keiko-server/src/update-local-state.ts",
+                "startLine": 331,
+                "endLine": 339,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700015563,
+                "path": "packages/keiko-server/src/update-local-state.ts",
+                "startLine": 332,
+                "endLine": 343,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699940367,
+                "path": "packages/keiko-server/src/update-remediation.ts",
+                "startLine": 299,
+                "endLine": 306,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af2a252ab9f97b6e47928c78e5d139ce4a0a8043"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700171555,
+                "path": "packages/keiko-server/src/update-remediation.ts",
+                "startLine": 399,
+                "endLine": 411,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699850039,
+                "path": "packages/keiko-server/src/update-session-lock.ts",
+                "startLine": 240,
+                "endLine": 244,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "d14864ca15f10e8c78fcdae8c63db6bebd2b1115"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700015576,
+                "path": "packages/keiko-server/src/update-session-lock.ts",
+                "startLine": 360,
+                "endLine": 361,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699905461,
+                "path": "packages/keiko-server/src/update-session.test.ts",
+                "startLine": 592,
+                "endLine": 593,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700086028,
+                "path": "packages/keiko-server/src/update-session.test.ts",
+                "startLine": 642,
+                "endLine": 642,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699850102,
+                "path": "packages/keiko-server/src/voice-recap.test.ts",
+                "startLine": 266,
+                "endLine": 268,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "d14864ca15f10e8c78fcdae8c63db6bebd2b1115"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700015600,
+                "path": "packages/keiko-ui/src/app/components/desktop/hooks/useChatSession.ts",
+                "startLine": 2528,
+                "endLine": 2535,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699905485,
+                "path": "packages/keiko-ui/src/app/components/desktop/modals/GatewaySetupDialog.tsx",
+                "startLine": 2040,
+                "endLine": 2044,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699888121,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.test.tsx",
+                "startLine": 696,
+                "endLine": 699,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "5cfcae3c1610effad5344ce453cc1a38df730c06"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699888145,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+                "startLine": 1694,
+                "endLine": 1702,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "5cfcae3c1610effad5344ce453cc1a38df730c06"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699905506,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+                "startLine": 1694,
+                "endLine": 1702,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "5cfcae3c1610effad5344ce453cc1a38df730c06"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3699940411,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+                "startLine": 1703,
+                "endLine": 1712,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "kfq",
+                "databaseId": 3700171656,
+                "path": "packages/keiko-ui/src/lib/api.boundaries.test.ts",
+                "startLine": 102,
+                "endLine": 104,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": false,
+                "resolvedByCommit": null
+              }
+            ]
+          },
+          "coderabbit": {
+            "summary": {
+              "total": 0,
+              "actedUpon": 0,
+              "resolvedWithoutChange": 0,
+              "openUnaddressed": 0,
+              "outdatedByRebase": 0,
+              "hadOpportunity": 0,
+              "actedUponWithOpportunity": 0
+            },
+            "findings": []
+          },
+          "codex": {
+            "summary": {
+              "total": 20,
+              "actedUpon": 13,
+              "resolvedWithoutChange": 1,
+              "openUnaddressed": 6,
+              "outdatedByRebase": 0,
+              "hadOpportunity": 20,
+              "actedUponWithOpportunity": 13
+            },
+            "findings": [
+              {
+                "arenaId": "codex",
+                "databaseId": 3699931040,
+                "path": "packages/keiko-contracts/src/voice-session-recap.ts",
+                "startLine": 103,
+                "endLine": 103,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699874014,
+                "path": "packages/keiko-contracts/src/voice-session-recap.ts",
+                "startLine": 117,
+                "endLine": 117,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "86a3e1af07e3ac9d0ea7c685be9c5eb7c45434d9"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699931042,
+                "path": "packages/keiko-memory-vault/src/tombstones.ts",
+                "startLine": 246,
+                "endLine": 247,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699874016,
+                "path": "packages/keiko-server/src/chat-handlers.ts",
+                "startLine": 1045,
+                "endLine": 1046,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "86a3e1af07e3ac9d0ea7c685be9c5eb7c45434d9"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699954486,
+                "path": "packages/keiko-server/src/chat-handlers.ts",
+                "startLine": 1276,
+                "endLine": 1279,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af2a252ab9f97b6e47928c78e5d139ce4a0a8043"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3700102598,
+                "path": "packages/keiko-server/src/coding-sidecar-gateway.ts",
+                "startLine": 177,
+                "endLine": 179,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699954491,
+                "path": "packages/keiko-server/src/deps.ts",
+                "startLine": 3608,
+                "endLine": 3608,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af2a252ab9f97b6e47928c78e5d139ce4a0a8043"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699931037,
+                "path": "packages/keiko-server/src/editor/completionRoutes.ts",
+                "startLine": 104,
+                "endLine": 104,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699931045,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 2828,
+                "endLine": 2828,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3700024862,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 3399,
+                "endLine": 3402,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699874013,
+                "path": "packages/keiko-server/src/gateway-setup.ts",
+                "startLine": 3648,
+                "endLine": 3649,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "resolved_without_change",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699931041,
+                "path": "packages/keiko-server/src/memory-handlers.ts",
+                "startLine": 705,
+                "endLine": 705,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3700102599,
+                "path": "packages/keiko-server/src/run-handlers.ts",
+                "startLine": 379,
+                "endLine": 380,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699954493,
+                "path": "packages/keiko-server/src/store-handlers.ts",
+                "startLine": 425,
+                "endLine": 429,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699874009,
+                "path": "packages/keiko-server/src/update-local-state.ts",
+                "startLine": 324,
+                "endLine": 325,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "86a3e1af07e3ac9d0ea7c685be9c5eb7c45434d9"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699931039,
+                "path": "packages/keiko-server/src/update-session-lock.ts",
+                "startLine": 240,
+                "endLine": 241,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699954483,
+                "path": "packages/keiko-server/src/update-session-lock.ts",
+                "startLine": 243,
+                "endLine": 245,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "60ae0e3e26b4e0e9385acf29cb543a3f62b7b4b4"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699874011,
+                "path": "packages/keiko-server/src/voice-recap.ts",
+                "startLine": 271,
+                "endLine": 271,
+                "isFileLevel": false,
+                "isResolved": true,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "86a3e1af07e3ac9d0ea7c685be9c5eb7c45434d9"
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3700102600,
+                "path": "packages/keiko-ui/src/app/components/desktop/modals/GatewaySetupDialog.tsx",
+                "startLine": 331,
+                "endLine": 333,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "open_unaddressed",
+                "hadOpportunity": true,
+                "resolvedByCommit": null
+              },
+              {
+                "arenaId": "codex",
+                "databaseId": 3699931048,
+                "path": "packages/keiko-ui/src/app/components/desktop/widgets/panels/SettingsPanel.tsx",
+                "startLine": 1701,
+                "endLine": 1701,
+                "isFileLevel": false,
+                "isResolved": false,
+                "classification": "acted_upon",
+                "hadOpportunity": true,
+                "resolvedByCommit": "af705c16455102098192e6d48d249bf8642fb6d4"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "aggregate": {
+    "prCount": 3,
+    "bots": {
+      "kfq": {
+        "findingsPosted": 124,
+        "distinctFindings": 95,
+        "duplicateVariants": 29,
+        "incompleteNotices": 7,
+        "filesTouched": 69,
+        "uniqueToBot": 76,
+        "threads": {
+          "resolved": 66,
+          "unresolved": 49,
+          "outdated": 16
+        },
+        "coFound": {
+          "kfq": null,
+          "coderabbit": 9,
+          "codex": 13
+        },
+        "coFoundAllThree": 4
+      },
+      "coderabbit": {
+        "findingsPosted": 53,
+        "distinctFindings": 53,
+        "duplicateVariants": 0,
+        "incompleteNotices": 0,
+        "filesTouched": 37,
+        "uniqueToBot": 41,
+        "threads": {
+          "resolved": 53,
+          "unresolved": 0,
+          "outdated": 0
+        },
+        "coFound": {
+          "kfq": 9,
+          "coderabbit": null,
+          "codex": 7
+        },
+        "coFoundAllThree": 4
+      },
+      "codex": {
+        "findingsPosted": 46,
+        "distinctFindings": 46,
+        "duplicateVariants": 0,
+        "incompleteNotices": 0,
+        "filesTouched": 35,
+        "uniqueToBot": 29,
+        "threads": {
+          "resolved": 27,
+          "unresolved": 11,
+          "outdated": 8
+        },
+        "coFound": {
+          "kfq": 13,
+          "coderabbit": 7,
+          "codex": null
+        },
+        "coFoundAllThree": 4
+      }
+    },
+    "actedUpon": {
+      "kfq": {
+        "total": 95,
+        "actedUpon": 64,
+        "resolvedWithoutChange": 13,
+        "openUnaddressed": 18,
+        "outdatedByRebase": 0,
+        "hadOpportunity": 85,
+        "actedUponWithOpportunity": 64
+      },
+      "coderabbit": {
+        "total": 53,
+        "actedUpon": 49,
+        "resolvedWithoutChange": 4,
+        "openUnaddressed": 0,
+        "outdatedByRebase": 0,
+        "hadOpportunity": 53,
+        "actedUponWithOpportunity": 49
+      },
+      "codex": {
+        "total": 46,
+        "actedUpon": 32,
+        "resolvedWithoutChange": 4,
+        "openUnaddressed": 10,
+        "outdatedByRebase": 0,
+        "hadOpportunity": 42,
+        "actedUponWithOpportunity": 32
+      }
+    }
+  }
+}
