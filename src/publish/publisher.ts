@@ -9,7 +9,8 @@ import {
   type ReviewCommentApi,
   type ReviewCommentInput,
 } from "../github/client.js";
-import { composeBody, extractMarker, fingerprint } from "./marker.js";
+import { extractMarker, fingerprint, markerComment } from "./marker.js";
+import { composeFindingBody, composeIncompleteNotice } from "./presentation.js";
 import { describePlacement, placementLadder } from "./placement.js";
 import { sanitizeFindingBody } from "./sanitize.js";
 
@@ -129,7 +130,13 @@ async function publishOne(
   }
 
   const ladder = placementLadder(finding, context.items.get(finding.path), context.headSha);
-  const result = await publishWithLadder(context, ladder, composeBody(sanitized.body, marker));
+  const document = composeFindingBody(sanitized.body, markerComment(marker), {
+    path: finding.path,
+    line: finding.endLine > 0 ? finding.endLine : finding.startLine,
+    severity: finding.severity,
+    category: finding.category,
+  });
+  const result = await publishWithLadder(context, ladder, document);
   if (result === undefined) {
     counters.rejectedPlacement += 1;
     diagnostics.record("publish.finding_rejected_placement", { headSha: context.headSha });
@@ -192,18 +199,9 @@ export async function publishIncompleteNotice(
   const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
   if (ownMarkers(comments, context.identity).has(marker)) return true;
 
-  const body = [
-    "**Keiko for Quality: review incomplete.**",
-    "",
-    `This change was not fully reviewed. Reason code: \`${reasonCode}\`.`,
-    "",
-    "Treat this pull request as unreviewed by this bot. Resolve this conversation only after the",
-    "underlying cause has been addressed or the run has completed on a later head.",
-  ].join("\n");
-
   try {
     const created = await context.client.createReviewComment(context.ref, context.pullNumber, {
-      body: composeBody(body, marker),
+      body: composeIncompleteNotice(reasonCode, markerComment(marker)),
       commitId: context.headSha,
       path: anchorPath,
     });
