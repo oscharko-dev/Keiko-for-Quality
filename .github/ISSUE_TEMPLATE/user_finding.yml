@@ -1,0 +1,136 @@
+name: User Finding
+description: Report a bug or defect found while running Keiko for Quality on a pull request.
+labels: ["User Findings", "bug", "status: new"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for problems found while running this action on a real pull request: a
+        finding that should not have published, an eligible pull request the reviewer skipped, a
+        run that settled incomplete without a clear cause, or behavior that does not match what
+        the README or SECURITY.md documents.
+
+        New reports start with label `status: new`. A maintainer or agent claiming the finding
+        sets the label to `status: in progress` while a fix is prepared, and closes it only once a
+        regression test proves the fix and the fix has merged to `main`.
+
+        Do not include the model credential, the GitHub App private key, model endpoint URLs,
+        candidate source code, or any content from a private repository. Redact sensitive values
+        before submitting. This bot's own diagnostics are already redacted to a closed vocabulary —
+        paste those lines rather than raw job logs.
+
+  - type: input
+    id: version
+    attributes:
+      label: Action version or commit SHA
+      description: The pinned ref this workflow uses, e.g. `v0.7.0` or the full 40-character SHA.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runner_platform
+    attributes:
+      label: Runner platform
+      description: The GitHub Actions runner platform the job ran on.
+      options:
+        - linux-x64
+        - linux-arm64
+        - darwin-x64
+        - darwin-arm64
+        - Other / self-hosted
+    validations:
+      required: true
+
+  - type: dropdown
+    id: identity
+    attributes:
+      label: Posting identity
+      description: >-
+        Was the reviewer configured with a GitHub App, or did it fall back to the shared
+        `github_token` identity?
+      options:
+        - GitHub App (app_id / app_private_key configured)
+        - Fallback github_token
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the problem in one or two sentences.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: >-
+        Provide the exact steps needed to reproduce the issue, including the relevant shape of the
+        review profile if it matters.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      description: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: What happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: >-
+        Paste the `outcome` and `reason` action outputs and any diagnostic lines from the job log.
+        These already carry only a reason code, counts, digests, and durations, so they are safe to
+        paste as-is. Do not paste the raw review comments or surrounding job log.
+      placeholder: |
+        outcome=incomplete reason=settlement.incomplete.coverage_gap
+
+  - type: dropdown
+    id: user_impact
+    attributes:
+      label: Impact
+      description: Select the highest observed impact.
+      options:
+        - Reviewer stayed silent on a change it should have covered
+        - Reviewer published something it should not have (false finding, wrong placement, leaked content)
+        - Run settled incomplete without a clear cause
+        - Cosmetic or minor
+        - Credential, secret, or candidate-execution concern
+    validations:
+      required: true
+
+  - type: textarea
+    id: maintainer_triage
+    attributes:
+      label: Maintainer triage
+      description: "Maintainers and agents only. Reporters may leave this blank."
+      value: |
+        Root cause:
+        README / SECURITY.md sections to update:
+        Engine pin advance required:
+        Version bump:
+
+  - type: checkboxes
+    id: submission_safety
+    attributes:
+      label: Submission safety
+      options:
+        - label: >-
+            I have removed the model credential, the GitHub App private key, endpoint URLs, and
+            any private-repository content from this report.
+          required: true
