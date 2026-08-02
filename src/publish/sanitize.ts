@@ -112,36 +112,63 @@ const MASKED_CHECKS: readonly { readonly pattern: RegExp; readonly reason: Rejec
   { pattern: MENTION, reason: "mention" },
 ];
 
+/** A fence opener: up to three spaces, a run of three or more backticks or tildes, an info string. */
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+
+/** A fence closer: the same run alone on its line, trailing blanks allowed. */
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+/**
+ * Inline spans: equal-length backtick runs on one line, so a longer or shorter run inside stays
+ * content (``escape `this` here``).
+ *
+ * The content class is a single unambiguous `[^\n]`. An earlier `(?:[^`\n]|`+)+?` let one backtick
+ * run decompose many ways (three backticks as 3, or 1+2, or 2+1, or 1+1+1), which is exponential
+ * backtracking on hostile input, not a nicety — this module validates model output produced while
+ * reading attacker-influenced material, so a body of backticks is a reachable denial of service.
+ */
+const INLINE_SPAN = /(?<!`)(`+)(?!`)([^\n]+?)\1(?!`)/g;
+
+/** Index of the line closing a fence opened with `marker`, or -1 when the fence never closes. */
+function closingFenceIndex(lines: readonly string[], from: number, marker: string): number {
+  for (let k = from; k < lines.length; k += 1) {
+    const run = FENCE_CLOSE.exec(lines[k] ?? "")?.[1];
+    if (run !== undefined && run[0] === marker[0] && run.length >= marker.length) return k;
+  }
+  return -1;
+}
+
+/**
+ * Masks the body of every closed fenced block, walking LINES rather than matching a multi-line
+ * regex: the regex form was super-linear (Sonar S8786) because a lazy `[\s\S]*?` re-scans toward
+ * every candidate closing line. A line walk is linear and states CommonMark's rules directly.
+ */
+function maskFencedBlocks(body: string): string {
+  const lines = body.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    const opened = FENCE_OPEN.exec(lines[i] ?? "");
+    const marker = opened?.[1];
+    // A backtick fence's info string may not contain a backtick; a tilde fence's may.
+    if (marker === undefined || (marker[0] === "`" && (opened?.[2] ?? "").includes("`"))) continue;
+    const close = closingFenceIndex(lines, i + 1, marker);
+    if (close === -1) continue;
+    for (let k = i + 1; k < close; k += 1) lines[k] = (lines[k] ?? "").replace(/./g, "x");
+    i = close;
+  }
+  return lines.join("\n");
+}
+
 /**
  * Replaces the CONTENT of well-delimited code regions with `x` runs of equal length, keeping the
  * delimiters and all offsets stable. Fenced blocks first (their content may contain backticks),
- * then single-line inline spans. Fences follow CommonMark's envelope: backtick or tilde runs of
- * three or more, up to three spaces of indentation, an info string (which a backtick fence
- * forbids backticks in), and a closing run of the same character at least as long, alone on its
- * line bar trailing blanks. Inline spans pair equal-length backtick runs, so a longer or
- * shorter run inside stays content (``escape `this` here``). Unclosed fences and unbalanced
- * inline backticks mask nothing — the text stays subject to the masked checks, which is the
- * strict side of every ambiguity.
+ * then single-line inline spans. Unclosed fences and unbalanced inline backticks mask nothing —
+ * the text stays subject to the masked checks, which is the strict side of every ambiguity.
  */
 function maskCodeRegions(body: string): string {
-  const maskLines = (content: string): string => content.replace(/[^\n]/g, "x");
-  const maskFence = (
-    whole: string,
-    open: string,
-    info: string,
-    inner: string,
-    close: string,
-  ): string =>
-    close.trim().length >= open.trim().length
-      ? `${open}${info}\n${maskLines(inner)}\n${close}`
-      : whole;
-  let masked = body.replace(/^( {0,3}`{3,})([^`\n]*)\n([\s\S]*?)\n( {0,3}`{3,} *)$/gm, maskFence);
-  masked = masked.replace(/^( {0,3}~{3,})([^\n]*)\n([\s\S]*?)\n( {0,3}~{3,} *)$/gm, maskFence);
-  masked = masked.replace(
-    /(?<!`)(`+)(?!`)((?:[^`\n]|`+)+?)\1(?!`)/g,
+  return maskFencedBlocks(body).replace(
+    INLINE_SPAN,
     (_whole, ticks: string, content: string) => `${ticks}${"x".repeat(content.length)}${ticks}`,
   );
-  return masked;
 }
 
 function looksLikeCredential(text: string): boolean {
