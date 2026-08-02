@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { sha256, type Sha256 } from "../core/brands.js";
 import type { CompiledProfile } from "../config/profile.js";
+import type { GuidelineIndex } from "../config/guidelines.js";
 import { readModelToken, type RuntimeConfig } from "../config/runtime.js";
 import type { Diagnostics } from "../diagnostics/sink.js";
 import { run, ExecFailure } from "../git/exec.js";
@@ -31,6 +32,7 @@ export interface EngineRunOptions {
   readonly pair: ReviewPair;
   readonly config: RuntimeConfig;
   readonly profile: CompiledProfile;
+  readonly guidelines: GuidelineIndex;
   readonly env: NodeJS.ProcessEnv;
   readonly pathValue: string;
 }
@@ -96,7 +98,7 @@ async function writeRuleFile(
   options: EngineRunOptions,
   home: string,
 ): Promise<{ rulePath: string; ruleDigest: Sha256 }> {
-  const ruleBody = serializeRuleFile(buildRuleFile(options.profile));
+  const ruleBody = serializeRuleFile(buildRuleFile(options.profile, options.guidelines));
   const rulePath = join(home, "keiko-rules.json");
   await writeFile(rulePath, ruleBody, { mode: 0o600 });
   return { rulePath, ruleDigest: sha256(createHash("sha256").update(ruleBody).digest("hex")) };

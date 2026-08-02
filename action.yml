@@ -15,6 +15,16 @@ inputs:
       exclusion with its justification. Read from the trusted base checkout.
     required: true
 
+  guidelines:
+    description: >-
+      Optional newline- or comma-separated repository-relative paths to this repository's own
+      written engineering guidance — AGENTS.md, CONTRIBUTING.md, a review-standards document.
+      Read from the trusted base checkout and given to the reviewer as background, so a finding can
+      cite the rule it rests on instead of arguing from general principle. At most 8 documents and
+      64 KB in total; a missing path is skipped and recorded, never fatal.
+    required: false
+    default: ""
+
   model_endpoint:
     description: HTTPS endpoint of the model provider. Must be https.
     required: true

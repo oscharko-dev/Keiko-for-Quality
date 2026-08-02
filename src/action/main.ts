@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 
+import { parseGuidelinePaths } from "../config/guidelines.js";
 import { loadReviewProfile } from "../config/profile.js";
 import { createDiagnostics, type Diagnostics } from "../diagnostics/sink.js";
 import { parseJson } from "../core/validate.js";
@@ -96,6 +97,7 @@ export async function runAction(
   const config = runtimeConfigFromInputs(env);
   const profilePath = readRequiredInput(env, "profile");
   const profile = loadReviewProfile(await readFile(profilePath, "utf8"));
+  const guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
   diagnostics.record("config.loaded", { headSha: event.head });
 
   const report = await performReview(
@@ -108,6 +110,7 @@ export async function runAction(
       repositoryPath: env.GITHUB_WORKSPACE ?? process.cwd(),
       config,
       profile,
+      guidelines,
       identity: identity.login,
       env,
       pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",

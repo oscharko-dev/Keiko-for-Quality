@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import type { CommitSha } from "./core/brands.js";
 import type { CompiledProfile } from "./config/profile.js";
+import type { GuidelineIndex } from "./config/guidelines.js";
 import type { RuntimeConfig } from "./config/runtime.js";
 import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
@@ -31,6 +32,7 @@ export interface ReviewRequest {
   readonly repositoryPath: string;
   readonly config: RuntimeConfig;
   readonly profile: CompiledProfile;
+  readonly guidelines: GuidelineIndex;
   readonly identity: string;
   readonly env: NodeJS.ProcessEnv;
   readonly pathValue: string;
@@ -117,6 +119,7 @@ async function executeEngine(
         pair: inventory.pair,
         config: request.config,
         profile: request.profile,
+        guidelines: request.guidelines,
         env: request.env,
         pathValue: request.pathValue,
       },
