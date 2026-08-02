@@ -8,6 +8,23 @@
 export { performReview } from "./review.js";
 export type { ReviewRequest, ReviewReport, ReviewOutcome } from "./review.js";
 
+export {
+  appendEntries,
+  computeKey,
+  lookup,
+  readStore,
+  serializeStore,
+  SUPPORTED_STORE_SCHEMA,
+} from "./cache/review-cache.js";
+export type {
+  BlobId,
+  CacheEntry,
+  CacheKey,
+  CacheStore,
+  ModelId,
+  Protocol,
+} from "./cache/review-cache.js";
+
 export { loadReviewProfile, parseReviewProfile, compileProfile } from "./config/profile.js";
 export type { ReviewProfile, CompiledProfile } from "./config/profile.js";
 
