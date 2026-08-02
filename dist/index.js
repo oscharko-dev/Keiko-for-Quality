@@ -536,6 +536,436 @@ function createDiagnostics(writer) {
   };
 }
 
+// src/engine/pinned-release.ts
+var VERSION2 = versionTag("v1.8.4");
+var ENGINE_PIN = {
+  engine: "alibaba/open-code-review",
+  version: VERSION2,
+  releaseUrl: `https://github.com/alibaba/open-code-review/releases/tag/${VERSION2}`,
+  platforms: {
+    "linux-x64": {
+      asset: "opencodereview-linux-amd64",
+      sha256: sha256("83a440dda3bae929888cb15e3dddad7c9cc6617af4ca10a7424c89370e7d7e64")
+    },
+    "linux-arm64": {
+      asset: "opencodereview-linux-arm64",
+      sha256: sha256("c5f7c389687a591d0382dcc0be9b61809712624ee1a6d68dc1af437063677384")
+    },
+    "darwin-x64": {
+      asset: "opencodereview-darwin-amd64",
+      sha256: sha256("a529e7536c9abf72379d8dd0a3b1c26e3ba8be817b5b20644ecab75f766b82d4")
+    },
+    "darwin-arm64": {
+      asset: "opencodereview-darwin-arm64",
+      sha256: sha256("484a232e017cee26dd489bd1a1caac1dd2e581ad2d1a45e9b2c37efcc4418b09")
+    }
+  }
+};
+function assetUrl(pin, asset) {
+  return `https://github.com/${pin.engine}/releases/download/${pin.version}/${asset}`;
+}
+function platformKey(platform, arch) {
+  return `${platform}-${arch}`;
+}
+function currentPlatformDigest(pin = ENGINE_PIN, platform = process.platform, arch = process.arch) {
+  return pin.platforms[platformKey(platform, arch)]?.sha256;
+}
+
+// src/publish/marker.ts
+import { createHash as createHash2 } from "node:crypto";
+var MARKER_PREFIX = "keiko-for-quality";
+var MARKER_PATTERN = new RegExp(`<!--\\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\\s*-->`);
+var FIELD_SEPARATOR2 = "\0";
+function normalizeForFingerprint(body) {
+  return body.toLowerCase().replace(/```[\s\S]*?```/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+}
+function fingerprint(input) {
+  const material = [
+    input.repository,
+    String(input.pullNumber),
+    input.path,
+    input.rule,
+    normalizeForFingerprint(input.body),
+    ...input.head !== void 0 ? [input.head] : []
+  ].join(FIELD_SEPARATOR2);
+  return createHash2("sha256").update(material).digest("hex").slice(0, 32);
+}
+function extractMarker(body) {
+  return MARKER_PATTERN.exec(body)?.[1];
+}
+function markerComment(value) {
+  return `${MARKER_PREFIX}:v1:${value}`;
+}
+function summaryMarker(repository, pullNumber) {
+  return fingerprint({
+    repository,
+    pullNumber,
+    path: "__run-summary__",
+    rule: "run-summary",
+    body: "run-summary"
+  });
+}
+
+// src/diagnostics/reason-codes.ts
+var REASON_CODES = [
+  // Run lifecycle
+  "run.started",
+  "run.finished",
+  "run.failed",
+  // Eligibility
+  "eligibility.accepted",
+  "eligibility.skipped.draft",
+  "eligibility.skipped.fork",
+  "eligibility.skipped.base_branch",
+  "eligibility.skipped.edit_not_retarget",
+  // Review pair
+  "review_pair.resolved",
+  "review_pair.merge_base_unresolved",
+  // Inventory
+  "inventory.completed",
+  "inventory.empty",
+  "inventory.unclassified_path",
+  // Engine acquisition
+  "engine.acquire.unsupported_platform",
+  "engine.acquire.download_failed",
+  "engine.acquire.digest_mismatch",
+  "engine.acquire.verified",
+  // Engine execution
+  "engine.run.completed",
+  "engine.run.timeout",
+  "engine.run.spawn_failed",
+  "engine.run.nonzero_exit",
+  "engine.run.output_unparsable",
+  "engine.run.schema_rejected",
+  // Settlement
+  "settlement.complete",
+  // Which coverage question was actually answered. Recorded on every run, because a consumer
+  // deciding how far to trust a clean result needs to know whether identities or only counts were
+  // reconciled.
+  "settlement.mode.reconciled",
+  "settlement.mode.counted",
+  "settlement.incomplete.terminal_state",
+  "settlement.incomplete.coverage_gap",
+  "settlement.incomplete.coverage_failed",
+  "settlement.incomplete.warning_not_allowlisted",
+  "settlement.incomplete.budget_exceeded",
+  "settlement.incomplete.engine_error",
+  // Publication
+  "publish.identity_resolved",
+  "publish.identity_unresolved",
+  "publish.finding_published",
+  "publish.finding_suppressed_duplicate",
+  // Suppressed by the phrasing-independent similarity gate (Keiko-for-Quality#38) rather than an
+  // exact marker match — kept distinct from the code above so an operator tuning the gate can tell
+  // the two mechanisms apart.
+  "publish.finding_suppressed_similar",
+  "publish.finding_rejected_sanitization",
+  "publish.finding_rejected_placement",
+  "publish.readback_failed",
+  "publish.api_failed",
+  "publish.incomplete_notice_published",
+  "publish.abandoned_stale_head",
+  // Run-summary comment (Keiko-for-Quality#31): a single, marker-identified issue comment this
+  // reviewer upserts once per pull request, independent of every finding conversation above. Never
+  // affects completeness — the same "pure add-on layer" posture as memoization below.
+  "publish.summary_published",
+  "publish.summary_updated",
+  "publish.summary_upsert_failed",
+  "publish.summary_disabled",
+  // Configuration
+  "config.invalid",
+  "config.loaded",
+  // Review-cache memoization (v0.9.0). None of these ever affect completeness — memoization is a
+  // pure optimization layer, and its own failure gates only re-review cost, never coverage. See
+  // `src/cache/review-cache.ts`'s doc comment for why replay is sound and why only a `complete`
+  // settlement may write an entry.
+  "cache.store_loaded",
+  "cache.store_rejected",
+  "cache.store_write_failed",
+  "cache.hits",
+  "cache.appended"
+];
+var REASON_CODE_SET = new Set(REASON_CODES);
+function isReasonCode(value) {
+  return REASON_CODE_SET.has(value);
+}
+
+// src/publish/sanitize.ts
+var CONTROL_EXCEPT_WHITESPACE = new RegExp("[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]");
+var BIDIRECTIONAL = new RegExp("[\\u202A-\\u202E\\u2066-\\u2069\\u200E\\u200F\\u061C]");
+var ZERO_WIDTH = new RegExp("[\\u200B\\u200C\\u200D\\u2060\\uFEFF\\u180E]");
+var HTML_TAG = new RegExp("<[A-Za-z!/?]");
+var SUGGESTION_BLOCK = new RegExp("```+\\s*suggestion", "i");
+var MENTION = new RegExp("(^|[^\\w`])@[A-Za-z0-9][A-Za-z0-9-]{0,38}", "m");
+var IMAGE = new RegExp("!\\[");
+var LINK = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.|^//[A-Za-z0-9-]+\\.[A-Za-z])", "m");
+var CREDENTIAL_SHAPES = [
+  new RegExp("gh[pousr]_[A-Za-z0-9]{16,}"),
+  new RegExp("github_pat_[A-Za-z0-9_]{20,}"),
+  new RegExp("sk-[A-Za-z0-9]{20,}"),
+  new RegExp("-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+  new RegExp("(?:AKIA|ASIA)[A-Z0-9]{16}"),
+  new RegExp("eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.")
+];
+var MAX_BODY_CHARS = 8e3;
+var MIN_BODY_CHARS = 12;
+var CHECKS = [
+  { pattern: CONTROL_EXCEPT_WHITESPACE, reason: "control_characters" },
+  { pattern: BIDIRECTIONAL, reason: "bidirectional_override" },
+  { pattern: ZERO_WIDTH, reason: "zero_width" },
+  { pattern: SUGGESTION_BLOCK, reason: "suggestion_block" },
+  { pattern: HTML_TAG, reason: "html" },
+  { pattern: IMAGE, reason: "image" },
+  { pattern: LINK, reason: "link" },
+  { pattern: MENTION, reason: "mention" }
+];
+function looksLikeCredential(text3) {
+  return CREDENTIAL_SHAPES.some((pattern) => pattern.test(text3));
+}
+function sanitizeFindingBody(raw) {
+  const body = raw.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  if (body.length < MIN_BODY_CHARS) return { ok: false, reason: "empty" };
+  if (body.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
+  for (const check of CHECKS) {
+    if (check.pattern.test(body)) return { ok: false, reason: check.reason };
+  }
+  if (looksLikeCredential(body)) return { ok: false, reason: "credential" };
+  return { ok: true, body };
+}
+function escapeInline(text3) {
+  return text3.replace(/[`\\]/g, "\\$&");
+}
+
+// src/publish/presentation.ts
+var CATEGORIES = {
+  security: { icon: "\u{1F512}", text: "Security" },
+  bug: { icon: "\u{1F41B}", text: "Correctness" },
+  performance: { icon: "\u26A1", text: "Performance" },
+  maintainability: { icon: "\u{1F9F9}", text: "Maintainability" },
+  test: { icon: "\u{1F9EA}", text: "Tests" },
+  documentation: { icon: "\u{1F4DA}", text: "Documentation" },
+  other: { icon: "\u{1F50E}", text: "Review" }
+};
+var SEVERITIES = {
+  critical: { icon: "\u{1F534}", text: "Critical" },
+  high: { icon: "\u{1F7E0}", text: "Major" },
+  medium: { icon: "\u{1F7E1}", text: "Minor" },
+  low: { icon: "\u{1F535}", text: "Nit" }
+};
+function label(table, key, fallback) {
+  if (key === void 0) return fallback;
+  return table[key.toLowerCase()] ?? fallback;
+}
+var FALLBACK_CATEGORY = { icon: "\u{1F50E}", text: "Review" };
+var FALLBACK_SEVERITY = { icon: "\u{1F7E1}", text: "Minor" };
+var MAX_TITLE_CHARS = 120;
+function splitTitle(prose) {
+  const trimmed = prose.trim();
+  const paragraphBreak = trimmed.indexOf("\n\n");
+  if (paragraphBreak > 0 && paragraphBreak <= MAX_TITLE_CHARS) {
+    const candidate = trimmed.slice(0, paragraphBreak).trim();
+    if (!candidate.includes("\n")) {
+      return { title: candidate, body: trimmed.slice(paragraphBreak).trim() };
+    }
+  }
+  const sentenceEnd = /[.!?](\s|$)/.exec(trimmed);
+  if (sentenceEnd !== null && sentenceEnd.index > 0 && sentenceEnd.index <= MAX_TITLE_CHARS) {
+    const end = sentenceEnd.index + 1;
+    return { title: trimmed.slice(0, end).trim(), body: trimmed.slice(end).trim() };
+  }
+  return { title: "", body: trimmed };
+}
+function repairPrompt(context, title) {
+  const where = `${escapeInline(context.path)}${context.line > 0 ? ` around line ${String(context.line)}` : ""}`;
+  return [
+    "Verify this finding against the current code before acting on it.",
+    "",
+    `In ${where}: ${title === "" ? "address the finding above." : title}`,
+    "",
+    "If it no longer applies, reply on the thread with a one-line reason and resolve it \u2014 do not",
+    "change code to match a stale finding. If it does apply, keep the fix minimal, fix the cause",
+    "rather than the symptom, and run this repository's own verification before pushing."
+  ].join("\n");
+}
+function composeFindingBody(sanitizedProse, marker, context) {
+  const category = label(CATEGORIES, context.category, FALLBACK_CATEGORY);
+  const severity = label(SEVERITIES, context.severity, FALLBACK_SEVERITY);
+  const { title, body } = splitTitle(sanitizedProse);
+  const parts = [`_${category.icon} ${category.text}_ | _${severity.icon} ${severity.text}_`, ""];
+  if (title !== "") parts.push(`**${title}**`, "");
+  parts.push(body, "");
+  parts.push(
+    "<details>",
+    "<summary>\u{1F916} Prompt for AI agents</summary>",
+    "",
+    "```",
+    repairPrompt(context, title),
+    "```",
+    "",
+    "</details>",
+    "",
+    `<!-- ${marker} -->`
+  );
+  return parts.join("\n");
+}
+function composeIncompleteNotice(reasonCode, marker) {
+  return [
+    "_\u26A0\uFE0F Coverage_ | _\u{1F7E0} Major_",
+    "",
+    "**This change was not fully reviewed.**",
+    "",
+    `Keiko for Quality could not complete its review. Reason code: \`${escapeInline(reasonCode)}\`.`,
+    "",
+    "Treat this pull request as unreviewed by this bot. Resolving this conversation does not make",
+    "the review complete \u2014 it only records that someone looked.",
+    "",
+    "<details>",
+    "<summary>\u{1F916} Prompt for AI agents</summary>",
+    "",
+    "```",
+    "Do not treat this pull request as reviewed. Check the reviewer's run for the reason code shown",
+    "above and address the cause, or push a new head so the reviewer runs again. Resolve this",
+    "conversation only once a later run has completed.",
+    "```",
+    "",
+    "</details>",
+    "",
+    `<!-- ${marker} -->`
+  ].join("\n");
+}
+function shortSha(sha) {
+  return sha.slice(0, 7);
+}
+function reasonText(reason) {
+  if (reason === void 0) return "unknown";
+  return isReasonCode(reason) ? reason : "unknown";
+}
+function outcomeText(report) {
+  switch (report.outcome) {
+    case "complete":
+      return "\u2705 complete";
+    case "abandoned":
+      return "\u23F3 abandoned";
+    case "incomplete":
+      return `\u26A0\uFE0F incomplete (\`${reasonText(report.reason)}\`)`;
+  }
+}
+function countRows(counts) {
+  const rows = [
+    ["Total paths", counts.totalPaths],
+    ["Reviewable", counts.reviewablePaths],
+    ["Excluded", counts.excludedPaths],
+    ["Mechanically clean", counts.mechanicallyClean],
+    ["Replayed from cache", counts.cacheHits],
+    ["Freshly reviewed", counts.freshlyReviewed],
+    ["Findings published", counts.findingsPublished],
+    ["Suppressed (exact duplicate)", counts.suppressedExactDuplicate],
+    ["Suppressed (similar)", counts.suppressedSimilar]
+  ];
+  return rows.map(([label2, value]) => `| ${label2} | ${String(value)} |`);
+}
+function budgetLine(budget) {
+  if (budget.allotted === void 0) return void 0;
+  return budget.spent === void 0 ? `Budget: ${String(budget.allotted)} tokens allotted` : `Budget: ${String(budget.allotted)} tokens allotted, ${String(budget.spent)} reported`;
+}
+function composeSummaryBody(report, marker) {
+  const timestamp = report.eventTimestamp === "" ? void 0 : escapeInline(report.eventTimestamp);
+  const action = report.actionVersion === "" ? void 0 : escapeInline(report.actionVersion);
+  const headline = [
+    outcomeText(report),
+    `head \`${shortSha(report.headSha)}\``,
+    ...timestamp === void 0 ? [] : [timestamp],
+    `engine \`${escapeInline(report.engineVersion)}\``,
+    ...action === void 0 ? [] : [`action \`${action}\``]
+  ].join(" \xB7 ");
+  const parts = [
+    "**Keiko for Quality \u2014 run summary**",
+    "",
+    headline,
+    "",
+    "| Metric | Count |",
+    "| --- | ---: |",
+    ...countRows(report.counts)
+  ];
+  const budget = budgetLine(report.budget);
+  if (budget !== void 0) parts.push("", budget);
+  parts.push("", `<!-- ${marker} -->`);
+  return parts.join("\n");
+}
+
+// src/publish/summary.ts
+function extractBudget(records) {
+  let allotted;
+  let spent;
+  for (const record of records) {
+    if (record.code === "engine.run.completed" && record.counts?.budget !== void 0) {
+      allotted = record.counts.budget;
+    }
+    if (record.counts?.tokens !== void 0) spent = record.counts.tokens;
+  }
+  return { allotted, spent };
+}
+function buildSummaryReport(input, diagnostics) {
+  const { report } = input;
+  const publish = report.publish;
+  const counts = {
+    totalPaths: report.inventorySize,
+    reviewablePaths: report.reviewablePaths,
+    excludedPaths: report.excludedPaths,
+    mechanicallyClean: report.mechanicallyClean,
+    cacheHits: report.cacheHits,
+    freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits),
+    findingsPublished: publish?.published ?? 0,
+    suppressedExactDuplicate: publish?.suppressedExactDuplicate ?? 0,
+    suppressedSimilar: publish?.suppressedSimilar ?? 0
+  };
+  return {
+    outcome: report.outcome,
+    reason: report.outcome === "incomplete" ? report.reason : void 0,
+    headSha: input.headSha,
+    eventTimestamp: input.eventTimestamp,
+    engineVersion: input.engineVersion,
+    actionVersion: input.actionVersion,
+    counts,
+    budget: extractBudget(diagnostics)
+  };
+}
+function newestOwnSummary(comments) {
+  return comments.reduce(
+    (newest, comment) => newest === void 0 || comment.id > newest.id ? comment : newest,
+    void 0
+  );
+}
+function ownSummaryComments(comments, identity, marker) {
+  return comments.filter(
+    (comment) => comment.authorLogin === identity && extractMarker(comment.body) === marker
+  );
+}
+async function maintainRunSummary(context, input, diagnostics) {
+  try {
+    const summary = buildSummaryReport(input, diagnostics.drain());
+    const marker = summaryMarker(`${context.ref.owner}/${context.ref.repo}`, context.pullNumber);
+    const body = composeSummaryBody(summary, markerComment(marker));
+    const existing = await context.client.listIssueComments(context.ref, context.pullNumber);
+    const target = newestOwnSummary(ownSummaryComments(existing, context.identity, marker));
+    if (target === void 0) {
+      const created = await context.client.createIssueComment(
+        context.ref,
+        context.pullNumber,
+        body
+      );
+      diagnostics.record("publish.summary_published");
+      return created.url;
+    }
+    const updated = await context.client.updateIssueComment(context.ref, target.id, body);
+    diagnostics.record("publish.summary_updated");
+    return updated.url;
+  } catch {
+    diagnostics.record("publish.summary_upsert_failed");
+    return void 0;
+  }
+}
+
 // src/review.ts
 import { mkdtemp as mkdtemp2, rm as rm2 } from "node:fs/promises";
 import { tmpdir as tmpdir2 } from "node:os";
@@ -630,46 +1060,9 @@ function buildNewEntries(inputs) {
 }
 
 // src/engine/acquire.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-
-// src/engine/pinned-release.ts
-var VERSION2 = versionTag("v1.8.4");
-var ENGINE_PIN = {
-  engine: "alibaba/open-code-review",
-  version: VERSION2,
-  releaseUrl: `https://github.com/alibaba/open-code-review/releases/tag/${VERSION2}`,
-  platforms: {
-    "linux-x64": {
-      asset: "opencodereview-linux-amd64",
-      sha256: sha256("83a440dda3bae929888cb15e3dddad7c9cc6617af4ca10a7424c89370e7d7e64")
-    },
-    "linux-arm64": {
-      asset: "opencodereview-linux-arm64",
-      sha256: sha256("c5f7c389687a591d0382dcc0be9b61809712624ee1a6d68dc1af437063677384")
-    },
-    "darwin-x64": {
-      asset: "opencodereview-darwin-amd64",
-      sha256: sha256("a529e7536c9abf72379d8dd0a3b1c26e3ba8be817b5b20644ecab75f766b82d4")
-    },
-    "darwin-arm64": {
-      asset: "opencodereview-darwin-arm64",
-      sha256: sha256("484a232e017cee26dd489bd1a1caac1dd2e581ad2d1a45e9b2c37efcc4418b09")
-    }
-  }
-};
-function assetUrl(pin, asset) {
-  return `https://github.com/${pin.engine}/releases/download/${pin.version}/${asset}`;
-}
-function platformKey(platform, arch) {
-  return `${platform}-${arch}`;
-}
-function currentPlatformDigest(pin = ENGINE_PIN, platform = process.platform, arch = process.arch) {
-  return pin.platforms[platformKey(platform, arch)]?.sha256;
-}
-
-// src/engine/acquire.ts
 var AcquisitionError = class extends Error {
   reason;
   constructor(reason) {
@@ -691,7 +1084,7 @@ async function download(url) {
   return bytes;
 }
 function digestOf(bytes) {
-  return createHash2("sha256").update(bytes).digest("hex");
+  return createHash3("sha256").update(bytes).digest("hex");
 }
 async function acquireEngine(directory, diagnostics, pin = ENGINE_PIN, platform = process.platform, arch = process.arch) {
   const key = platformKey(platform, arch);
@@ -844,7 +1237,7 @@ function parseEngineResult(text3) {
 }
 
 // src/engine/rule-identity.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 
 // src/engine/rule-file.ts
 var CATCH_ALL_RULE = [
@@ -1034,11 +1427,11 @@ function serializeRuleFile(file) {
 // src/engine/rule-identity.ts
 function promptIdentityDigest(profile, guidelines) {
   const body = serializeRuleFile(buildRuleFile(profile, guidelines));
-  return sha256(createHash3("sha256").update(body).digest("hex"));
+  return sha256(createHash4("sha256").update(body).digest("hex"));
 }
 
 // src/engine/run.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 import { mkdir as mkdir2, mkdtemp, rm, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join as join2 } from "node:path";
@@ -1206,7 +1599,7 @@ async function writeRuleFile(options2, home) {
   const ruleBody = serializeRuleFile(rule);
   const rulePath = join2(home, "keiko-rules.json");
   await writeFile2(rulePath, ruleBody, { mode: 384 });
-  return { rulePath, ruleDigest: sha256(createHash4("sha256").update(ruleBody).digest("hex")) };
+  return { rulePath, ruleDigest: sha256(createHash5("sha256").update(ruleBody).digest("hex")) };
 }
 function reviewArguments(options2, rulePath) {
   return [
@@ -1593,6 +1986,9 @@ function countByKind(items) {
 function mechanicallyCleanPaths(inventory) {
   return inventory.items.filter((item) => item.classification.kind === "mechanically-clean").map((item) => item.path);
 }
+function excludedPathCount(inventory) {
+  return inventory.items.filter((item) => item.classification.kind === "excluded").length;
+}
 async function buildInventory(ctx, profile, pair, renamePercent, diagnostics) {
   const changes = await listChanges(ctx, pair.mergeBase, pair.head, renamePercent);
   const items = changes.map((change) => toItem(profile, change));
@@ -1804,6 +2200,38 @@ var GitHubClient = class {
       return void 0;
     }
   }
+  /** Lists every top-level issue comment on the pull request, following pagination to the end. */
+  async listIssueComments(ref, number) {
+    const comments = [];
+    for (let page = 1; page <= 20; page += 1) {
+      const batch = await this.json(
+        `/repos/${ref.owner}/${ref.repo}/issues/${String(number)}/comments?per_page=100&page=${String(page)}`
+      );
+      if (!Array.isArray(batch) || batch.length === 0) break;
+      for (const entry of batch) comments.push(toIssueComment(entry));
+      if (batch.length < 100) break;
+    }
+    return comments;
+  }
+  /** Posts a new top-level issue comment. Never the review-comments or reviews endpoint. */
+  async createIssueComment(ref, number, body) {
+    const created = await this.json(
+      `/repos/${ref.owner}/${ref.repo}/issues/${String(number)}/comments`,
+      { method: "POST", body: JSON.stringify({ body }) }
+    );
+    return toIssueComment(created);
+  }
+  /** Replaces an existing issue comment's body in place — an upsert's "update" half. */
+  async updateIssueComment(ref, id, body) {
+    const updated = await this.json(
+      `/repos/${ref.owner}/${ref.repo}/issues/comments/${String(id)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({ body })
+      }
+    );
+    return toIssueComment(updated);
+  }
 };
 function text(value) {
   return typeof value === "string" ? value : "";
@@ -1826,175 +2254,14 @@ function toReviewComment(raw) {
     ...startLine !== void 0 ? { startLine } : {}
   };
 }
-
-// src/publish/marker.ts
-import { createHash as createHash5 } from "node:crypto";
-var MARKER_PREFIX = "keiko-for-quality";
-var MARKER_PATTERN = new RegExp(`<!--\\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\\s*-->`);
-var FIELD_SEPARATOR2 = "\0";
-function normalizeForFingerprint(body) {
-  return body.toLowerCase().replace(/```[\s\S]*?```/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
-}
-function fingerprint(input) {
-  const material = [
-    input.repository,
-    String(input.pullNumber),
-    input.path,
-    input.rule,
-    normalizeForFingerprint(input.body),
-    ...input.head !== void 0 ? [input.head] : []
-  ].join(FIELD_SEPARATOR2);
-  return createHash5("sha256").update(material).digest("hex").slice(0, 32);
-}
-function extractMarker(body) {
-  return MARKER_PATTERN.exec(body)?.[1];
-}
-function markerComment(value) {
-  return `${MARKER_PREFIX}:v1:${value}`;
-}
-
-// src/publish/sanitize.ts
-var CONTROL_EXCEPT_WHITESPACE = new RegExp("[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]");
-var BIDIRECTIONAL = new RegExp("[\\u202A-\\u202E\\u2066-\\u2069\\u200E\\u200F\\u061C]");
-var ZERO_WIDTH = new RegExp("[\\u200B\\u200C\\u200D\\u2060\\uFEFF\\u180E]");
-var HTML_TAG = new RegExp("<[A-Za-z!/?]");
-var SUGGESTION_BLOCK = new RegExp("```+\\s*suggestion", "i");
-var MENTION = new RegExp("(^|[^\\w`])@[A-Za-z0-9][A-Za-z0-9-]{0,38}", "m");
-var IMAGE = new RegExp("!\\[");
-var LINK = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.|^//[A-Za-z0-9-]+\\.[A-Za-z])", "m");
-var CREDENTIAL_SHAPES = [
-  new RegExp("gh[pousr]_[A-Za-z0-9]{16,}"),
-  new RegExp("github_pat_[A-Za-z0-9_]{20,}"),
-  new RegExp("sk-[A-Za-z0-9]{20,}"),
-  new RegExp("-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-  new RegExp("(?:AKIA|ASIA)[A-Z0-9]{16}"),
-  new RegExp("eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.")
-];
-var MAX_BODY_CHARS = 8e3;
-var MIN_BODY_CHARS = 12;
-var CHECKS = [
-  { pattern: CONTROL_EXCEPT_WHITESPACE, reason: "control_characters" },
-  { pattern: BIDIRECTIONAL, reason: "bidirectional_override" },
-  { pattern: ZERO_WIDTH, reason: "zero_width" },
-  { pattern: SUGGESTION_BLOCK, reason: "suggestion_block" },
-  { pattern: HTML_TAG, reason: "html" },
-  { pattern: IMAGE, reason: "image" },
-  { pattern: LINK, reason: "link" },
-  { pattern: MENTION, reason: "mention" }
-];
-function looksLikeCredential(text3) {
-  return CREDENTIAL_SHAPES.some((pattern) => pattern.test(text3));
-}
-function sanitizeFindingBody(raw) {
-  const body = raw.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-  if (body.length < MIN_BODY_CHARS) return { ok: false, reason: "empty" };
-  if (body.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
-  for (const check of CHECKS) {
-    if (check.pattern.test(body)) return { ok: false, reason: check.reason };
-  }
-  if (looksLikeCredential(body)) return { ok: false, reason: "credential" };
-  return { ok: true, body };
-}
-function escapeInline(text3) {
-  return text3.replace(/[`\\]/g, "\\$&");
-}
-
-// src/publish/presentation.ts
-var CATEGORIES = {
-  security: { icon: "\u{1F512}", text: "Security" },
-  bug: { icon: "\u{1F41B}", text: "Correctness" },
-  performance: { icon: "\u26A1", text: "Performance" },
-  maintainability: { icon: "\u{1F9F9}", text: "Maintainability" },
-  test: { icon: "\u{1F9EA}", text: "Tests" },
-  documentation: { icon: "\u{1F4DA}", text: "Documentation" },
-  other: { icon: "\u{1F50E}", text: "Review" }
-};
-var SEVERITIES = {
-  critical: { icon: "\u{1F534}", text: "Critical" },
-  high: { icon: "\u{1F7E0}", text: "Major" },
-  medium: { icon: "\u{1F7E1}", text: "Minor" },
-  low: { icon: "\u{1F535}", text: "Nit" }
-};
-function label(table, key, fallback) {
-  if (key === void 0) return fallback;
-  return table[key.toLowerCase()] ?? fallback;
-}
-var FALLBACK_CATEGORY = { icon: "\u{1F50E}", text: "Review" };
-var FALLBACK_SEVERITY = { icon: "\u{1F7E1}", text: "Minor" };
-var MAX_TITLE_CHARS = 120;
-function splitTitle(prose) {
-  const trimmed = prose.trim();
-  const paragraphBreak = trimmed.indexOf("\n\n");
-  if (paragraphBreak > 0 && paragraphBreak <= MAX_TITLE_CHARS) {
-    const candidate = trimmed.slice(0, paragraphBreak).trim();
-    if (!candidate.includes("\n")) {
-      return { title: candidate, body: trimmed.slice(paragraphBreak).trim() };
-    }
-  }
-  const sentenceEnd = /[.!?](\s|$)/.exec(trimmed);
-  if (sentenceEnd !== null && sentenceEnd.index > 0 && sentenceEnd.index <= MAX_TITLE_CHARS) {
-    const end = sentenceEnd.index + 1;
-    return { title: trimmed.slice(0, end).trim(), body: trimmed.slice(end).trim() };
-  }
-  return { title: "", body: trimmed };
-}
-function repairPrompt(context, title) {
-  const where = `${escapeInline(context.path)}${context.line > 0 ? ` around line ${String(context.line)}` : ""}`;
-  return [
-    "Verify this finding against the current code before acting on it.",
-    "",
-    `In ${where}: ${title === "" ? "address the finding above." : title}`,
-    "",
-    "If it no longer applies, reply on the thread with a one-line reason and resolve it \u2014 do not",
-    "change code to match a stale finding. If it does apply, keep the fix minimal, fix the cause",
-    "rather than the symptom, and run this repository's own verification before pushing."
-  ].join("\n");
-}
-function composeFindingBody(sanitizedProse, marker, context) {
-  const category = label(CATEGORIES, context.category, FALLBACK_CATEGORY);
-  const severity = label(SEVERITIES, context.severity, FALLBACK_SEVERITY);
-  const { title, body } = splitTitle(sanitizedProse);
-  const parts = [`_${category.icon} ${category.text}_ | _${severity.icon} ${severity.text}_`, ""];
-  if (title !== "") parts.push(`**${title}**`, "");
-  parts.push(body, "");
-  parts.push(
-    "<details>",
-    "<summary>\u{1F916} Prompt for AI agents</summary>",
-    "",
-    "```",
-    repairPrompt(context, title),
-    "```",
-    "",
-    "</details>",
-    "",
-    `<!-- ${marker} -->`
-  );
-  return parts.join("\n");
-}
-function composeIncompleteNotice(reasonCode, marker) {
-  return [
-    "_\u26A0\uFE0F Coverage_ | _\u{1F7E0} Major_",
-    "",
-    "**This change was not fully reviewed.**",
-    "",
-    `Keiko for Quality could not complete its review. Reason code: \`${escapeInline(reasonCode)}\`.`,
-    "",
-    "Treat this pull request as unreviewed by this bot. Resolving this conversation does not make",
-    "the review complete \u2014 it only records that someone looked.",
-    "",
-    "<details>",
-    "<summary>\u{1F916} Prompt for AI agents</summary>",
-    "",
-    "```",
-    "Do not treat this pull request as reviewed. Check the reviewer's run for the reason code shown",
-    "above and address the cause, or push a new head so the reviewer runs again. Resolve this",
-    "conversation only once a later run has completed.",
-    "```",
-    "",
-    "</details>",
-    "",
-    `<!-- ${marker} -->`
-  ].join("\n");
+function toIssueComment(raw) {
+  const user = raw.user;
+  return {
+    id: typeof raw.id === "number" ? raw.id : 0,
+    body: text(raw.body),
+    authorLogin: text(user?.login),
+    url: text(raw.html_url)
+  };
 }
 
 // src/publish/placement.ts
@@ -2203,6 +2470,8 @@ async function publishOne(context, finding, existing, existingThreads, counters,
   );
   if (suppression !== void 0) {
     counters.suppressed += 1;
+    if (suppression === "exact") counters.suppressedExactDuplicate += 1;
+    else counters.suppressedSimilar += 1;
     const code = suppression === "exact" ? "publish.finding_suppressed_duplicate" : "publish.finding_suppressed_similar";
     diagnostics.record(code, { headSha: context.headSha });
     return;
@@ -2216,6 +2485,8 @@ async function publishFindings(context, findings, diagnostics) {
   const counters = {
     published: 0,
     suppressed: 0,
+    suppressedExactDuplicate: 0,
+    suppressedSimilar: 0,
     rejectedSanitization: 0,
     rejectedPlacement: 0,
     readbackFailures: 0
@@ -2297,6 +2568,14 @@ async function headIsCurrent(request) {
 function itemIndex(inventory) {
   return new Map(inventory.items.map((item) => [item.path, item]));
 }
+function inventoryCounts(inventory) {
+  return {
+    inventorySize: inventory.items.length,
+    reviewablePaths: inventory.reviewablePaths.size,
+    excludedPaths: excludedPathCount(inventory),
+    mechanicallyClean: mechanicallyCleanPaths(inventory).length
+  };
+}
 function publishContextFor(request, inventory) {
   return {
     client: request.client,
@@ -2356,7 +2635,7 @@ async function settleIncomplete(request, inventory, reason, diagnostics, finding
   return {
     outcome: "incomplete",
     reason,
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     cacheAppended: 0,
     ...cacheCounts(memo),
     ...publish === void 0 ? {} : { publish }
@@ -2440,7 +2719,7 @@ async function publishSettledFindings(request, inventory, settlement, memo, star
   const finalized = finalizeCacheStore(request, inventory, memo, settlement.findings);
   return {
     outcome: "complete",
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     publish,
     cacheAppended: finalized?.appended ?? 0,
     ...cacheCounts(memo),
@@ -2450,7 +2729,7 @@ async function publishSettledFindings(request, inventory, settlement, memo, star
 function emptyReviewReport(inventory) {
   return {
     outcome: "complete",
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     cacheHits: 0,
     cacheMisses: 0,
     cacheAppended: 0
@@ -2459,7 +2738,7 @@ function emptyReviewReport(inventory) {
 function abandonedReport(inventory, memo) {
   return {
     outcome: "abandoned",
-    inventorySize: inventory.items.length,
+    ...inventoryCounts(inventory),
     ...cacheCounts(memo),
     cacheAppended: 0
   };
@@ -2641,6 +2920,13 @@ function readIntegerInput(env, name, fallback) {
   if (!Number.isInteger(parsed)) throw new ValidationError(`input.${name}`);
   return parsed;
 }
+function readBooleanInput(env, name, fallback) {
+  const raw = readInput(env, name);
+  if (raw === "") return fallback;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  throw new ValidationError(`input.${name}`);
+}
 function writeOutputs(env, values) {
   const target = env.GITHUB_OUTPUT;
   if (target === void 0 || target === "") return;
@@ -2701,7 +2987,8 @@ function parseEventContext(payload) {
     draft: pull.draft === true,
     headRepoFullName: typeof headRepo.full_name === "string" ? headRepo.full_name : void 0,
     action: eventAction,
-    previousBaseRef: typeof baseChange.from === "string" ? baseChange.from : void 0
+    previousBaseRef: typeof baseChange.from === "string" ? baseChange.from : void 0,
+    eventTimestamp: text2(pull.updated_at)
   };
 }
 
@@ -2719,7 +3006,7 @@ async function loadEvent(env) {
   const payload = parseJson(await readFile(path, "utf8"), "event");
   return parseEventContext(payload);
 }
-function reportOutputs(report) {
+function reportOutputs(report, summaryCommentUrl) {
   return {
     outcome: report.outcome,
     reason: report.reason ?? "",
@@ -2727,7 +3014,8 @@ function reportOutputs(report) {
     findings_published: String(report.publish?.published ?? 0),
     findings_suppressed: String(report.publish?.suppressed ?? 0),
     cache_hits: String(report.cacheHits),
-    cache_misses: String(report.cacheMisses)
+    cache_misses: String(report.cacheMisses),
+    summary_comment_url: summaryCommentUrl ?? ""
   };
 }
 function isEnoent(error) {
@@ -2766,6 +3054,30 @@ async function maybeSaveCacheStore(storePath, report, diagnostics) {
     return;
   }
   await saveCacheStore(storePath, report.updatedCacheStore, report.cacheAppended, diagnostics);
+}
+async function maybeMaintainSummary(env, event, identity, report, diagnostics) {
+  if (!readBooleanInput(env, "run_summary", true)) {
+    diagnostics.record("publish.summary_disabled");
+    return void 0;
+  }
+  return maintainRunSummary(
+    {
+      client: identity.client,
+      ref: { owner: event.owner, repo: event.repo },
+      pullNumber: event.pullNumber,
+      identity: identity.login
+    },
+    {
+      report,
+      headSha: event.head,
+      eventTimestamp: event.eventTimestamp,
+      engineVersion: ENGINE_PIN.version,
+      // Set by Actions for a step that `uses:` a JS action — the exact ref/SHA the consumer's own
+      // workflow pinned this run to. Empty outside Actions (a local invocation, a test).
+      actionVersion: env.GITHUB_ACTION_REF ?? ""
+    },
+    diagnostics
+  );
 }
 function admit(env, event, diagnostics) {
   const eligibility = evaluateEligibility(
@@ -2827,7 +3139,8 @@ async function runAction(env, diagnostics) {
     diagnostics
   );
   await maybeSaveCacheStore(storePath, report, diagnostics);
-  writeOutputs(env, reportOutputs(report));
+  const summaryCommentUrl = await maybeMaintainSummary(env, event, identity, report, diagnostics);
+  writeOutputs(env, reportOutputs(report, summaryCommentUrl));
   return report;
 }
 async function main() {

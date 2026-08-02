@@ -93,3 +93,30 @@ export function composeBody(sanitizedBody: string, marker: string): string {
 export function markerComment(value: string): string {
   return `${MARKER_PREFIX}:v1:${value}`;
 }
+
+/**
+ * The fixed marker identifying the one maintained run-summary comment on a pull request.
+ *
+ * Every other caller of `fingerprint` wants the opposite of what the summary needs: a finding's
+ * marker changes when its content changes, so a genuinely new finding is not suppressed as a
+ * repost, and an incomplete-review notice's marker also varies with `head`, so a notice about a
+ * superseded commit never suppresses the notice a fresh run for the current head still needs to
+ * publish (see both doc comments above). The summary is the opposite of both: the same *one*
+ * comment must be found and updated on every run against the same pull request, however the counts
+ * changed and regardless of which head this run reviewed — that is what makes the upsert an update
+ * instead of an accumulating pile of comments.
+ *
+ * Passing constant `path`/`rule`/`body` values and no `head` collapses `fingerprint`'s hash to a
+ * function of `repository`/`pullNumber` alone, which is exactly the desired shape. This reuses the
+ * exact hash and marker-regex format every other marker in this product already uses instead of
+ * inventing a second one.
+ */
+export function summaryMarker(repository: string, pullNumber: number): string {
+  return fingerprint({
+    repository,
+    pullNumber,
+    path: "__run-summary__",
+    rule: "run-summary",
+    body: "run-summary",
+  });
+}

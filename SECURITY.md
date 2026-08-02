@@ -52,6 +52,21 @@ blocking — rather than being silently rewritten into something no one authored
 **Suggestion blocks are prohibited.** Model output produced while reading attacker-influenced input
 must never become one-click-applicable code.
 
+**The run-summary comment cannot carry model or candidate-influenced content.** Its composer's
+parameter type is limited to numbers, closed-vocabulary reason codes, and branded identifiers
+(head SHA, engine version) or narrowly trusted strings sourced from the triggering event payload
+and the Actions runtime (`GITHUB_ACTION_REF`) — never engine output and never a finding body.
+There is no field wide enough to hold arbitrary prose, so this publication path cannot become a
+second route for unsanitized content to reach a published comment. It is upserted through the same
+authorship rule as every other publication: only a comment carrying the marker _and_ authored by
+this reviewer's own runtime-resolved identity is treated as the existing summary and updated in
+place; a look-alike marker inside anyone else's comment is spoofing and is ignored, and a fresh
+comment is created instead of overwriting it. Because it is an issue comment rather than a review
+comment, it carries no `commit_id` — it states the reviewed head in its own text instead, and is
+reissued on every run against a new head so it can never describe a superseded commit while
+looking current. A failure to upsert it is caught and recorded as a diagnostic; it never fails the
+run or changes the settlement outcome the rest of that run already reached.
+
 **Deduplication verifies authorship, on both of its stages.** A finding is suppressed only when an
 existing conversation was authored by this reviewer's own runtime-resolved identity — whether the
 match is the exact marker every publication carries, or the second, phrasing-independent stage that

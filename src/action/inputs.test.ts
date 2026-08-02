@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ValidationError } from "../core/brands.js";
 import {
   parseEventContext,
+  readBooleanInput,
   readIntegerInput,
   readInput,
   runtimeConfigFromInputs,
@@ -89,6 +90,27 @@ describe("parseEventContext", () => {
     };
     expect(() => parseEventContext(broken)).toThrow(ValidationError);
   });
+
+  // The run-summary comment (Keiko-for-Quality#31) states this verbatim rather than substituting
+  // this process's own wall clock, which would reflect when a queued job happened to run rather
+  // than when the reviewed activity actually occurred.
+  describe("eventTimestamp", () => {
+    it("reads pull_request.updated_at from the webhook payload", () => {
+      const withTimestamp = payload();
+      (withTimestamp.pull_request as Record<string, unknown>).updated_at = "2026-08-02T10:15:00Z";
+      expect(parseEventContext(withTimestamp).eventTimestamp).toBe("2026-08-02T10:15:00Z");
+    });
+
+    it("is empty rather than fatal when the payload carries none", () => {
+      expect(parseEventContext(payload()).eventTimestamp).toBe("");
+    });
+
+    it("is empty rather than a coerced string when the field is present but not a string", () => {
+      const malformed = payload();
+      (malformed.pull_request as Record<string, unknown>).updated_at = 12345;
+      expect(parseEventContext(malformed).eventTimestamp).toBe("");
+    });
+  });
 });
 
 describe("action inputs", () => {
@@ -127,5 +149,26 @@ describe("action inputs", () => {
         INPUT_MODEL_TOKEN_ENV: "GITHUB_TOKEN",
       }),
     ).toThrow(ValidationError);
+  });
+
+  describe("readBooleanInput", () => {
+    it("falls back when the input is absent", () => {
+      expect(readBooleanInput({}, "run_summary", true)).toBe(true);
+      expect(readBooleanInput({}, "run_summary", false)).toBe(false);
+    });
+
+    it("reads the literal string true", () => {
+      expect(readBooleanInput({ INPUT_RUN_SUMMARY: "true" }, "run_summary", false)).toBe(true);
+    });
+
+    it("reads the literal string false, overriding a true fallback", () => {
+      expect(readBooleanInput({ INPUT_RUN_SUMMARY: "false" }, "run_summary", true)).toBe(false);
+    });
+
+    it("rejects any other value rather than coercing it", () => {
+      expect(() => readBooleanInput({ INPUT_RUN_SUMMARY: "yes" }, "run_summary", true)).toThrow(
+        ValidationError,
+      );
+    });
   });
 });
