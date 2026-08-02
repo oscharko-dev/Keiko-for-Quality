@@ -40,6 +40,13 @@
  * invisible in the diff, and the rule text separately forbids speculating about unseen code. The
  * reviewer's silence was defensible, so the case would have produced a permanent false regression.
  * A corpus case must be decidable from the diff alone.
+ *
+ * `clean-added-guard` went the same way, and it is the clearer illustration. It added
+ * `if (b === 0) throw new RangeError(...)` to a division helper and asserted that was "a change
+ * that strictly improves safety" — which it is, and it is also a contract change: callers that
+ * relied on `Infinity` now get an exception. Silence and a finding are both defensible, so the
+ * case measured which way the model happened to land. Decidable from the diff is necessary but not
+ * sufficient; a case must also have one defensible answer.
  */
 
 const CHECKOUT_V4_2_0 = "11bd71901bbe5b1630ceea73d27597364c9af683";
@@ -631,25 +638,6 @@ choose one on the caller's behalf.
 
 export function label(kind: string): string {
   return LABELS.get(kind) ?? "Unknown";
-}
-`,
-      },
-    ],
-  },
-  {
-    id: "clean-added-guard",
-    defect: null,
-    about: "a change that strictly improves safety",
-    files: [
-      {
-        path: "src/divide.ts",
-        base: `export function ratio(a: number, b: number): number {
-  return a / b;
-}
-`,
-        head: `export function ratio(a: number, b: number): number {
-  if (b === 0) throw new RangeError("division by zero");
-  return a / b;
 }
 `,
       },
