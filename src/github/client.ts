@@ -45,6 +45,26 @@ export interface ReviewComment {
    * comment; callers must treat an absent value the same as `false` rather than as "known open".
    */
   readonly resolved?: boolean;
+  /**
+   * The last reply on this comment's thread, when the same GraphQL lookup found the thread
+   * genuinely RESOLVED (Keiko-for-Quality#64) — never set for a thread that is merely outdated, a
+   * distinct condition `resolved` alone does not separate from a considered resolution. Absent when
+   * the lookup did not run, the thread is not resolved, or GitHub reported no usable reply (a
+   * deleted author, for instance). A thread whose only comment is its own root finding reports that
+   * same root comment back here — there is nothing else to report — which is what lets a caller
+   * that also knows this reviewer's own identity tell a bare resolve apart from an answered one
+   * without this client needing to know what either of those mean.
+   */
+  readonly lastReply?: ThreadLastReply;
+}
+
+/** The shape of a thread's last reply this best-effort GraphQL lookup can report — see
+ *  `ReviewComment.lastReply`. Structurally identical to, and deliberately not imported from,
+ *  `publish/disposition.ts`'s type of the same name: this module is a transport layer and has no
+ *  business knowing what a caller does with the shape, only how to fetch it. */
+export interface ThreadLastReply {
+  readonly authorLogin: string;
+  readonly body: string;
 }
 
 export interface PullRequestState {
@@ -115,11 +135,20 @@ const RETRYABLE: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
 
 /**
- * Walks every review thread on the pull request, each carrying whether it is resolved or outdated
- * and the database id — the same id the REST comments endpoint returns — of every comment inside it.
- * `first: 100` on the inner `comments` connection is generous: a single review thread with more than
- * a hundred replies has never been observed, and undercounting a thread's later replies here still
- * leaves its first comment (where this reviewer's own marker or finding lives) correctly identified.
+ * Walks every review thread on the pull request, each carrying whether it is resolved or outdated,
+ * the database id — the same id the REST comments endpoint returns — of every comment inside it, and
+ * (aliased `lastComment`) that same thread's true last comment, however many it has.
+ *
+ * The two `comments` connections answer different questions and neither substitutes for the other.
+ * `first: 100` is generous for the identity list: a single review thread with more than a hundred
+ * replies has never been observed, and undercounting a thread's later replies here still leaves its
+ * first comment (where this reviewer's own marker or finding lives) correctly identified. But
+ * `lastComment` (Keiko-for-Quality#64) needs the thread's *actual* final reply to decide whether
+ * someone gave it a considered disposition — on that one question, "the last of the first 100" would
+ * silently answer a different, wrong question the moment a thread ever grew past a hundred replies,
+ * which is exactly the shape a long-lived, heavily re-litigated thread can reach. `last: 1` fetches
+ * from the end of the connection regardless of its total size, so it is correct at any thread length,
+ * not just today's observed ones.
  */
 const RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
@@ -129,6 +158,7 @@ const RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: 
           isResolved
           isOutdated
           comments(first: 100) { nodes { databaseId } }
+          lastComment: comments(last: 1) { nodes { author { login } body } }
         }
         pageInfo { hasNextPage endCursor }
       }
@@ -140,6 +170,12 @@ interface ReviewThreadNode {
   readonly isResolved?: unknown;
   readonly isOutdated?: unknown;
   readonly comments?: { readonly nodes?: readonly { readonly databaseId?: unknown }[] };
+  readonly lastComment?: {
+    readonly nodes?: readonly {
+      readonly author?: { readonly login?: unknown } | null;
+      readonly body?: unknown;
+    }[];
+  };
 }
 
 interface ReviewThreadsPage {
@@ -154,12 +190,38 @@ interface ReviewThreadsResponse {
   readonly errors?: unknown;
 }
 
-/** A thread counts as no-longer-blocking dedup once resolved or outdated — see `ReviewComment.resolved`. */
-function collectResolvedIds(nodes: readonly ReviewThreadNode[], into: Set<number>): void {
+/**
+ * The thread's true last reply, read off the `lastComment` alias — never derived from the bounded
+ * `comments(first: 100)` connection above, which would silently report comment #100 instead of the
+ * real last one on an exceptionally long thread. A missing or non-string author/body — a deleted
+ * account, a malformed response — degrades to "no reply to report" rather than a guess.
+ */
+function extractLastReply(node: ReviewThreadNode): ThreadLastReply | undefined {
+  const last = node.lastComment?.nodes?.[0];
+  const authorLogin = last?.author?.login;
+  const body = last?.body;
+  if (typeof authorLogin !== "string" || typeof body !== "string") return undefined;
+  return { authorLogin, body };
+}
+
+/**
+ * `Map<databaseId, lastReply>` for every comment belonging to a resolved-or-outdated thread — see
+ * `ReviewComment.resolved`. Key *presence* is the resolved/outdated signal (unchanged from the set
+ * this collected before Keiko-for-Quality#64); the value is that thread's last reply, but only for a
+ * thread GitHub reports as genuinely `isResolved` — a merely-outdated thread never had anyone decide
+ * anything, so it is a key with an `undefined` value here, exactly like a resolved thread whose last
+ * comment carried no usable author/body.
+ */
+function collectThreadOverlays(
+  nodes: readonly ReviewThreadNode[],
+  into: Map<number, ThreadLastReply | undefined>,
+): void {
   for (const node of nodes) {
-    if (node.isResolved !== true && node.isOutdated !== true) continue;
+    const isResolved = node.isResolved === true;
+    if (!isResolved && node.isOutdated !== true) continue;
+    const lastReply = isResolved ? extractLastReply(node) : undefined;
     for (const comment of node.comments?.nodes ?? []) {
-      if (typeof comment.databaseId === "number") into.add(comment.databaseId);
+      if (typeof comment.databaseId === "number") into.set(comment.databaseId, lastReply);
     }
   }
 }
@@ -276,19 +338,29 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     number: number,
     comments: readonly ReviewComment[],
   ): Promise<ReviewComment[]> {
-    const resolvedIds = await this.fetchResolvedCommentIds(ref, number);
-    if (resolvedIds.size === 0) return [...comments];
-    return comments.map((comment) =>
-      resolvedIds.has(comment.id) ? { ...comment, resolved: true } : comment,
-    );
+    const overlays = await this.fetchThreadOverlays(ref, number);
+    if (overlays.size === 0) return [...comments];
+    return comments.map((comment) => {
+      if (!overlays.has(comment.id)) return comment;
+      const lastReply = overlays.get(comment.id);
+      return {
+        ...comment,
+        resolved: true,
+        ...(lastReply !== undefined ? { lastReply } : {}),
+      };
+    });
   }
 
-  /** Bounded, best-effort GraphQL walk of every review thread, returning comment ids to mark resolved. */
-  private async fetchResolvedCommentIds(
+  /**
+   * Bounded, best-effort GraphQL walk of every review thread, returning a map of every comment id
+   * belonging to a resolved-or-outdated thread to that thread's last reply (Keiko-for-Quality#64) —
+   * see `collectThreadOverlays` for exactly what "that thread's last reply" means per thread state.
+   */
+  private async fetchThreadOverlays(
     ref: RepoRef,
     number: number,
-  ): Promise<ReadonlySet<number>> {
-    const resolved = new Set<number>();
+  ): Promise<ReadonlyMap<number, ThreadLastReply | undefined>> {
+    const overlays = new Map<number, ThreadLastReply | undefined>();
     try {
       let cursor: string | null = null;
       for (let page = 1; page <= 20; page += 1) {
@@ -300,16 +372,16 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
         })) as ReviewThreadsResponse;
         const threads = reviewThreadsPage(raw);
         if (threads === undefined) break;
-        collectResolvedIds(threads.nodes ?? [], resolved);
+        collectThreadOverlays(threads.nodes ?? [], overlays);
         const next = nextThreadsCursor(threads);
         if (next === undefined) break;
         cursor = next;
       }
     } catch {
       // Best-effort: see `markResolved`'s doc comment. A failed lookup is not a failed review.
-      return new Set();
+      return new Map();
     }
-    return resolved;
+    return overlays;
   }
 
   public async createReviewComment(

@@ -76,6 +76,7 @@ function report(overrides: Partial<ReviewReport> = {}): ReviewReport {
       suppressed: 1,
       suppressedExactDuplicate: 1,
       suppressedSimilar: 0,
+      suppressedDispositioned: 0,
       rejectedSanitization: 0,
       rejectedPlacement: 0,
       readbackFailures: 0,
@@ -240,6 +241,16 @@ describe("buildSummaryReport", () => {
       excludedPaths: 30,
       mechanicallyClean: 10,
       cacheHits: 12,
+      publish: {
+        published: 2,
+        suppressed: 4,
+        suppressedExactDuplicate: 1,
+        suppressedSimilar: 2,
+        suppressedDispositioned: 1,
+        rejectedSanitization: 0,
+        rejectedPlacement: 0,
+        readbackFailures: 0,
+      },
     });
     const summary = buildSummaryReport(runInput({ report: r }), []);
 
@@ -251,6 +262,7 @@ describe("buildSummaryReport", () => {
     expect(summary.counts.findingsPublished).toBe(r.publish?.published);
     expect(summary.counts.suppressedExactDuplicate).toBe(r.publish?.suppressedExactDuplicate);
     expect(summary.counts.suppressedSimilar).toBe(r.publish?.suppressedSimilar);
+    expect(summary.counts.suppressedDispositioned).toBe(r.publish?.suppressedDispositioned);
   });
 
   it("derives freshlyReviewed as the one arithmetic step: reviewablePaths minus cacheHits", () => {
@@ -270,6 +282,7 @@ describe("buildSummaryReport", () => {
     expect(summary.counts.findingsPublished).toBe(0);
     expect(summary.counts.suppressedExactDuplicate).toBe(0);
     expect(summary.counts.suppressedSimilar).toBe(0);
+    expect(summary.counts.suppressedDispositioned).toBe(0);
   });
 
   it("carries the reason code only for an incomplete outcome", () => {

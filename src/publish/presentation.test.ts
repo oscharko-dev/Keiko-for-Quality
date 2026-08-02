@@ -160,6 +160,7 @@ describe("composeSummaryBody", () => {
     findingsPublished: 3,
     suppressedExactDuplicate: 1,
     suppressedSimilar: 2,
+    suppressedDispositioned: 0,
   };
 
   function summaryReport(overrides: Partial<SummaryReport> = {}): SummaryReport {
@@ -257,18 +258,28 @@ describe("composeSummaryBody", () => {
       expect(body).toContain("| Findings published | 3 |");
       expect(body).toContain("| Suppressed (exact duplicate) | 1 |");
       expect(body).toContain("| Suppressed (similar) | 2 |");
+      expect(body).toContain("| Suppressed (dispositioned) | 0 |");
     });
 
     // Keiko-for-Quality#50's visibility requirement: replay staleness and dedup behaviour must stay
-    // visible, which is why the two duplicate-suppression stages (#38's exact marker, #51's
-    // phrasing-independent similarity) are surfaced as two counts, never folded into one.
-    it("carries the two duplicate-suppression stages separately, never merged into one count", () => {
+    // visible, which is why the three duplicate-suppression stages (#38's exact marker, #51's
+    // phrasing-independent similarity, #64's dispositioned recurrence) are surfaced as three counts,
+    // never folded into one.
+    it("carries every duplicate-suppression stage separately, never merged into one count", () => {
       const body = composeSummaryBody(
-        summaryReport({ counts: { ...COUNTS, suppressedExactDuplicate: 9, suppressedSimilar: 4 } }),
+        summaryReport({
+          counts: {
+            ...COUNTS,
+            suppressedExactDuplicate: 9,
+            suppressedSimilar: 4,
+            suppressedDispositioned: 7,
+          },
+        }),
         MARKER,
       );
       expect(body).toContain("| Suppressed (exact duplicate) | 9 |");
       expect(body).toContain("| Suppressed (similar) | 4 |");
+      expect(body).toContain("| Suppressed (dispositioned) | 7 |");
     });
 
     it("never lists an individual path — aggregate counts only", () => {

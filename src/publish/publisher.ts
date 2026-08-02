@@ -9,11 +9,16 @@ import {
   type ReviewCommentApi,
   type ReviewCommentInput,
 } from "../github/client.js";
+import { isSubstantiveDisposition } from "./disposition.js";
 import { extractMarker, fingerprint, markerComment } from "./marker.js";
 import { composeFindingBody, composeIncompleteNotice } from "./presentation.js";
 import { describePlacement, placementLadder, tallyPlacementAttempts } from "./placement.js";
 import { sanitizeFindingBody } from "./sanitize.js";
-import { findsSimilarOpenConversation, type ExistingConversation } from "./similarity.js";
+import {
+  findsDispositionedConversation,
+  findsSimilarOpenConversation,
+  type ExistingConversation,
+} from "./similarity.js";
 
 export interface PublishContext {
   readonly client: ReviewCommentApi;
@@ -27,12 +32,15 @@ export interface PublishContext {
 
 export interface PublishOutcome {
   readonly published: number;
-  /** Total suppressed as an already-published duplicate — the sum of the two fields below. */
+  /** Total suppressed as an already-published duplicate — the sum of the three fields below. */
   readonly suppressed: number;
   /** Suppressed by the exact-marker stage (a byte-for-byte, cosmetically-normalized repeat). */
   readonly suppressedExactDuplicate: number;
   /** Suppressed by the phrasing-independent similarity stage (Keiko-for-Quality#38). */
   readonly suppressedSimilar: number;
+  /** Suppressed against a resolved thread with a substantive disposition reply (Keiko-for-Quality#64) —
+   *  never against a bare resolve, which must keep a genuinely recurred defect publishable. */
+  readonly suppressedDispositioned: number;
   readonly rejectedSanitization: number;
   readonly rejectedPlacement: number;
   readonly readbackFailures: number;
@@ -68,12 +76,17 @@ function ownMarkers(comments: readonly ReviewComment[], identity: string): Reado
  * GitHub reports a multi-line comment's end as `line` and its start as `start_line`; a single-line
  * comment carries only `line`. Absent either, there is no usable anchor and the similarity stage's
  * own range check will correctly never match it.
+ *
+ * `dispositioned` (Keiko-for-Quality#64) is computed here, at the one place a raw `ReviewComment`
+ * becomes the shape dedup logic reasons about — `github/client.ts` reports only the raw last-reply
+ * data it fetched, deliberately with no opinion on what counts as a considered disposition.
  */
-function toExistingConversation(comment: ReviewComment): ExistingConversation {
+function toExistingConversation(comment: ReviewComment, identity: string): ExistingConversation {
   return {
     path: comment.path,
     authorLogin: comment.authorLogin,
     resolved: comment.resolved === true,
+    dispositioned: isSubstantiveDisposition(comment.lastReply, identity),
     body: comment.body,
     startLine: comment.startLine ?? comment.line,
     endLine: comment.line,
@@ -128,18 +141,23 @@ interface Counters {
   suppressed: number;
   suppressedExactDuplicate: number;
   suppressedSimilar: number;
+  suppressedDispositioned: number;
   rejectedSanitization: number;
   rejectedPlacement: number;
   readbackFailures: number;
 }
 
 /**
- * Which of the two dedup stages, if either, already covers this exact finding.
+ * Which dedup stage, if any, already covers this exact finding.
  *
  * The marker stage runs first: it is an exact, spoof-resistant match and cheaper to compute. The
- * similarity stage — phrasing-independent, Keiko-for-Quality#38 — runs only when the marker missed,
- * since a marker hit already proves the same finding exists and there is nothing left to gain by
- * also asking whether it merely *resembles* one.
+ * similarity stage — phrasing-independent, Keiko-for-Quality#38 — runs next, against still-open
+ * conversations only, since a genuinely recurred defect must stay publishable once a thread is
+ * merely resolved with no reply. The dispositioned stage (Keiko-for-Quality#64) runs last and
+ * narrows the opposite direction: it reconsiders exactly the resolved conversations the similarity
+ * stage just excluded, but only those whose last reply was a substantive disposition rather than a
+ * bare resolve — the case where someone actually decided the question, so a matching recurrence
+ * should stop re-litigating it rather than republish.
  */
 function classifySuppression(
   finding: EngineFinding,
@@ -148,7 +166,7 @@ function classifySuppression(
   existingMarkers: ReadonlySet<string>,
   existingThreads: readonly ExistingConversation[],
   identity: string,
-): "exact" | "similar" | undefined {
+): "exact" | "similar" | "dispositioned" | undefined {
   if (existingMarkers.has(marker)) return "exact";
   const candidate = {
     path: finding.path,
@@ -156,7 +174,9 @@ function classifySuppression(
     endLine: finding.endLine,
     body: sanitizedBody,
   };
-  return findsSimilarOpenConversation(candidate, existingThreads, identity) ? "similar" : undefined;
+  if (findsSimilarOpenConversation(candidate, existingThreads, identity)) return "similar";
+  if (findsDispositionedConversation(candidate, existingThreads, identity)) return "dispositioned";
+  return undefined;
 }
 
 /** The placement ladder, composition, publication, and read-back for a finding past both dedup stages. */
@@ -236,11 +256,14 @@ async function publishOne(
   if (suppression !== undefined) {
     counters.suppressed += 1;
     if (suppression === "exact") counters.suppressedExactDuplicate += 1;
-    else counters.suppressedSimilar += 1;
+    else if (suppression === "similar") counters.suppressedSimilar += 1;
+    else counters.suppressedDispositioned += 1;
     const code =
       suppression === "exact"
         ? "publish.finding_suppressed_duplicate"
-        : "publish.finding_suppressed_similar";
+        : suppression === "similar"
+          ? "publish.finding_suppressed_similar"
+          : "dedup.dispositioned";
     diagnostics.record(code, { headSha: context.headSha });
     return;
   }
@@ -255,12 +278,15 @@ export async function publishFindings(
 ): Promise<PublishOutcome> {
   const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
   const existing = ownMarkers(comments, context.identity);
-  const existingThreads = comments.map(toExistingConversation);
+  const existingThreads = comments.map((comment) =>
+    toExistingConversation(comment, context.identity),
+  );
   const counters: Counters = {
     published: 0,
     suppressed: 0,
     suppressedExactDuplicate: 0,
     suppressedSimilar: 0,
+    suppressedDispositioned: 0,
     rejectedSanitization: 0,
     rejectedPlacement: 0,
     readbackFailures: 0,
