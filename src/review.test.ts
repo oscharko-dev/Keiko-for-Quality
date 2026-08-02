@@ -18,7 +18,7 @@ import { blobId, commitSha, sha256 } from "./core/brands.js";
 import { createSilentDiagnostics } from "./diagnostics/sink.js";
 import { currentPlatformDigest } from "./engine/pinned-release.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
-import { GitHubClient } from "./github/client.js";
+import { GitHubApiError, GitHubClient } from "./github/client.js";
 import type { ReviewRequest } from "./review.js";
 
 const acquireEngineMock = vi.fn();
@@ -163,6 +163,24 @@ describe("performReview: review-cache memoization end to end", () => {
       status: "success",
       summary: { files_reviewed: filesReviewed, total_tokens: 100, budget_exceeded: false },
       comments: [],
+    });
+  }
+
+  /** The same counted-mode output, carrying one publishable finding against `src/a.ts`. */
+  function engineStdoutWithFinding(filesReviewed: number): string {
+    return JSON.stringify({
+      status: "success",
+      summary: { files_reviewed: filesReviewed, total_tokens: 100, budget_exceeded: false },
+      comments: [
+        {
+          path: "src/a.ts",
+          content: "This line never validates the input length before using it as an index.",
+          start_line: 1,
+          end_line: 1,
+          severity: "medium",
+          category: "bug",
+        },
+      ],
     });
   }
 
@@ -313,6 +331,47 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(report.outcome).toBe("incomplete");
     expect(report.cacheHits).toBe(0);
     expect(report.cacheMisses).toBe(0);
+  });
+
+  /**
+   * Keiko-for-Quality#63, run-level: production evidence was a run that settled incomplete with
+   * reason `publish.finding_rejected_placement` alone — no breakdown of what was actually tried.
+   * `publisher.test.ts` already pins the per-finding tally this same rejection carries one layer
+   * down; this proves the run-level event `settleIncomplete` records also carries the publication
+   * outcome's own breakdown, not just the bare reason code, so an operator reading *this* one event
+   * does not have to go correlate it against the per-finding diagnostics stream by hand.
+   */
+  it("settles incomplete with the publication outcome's own breakdown when every placement is refused", async () => {
+    const engineDigest = currentPlatformDigest();
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+    runEngineMock.mockResolvedValue({
+      stdout: engineStdoutWithFinding(2),
+      ruleDigest: engineDigest,
+    });
+
+    const request = baseRequest(undefined);
+    vi.spyOn(request.client, "createReviewComment").mockRejectedValue(new GitHubApiError(422));
+
+    const diagnostics = createSilentDiagnostics();
+    const report = await performReview(request, diagnostics);
+
+    expect(report.outcome).toBe("incomplete");
+    expect(report.reason).toBe("publish.finding_rejected_placement");
+    expect(report.publish).toMatchObject({ published: 0, rejectedPlacement: 1 });
+
+    // The run-level record — the last one with this code, since `publishFindings`' own per-finding
+    // record for the same code is written first — carries the full outcome breakdown redactedly:
+    // counts and codes only, never the finding's content or the rejection's own message.
+    const runLevel = diagnostics
+      .drain()
+      .filter((record) => record.code === "publish.finding_rejected_placement")
+      .at(-1);
+    expect(runLevel?.counts).toStrictEqual({
+      published: 0,
+      rejected_placement: 1,
+      rejected_sanitization: 0,
+      readback_failures: 0,
+    });
   });
 
   /**

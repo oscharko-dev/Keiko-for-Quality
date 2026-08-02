@@ -317,6 +317,10 @@ function prepareMemoization(
  * Keiko-for-Quality#38, alongside the notice marker now also keying on `head` (see `publisher.ts`).
  * `publishSettledFindings`, the sibling "complete" path, applies the identical check itself
  * immediately before publishing real findings, for the same reason.
+ *
+ * @param counts Redacted, bounded context for *why* this settlement fired — e.g. the publication
+ *   outcome's own rejection breakdown (Keiko-for-Quality#63) when the reason is a degraded
+ *   publication. Omitted by every caller that has nothing more specific than the reason code itself.
  */
 async function settleIncomplete(
   request: ReviewRequest,
@@ -325,8 +329,12 @@ async function settleIncomplete(
   diagnostics: Diagnostics,
   findings: readonly EngineFinding[] = [],
   memo: MemoContext = INERT_MEMO,
+  counts?: Readonly<Record<string, number>>,
 ): Promise<ReviewReport> {
-  diagnostics.record(reason, { headSha: request.head });
+  diagnostics.record(reason, {
+    headSha: request.head,
+    ...(counts !== undefined ? { counts } : {}),
+  });
 
   if (!(await headIsCurrent(request))) {
     diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
@@ -403,6 +411,22 @@ function publicationDegraded(outcome: PublishOutcome): boolean {
 }
 
 /**
+ * The redacted breakdown behind a degraded-publication settlement (Keiko-for-Quality#63): what
+ * published cleanly alongside what did not, and along which of the three failure modes. Every
+ * per-finding placement rejection folded into `outcome.rejectedPlacement` already carries its own
+ * finer attempt tally (`publisher.ts`'s `publish.finding_rejected_placement` record); this is the
+ * run-level rollup an operator sees on the single event that decided the run as a whole.
+ */
+function publicationDegradedCounts(outcome: PublishOutcome): Readonly<Record<string, number>> {
+  return {
+    published: outcome.published,
+    rejected_placement: outcome.rejectedPlacement,
+    rejected_sanitization: outcome.rejectedSanitization,
+    readback_failures: outcome.readbackFailures,
+  };
+}
+
+/**
  * Folds this run's newly-clean-or-found paths into the store to write back — never a hit's own
  * entry, which is already in the store unchanged, and never anything from an outcome other than
  * `complete`: this function is only reachable from `publishSettledFindings`, and that is the one
@@ -467,6 +491,7 @@ async function publishSettledFindings(
       diagnostics,
       [],
       memo,
+      publicationDegradedCounts(publish),
     );
     return { ...report, publish };
   }
