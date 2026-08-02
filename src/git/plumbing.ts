@@ -1,7 +1,9 @@
 import {
+  blobId,
   commitSha,
   repoPath,
   ValidationError,
+  type BlobId,
   type CommitSha,
   type RepoPath,
 } from "../core/brands.js";
@@ -31,10 +33,21 @@ export interface RawChange {
   readonly status: ChangeStatus;
   readonly oldMode: string;
   readonly newMode: string;
+  /**
+   * The blob on each side of the change, at full length (`--no-abbrev`).
+   *
+   * `oldBlob === newBlob` is the cryptographic proof that a rename moved a path without touching
+   * its content — comparing abbreviated ids would only make that collision less likely, not
+   * impossible, and this equality is load-bearing for a downgrade decision.
+   */
+  readonly oldBlob: BlobId;
+  readonly newBlob: BlobId;
   readonly path: RepoPath;
   readonly oldPath?: RepoPath;
   /** Git's own binary determination, from numstat. */
   readonly binary: boolean;
+  /** Added plus deleted lines, from numstat. Zero for a binary change or a record numstat omits. */
+  readonly changedLines: number;
 }
 
 export interface GitContext {
@@ -76,16 +89,37 @@ export async function mergeBase(
 }
 
 /** Parses one `:<oldmode> <newmode> <oldoid> <newoid> <status>` record. */
-function parseMeta(meta: string): { status: ChangeStatus; oldMode: string; newMode: string } {
+function parseMeta(meta: string): {
+  status: ChangeStatus;
+  oldMode: string;
+  newMode: string;
+  oldBlob: BlobId;
+  newBlob: BlobId;
+} {
   if (!meta.startsWith(":")) throw new ValidationError("diff.record");
   const fields = meta.slice(1).split(" ");
-  const [oldMode, newMode, , , statusToken] = fields;
-  if (oldMode === undefined || newMode === undefined || statusToken === undefined) {
+  const [oldMode, newMode, oldOid, newOid, statusToken] = fields;
+  if (
+    oldMode === undefined ||
+    newMode === undefined ||
+    oldOid === undefined ||
+    newOid === undefined ||
+    statusToken === undefined
+  ) {
     throw new ValidationError("diff.record");
   }
   const status = statusToken.charAt(0);
   if (!STATUSES.has(status)) throw new ValidationError("diff.status");
-  return { status: status as ChangeStatus, oldMode, newMode };
+  return {
+    status: status as ChangeStatus,
+    oldMode,
+    newMode,
+    // The caller invokes `diff --raw` with `--no-abbrev`, so these are full object ids — abbreviated
+    // equality would only make a false match less likely, and the pure-rename downgrade this feeds
+    // needs it impossible.
+    oldBlob: blobId(oldOid, "diff.oldBlob"),
+    newBlob: blobId(newOid, "diff.newBlob"),
+  };
 }
 
 /**
@@ -95,14 +129,14 @@ function parseMeta(meta: string): { status: ChangeStatus; oldMode: string; newMo
  * newlines, and any line-oriented parse of a candidate-controlled path is a classification bug
  * waiting to be exploited.
  */
-function parseRawDiff(text: string): Omit<RawChange, "binary">[] {
+function parseRawDiff(text: string): Omit<RawChange, "binary" | "changedLines">[] {
   const parts = text.split("\0");
-  const changes: Omit<RawChange, "binary">[] = [];
+  const changes: Omit<RawChange, "binary" | "changedLines">[] = [];
   let i = 0;
   while (i < parts.length) {
     const meta = parts[i];
     if (meta === undefined || meta === "") break;
-    const { status, oldMode, newMode } = parseMeta(meta);
+    const { status, oldMode, newMode, oldBlob, newBlob } = parseMeta(meta);
     const renamed = status === "R" || status === "C";
     const first = parts[i + 1];
     if (first === undefined) throw new ValidationError("diff.path");
@@ -113,22 +147,45 @@ function parseRawDiff(text: string): Omit<RawChange, "binary">[] {
         status,
         oldMode,
         newMode,
+        oldBlob,
+        newBlob,
         oldPath: repoPath(first, "diff.oldPath"),
         path: repoPath(second, "diff.path"),
       });
       i += 3;
     } else {
-      changes.push({ status, oldMode, newMode, path: repoPath(first, "diff.path") });
+      changes.push({
+        status,
+        oldMode,
+        newMode,
+        oldBlob,
+        newBlob,
+        path: repoPath(first, "diff.path"),
+      });
       i += 2;
     }
   }
   return changes;
 }
 
+export interface NumstatIndex {
+  readonly binary: ReadonlySet<string>;
+  /** Added plus deleted lines, keyed by the final (post-rename) path. */
+  readonly changedLines: ReadonlyMap<string, number>;
+}
+
+/** Parses one numstat count field. Git's binary marker `-` and anything unparsable become zero. */
+function parseNumstatCount(value: string | undefined): number {
+  if (value === undefined || value === "-") return 0;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 /** Parses `git diff --numstat -z`; binary entries report `-` for both counts. */
-function parseBinaryPaths(text: string): ReadonlySet<string> {
+function parseNumstat(text: string): NumstatIndex {
   const parts = text.split("\0");
   const binary = new Set<string>();
+  const changedLines = new Map<string, number>();
   let i = 0;
   while (i < parts.length) {
     const record = parts[i];
@@ -136,19 +193,24 @@ function parseBinaryPaths(text: string): ReadonlySet<string> {
     const fields = record.split("\t");
     const [added, deleted] = fields;
     const isBinary = added === "-" && deleted === "-";
+    const lines = parseNumstatCount(added) + parseNumstatCount(deleted);
     // A renamed entry emits an empty path in the record and two following path fields.
     // Re-joining the tail preserves a path that legitimately contains a tab.
     const inlinePath = fields.slice(2).join("\t");
     if (inlinePath === "") {
       const target = parts[i + 2];
-      if (isBinary && target !== undefined) binary.add(target);
+      if (target !== undefined) {
+        if (isBinary) binary.add(target);
+        changedLines.set(target, lines);
+      }
       i += 3;
     } else {
       if (isBinary) binary.add(inlinePath);
+      changedLines.set(inlinePath, lines);
       i += 1;
     }
   }
-  return binary;
+  return { binary, changedLines };
 }
 
 /**
@@ -172,12 +234,19 @@ export async function listChanges(
     "diff",
     "--no-ext-diff",
     "--no-color",
+    // Raw object ids at full length: `classify()` proves a pure rename by comparing them, and an
+    // abbreviated id only makes a false-positive collision less likely, not impossible.
+    "--no-abbrev",
     "--submodule=short",
     `--find-renames=${String(renamePercent)}%`,
     "-z",
   ];
   const raw = await git(ctx, [...shared, "--raw", from, to]);
   const numstat = await git(ctx, [...shared, "--numstat", from, to]);
-  const binary = parseBinaryPaths(numstat);
-  return parseRawDiff(raw).map((change) => ({ ...change, binary: binary.has(change.path) }));
+  const { binary, changedLines } = parseNumstat(numstat);
+  return parseRawDiff(raw).map((change) => ({
+    ...change,
+    binary: binary.has(change.path),
+    changedLines: changedLines.get(change.path) ?? 0,
+  }));
 }

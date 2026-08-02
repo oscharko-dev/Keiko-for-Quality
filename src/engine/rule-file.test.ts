@@ -65,6 +65,32 @@ describe("buildRuleFile", () => {
     expect(() => buildRuleFile(profileWith({ reviewRelevant: [] }))).toThrow(TypeError);
   });
 
+  /**
+   * The inventory's pure-rename downgrade only stops this adapter from *requiring* engine
+   * coverage of the path — it does not, by itself, stop the engine from spending on it anyway.
+   * Forwarding the path as an exclude is what actually stops the spend.
+   */
+  describe("mechanically-clean paths", () => {
+    it("appends them to exclude, alongside the generated paths", () => {
+      const file = buildRuleFile(profileWith({ generated: ["**/dist/**"] }), { paths: [] }, [
+        "src/renamed.ts",
+      ]);
+      expect(file.exclude).toEqual(["**/dist/**", "src/renamed.ts"]);
+    });
+
+    it("defaults to an empty list when the caller passes none", () => {
+      const file = buildRuleFile(profileWith({ generated: ["**/dist/**"] }));
+      expect(file.exclude).toEqual(["**/dist/**"]);
+    });
+
+    it("never widens include: a mechanically-clean path is exclude-only", () => {
+      const file = buildRuleFile(profileWith({ reviewRelevant: ["src/**/*.ts"] }), { paths: [] }, [
+        "src/renamed.ts",
+      ]);
+      expect(file.include).toEqual(["src/**/*.ts"]);
+    });
+  });
+
   it("applies its guidance to every path", () => {
     const file = buildRuleFile(profileWith({}));
     expect(file.rules).toHaveLength(1);

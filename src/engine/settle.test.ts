@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { compileProfile, type ReviewProfile } from "../config/profile.js";
-import { commitSha, repoPath } from "../core/brands.js";
+import { blobId, commitSha, repoPath } from "../core/brands.js";
+import { toItem } from "../inventory/classify.js";
 import type { Inventory } from "../inventory/inventory.js";
 import type { RuntimeConfig } from "../config/runtime.js";
+import { MODE_REGULAR, type RawChange } from "../git/plumbing.js";
 import { SUPPORTED_MANIFEST_SCHEMA, type EngineResult } from "./result.js";
 import { settle } from "./settle.js";
 
@@ -41,6 +43,7 @@ function inventory(paths: readonly string[]): Inventory {
       classification: { kind: "reviewed" as const },
       modeChanged: false,
       reviewable: true,
+      changedLines: 0,
     })),
     reviewablePaths: new Set(paths),
     unclassified: [],
@@ -317,6 +320,76 @@ describe("counted settlement (no manifest)", () => {
   it("prefers the reconciled path whenever a manifest is present", () => {
     const outcome = settle(inventory(["src/a.ts"]), result(), PROFILE, CONFIG);
     expect(outcome.mode).toBe("reconciled");
+  });
+});
+
+/**
+ * A mechanically-clean rename is `reviewable: false`, so it never joins `reviewablePaths` — the
+ * denominator both settlement paths reconcile against. This is what actually stops the engine's
+ * spend on a path with nothing to review: the accounting shrinks, not just a label on the item.
+ *
+ * The inventory below is built through `classify`/`toItem`, the same production entry point
+ * `buildInventory` uses — not hand-authored to already say `reviewable: false` — so a regression
+ * in the downgrade itself (`isPureRename`/`downgradeToMechanicallyClean`) would show up here too,
+ * not only in `classify.test.ts`.
+ */
+describe("a mechanically-clean item shrinks the settlement denominator", () => {
+  const rawChange = (
+    overrides: Omit<Partial<RawChange>, "path"> & { path: string },
+  ): RawChange => ({
+    status: "M",
+    oldMode: MODE_REGULAR,
+    newMode: MODE_REGULAR,
+    oldBlob: blobId("a".repeat(40)),
+    newBlob: blobId("b".repeat(40)),
+    binary: false,
+    changedLines: 0,
+    ...overrides,
+    path: repoPath(overrides.path),
+  });
+
+  function mixedInventory(): Inventory {
+    const cleanBlob = blobId("c".repeat(40));
+    const items = [
+      rawChange({ path: "src/a.ts" }),
+      rawChange({ path: "src/b.ts" }),
+      // A byte-identical rename: same blob and mode on both sides.
+      rawChange({
+        path: "src/renamed.ts",
+        oldPath: repoPath("src/old.ts"),
+        status: "R",
+        oldBlob: cleanBlob,
+        newBlob: cleanBlob,
+      }),
+    ].map((change) => toItem(PROFILE, change));
+
+    return {
+      pair: { base: SHA, head: SHA, mergeBase: SHA },
+      items,
+      reviewablePaths: new Set(items.filter((i) => i.reviewable).map((i) => i.path as string)),
+      unclassified: [],
+    };
+  }
+
+  it("classifies the third item as mechanically-clean, not reviewed", () => {
+    const built = mixedInventory();
+    expect(built.items).toHaveLength(3);
+    expect(built.items[2]?.classification).toEqual({
+      kind: "mechanically-clean",
+      reason: "pure-rename",
+    });
+  });
+
+  it("excludes the prefiltered rename from the reviewable count, not just from the item list", () => {
+    const built = mixedInventory();
+    // Shrunk by exactly one — the mechanically-clean item — not by the whole prefiltered set.
+    expect(built.reviewablePaths.size).toBe(2);
+  });
+
+  it("settles complete on engine coverage of only the two reviewable paths", () => {
+    // Without the shrink this would need `filesReviewed: 3` to avoid a coverage gap.
+    const released = result({ manifestPresent: false, status: "success", filesReviewed: 2 });
+    expect(settle(mixedInventory(), released, PROFILE, CONFIG).status).toBe("complete");
   });
 });
 
