@@ -7,8 +7,15 @@ import { buildRuleFile, serializeRuleFile } from "./rule-file.js";
 
 /**
  * A stable digest of the rule document's *static* shape — the catch-all guidance, the consumer's
- * `include`/`generated` lists, and the guideline paths — computed by calling `buildRuleFile` with
- * no per-run exclude list at all.
+ * `include`/`generated` lists, the profile's per-path instructions, and the guideline paths —
+ * computed by calling `buildRuleFile` with no per-run exclude list at all.
+ *
+ * Per-path instructions (`profile.pathInstructions`, rendered by `rule-file.ts`'s
+ * `pathInstructionsSection`) are rule identity, not per-run state: they change what the model is
+ * asked, the same way the catch-all guidance or a guideline path does, so a cached finding produced
+ * under one instruction text must never be replayed as an answer to a different one. They reach
+ * this digest through nothing more than `profile` already being a parameter — there is no separate
+ * plumbing to keep in sync, and none to forget the next time this file changes.
  *
  * **Why this must not be `writeRuleFile`'s `ruleDigest`.** That digest is recorded with a run
  * because it covers the *executed* rule file, which also carries the run's dynamic exclude list:

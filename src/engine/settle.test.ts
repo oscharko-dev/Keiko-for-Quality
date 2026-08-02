@@ -16,6 +16,7 @@ const PROFILE = compileProfile({
   generated: [],
   excluded: [],
   benignWarnings: [{ type: "context_truncated", justification: "known on very large files" }],
+  pathInstructions: [],
 } satisfies ReviewProfile);
 
 const CONFIG: RuntimeConfig = {

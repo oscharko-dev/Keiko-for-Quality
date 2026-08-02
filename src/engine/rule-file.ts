@@ -1,4 +1,4 @@
-import type { CompiledProfile } from "../config/profile.js";
+import type { CompiledProfile, PathInstruction } from "../config/profile.js";
 import type { GuidelineIndex } from "../config/guidelines.js";
 
 /**
@@ -187,6 +187,53 @@ function guidanceSection(guidelines: GuidelineIndex): string {
   ].join("\n");
 }
 
+/** Wraps each glob in backticks so the model reads it as a literal pattern, not prose. */
+function formatPathList(paths: readonly string[]): string {
+  return paths.map((path) => `\`${path}\``).join(", ");
+}
+
+/**
+ * Renders the consumer's per-path natural-language guidance, or nothing when none is declared.
+ *
+ * This is prose appended to the one catch-all rule, deliberately never a second `rules[]` entry.
+ * The engine already reviews one file at a time and is told which path it is reviewing, so it can
+ * apply the entry whose globs match on its own; a second rule-selection layer per pattern was
+ * considered and rejected, because this reviewer already carries a documented, costly lesson about
+ * two layers disagreeing on the same path (see `buildRuleFile`'s own comment on `exclude` below) —
+ * one rule file, one selection layer, stays the contract, and per-path guidance is a second voice
+ * inside it, not a second layer.
+ *
+ * Every declared entry is rendered unconditionally, regardless of which paths the current run's
+ * diff actually touches. That is load-bearing, not an oversight: `promptIdentityDigest`
+ * (`rule-identity.ts`) calls `buildRuleFile` to compute a stable cache identity, and that digest
+ * must depend only on the profile and the guidelines, never on per-run facts — a render that varied
+ * with the diff would make the "stable" identity vary with it too, which is exactly the circularity
+ * that module's own doc comment says must never happen. `mechanicallyClean` is the one parameter
+ * that *is* per-run, and it stays wired only into `exclude`, never into this function.
+ *
+ * Instruction text is consumer-authored configuration `profile.ts` already validated and bounded —
+ * read from the trusted base checkout, at the same trust level as `reviewRelevant`/`excluded`
+ * patterns — never candidate content. See `PathInstruction`'s own doc comment for why that means
+ * this function does not screen the text for injection the way `CATCH_ALL_RULE` screens the diff.
+ */
+function pathInstructionsSection(entries: readonly PathInstruction[]): string {
+  if (entries.length === 0) return "";
+  const lines = entries.map(
+    (entry) => `- For files matching ${formatPathList(entry.paths)}: ${entry.instructions}`,
+  );
+  return [
+    "",
+    "## Path-scoped guidance from the review profile",
+    "",
+    "The consumer's review profile attaches guidance below to specific path patterns. Apply an",
+    "entry only to files matching its patterns — it refines how you review them, not which paths",
+    "are reviewed; that is decided solely by review-relevant, deletion-critical, and excluded",
+    "above.",
+    "",
+    ...lines,
+  ].join("\n");
+}
+
 /**
  * @param mechanicallyClean Paths the inventory downgraded away from `reviewed` — a pure rename
  *   today. Each entry is a candidate-controlled path string handed to the engine's own rule
@@ -238,7 +285,10 @@ export function buildRuleFile(
     rules: [
       {
         path: "**/*",
-        rule: CATCH_ALL_RULE + guidanceSection(guidelines),
+        rule:
+          CATCH_ALL_RULE +
+          guidanceSection(guidelines) +
+          pathInstructionsSection(profile.profile.pathInstructions),
         merge_system_rule: true,
       },
     ],

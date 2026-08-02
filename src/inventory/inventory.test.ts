@@ -43,6 +43,7 @@ const PROFILE: ReviewProfile = {
   generated: [],
   excluded: [],
   benignWarnings: [],
+  pathInstructions: [],
 };
 
 const compiled = compileProfile(PROFILE);
