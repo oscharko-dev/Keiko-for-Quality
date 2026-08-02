@@ -36,7 +36,8 @@
     "corpus": "node corpus/run.mjs",
     "fetch:engine": "node scripts/fetch-engine.mjs",
     "check:qualification": "node scripts/check-qualification.mjs",
-    "corpus:real": "node corpus/real-diffs.mjs"
+    "corpus:real": "node corpus/real-diffs.mjs",
+    "arena": "node corpus/arena.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",
