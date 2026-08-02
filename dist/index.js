@@ -749,18 +749,41 @@ var MASKED_CHECKS = [
   { pattern: LINK, reason: "link" },
   { pattern: MENTION, reason: "mention" }
 ];
+var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+var INLINE_SPAN = /(?<!`)(`+)(?!`)([^\n]+?)\1(?!`)/g;
+function closingFenceIndex(lines, from, marker) {
+  const char = marker.slice(0, 1);
+  for (let k = from; k < lines.length; k += 1) {
+    const run2 = FENCE_CLOSE.exec(lines[k] ?? "")?.[1];
+    if (run2?.startsWith(char) === true && run2.length >= marker.length) return k;
+  }
+  return -1;
+}
+function openingFenceMarker(line) {
+  const opened = FENCE_OPEN.exec(line);
+  const marker = opened?.[1];
+  if (marker === void 0) return void 0;
+  if (marker.startsWith("`") && (opened?.[2] ?? "").includes("`")) return void 0;
+  return marker;
+}
+function maskFencedBlocks(body) {
+  const lines = body.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    const marker = openingFenceMarker(lines[i] ?? "");
+    if (marker === void 0) continue;
+    const close = closingFenceIndex(lines, i + 1, marker);
+    if (close === -1) continue;
+    for (let k = i + 1; k < close; k += 1) lines[k] = (lines[k] ?? "").replace(/./g, "x");
+    i = close;
+  }
+  return lines.join("\n");
+}
 function maskCodeRegions(body) {
-  const maskLines = (content) => content.replace(/[^\n]/g, "x");
-  const maskFence = (whole, open, info, inner, close) => close.trim().length >= open.trim().length ? `${open}${info}
-${maskLines(inner)}
-${close}` : whole;
-  let masked = body.replace(/^( {0,3}`{3,})([^`\n]*)\n([\s\S]*?)\n( {0,3}`{3,} *)$/gm, maskFence);
-  masked = masked.replace(/^( {0,3}~{3,})([^\n]*)\n([\s\S]*?)\n( {0,3}~{3,} *)$/gm, maskFence);
-  masked = masked.replace(
-    /(?<!`)(`+)(?!`)((?:[^`\n]|`+)+?)\1(?!`)/g,
+  return maskFencedBlocks(body).replace(
+    INLINE_SPAN,
     (_whole, ticks, content) => `${ticks}${"x".repeat(content.length)}${ticks}`
   );
-  return masked;
 }
 function looksLikeCredential(text3) {
   return CREDENTIAL_SHAPES.some((pattern) => pattern.test(text3));

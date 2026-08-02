@@ -131,11 +131,22 @@ const INLINE_SPAN = /(?<!`)(`+)(?!`)([^\n]+?)\1(?!`)/g;
 
 /** Index of the line closing a fence opened with `marker`, or -1 when the fence never closes. */
 function closingFenceIndex(lines: readonly string[], from: number, marker: string): number {
+  const char = marker.slice(0, 1);
   for (let k = from; k < lines.length; k += 1) {
     const run = FENCE_CLOSE.exec(lines[k] ?? "")?.[1];
-    if (run !== undefined && run[0] === marker[0] && run.length >= marker.length) return k;
+    if (run?.startsWith(char) === true && run.length >= marker.length) return k;
   }
   return -1;
+}
+
+/** The marker of a fence this line opens, or undefined when it opens none. */
+function openingFenceMarker(line: string): string | undefined {
+  const opened = FENCE_OPEN.exec(line);
+  const marker = opened?.[1];
+  if (marker === undefined) return undefined;
+  // A backtick fence's info string may not contain a backtick; a tilde fence's may.
+  if (marker.startsWith("`") && (opened?.[2] ?? "").includes("`")) return undefined;
+  return marker;
 }
 
 /**
@@ -146,10 +157,8 @@ function closingFenceIndex(lines: readonly string[], from: number, marker: strin
 function maskFencedBlocks(body: string): string {
   const lines = body.split("\n");
   for (let i = 0; i < lines.length; i += 1) {
-    const opened = FENCE_OPEN.exec(lines[i] ?? "");
-    const marker = opened?.[1];
-    // A backtick fence's info string may not contain a backtick; a tilde fence's may.
-    if (marker === undefined || (marker[0] === "`" && (opened?.[2] ?? "").includes("`"))) continue;
+    const marker = openingFenceMarker(lines[i] ?? "");
+    if (marker === undefined) continue;
     const close = closingFenceIndex(lines, i + 1, marker);
     if (close === -1) continue;
     for (let k = i + 1; k < close; k += 1) lines[k] = (lines[k] ?? "").replace(/./g, "x");
