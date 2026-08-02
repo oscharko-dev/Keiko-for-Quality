@@ -456,12 +456,15 @@ function parseEngineResult(text3) {
     throw new ValidationError("result.size");
   }
   const root = asObject(parseJson(text3, "result"), "result");
-  const manifest = asObject(root.manifest, "result.manifest");
+  const rawManifest = root.manifest;
+  const manifestPresent = rawManifest !== void 0 && rawManifest !== null;
+  const manifest = manifestPresent ? asObject(rawManifest, "result.manifest") : {};
   const summary = parseSummary(root.summary);
   return {
-    schemaVersion: asString(manifest.schema_version, "result.manifest.schema_version", 128),
+    manifestPresent,
+    schemaVersion: manifestPresent ? asString(manifest.schema_version, "result.manifest.schema_version", 128) : "",
     terminalState: parseTerminalState(manifest.terminal_state),
-    coverage: parseCoverage(manifest.coverage, "result.manifest.coverage"),
+    coverage: manifestPresent ? parseCoverage(manifest.coverage, "result.manifest.coverage") : { selected: [], completed: [], reused: [], failed: [], waived: [] },
     findings: parseFindings(root.comments, "result.comments"),
     warnings: parseWarnings(root.warnings, "result.warnings"),
     totalTokens: summary.totalTokens,
@@ -754,6 +757,9 @@ function unlistedWarnings(profile, result) {
   return unlisted;
 }
 function settle(inventory, result, profile, config) {
+  if (!result.manifestPresent) {
+    return incomplete("settlement.incomplete.missing_manifest");
+  }
   if (result.schemaVersion !== SUPPORTED_MANIFEST_SCHEMA) {
     return incomplete("engine.run.schema_rejected");
   }

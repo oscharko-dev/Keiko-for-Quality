@@ -44,6 +44,7 @@ export const REASON_CODES = [
   // Settlement
   "settlement.complete",
   "settlement.incomplete.terminal_state",
+  "settlement.incomplete.missing_manifest",
   "settlement.incomplete.coverage_gap",
   "settlement.incomplete.coverage_failed",
   "settlement.incomplete.warning_not_allowlisted",

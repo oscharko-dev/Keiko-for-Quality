@@ -49,6 +49,7 @@ function inventory(paths: readonly string[]): Inventory {
 
 function result(overrides: Partial<EngineResult> = {}): EngineResult {
   return {
+    manifestPresent: true,
     schemaVersion: SUPPORTED_MANIFEST_SCHEMA,
     terminalState: "complete",
     coverage: {
@@ -95,6 +96,21 @@ describe("settle", () => {
         });
       },
     );
+
+    // The engine answers this way for a skipped run. Before this case existed it settled as a
+    // malformed engine error, which sent an operator looking for the wrong problem.
+    it("reports an absent manifest as such, not as a malformed result", () => {
+      const outcome = settle(
+        inventory(["src/a.ts"]),
+        result({ manifestPresent: false, schemaVersion: "", terminalState: "unknown" }),
+        PROFILE,
+        CONFIG,
+      );
+      expect(outcome).toMatchObject({
+        status: "incomplete",
+        reason: "settlement.incomplete.missing_manifest",
+      });
+    });
 
     it("rejects an unfamiliar manifest schema rather than guessing at its fields", () => {
       const outcome = settle(
