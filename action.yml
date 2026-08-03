@@ -129,6 +129,13 @@ outputs:
     description: Number of findings published as review conversations.
   findings_suppressed:
     description: Number of findings suppressed as already-open duplicates.
+  store_written:
+    description: >-
+      `true` when this run persisted a review store at `review_store_path`, `false` otherwise.
+      Not the same question as `outcome`: since a budget-truncated run keeps the verdicts it
+      earned, a consumer that carries the store between runs must gate its hand-off on THIS
+      output, not on `outcome == 'complete'` — otherwise a truncated run's store never leaves the
+      runner and a large pull request re-prices every file on every push.
   cache_hits:
     description: >-
       Number of cache-eligible files served from `review_store_path` instead of the model. Always

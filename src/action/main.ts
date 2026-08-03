@@ -48,6 +48,7 @@ async function loadEvent(env: NodeJS.ProcessEnv): Promise<EventContext> {
 function reportOutputs(
   report: ReviewReport,
   summaryCommentUrl: string | undefined,
+  storeWritten: boolean,
 ): Record<string, string> {
   return {
     outcome: report.outcome,
@@ -57,6 +58,12 @@ function reportOutputs(
     findings_suppressed: String(report.publish?.suppressed ?? 0),
     cache_hits: String(report.cacheHits),
     cache_misses: String(report.cacheMisses),
+    // Whether this run left a store behind, decided by the same rule that governs the write
+    // rather than restated by the caller. A consumer needs it because "did you persist" is not
+    // "did you settle complete": since #75 a budget-truncated run persists the verdicts it
+    // earned, and a consumer gating its hand-off on the outcome alone would strand exactly that
+    // store on the runner — which is the whole cost the fix exists to remove.
+    store_written: storeWritten ? "true" : "false",
     summary_comment_url: summaryCommentUrl ?? "",
   };
 }
@@ -114,12 +121,18 @@ async function saveCacheStore(
   store: CacheStore,
   appended: number,
   diagnostics: Diagnostics,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await writeFile(path, serializeStore(store), "utf8");
     diagnostics.record("cache.appended", { counts: { entries: appended } });
+    return true;
   } catch {
+    // Swallowing the error is right — a store this run cannot write is a lost optimization, not a
+    // reason to fail a review that already published. Swallowing the OUTCOME is not: the caller
+    // reports `store_written`, and a consumer that believes it will try to hand off a file that
+    // is not there.
     diagnostics.record("cache.store_write_failed");
+    return false;
   }
 }
 
@@ -143,15 +156,20 @@ async function maybeSaveCacheStore(
   storePath: string,
   report: ReviewReport,
   diagnostics: Diagnostics,
-): Promise<void> {
-  if (storePath === "" || report.updatedCacheStore === undefined) return;
+): Promise<boolean> {
+  if (storePath === "" || report.updatedCacheStore === undefined) return false;
   if (report.outcome === "incomplete") {
     // An incomplete report without a reason cannot be argued into the allowed set, so it is not.
-    if (report.reason === undefined || !verdictsSurviveIncompleteness(report.reason)) return;
+    if (report.reason === undefined || !verdictsSurviveIncompleteness(report.reason)) return false;
   } else if (report.outcome !== "complete") {
-    return;
+    return false;
   }
-  await saveCacheStore(storePath, report.updatedCacheStore, report.cacheAppended, diagnostics);
+  return await saveCacheStore(
+    storePath,
+    report.updatedCacheStore,
+    report.cacheAppended,
+    diagnostics,
+  );
 }
 
 /**
@@ -277,10 +295,10 @@ export async function runAction(
     diagnostics,
   );
 
-  await maybeSaveCacheStore(storePath, report, diagnostics);
+  const storeWritten = await maybeSaveCacheStore(storePath, report, diagnostics);
   const summaryCommentUrl = await maybeMaintainSummary(env, event, identity, report, diagnostics);
 
-  writeOutputs(env, reportOutputs(report, summaryCommentUrl));
+  writeOutputs(env, reportOutputs(report, summaryCommentUrl, storeWritten));
   return report;
 }
 

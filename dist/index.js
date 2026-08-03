@@ -3264,7 +3264,7 @@ async function loadEvent(env) {
   const payload = parseJson(await readFile(path, "utf8"), "event");
   return parseEventContext(payload);
 }
-function reportOutputs(report, summaryCommentUrl) {
+function reportOutputs(report, summaryCommentUrl, storeWritten) {
   return {
     outcome: report.outcome,
     reason: report.reason ?? "",
@@ -3273,6 +3273,12 @@ function reportOutputs(report, summaryCommentUrl) {
     findings_suppressed: String(report.publish?.suppressed ?? 0),
     cache_hits: String(report.cacheHits),
     cache_misses: String(report.cacheMisses),
+    // Whether this run left a store behind, decided by the same rule that governs the write
+    // rather than restated by the caller. A consumer needs it because "did you persist" is not
+    // "did you settle complete": since #75 a budget-truncated run persists the verdicts it
+    // earned, and a consumer gating its hand-off on the outcome alone would strand exactly that
+    // store on the runner — which is the whole cost the fix exists to remove.
+    store_written: storeWritten ? "true" : "false",
     summary_comment_url: summaryCommentUrl ?? ""
   };
 }
@@ -3303,18 +3309,25 @@ async function saveCacheStore(path, store, appended, diagnostics) {
   try {
     await writeFile3(path, serializeStore(store), "utf8");
     diagnostics.record("cache.appended", { counts: { entries: appended } });
+    return true;
   } catch {
     diagnostics.record("cache.store_write_failed");
+    return false;
   }
 }
 async function maybeSaveCacheStore(storePath, report, diagnostics) {
-  if (storePath === "" || report.updatedCacheStore === void 0) return;
+  if (storePath === "" || report.updatedCacheStore === void 0) return false;
   if (report.outcome === "incomplete") {
-    if (report.reason === void 0 || !verdictsSurviveIncompleteness(report.reason)) return;
+    if (report.reason === void 0 || !verdictsSurviveIncompleteness(report.reason)) return false;
   } else if (report.outcome !== "complete") {
-    return;
+    return false;
   }
-  await saveCacheStore(storePath, report.updatedCacheStore, report.cacheAppended, diagnostics);
+  return await saveCacheStore(
+    storePath,
+    report.updatedCacheStore,
+    report.cacheAppended,
+    diagnostics
+  );
 }
 async function maybeMaintainSummary(env, event, identity, report, diagnostics) {
   if (!readBooleanInput(env, "run_summary", true)) {
@@ -3399,9 +3412,9 @@ async function runAction(env, diagnostics) {
     },
     diagnostics
   );
-  await maybeSaveCacheStore(storePath, report, diagnostics);
+  const storeWritten = await maybeSaveCacheStore(storePath, report, diagnostics);
   const summaryCommentUrl = await maybeMaintainSummary(env, event, identity, report, diagnostics);
-  writeOutputs(env, reportOutputs(report, summaryCommentUrl));
+  writeOutputs(env, reportOutputs(report, summaryCommentUrl, storeWritten));
   return report;
 }
 async function main() {
