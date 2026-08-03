@@ -466,6 +466,9 @@ async function repairFindingClassification(
   return { ...parsed, findings: audit.findings };
 }
 
+/** The resume's seed — any value other than the primary pin does the job. */
+const RESUME_SEED = 43;
+
 /**
  * Exactly one bounded resume (#57). A run that ends without a usable success — the process threw,
  * or the result reports a non-success status — is re-invoked once, and the second outcome stands
@@ -488,7 +491,11 @@ async function runEngineWithOneResume(
     if (!(error instanceof EngineRunError)) throw error;
     diagnostics.record("engine.resumed_once");
   }
-  const second = await runEngine(options, diagnostics);
+  // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
+  // would replay itself byte-for-byte — measured, not hypothesized (the seeded verification
+  // spiral failed 2/2 where the unseeded one failed ~1/4). Varying exactly one bit of entropy on
+  // the one bounded retry is what turns it into a second opinion.
+  const second = await runEngine({ ...options, samplingSeed: RESUME_SEED }, diagnostics);
   return parseEngineResult(second.stdout);
 }
 

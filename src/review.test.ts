@@ -601,6 +601,12 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("complete");
       expect(runEngineMock).toHaveBeenCalledTimes(2);
+      // The retry must not replay the failure: pinned sampling makes a deterministic failure
+      // reproduce itself, so the second attempt carries a different seed.
+      const firstOptions = runEngineMock.mock.calls[0]?.[0] as { samplingSeed?: number };
+      const secondOptions = runEngineMock.mock.calls[1]?.[0] as { samplingSeed?: number };
+      expect(firstOptions.samplingSeed).toBeUndefined();
+      expect(secondOptions.samplingSeed).toBe(43);
     });
 
     it("settles incomplete after the second failure — one resume, never two", async () => {

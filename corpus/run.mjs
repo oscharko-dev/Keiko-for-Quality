@@ -123,14 +123,14 @@ function buildRepo(testCase) {
   return dir;
 }
 
-async function runEngine(dir) {
+async function runEngine(dir, seed = 42) {
   const home = mkdtempSync(join(tmpdir(), "kfq-home-"));
   // The production sampling pin (src/engine/model-proxy.ts, temperature 0) — the corpus measures
   // the pipeline that ships, and the pin is precisely what makes "twice in a row" meaningful.
   const proxy = await startModelProxy({
     upstreamUrl: process.env.OCR_LLM_URL ?? "",
     temperature: 0,
-    seed: 42,
+    seed,
   });
   try {
     const args = ["review", "--from", "HEAD~1", "--to", "HEAD", "--format", "json"];
@@ -170,7 +170,9 @@ async function runEngineWithOneResume(dir) {
   try {
     return await runEngine(dir);
   } catch {
-    return await runEngine(dir);
+    // Seed 43, mirroring the shipped resume: pinned sampling replays a deterministic failure
+    // byte-for-byte, so the one retry varies exactly that one bit of entropy.
+    return await runEngine(dir, 43);
   }
 }
 

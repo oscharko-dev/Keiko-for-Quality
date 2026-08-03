@@ -2300,7 +2300,7 @@ async function runEngine(options2, diagnostics) {
     proxy = options2.config.protocol === "anthropic" ? void 0 : await startModelProxy({
       upstreamUrl: options2.config.endpoint,
       temperature: REVIEW_TEMPERATURE,
-      seed: REVIEW_SEED
+      seed: options2.samplingSeed ?? REVIEW_SEED
     });
     const env = engineEnvironment(options2, token, home);
     if (proxy !== void 0) env.OCR_LLM_URL = proxy.url;
@@ -3352,6 +3352,7 @@ async function repairFindingClassification(parsed, request, diagnostics) {
   });
   return { ...parsed, findings: audit.findings };
 }
+var RESUME_SEED = 43;
 async function runEngineWithOneResume(options2, diagnostics) {
   try {
     const first = await runEngine(options2, diagnostics);
@@ -3362,7 +3363,7 @@ async function runEngineWithOneResume(options2, diagnostics) {
     if (!(error instanceof EngineRunError)) throw error;
     diagnostics.record("engine.resumed_once");
   }
-  const second = await runEngine(options2, diagnostics);
+  const second = await runEngine({ ...options2, samplingSeed: RESUME_SEED }, diagnostics);
   return parseEngineResult(second.stdout);
 }
 function publicationDegraded(outcome) {

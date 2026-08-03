@@ -46,6 +46,12 @@ export interface EngineRunOptions {
   readonly allottedBudget: number;
   /** Paths the inventory downgraded to `mechanically-clean`. Forwarded to `buildRuleFile`. */
   readonly mechanicallyCleanPaths: readonly string[];
+  /**
+   * Overrides the pinned sampling seed for this invocation. The single bounded resume passes a
+   * different value: pinned sampling replays a deterministic failure byte-for-byte, and a resume
+   * that cannot produce a different path is not a second opinion.
+   */
+  readonly samplingSeed?: number;
 }
 
 export interface EngineRunOutput {
@@ -182,7 +188,7 @@ export async function runEngine(
         : await startModelProxy({
             upstreamUrl: options.config.endpoint,
             temperature: REVIEW_TEMPERATURE,
-            seed: REVIEW_SEED,
+            seed: options.samplingSeed ?? REVIEW_SEED,
           });
     const env = engineEnvironment(options, token, home);
     if (proxy !== undefined) env.OCR_LLM_URL = proxy.url;
