@@ -262,6 +262,42 @@ function buildAuditPrompt(finding: ClassifiableFinding): string {
   ].join("\n");
 }
 
+/**
+ * Majority of three: prompt work moves the mean, only sampling moves the variance. Two agreeing
+ * votes adopt (the third call is never spent); a 2-1 split adopts the pair two votes named; three
+ * distinct answers decide nothing — that spread IS the close call the anti-churn clause protects.
+ */
+async function collectAuditVotes(
+  finding: ClassifiableFinding,
+  deps: ClassifyEndpoint,
+): Promise<{ votes: readonly { category: string; severity: string }[]; tokens: number }> {
+  const votes: { category: string; severity: string }[] = [];
+  let tokens = 0;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const result = await requestPair(buildAuditPrompt(finding), deps);
+    tokens += result.tokens;
+    if (result.pair !== undefined) votes.push(result.pair);
+    if (votes.length === 2 && pairKey(votes[0]) === pairKey(votes[1])) break;
+  }
+  return { votes, tokens };
+}
+
+function pairKey(pair: { category: string; severity: string } | undefined): string {
+  return pair === undefined ? "" : `${pair.category}/${pair.severity}`;
+}
+
+/** Two matching votes decide; three distinct votes are a genuine close call and decide nothing. */
+function majorityPair(
+  votes: readonly { category: string; severity: string }[],
+): { category: string; severity: string } | undefined {
+  for (let i = 0; i < votes.length; i += 1) {
+    for (let j = i + 1; j < votes.length; j += 1) {
+      if (pairKey(votes[i]) === pairKey(votes[j])) return votes[i];
+    }
+  }
+  return undefined;
+}
+
 export async function auditClassification<T extends ClassifiableFinding>(
   findings: readonly T[],
   deps: ClassifyEndpoint,
@@ -275,19 +311,17 @@ export async function auditClassification<T extends ClassifiableFinding>(
       out.push(finding);
       continue;
     }
-    const attempt = await requestPair(buildAuditPrompt(finding), deps);
-    tokens += attempt.tokens;
-    if (attempt.pair === undefined) {
+    const voted = await collectAuditVotes(finding, deps);
+    tokens += voted.tokens;
+    const majority = majorityPair(voted.votes);
+    if (majority === undefined) {
       out.push(finding);
       continue;
     }
-    const moved =
-      attempt.pair.category !== finding.category || attempt.pair.severity !== finding.severity;
+    const moved = majority.category !== finding.category || majority.severity !== finding.severity;
     if (moved) changed += 1;
     out.push(
-      moved
-        ? { ...finding, category: attempt.pair.category, severity: attempt.pair.severity }
-        : finding,
+      moved ? { ...finding, category: majority.category, severity: majority.severity } : finding,
     );
   }
   return { findings: out, changed, tokens };

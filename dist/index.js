@@ -1684,6 +1684,28 @@ function buildAuditPrompt(finding) {
     `Finding: ${finding.content}`
   ].join("\n");
 }
+async function collectAuditVotes(finding, deps) {
+  const votes = [];
+  let tokens = 0;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const result = await requestPair(buildAuditPrompt(finding), deps);
+    tokens += result.tokens;
+    if (result.pair !== void 0) votes.push(result.pair);
+    if (votes.length === 2 && pairKey(votes[0]) === pairKey(votes[1])) break;
+  }
+  return { votes, tokens };
+}
+function pairKey(pair) {
+  return pair === void 0 ? "" : `${pair.category}/${pair.severity}`;
+}
+function majorityPair(votes) {
+  for (let i = 0; i < votes.length; i += 1) {
+    for (let j = i + 1; j < votes.length; j += 1) {
+      if (pairKey(votes[i]) === pairKey(votes[j])) return votes[i];
+    }
+  }
+  return void 0;
+}
 async function auditClassification(findings, deps) {
   const out = [];
   let changed = 0;
@@ -1693,16 +1715,17 @@ async function auditClassification(findings, deps) {
       out.push(finding);
       continue;
     }
-    const attempt = await requestPair(buildAuditPrompt(finding), deps);
-    tokens += attempt.tokens;
-    if (attempt.pair === void 0) {
+    const voted = await collectAuditVotes(finding, deps);
+    tokens += voted.tokens;
+    const majority = majorityPair(voted.votes);
+    if (majority === void 0) {
       out.push(finding);
       continue;
     }
-    const moved = attempt.pair.category !== finding.category || attempt.pair.severity !== finding.severity;
+    const moved = majority.category !== finding.category || majority.severity !== finding.severity;
     if (moved) changed += 1;
     out.push(
-      moved ? { ...finding, category: attempt.pair.category, severity: attempt.pair.severity } : finding
+      moved ? { ...finding, category: majority.category, severity: majority.severity } : finding
     );
   }
   return { findings: out, changed, tokens };
@@ -1718,7 +1741,10 @@ var CATCH_ALL_RULE = [
   "## What to report",
   "",
   "Report a finding only when you can name a concrete defect AND its consequence:",
-  "- correctness, including boundary and error paths, and concurrency or ordering hazards. An",
+  "- correctness, including boundary and error paths, and concurrency or ordering hazards. A",
+  "  bound moved by one \u2014 a `<` become `<=`, a dropped `-1`, a fence-post in a loop or slice \u2014",
+  "  reads or writes exactly one element wrong and deserves a finding even when every current",
+  "  test passes. An",
   "  explicit empty, zero, or cleared value is not the same as no value provided \u2014 skipping an",
   "  update whenever a collection or count is empty can silently discard an intentional clear. A",
   "  catch block that maps every failure to a success-shaped fallback (an empty list, a default",
