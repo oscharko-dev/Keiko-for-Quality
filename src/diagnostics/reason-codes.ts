@@ -54,6 +54,13 @@ export const REASON_CODES = [
   "settlement.incomplete.warning_not_allowlisted",
   "settlement.incomplete.budget_exceeded",
   "settlement.incomplete.engine_error",
+  // A settlement's `reason` is published in the incomplete notice, so it answers "why was my
+  // change not fully reviewed" for a reader who has no access to the log. It must therefore name
+  // a SETTLEMENT outcome. The two below replace codes borrowed from other families — an engine
+  // diagnostic and a publication diagnostic — which described where the trouble was detected
+  // rather than what it meant for coverage. Those codes keep their diagnostic role unchanged.
+  "settlement.incomplete.schema_rejected",
+  "settlement.incomplete.publication_degraded",
 
   // Publication
   "publish.identity_resolved",

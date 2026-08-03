@@ -110,7 +110,15 @@ describe("settle", () => {
         PROFILE,
         CONFIG,
       );
-      expect(outcome).toMatchObject({ status: "incomplete", reason: "engine.run.schema_rejected" });
+      // The invariant this pins — an unfamiliar schema settles incomplete rather than being read
+      // as if its fields still meant what they used to — is unchanged. Only the reason moved
+      // family: a settlement reason is published in the incomplete notice, so it names what the
+      // outcome means for coverage rather than which internal step noticed the trouble.
+      // `engine.run.schema_rejected` keeps its diagnostic role where the manifest is validated.
+      expect(outcome).toMatchObject({
+        status: "incomplete",
+        reason: "settlement.incomplete.schema_rejected",
+      });
     });
 
     it("rejects a run with failed coverage", () => {
