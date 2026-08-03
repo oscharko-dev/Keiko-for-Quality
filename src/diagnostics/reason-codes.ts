@@ -59,6 +59,10 @@ export const REASON_CODES = [
   // a SETTLEMENT outcome. The two below replace codes borrowed from other families — an engine
   // diagnostic and a publication diagnostic — which described where the trouble was detected
   // rather than what it meant for coverage. Those codes keep their diagnostic role unchanged.
+  // Counted mode has no manifest, so a run that fails there fails on the engine's own top-level
+  // `status` field — not on a terminal state it never reported. `terminal_state` said the wrong
+  // thing and, carrying no counts, told an operator nothing about how much went unreviewed.
+  "settlement.incomplete.engine_status_not_success",
   "settlement.incomplete.schema_rejected",
   "settlement.incomplete.publication_degraded",
 

@@ -291,13 +291,31 @@ describe("counted settlement (no manifest)", () => {
     }
   });
 
+  /**
+   * Counted mode has no manifest, so there is no terminal state to reject — what fails here is the
+   * engine's own top-level `status`. The reason used to say `terminal_state`, which named
+   * something the run never reported, and carried no counts at all: a published notice then told
+   * a reader their change was not fully reviewed and nothing whatever about how much was missing.
+   * Observed on oscharko-dev/Keiko#2963, where forty-four files were reviewed and the notice could
+   * not distinguish that from none. The invariant is unchanged — a non-success status still
+   * settles incomplete — and the assertion is now stricter, covering the counts as well.
+   */
   it.each(["skipped", "failed", "unknown"] as const)("rejects run status %s", (status) => {
-    const outcome = settle(inventory(["src/a.ts"]), released({ status }), PROFILE, CONFIG);
+    const outcome = settle(
+      inventory(["src/a.ts", "src/b.ts"]),
+      released({ status, filesReviewed: 1 }),
+      PROFILE,
+      CONFIG,
+    );
     expect(outcome).toMatchObject({
       status: "incomplete",
       mode: "counted",
-      reason: "settlement.incomplete.terminal_state",
+      reason: "settlement.incomplete.engine_status_not_success",
     });
+    if (outcome.status === "incomplete") {
+      expect(outcome.counts.reviewed).toBe(1);
+      expect(outcome.counts.expected).toBe(2);
+    }
   });
 
   it("still enforces the warning allowlist", () => {
