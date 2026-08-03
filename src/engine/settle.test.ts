@@ -300,6 +300,59 @@ describe("counted settlement (no manifest)", () => {
    * not distinguish that from none. The invariant is unchanged — a non-success status still
    * settles incomplete — and the assertion is now stricter, covering the counts as well.
    */
+  /**
+   * The memoization success case, which used to be punished.
+   *
+   * Production evidence, oscharko-dev/Keiko#2962: two reviewable files, two cache hits, zero
+   * misses. The engine was handed nothing to dispatch and reported `skipped` — correctly — and the
+   * status check read that as a failed run, so a fully answered pull request received a blocking
+   * "this change was not fully reviewed" notice. The better the store worked, the more often the
+   * reviewer declared itself broken.
+   *
+   * With nothing dispatched, the engine's status says nothing about coverage: every reviewable
+   * path carries a replayed verdict by construction.
+   */
+  it("settles complete when every reviewable path was answered from the store", () => {
+    const memoized = new Set(["src/a.ts", "src/b.ts"]);
+    const outcome = settle(
+      inventory(["src/a.ts", "src/b.ts"]),
+      released({ status: "skipped", filesReviewed: 0 }),
+      PROFILE,
+      CONFIG,
+      memoized,
+    );
+    expect(outcome.status).toBe("complete");
+  });
+
+  it("still refuses when the store answered only some of the paths", () => {
+    const outcome = settle(
+      inventory(["src/a.ts", "src/b.ts"]),
+      released({ status: "skipped", filesReviewed: 0 }),
+      PROFILE,
+      CONFIG,
+      new Set(["src/a.ts"]),
+    );
+    expect(outcome).toMatchObject({
+      status: "incomplete",
+      reason: "settlement.incomplete.engine_status_not_success",
+    });
+  });
+
+  it("still applies the disqualifiers to an all-hits run", () => {
+    // Nothing dispatched does not mean nothing to object to: an unlisted warning is about the run.
+    const outcome = settle(
+      inventory(["src/a.ts"]),
+      released({ status: "skipped", warnings: [{ type: "unknown-warning", file: "src/a.ts" }] }),
+      PROFILE,
+      CONFIG,
+      new Set(["src/a.ts"]),
+    );
+    expect(outcome).toMatchObject({
+      status: "incomplete",
+      reason: "settlement.incomplete.warning_not_allowlisted",
+    });
+  });
+
   it.each(["skipped", "failed", "unknown"] as const)("rejects run status %s", (status) => {
     const outcome = settle(
       inventory(["src/a.ts", "src/b.ts"]),

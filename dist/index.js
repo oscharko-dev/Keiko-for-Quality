@@ -788,8 +788,11 @@ function settleReconciled(inventory, result, profile, config, memoizedPaths) {
     findings: result.findings
   };
 }
+function unreviewedByEngine(inventory, memoizedPaths) {
+  return Math.max(0, inventory.reviewablePaths.size - memoizedPaths.size);
+}
 function settleCounted(inventory, result, profile, config, memoizedPaths) {
-  const expected = Math.max(0, inventory.reviewablePaths.size - memoizedPaths.size);
+  const expected = unreviewedByEngine(inventory, memoizedPaths);
   if (result.status !== "success") {
     return incomplete(
       "counted",
@@ -815,6 +818,14 @@ function settleCounted(inventory, result, profile, config, memoizedPaths) {
   };
 }
 function settle(inventory, result, profile, config, memoizedPaths = NO_MEMOIZED_PATHS) {
+  if (unreviewedByEngine(inventory, memoizedPaths) === 0) {
+    const mode = result.manifestPresent ? "reconciled" : "counted";
+    return commonDisqualifier(mode, result, profile, config) ?? {
+      status: "complete",
+      mode,
+      findings: result.findings
+    };
+  }
   return result.manifestPresent ? settleReconciled(inventory, result, profile, config, memoizedPaths) : settleCounted(inventory, result, profile, config, memoizedPaths);
 }
 

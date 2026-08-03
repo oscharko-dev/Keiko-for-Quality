@@ -233,6 +233,11 @@ function settleReconciled(
   );
 }
 
+/** Reviewable paths the engine is expected to dispatch: everything a cache hit did not answer. */
+function unreviewedByEngine(inventory: Inventory, memoizedPaths: ReadonlySet<string>): number {
+  return Math.max(0, inventory.reviewablePaths.size - memoizedPaths.size);
+}
+
 /**
  * Settlement against an engine that reports no coverage manifest.
  *
@@ -253,7 +258,7 @@ function settleCounted(
   config: RuntimeConfig,
   memoizedPaths: ReadonlySet<string>,
 ): Settlement {
-  const expected = Math.max(0, inventory.reviewablePaths.size - memoizedPaths.size);
+  const expected = unreviewedByEngine(inventory, memoizedPaths);
   if (result.status !== "success") {
     // Named for the field that actually failed: counted mode has no manifest, so there is no
     // terminal state to report and the old code said something the run never claimed. The counts
@@ -297,6 +302,26 @@ export function settle(
   config: RuntimeConfig,
   memoizedPaths: ReadonlySet<string> = NO_MEMOIZED_PATHS,
 ): Settlement {
+  // Memoization answering EVERY reviewable path is the success case, and it used to settle
+  // incomplete. Observed in production on oscharko-dev/Keiko#2962: two reviewable files, two cache
+  // hits, zero misses — the engine was handed nothing to dispatch, reported `skipped` as it should,
+  // and the status check below read that as a failed run. The pull request then received a
+  // blocking "this change was not fully reviewed" notice for a change that was, in fact, fully
+  // answered. The better the store worked, the more often the reviewer called itself broken.
+  //
+  // With nothing dispatched, the engine's own account says nothing about this change's coverage:
+  // every reviewable path is covered by a replayed verdict by construction. The disqualifiers
+  // still apply — a warning or an implausible finding count is about the run, not about dispatch.
+  if (unreviewedByEngine(inventory, memoizedPaths) === 0) {
+    const mode: SettlementMode = result.manifestPresent ? "reconciled" : "counted";
+    return (
+      commonDisqualifier(mode, result, profile, config) ?? {
+        status: "complete",
+        mode,
+        findings: result.findings,
+      }
+    );
+  }
   return result.manifestPresent
     ? settleReconciled(inventory, result, profile, config, memoizedPaths)
     : settleCounted(inventory, result, profile, config, memoizedPaths);
