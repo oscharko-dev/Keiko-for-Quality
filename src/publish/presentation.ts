@@ -202,6 +202,8 @@ export interface SummaryCounts {
   readonly findingsPublished: number;
   readonly suppressedExactDuplicate: number;
   readonly suppressedSimilar: number;
+  /** Suppressed against a resolved thread with a substantive disposition reply (Keiko-for-Quality#64). */
+  readonly suppressedDispositioned: number;
 }
 
 /**
@@ -268,9 +270,10 @@ function outcomeText(report: SummaryReport): string {
 
 /**
  * The metric table's rows, in the fixed order the epic's visibility requirement asks for: the path
- * accounting first, then the finding/dedup accounting, with the two duplicate-suppression stages
- * (Keiko-for-Quality#38/#51) broken out separately rather than folded into one number. These counts
- * are independently meaningful and are not required to sum to `totalPaths` — a generated, binary, or
+ * accounting first, then the finding/dedup accounting, with the three duplicate-suppression stages
+ * (Keiko-for-Quality#38/#51's exact marker and phrasing-independent similarity, #64's dispositioned
+ * recurrence) broken out separately rather than folded into one number. These counts are
+ * independently meaningful and are not required to sum to `totalPaths` — a generated, binary, or
  * non-critical pointer path is neither reviewable, excluded, nor mechanically clean, and omitting
  * that remainder from this compact table is deliberate (see the epic's leanness requirement).
  */
@@ -285,6 +288,7 @@ function countRows(counts: SummaryCounts): readonly string[] {
     ["Findings published", counts.findingsPublished],
     ["Suppressed (exact duplicate)", counts.suppressedExactDuplicate],
     ["Suppressed (similar)", counts.suppressedSimilar],
+    ["Suppressed (dispositioned)", counts.suppressedDispositioned],
   ];
   return rows.map(([label, value]) => `| ${label} | ${String(value)} |`);
 }

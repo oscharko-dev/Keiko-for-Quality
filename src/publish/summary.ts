@@ -89,6 +89,7 @@ export function buildSummaryReport(
     findingsPublished: publish?.published ?? 0,
     suppressedExactDuplicate: publish?.suppressedExactDuplicate ?? 0,
     suppressedSimilar: publish?.suppressedSimilar ?? 0,
+    suppressedDispositioned: publish?.suppressedDispositioned ?? 0,
   };
   return {
     outcome: report.outcome,

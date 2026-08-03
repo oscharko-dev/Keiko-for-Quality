@@ -11,7 +11,8 @@ import {
   type ReviewCommentInput,
 } from "../github/client.js";
 import type { InventoryItem } from "../inventory/classify.js";
-import { composeBody, fingerprint } from "./marker.js";
+import { fingerprint, markerComment } from "./marker.js";
+import { composeFindingBody } from "./presentation.js";
 import { publishFindings, publishIncompleteNotice, type PublishContext } from "./publisher.js";
 
 const HEAD = commitSha("b".repeat(40));
@@ -319,7 +320,14 @@ describe("publishFindings", () => {
       });
       return {
         id: 1,
-        body: composeBody(body, marker),
+        // Built by the production composer, so this fixture cannot drift from the body a
+        // publication really carries — which is the shape deduplication has to recognise.
+        body: composeFindingBody(body, markerComment(marker), {
+          path: "src/retry.ts",
+          line: 1,
+          severity: "medium",
+          category: "bug",
+        }),
         path: "src/retry.ts",
         authorLogin: author,
         commitId: HEAD,
@@ -447,6 +455,125 @@ describe("publishFindings", () => {
 
     it("does not suppress anything against an empty existing-conversation list", async () => {
       api.existing = [];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+  });
+
+  /**
+   * Keiko-for-Quality#64: the similarity stage above deliberately excludes every resolved
+   * conversation, so a genuinely recurred defect stays publishable (Keiko-for-Quality#38's
+   * contract). Observed live on a long-lived pull request (oscharko-dev/Keiko#2931, rounds 6-10): a
+   * dispositioned finding — reasoned reply, thread resolved — reappeared as a "fresh" finding on
+   * every later run, because that exclusion has no memory of *why* a thread was resolved. These
+   * prove the narrower, additive case end to end — from the raw `ReviewComment.lastReply` this
+   * reviewer's own GraphQL lookup would report through `toExistingConversation` and
+   * `isSubstantiveDisposition` to the counters and diagnostics a run actually reports — while
+   * pinning that a resolved conversation with no considered reply still republishes exactly as
+   * before.
+   */
+  describe("dispositioned deduplication (Keiko-for-Quality#64)", () => {
+    const REPHRASED_SAME_DEFECT =
+      "The retry loop keeps spinning forever because it never resets its attempt counter after a failure.";
+    const REAL_DISPOSITION =
+      "Fixed in commit abc1234 - the retry loop now resets its counter on every failure path. See " +
+      "the follow-up pull request for the full explanation of the change.";
+
+    function resolvedComment(overrides: Partial<ReviewComment> = {}): ReviewComment {
+      return {
+        id: 1,
+        body: BODY,
+        path: "src/retry.ts",
+        authorLogin: IDENTITY,
+        commitId: HEAD,
+        url: "https://example.test/existing",
+        line: 12,
+        startLine: 10,
+        resolved: true,
+        ...overrides,
+      };
+    }
+
+    it("suppresses a recurrence at a resolved, dispositioned location and counts it distinctly", async () => {
+      api.existing = [
+        resolvedComment({ lastReply: { authorLogin: "a-contributor", body: REAL_DISPOSITION } }),
+      ];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({
+        published: 0,
+        suppressed: 1,
+        suppressedExactDuplicate: 0,
+        suppressedSimilar: 0,
+        suppressedDispositioned: 1,
+      });
+      expect(api.created).toHaveLength(0);
+    });
+
+    it("suppresses a paraphrase, not just an exact repeat, at a dispositioned location", async () => {
+      api.existing = [
+        resolvedComment({
+          body: REPHRASED_SAME_DEFECT,
+          lastReply: { authorLogin: "a-contributor", body: REAL_DISPOSITION },
+        }),
+      ];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 0, suppressedDispositioned: 1 });
+    });
+
+    it("records the dedup.dispositioned diagnostic on suppression", async () => {
+      api.existing = [
+        resolvedComment({ lastReply: { authorLogin: "a-contributor", body: REAL_DISPOSITION } }),
+      ];
+      const localDiagnostics = createSilentDiagnostics();
+      await publishFindings(context, [finding()], localDiagnostics);
+      const codes = localDiagnostics.drain().map((record) => record.code);
+      expect(codes).toContain("dedup.dispositioned");
+    });
+
+    // The exact case Keiko-for-Quality#38 protects and #64 must not regress: a resolved thread with
+    // no reply at all republishes a genuine recurrence exactly as it did before this feature existed.
+    it("still republishes when the thread is resolved but carries no reply at all (a bare resolve)", async () => {
+      api.existing = [resolvedComment()]; // no `lastReply` — the GraphQL lookup found nothing to report
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0, suppressedDispositioned: 0 });
+    });
+
+    it("still republishes when the thread's only reply is a short, non-substantive acknowledgement", async () => {
+      api.existing = [
+        resolvedComment({ lastReply: { authorLogin: "a-contributor", body: "Resolved, thanks." } }),
+      ];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0, suppressedDispositioned: 0 });
+    });
+
+    // The scenario `disposition.ts` exists to exclude: a thread whose only comment is its own root
+    // finding reports that same comment back as `lastReply` — there is no reply from anyone else.
+    it("still republishes when the reported 'last reply' is this reviewer's own root comment", async () => {
+      api.existing = [
+        resolvedComment({ lastReply: { authorLogin: IDENTITY, body: REAL_DISPOSITION } }),
+      ];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0, suppressedDispositioned: 0 });
+    });
+
+    it("does not suppress a genuinely different defect at the same dispositioned location", async () => {
+      api.existing = [
+        resolvedComment({
+          body: "An unrelated earlier finding about something else entirely.",
+          lastReply: { authorLogin: "a-contributor", body: REAL_DISPOSITION },
+        }),
+      ];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+
+    it("does not suppress a dispositioned conversation authored by someone else", async () => {
+      api.existing = [
+        resolvedComment({
+          authorLogin: "contributor",
+          lastReply: { authorLogin: "another-contributor", body: REAL_DISPOSITION },
+        }),
+      ];
       const outcome = await publishFindings(context, [finding()], diagnostics);
       expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
     });

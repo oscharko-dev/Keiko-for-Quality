@@ -54,6 +54,13 @@ export const REASON_CODES = [
   "settlement.incomplete.warning_not_allowlisted",
   "settlement.incomplete.budget_exceeded",
   "settlement.incomplete.engine_error",
+  // A settlement's `reason` is published in the incomplete notice, so it answers "why was my
+  // change not fully reviewed" for a reader who has no access to the log. It must therefore name
+  // a SETTLEMENT outcome. The two below replace codes borrowed from other families — an engine
+  // diagnostic and a publication diagnostic — which described where the trouble was detected
+  // rather than what it meant for coverage. Those codes keep their diagnostic role unchanged.
+  "settlement.incomplete.schema_rejected",
+  "settlement.incomplete.publication_degraded",
 
   // Publication
   "publish.identity_resolved",
@@ -70,6 +77,15 @@ export const REASON_CODES = [
   "publish.api_failed",
   "publish.incomplete_notice_published",
   "publish.abandoned_stale_head",
+
+  // Deduplication against a settled disposition (Keiko-for-Quality#64), distinct from the two
+  // `publish.finding_suppressed_*` codes above: those suppress against a still-open conversation,
+  // this one suppresses against a RESOLVED one whose last reply was a substantive disposition —
+  // never a bare resolve, which must keep a genuinely recurred defect publishable (Keiko-for-
+  // Quality#38's contract, unchanged). A separate top-level prefix rather than another
+  // `publish.finding_suppressed_*` variant because the decision it reports on belongs to a
+  // different question: not "is this the same finding" but "did someone already settle it."
+  "dedup.dispositioned",
 
   // Run-summary comment (Keiko-for-Quality#31): a single, marker-identified issue comment this
   // reviewer upserts once per pull request, independent of every finding conversation above. Never
@@ -117,6 +133,9 @@ export const REASON_CODE_GUIDANCE: Readonly<Record<string, string>> = {
   engine: "The engine could not be acquired or completed. Check the pin and the model endpoint.",
   settlement: "The review did not complete. Treat the pull request as unreviewed.",
   publish: "Findings could not be published. Check the App installation and its permissions.",
+  dedup:
+    "A finding was suppressed against a settled disposition rather than published. No action " +
+    "unless the disposition itself was wrong — reopen the original thread to contest it.",
   config: "The supplied configuration was rejected. Compare it against the documented schema.",
   run: "Run lifecycle marker.",
   cache:

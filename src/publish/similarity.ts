@@ -29,6 +29,12 @@ export interface ExistingConversation {
   readonly authorLogin: string;
   /** True once the conversation is resolved or the diff hunk it anchored is now outdated. */
   readonly resolved: boolean;
+  /**
+   * True when `resolved` and this thread's last reply was a substantive disposition rather than a
+   * bare resolve (Keiko-for-Quality#64) — see `disposition.ts`. Always `false` when not resolved,
+   * and computed independently of `resolved` so a caller can never read it as "resolved" on its own.
+   */
+  readonly dispositioned: boolean;
   readonly body: string;
   /** Absent when this conversation carries no usable line anchor (a file-level comment). */
   readonly startLine: number | undefined;
@@ -174,6 +180,26 @@ function linesOverlap(candidate: SimilarityCandidate, existing: ExistingConversa
 }
 
 /**
+ * The location-and-substance match every dedup stage below shares: same author, same path, an
+ * overlapping anchor, and a conservatively similar body. Eligibility — *which* threads this check
+ * may even run against — is each caller's own question, kept deliberately separate: "is this the
+ * same finding at the same spot" and "is this the kind of thread that should suppress" evolve for
+ * different reasons (Keiko-for-Quality#38's open-thread contract versus #64's disposition contract).
+ */
+function isSameFindingAtSameLocation(
+  candidate: SimilarityCandidate,
+  thread: ExistingConversation,
+  identity: string,
+): boolean {
+  return (
+    thread.authorLogin === identity &&
+    thread.path === candidate.path &&
+    linesOverlap(candidate, thread) &&
+    bodiesAreSimilar(candidate.body, thread.body)
+  );
+}
+
+/**
  * True when `candidate` is a phrasing-independent duplicate of an open conversation this reviewer
  * already authored at the same location.
  */
@@ -183,11 +209,34 @@ export function findsSimilarOpenConversation(
   identity: string,
 ): boolean {
   return existing.some(
+    (thread) => !thread.resolved && isSameFindingAtSameLocation(candidate, thread, identity),
+  );
+}
+
+/**
+ * True when `candidate` is a same-location, same-substance match of a RESOLVED conversation this
+ * reviewer authored whose last reply was a substantive disposition (Keiko-for-Quality#64) — the
+ * caller's signal to suppress instead of republishing, which is what dampens the argue-with-the-bot
+ * loop a long-lived pull request otherwise falls into.
+ *
+ * Deliberately separate from `findsSimilarOpenConversation` above, not a relaxation of it: that
+ * function's own contract is that a resolved thread must never suppress on its own, because a
+ * genuinely recurred defect has to stay publishable (Keiko-for-Quality#38) — bare resolution is not
+ * a verdict. This function only ever returns `true` once `thread.dispositioned` is already `true`,
+ * and that flag is `false` for a bare "resolved, no reply" thread by construction (see
+ * `disposition.ts`), so the #38 guarantee is preserved: a thread resolved without a considered reply
+ * can never reach this branch's `true` outcome, and its finding remains publishable exactly as
+ * before.
+ */
+export function findsDispositionedConversation(
+  candidate: SimilarityCandidate,
+  existing: readonly ExistingConversation[],
+  identity: string,
+): boolean {
+  return existing.some(
     (thread) =>
-      thread.authorLogin === identity &&
-      !thread.resolved &&
-      thread.path === candidate.path &&
-      linesOverlap(candidate, thread) &&
-      bodiesAreSimilar(candidate.body, thread.body),
+      thread.resolved &&
+      thread.dispositioned &&
+      isSameFindingAtSameLocation(candidate, thread, identity),
   );
 }

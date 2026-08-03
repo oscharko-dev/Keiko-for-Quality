@@ -76,10 +76,19 @@ with the source that produced it. This exact miss has already cost a CI round in
 - **`dev` is the integration branch and the default.** Ordinary work targets `dev`; native
   auto-merge is enabled, so arm it after opening the pull request and the platform integrates once
   the required checks are green and every conversation is resolved.
-- **`main` is the release line.** It advances only through a release pull request from `dev` —
+- **`main` is the release line.** It advances only through a release pull request carrying `dev`'s
+  tree —
   version bump, regenerated `dist/index.js`, and a fresh qualification-corpus run recorded in the
   PR — and every merge to `main` is tagged `vX.Y.Z`. Consumers pin full tag SHAs, so `main` is the
-  audit trail ("every commit is a qualified release"), not a consumer surface.
+  audit trail ("every commit is a qualified release"), not a consumer surface. From the second release
+  onward that pull request comes from a `release/vX.Y.Z` branch cut from `main`, not from `dev`
+  directly: each release squash leaves a commit on `main` whose content already exists in `dev`'s
+  own history, so git reports a conflict on files both sides touched since an older merge base.
+  `dev` is always the correct side of that false conflict, and neither remedy is available here —
+  merging `main` into `dev` and rebasing `dev` both break linear history and the no-force-push
+  rule. So the release branch takes `dev`'s tree WHOLE (`git checkout origin/dev -- .`), and the
+  release must assert `HEAD^{tree}` equals `origin/dev^{tree}` before opening the pull request, so
+  what ships is the qualified tree rather than the outcome of a hand-resolved merge.
 - Both branches carry identical protection: signed commits, linear history, no force pushes,
   conversation resolution, and the required checks `verify`, `engine pin`, and
   `SonarCloud Code Analysis` (verified against the live branch protection). `action smoke` runs on

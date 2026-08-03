@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   ARENA_BOT_ORDER,
+  ACTED_UPON_LINE_TOLERANCE,
   classifyAuthor,
   buildIdentityTable,
   isIncompleteNotice,
@@ -16,6 +17,9 @@ import {
   buildPrRecord,
   buildEvidenceDocument,
   renderMarkdown,
+  parseUnifiedDiffHunks,
+  hunkOverlapsWindow,
+  classifyActedUpon,
 } from "./arena-lib.mjs";
 import {
   PR_2926_RAW_THREADS,
@@ -507,4 +511,365 @@ test("renderMarkdown's duplicate-cluster wording reconciles with the Duplicates 
     "the list entry's count must be the same number as the Duplicates column, not the raw member count",
   );
   assert.ok(!markdown.includes("3 variants"), "must not render the pre-fix, unreconciled wording");
+});
+
+// ---------------------------------------------------------------------------------------------
+// Acted-upon linking (issue #56): hunk parsing, tolerance-window overlap, the four-way per-finding
+// classification, and its wiring into buildPrRecord/buildEvidenceDocument.
+//
+// A manual, hand-verified pass over Keiko pull request #2930 (posted as the #56 issue comment)
+// is this mechanism's calibration ground truth; the cases below are exactly the edges that pass
+// flagged as needing more than a same-file, same-line-window proxy can give — see the pull request
+// that introduced this section for the live comparison.
+// ---------------------------------------------------------------------------------------------
+
+function commitFixture(sha, committedDate, files) {
+  return { sha, committedDate, files };
+}
+
+function fileFixture(path, { status = "modified", patch = null, previousPath = null } = {}) {
+  return { path, previousPath, status, patch };
+}
+
+function findingFixture({
+  path = "a.ts",
+  startLine = 10,
+  endLine = 10,
+  isFileLevel = false,
+  isResolved = false,
+  createdAt = "2026-01-01T00:00:00Z",
+  databaseId = 1,
+} = {}) {
+  return { path, startLine, endLine, isFileLevel, isResolved, createdAt, databaseId };
+}
+
+test("parseUnifiedDiffHunks reads standard hunk headers with explicit counts", () => {
+  const patch =
+    "@@ -10,3 +10,5 @@ function foo() {\n-old\n+new\n+new2\n context\n@@ -50,1 +52,1 @@\n-x\n+y\n";
+  assert.deepEqual(parseUnifiedDiffHunks(patch), [
+    { oldStart: 10, oldCount: 3, newStart: 10, newCount: 5 },
+    { oldStart: 50, oldCount: 1, newStart: 52, newCount: 1 },
+  ]);
+});
+
+test("parseUnifiedDiffHunks defaults an omitted count to one line, not zero", () => {
+  assert.deepEqual(parseUnifiedDiffHunks("@@ -5 +5 @@\n-old\n+new\n"), [
+    { oldStart: 5, oldCount: 1, newStart: 5, newCount: 1 },
+  ]);
+});
+
+test("parseUnifiedDiffHunks returns an empty array for a missing or empty patch", () => {
+  assert.deepEqual(parseUnifiedDiffHunks(null), []);
+  assert.deepEqual(parseUnifiedDiffHunks(undefined), []);
+  assert.deepEqual(parseUnifiedDiffHunks(""), []);
+});
+
+test("parseUnifiedDiffHunks ignores diff preamble lines that are not hunk headers", () => {
+  const patch =
+    "diff --git a/a.ts b/a.ts\nindex 111..222 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1,2 +1,2 @@\n-a\n+b\n";
+  assert.deepEqual(parseUnifiedDiffHunks(patch), [
+    { oldStart: 1, oldCount: 2, newStart: 1, newCount: 2 },
+  ]);
+});
+
+test("hunkOverlapsWindow matches a window fully inside the hunk's old-side range", () => {
+  const hunk = { oldStart: 10, oldCount: 5, newStart: 10, newCount: 5 };
+  assert.equal(
+    hunkOverlapsWindow(hunk, { startLine: 12, endLine: 12, isFileLevel: false }, 0),
+    true,
+  );
+});
+
+test("hunkOverlapsWindow respects the tolerance boundary exactly", () => {
+  const hunk = { oldStart: 20, oldCount: 2, newStart: 20, newCount: 2 }; // old range 20-21
+  const justInside = { startLine: 24, endLine: 24, isFileLevel: false }; // 3 lines past line 21
+  const justOutside = { startLine: 25, endLine: 25, isFileLevel: false }; // 4 lines past line 21
+  assert.equal(hunkOverlapsWindow(hunk, justInside, 3), true);
+  assert.equal(hunkOverlapsWindow(hunk, justOutside, 3), false);
+});
+
+test("hunkOverlapsWindow treats a file-level window as always overlapping", () => {
+  const hunk = { oldStart: 900, oldCount: 1, newStart: 900, newCount: 1 };
+  assert.equal(
+    hunkOverlapsWindow(hunk, { startLine: null, endLine: null, isFileLevel: true }, 0),
+    true,
+  );
+});
+
+test("hunkOverlapsWindow matches a pure insertion (zero old-side count) at its boundary line", () => {
+  const insertion = { oldStart: 40, oldCount: 0, newStart: 41, newCount: 3 };
+  assert.equal(
+    hunkOverlapsWindow(insertion, { startLine: 40, endLine: 40, isFileLevel: false }, 0),
+    true,
+  );
+});
+
+test("ACTED_UPON_LINE_TOLERANCE defaults to three lines", () => {
+  assert.equal(ACTED_UPON_LINE_TOLERANCE, 3);
+});
+
+// --- classifyActedUpon: the four-way per-finding classification. ---
+
+test("classifyActedUpon reports acted_upon when a later commit's hunk overlaps the anchor", () => {
+  const finding = findingFixture({ path: "a.ts", startLine: 100, endLine: 100 });
+  const commits = [
+    commitFixture("c1", "2026-01-02T00:00:00Z", [
+      fileFixture("a.ts", { patch: "@@ -98,5 +98,6 @@ function f() {\n context\n" }),
+    ]),
+  ];
+  assert.deepEqual(classifyActedUpon(finding, commits), {
+    classification: "acted_upon",
+    hadOpportunity: true,
+    resolvedByCommit: "c1",
+  });
+});
+
+test("classifyActedUpon reports open_unaddressed when a later commit exists but never touches the region", () => {
+  const finding = findingFixture({ path: "a.ts", startLine: 100, endLine: 100, isResolved: false });
+  const commits = [
+    commitFixture("c1", "2026-01-02T00:00:00Z", [
+      fileFixture("a.ts", { patch: "@@ -1,2 +1,2 @@\n-a\n+b\n" }),
+    ]),
+  ];
+  assert.deepEqual(classifyActedUpon(finding, commits), {
+    classification: "open_unaddressed",
+    hadOpportunity: true,
+    resolvedByCommit: null,
+  });
+});
+
+test("classifyActedUpon reports resolved_without_change for the same untouched region when the thread is resolved", () => {
+  const finding = findingFixture({ path: "a.ts", startLine: 100, endLine: 100, isResolved: true });
+  const commits = [
+    commitFixture("c1", "2026-01-02T00:00:00Z", [
+      fileFixture("a.ts", { patch: "@@ -1,2 +1,2 @@\n-a\n+b\n" }),
+    ]),
+  ];
+  assert.equal(classifyActedUpon(finding, commits).classification, "resolved_without_change");
+});
+
+test("classifyActedUpon excludes a finding posted after the last push from opportunity, regardless of verdict", () => {
+  const finding = findingFixture({
+    path: "a.ts",
+    createdAt: "2026-01-03T00:00:00Z",
+    isResolved: false,
+  });
+  const commits = [commitFixture("c1", "2026-01-02T00:00:00Z", [fileFixture("a.ts")])];
+  const result = classifyActedUpon(finding, commits);
+  assert.equal(result.hadOpportunity, false, "no commit exists after this finding was posted");
+  assert.equal(result.classification, "open_unaddressed");
+});
+
+test("classifyActedUpon ignores a later commit that touches a different file entirely", () => {
+  const finding = findingFixture({ path: "a.ts", startLine: 5, endLine: 5 });
+  const commits = [
+    commitFixture("c1", "2026-01-02T00:00:00Z", [
+      fileFixture("b.ts", { patch: "@@ -1,50 +1,50 @@\n" }),
+    ]),
+  ];
+  assert.equal(classifyActedUpon(finding, commits).classification, "open_unaddressed");
+});
+
+test("classifyActedUpon treats a file-level finding as acted upon by any later commit naming the file", () => {
+  const finding = findingFixture({
+    path: "a.ts",
+    isFileLevel: true,
+    startLine: null,
+    endLine: null,
+  });
+  const commits = [
+    commitFixture("c1", "2026-01-02T00:00:00Z", [
+      fileFixture("a.ts", { patch: "@@ -900,1 +900,1 @@\n-x\n+y\n" }),
+    ]),
+  ];
+  assert.equal(classifyActedUpon(finding, commits).classification, "acted_upon");
+});
+
+test("classifyActedUpon treats a file removal as acted upon even with no parseable patch", () => {
+  const finding = findingFixture({ path: "a.ts", startLine: 5, endLine: 5 });
+  const commits = [
+    commitFixture("c1", "2026-01-02T00:00:00Z", [
+      fileFixture("a.ts", { status: "removed", patch: null }),
+    ]),
+  ];
+  assert.equal(classifyActedUpon(finding, commits).classification, "acted_upon");
+});
+
+test("classifyActedUpon reports outdated_by_rebase when a later commit's patch cannot be parsed", () => {
+  const finding = findingFixture({ path: "a.ts", startLine: 5, endLine: 5 });
+  const commits = [
+    commitFixture("c1", "2026-01-02T00:00:00Z", [
+      fileFixture("a.ts", { status: "modified", patch: null }),
+    ]),
+  ];
+  assert.equal(classifyActedUpon(finding, commits).classification, "outdated_by_rebase");
+});
+
+/**
+ * `fileExistsAtHead` folds a path's status across the *entire* commit list, independent of any one
+ * finding's timing, so this constructs the fold's input directly: a removal commit dated before the
+ * finding (so the later-commit scan above never inspects it and cannot already return `acted_upon`)
+ * is the only way to isolate "this run's own data says the file is gone" from "a later commit
+ * touched it," without depending on real-world push ordering being implausible.
+ */
+test("classifyActedUpon reports outdated_by_rebase when this run's own commit data shows the file gone and no later commit says otherwise", () => {
+  const finding = findingFixture({
+    path: "a.ts",
+    startLine: 5,
+    endLine: 5,
+    createdAt: "2026-01-01T00:00:00Z",
+  });
+  const commits = [
+    commitFixture("before", "2025-12-31T00:00:00Z", [
+      fileFixture("a.ts", { status: "removed", patch: null }),
+    ]),
+  ];
+  assert.equal(classifyActedUpon(finding, commits).classification, "outdated_by_rebase");
+});
+
+test("classifyActedUpon reports the chronologically earliest touching commit regardless of input order", () => {
+  const finding = findingFixture({ path: "a.ts", startLine: 5, endLine: 5 });
+  const commits = [
+    commitFixture("later", "2026-01-05T00:00:00Z", [
+      fileFixture("a.ts", { patch: "@@ -4,3 +4,3 @@\n" }),
+    ]),
+    commitFixture("earlier", "2026-01-02T00:00:00Z", [
+      fileFixture("a.ts", { patch: "@@ -4,3 +4,3 @@\n" }),
+    ]),
+  ];
+  assert.equal(classifyActedUpon(finding, commits).resolvedByCommit, "earlier");
+});
+
+test("classifyActedUpon follows a rename to find the file's patch under its new name", () => {
+  const finding = findingFixture({ path: "old-name.ts", startLine: 5, endLine: 5 });
+  const commits = [
+    commitFixture("c1", "2026-01-02T00:00:00Z", [
+      fileFixture("new-name.ts", {
+        previousPath: "old-name.ts",
+        status: "renamed",
+        patch: "@@ -4,3 +4,3 @@\n",
+      }),
+    ]),
+  ];
+  assert.equal(classifyActedUpon(finding, commits).classification, "acted_upon");
+});
+
+// --- buildPrRecord / buildEvidenceDocument: wiring, aggregation, determinism, redaction. ---
+
+test("buildPrRecord's actedUpon section classifies each bot's distinct findings against the pull request's commits", () => {
+  const { conversations } = extractConversations(PR_2926_RAW_THREADS);
+  // Touches the shared codingContextRoutes.ts:235-243 location after every finding posted there
+  // (KfQ's last paraphrase at 13:15:46Z, CodeRabbit at 12:21:38Z, Codex at 12:14:42Z) but is the
+  // pull request's only commit, so every other distinct finding stays untouched.
+  const commits = [
+    commitFixture("fixsha1", "2026-08-02T14:30:00Z", [
+      fileFixture("packages/keiko-server/src/coding-context/codingContextRoutes.ts", {
+        patch: "@@ -234,4 +234,6 @@ function handler() {\n context\n",
+      }),
+    ]),
+  ];
+  const record = buildPrRecord({ number: 2926, headSha: PR_2926_HEAD_SHA, commits }, conversations);
+
+  const kfq = record.actedUpon.byBot.kfq;
+  assert.equal(kfq.summary.total, 1, "fixture setup: kfq has exactly one distinct finding");
+  assert.equal(kfq.summary.actedUpon, 1);
+  assert.equal(kfq.summary.hadOpportunity, 1);
+  assert.equal(kfq.findings[0].resolvedByCommit, "fixsha1");
+
+  const codex = record.actedUpon.byBot.codex;
+  assert.equal(codex.summary.total, 1, "fixture setup: codex has exactly one distinct finding");
+  assert.equal(codex.summary.actedUpon, 1);
+
+  const coderabbit = record.actedUpon.byBot.coderabbit;
+  assert.equal(
+    coderabbit.summary.total,
+    7,
+    "fixture setup: coderabbit has seven distinct findings",
+  );
+  assert.equal(coderabbit.summary.actedUpon, 1, "only the routes.ts finding was touched");
+});
+
+test("buildPrRecord's actedUpon.lastPushAt is the latest commit's committedDate, or null with no commits known", () => {
+  const { conversations } = extractConversations(PR_2924_RAW_THREADS);
+  const withCommits = buildPrRecord(
+    {
+      number: 2924,
+      headSha: PR_2924_HEAD_SHA,
+      commits: [
+        commitFixture("a", "2026-08-02T10:00:00Z", []),
+        commitFixture("b", "2026-08-02T18:00:00Z", []),
+      ],
+    },
+    conversations,
+  );
+  assert.equal(withCommits.actedUpon.lastPushAt, "2026-08-02T18:00:00Z");
+
+  const withoutCommits = buildPrRecord({ number: 2924, headSha: PR_2924_HEAD_SHA }, conversations);
+  assert.equal(withoutCommits.actedUpon.lastPushAt, null);
+});
+
+test("buildEvidenceDocument's acted-upon section is byte-identical across two calls with the same input", () => {
+  const commits = [
+    commitFixture("s1", "2026-08-02T14:00:00Z", [
+      fileFixture("packages/keiko-server/src/coding-context/codingContextRoutes.ts", {
+        patch: "@@ -234,4 +234,6 @@\n",
+      }),
+    ]),
+  ];
+  const prs = [
+    {
+      number: 2926,
+      headSha: PR_2926_HEAD_SHA,
+      commits,
+      ...extractConversations(PR_2926_RAW_THREADS),
+    },
+  ];
+  const input = { repo: "oscharko-dev/Keiko", generatedAt: "2026-08-02T12:00:00Z", prs };
+  const first = JSON.stringify(buildEvidenceDocument(input));
+  const second = JSON.stringify(buildEvidenceDocument(input));
+  assert.equal(first, second);
+});
+
+test("buildEvidenceDocument aggregates the acted-upon summary across every included pull request", () => {
+  const prs = [
+    { number: 2926, headSha: PR_2926_HEAD_SHA, ...extractConversations(PR_2926_RAW_THREADS) },
+    { number: 2924, headSha: PR_2924_HEAD_SHA, ...extractConversations(PR_2924_RAW_THREADS) },
+  ];
+  const document = buildEvidenceDocument({ repo: "oscharko-dev/Keiko", generatedAt: "x", prs });
+  // Neither pull request fixture carries commits here: every finding must still get a well-shaped
+  // `actedUpon` verdict (falling back to thread-resolution status) rather than an exception, and
+  // every one of them correctly reports it never had an opportunity.
+  assert.equal(
+    document.aggregate.actedUpon.kfq.total,
+    document.aggregate.bots.kfq.distinctFindings,
+  );
+  assert.equal(document.aggregate.actedUpon.kfq.hadOpportunity, 0);
+  assert.equal(document.aggregate.actedUpon.kfq.actedUpon, 0);
+});
+
+test("renderMarkdown includes the acted-upon linking section, its heuristic note, and the aggregate table", () => {
+  const commits = [
+    commitFixture("s1", "2026-08-02T14:00:00Z", [
+      fileFixture("packages/keiko-server/src/coding-context/codingContextRoutes.ts", {
+        patch: "@@ -234,4 +234,6 @@\n",
+      }),
+    ]),
+  ];
+  const prs = [
+    {
+      number: 2926,
+      headSha: PR_2926_HEAD_SHA,
+      commits,
+      ...extractConversations(PR_2926_RAW_THREADS),
+    },
+  ];
+  const document = buildEvidenceDocument({ repo: "oscharko-dev/Keiko", generatedAt: "x", prs });
+  const markdown = renderMarkdown(document);
+  assert.ok(markdown.includes("Acted-upon linking"));
+  assert.ok(markdown.includes("later-commit-hunk-overlap-v1"));
+  assert.ok(markdown.includes("Acted-upon linking (aggregate)"));
+  assert.ok(
+    markdown.includes("acted_upon"),
+    "the per-finding ledger renders the raw classification value",
+  );
 });

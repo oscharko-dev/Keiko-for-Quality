@@ -26,7 +26,7 @@ import { currentPlatformDigest } from "./engine/pinned-release.js";
 import { parseEngineResult, type EngineFinding } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
 import { runEngine } from "./engine/run.js";
-import { settle, type Settlement } from "./engine/settle.js";
+import { settle, verdictsSurviveIncompleteness, type Settlement } from "./engine/settle.js";
 import type { GitContext } from "./git/plumbing.js";
 import type { InventoryItem } from "./inventory/classify.js";
 import {
@@ -296,6 +296,32 @@ function prepareMemoization(
 }
 
 /**
+ * What an incomplete report carries about the cache.
+ *
+ * A truncated run still earned verdicts for the files it reached, and persisting exactly those —
+ * nothing else — is what lets the next push spend its budget on the tail rather than paying for
+ * the same files again (Keiko-for-Quality#75). `covered` is supplied only for reasons whose
+ * incompleteness leaves those verdicts intact, so every other incomplete path lands here with
+ * `undefined`, writes nothing, and behaves exactly as it did before.
+ */
+function truncatedCacheFields(
+  request: ReviewRequest,
+  inventory: Inventory,
+  memo: MemoContext,
+  findings: readonly EngineFinding[],
+  covered: ReadonlySet<string> | undefined,
+): { cacheAppended: number; updatedCacheStore?: CacheStore } {
+  const finalized =
+    covered === undefined
+      ? undefined
+      : finalizeCacheStore(request, inventory, memo, findings, covered);
+  return {
+    cacheAppended: finalized?.appended ?? 0,
+    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
+  };
+}
+
+/**
  * Reports a run that fell short — and publishes whatever it managed to find.
  *
  * The notice is what blocks, and it still does. What changed is that the findings alongside it are
@@ -330,6 +356,7 @@ async function settleIncomplete(
   findings: readonly EngineFinding[] = [],
   memo: MemoContext = INERT_MEMO,
   counts?: Readonly<Record<string, number>>,
+  covered?: ReadonlySet<string>,
 ): Promise<ReviewReport> {
   diagnostics.record(reason, {
     headSha: request.head,
@@ -356,7 +383,7 @@ async function settleIncomplete(
     outcome: "incomplete",
     reason,
     ...inventoryCounts(inventory),
-    cacheAppended: 0,
+    ...truncatedCacheFields(request, inventory, memo, findings, covered),
     ...cacheCounts(memo),
     ...(publish === undefined ? {} : { publish }),
   };
@@ -439,6 +466,7 @@ function finalizeCacheStore(
   inventory: Inventory,
   memo: MemoContext,
   engineFindings: readonly EngineFinding[],
+  restrictTo?: ReadonlySet<string>,
 ): { store: CacheStore; appended: number } | undefined {
   if (request.cacheStore === undefined) return undefined;
   if (
@@ -449,9 +477,19 @@ function finalizeCacheStore(
     return undefined;
   }
 
+  // On a complete run every eligible path was reviewed, so the eligible set IS the reviewed set.
+  // On a truncated one it is not: the engine stopped dispatching partway, and folding the paths it
+  // never opened into the store would freeze them as "clean" forever — the precise laundering
+  // review-cache.ts warns about, and worse than not memoizing at all. `restrictTo` is the engine's
+  // own account of what it reached, so only those paths can be admitted.
+  const eligible =
+    restrictTo === undefined
+      ? memo.eligiblePaths
+      : new Set([...memo.eligiblePaths].filter((path) => restrictTo.has(path)));
+
   const newEntries = buildNewEntries({
     inventory,
-    eligiblePaths: memo.eligiblePaths,
+    eligiblePaths: eligible,
     hitPaths: memo.hitPaths,
     findings: engineFindings,
     ruleDigest: memo.ruleDigest,
@@ -483,11 +521,17 @@ async function publishSettledFindings(
 
   // A finding the reviewer found but could not publish is a finding the consumer never saw. The
   // engine's own verdict was "complete", so this is the only place that fact can be recorded.
+  //
+  // The reason names the SETTLEMENT outcome (Keiko-for-Quality#57). It used to carry
+  // `publish.finding_rejected_placement`, a publication diagnostic: accurate about where the
+  // failure happened, but published in the incomplete notice, where the reader needs to know what
+  // it means for their coverage rather than which internal step noticed. The diagnostic keeps its
+  // name and its per-attempt breakdown; only the settlement reason moved family.
   if (publicationDegraded(publish)) {
     const report = await settleIncomplete(
       request,
       inventory,
-      "publish.finding_rejected_placement",
+      "settlement.incomplete.publication_degraded",
       diagnostics,
       [],
       memo,
@@ -613,6 +657,8 @@ export async function performReview(
       diagnostics,
       mergeHitFindings(settlement.findings, memo.hits),
       memo,
+      undefined,
+      verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths : undefined,
     );
   }
   if (!(await headIsCurrent(request))) {

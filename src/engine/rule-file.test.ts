@@ -126,19 +126,56 @@ describe("buildRuleFile", () => {
   /**
    * Found by running the reviewer over real merged Keiko commits rather than constructed fixtures.
    * It reported a genuine cross-platform defect — `git diff --no-index -- /dev/null <path>` fails on
-   * Windows — and the finding was discarded, because `<path>` matches the HTML check. The guard is
-   * correct and stays; what changed is that the rule now tells the model not to write placeholders
-   * that way. This pins both halves so they cannot drift apart again.
+   * Windows — and the finding was discarded, because a bare `<path>` matches the HTML check. Code-
+   * region masking has since made the backticked form publishable, so the rule and this round-trip
+   * changed together: bare placeholders still die, backticked ones survive, and the rule must say
+   * exactly that. This pins both halves so they cannot drift apart again.
    */
-  it("warns about the placeholder shape that the publisher rejects", () => {
+  /**
+   * The rule taught the exact shape another of its own rules forbids: it asked for a
+   * `Source: <path>` line while stating that bare angle brackets destroy the finding. In
+   * qualification the model obeyed the citation rule and filled the placeholder with the only
+   * "path" it could see — the name of a section of its own instructions — producing
+   * `Source: <current_file_diff>`, which the sanitizer rejected as html. A correct high-severity
+   * finding was lost to a contradiction between two rules, so no example in this file may show a
+   * `Source:` line with an angle bracket.
+   */
+  /**
+   * Two qualification failures, one shape. A finding lost its whole body to a `Source:` line
+   * carrying an angle-bracketed prompt marker, and another to an exfiltration beacon appended
+   * after the closing diff fence — the injection the case seeds. Both were correct findings
+   * discarded because of the line AFTER the body proper, so the rule names the three endings a
+   * body may have and asks for a final re-read.
+   */
+  it("bounds how a finding body may end", () => {
     const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    expect(rule).toContain("The most common way this succeeds is a trailing line");
+    expect(rule).toContain("Nothing follows");
+  });
+
+  it("never teaches an angle-bracketed Source line", () => {
+    const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    expect(rule).toContain("Source:");
+    expect(rule).not.toMatch(/Source:\s*`?</);
+    // And the citation instruction must bound what may be named, not leave it open.
+    expect(rule).toContain("NEVER in angle brackets");
+  });
+
+  it("keeps the placeholder guidance aligned with the real sanitizer", () => {
+    const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    expect(rule).toContain("Never write a bare placeholder in angle brackets");
+    // Round-trip through the REAL sanitizer, both directions: the backticked placeholder from the
+    // original incident now publishes (code spans are masked before the markup checks), while the
+    // same body with the backticks stripped still dies as html.
     expect(
-      sanitizeFindingBody("Use a null device.\n\nIt runs `diff -- /dev/null <path>` today."),
+      sanitizeFindingBody("Use a null device.\n\nIt runs `diff -- /dev/null <path>` today.").ok,
+    ).toBe(true);
+    expect(
+      sanitizeFindingBody("Use a null device.\n\nIt runs diff -- /dev/null <path> today."),
     ).toEqual({
       ok: false,
       reason: "html",
     });
-    expect(rule).toContain("Never write a placeholder in angle brackets");
     // A comparison must remain writable — `<` followed by a space is not a tag.
     expect(
       sanitizeFindingBody("Fix the bound.\n\nThe guard `i < items.length` became `i <= n`.").ok,

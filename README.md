@@ -179,8 +179,8 @@ works; it is weaker; the fallback exists so you can try the reviewer before regi
 
 ### Deduplication
 
-A finding is suppressed only when it is the same finding this reviewer already published, checked
-in two stages:
+A finding is suppressed only when it is the same finding this reviewer already published, or the
+same finding at a location someone already gave a considered answer to, checked in three stages:
 
 1. **Exact marker.** Every published conversation carries a hidden fingerprint of its content. A
    later run recomputes the same fingerprint for the same defect and suppresses the repost.
@@ -191,12 +191,21 @@ in two stages:
    conservatively similar — a shared quoted code snippet, or enough shared content vocabulary. Two
    different defects at the same or an adjacent line are deliberately not similar enough to match,
    and an uncertain comparison publishes rather than suppresses.
+3. **Dispositioned recurrence.** The first two stages both ignore a resolved conversation, so a
+   genuinely recurred defect always stays publishable — but on a long-lived pull request this let a
+   finding someone had already reasoned through and resolved reappear on every later push, arguing
+   the same point again each time. This stage suppresses a same-location, same-substance match of a
+   _resolved_ conversation, but only when its last reply is a substantive disposition — at least 80
+   characters once signature lines (an automation footer, a `Co-Authored-By:` trailer) are stripped —
+   never a bare "resolved" click with no reply, or a resolve with no reply at all. Counted separately
+   as `dedup.dispositioned` so it is never confused with the two stages above.
 
-Both stages ignore a **resolved or outdated** conversation: once a conversation is no longer open,
-whatever it described can recur and be republished. Resolution state comes from a best-effort
-GraphQL lookup the `Pull requests` permission above already covers; if a token or platform cannot
-answer it, every conversation is simply treated as open, which is exactly how deduplication behaved
-before this lookup existed.
+Every stage but the third ignores a **resolved or outdated** conversation: once a conversation is no
+longer open, whatever it described can recur and be republished. Resolution state, and — for a
+genuinely resolved thread — its last reply's author and body, come from a best-effort GraphQL lookup
+the `Pull requests` permission above already covers; if a token or platform cannot answer it, every
+conversation is simply treated as open, which is exactly how deduplication behaved before this lookup
+existed.
 
 ### The run-summary comment
 
@@ -272,6 +281,12 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 9. **The run-summary comment is not archived when a pull request closes.** It is updated in place
    on every eligible run and otherwise left as it last stood; deciding whether and how to clean it
    up on closure is a deliberately deferred, separate concern.
+10. **The dispositioned-recurrence stage's 80-character floor is a heuristic, not a semantic
+    judgment.** A long-winded reply that never actually engages with the finding could clear it, and
+    a terse but genuinely conclusive one ("Wrong — this path is dead code, see line 40.") could fall
+    just short. Biased the same direction as the similarity stage: an uncertain call republishes
+    rather than suppresses, because a re-opened settled question costs a reply, while a wrongly
+    suppressed genuine recurrence costs a defect nobody sees again.
 
 ## Measured quality
 
@@ -334,14 +349,31 @@ Quality comments at one location on Keiko #2926, which the heuristic must collap
 plus two duplicate variants (tracked as bug #38 — re-running the arena after that fix lands is the
 regression meter for it).
 
+Thread-resolution status is a human or bot toggle, not proof a finding was addressed — a stale
+conversation gets resolved for reasons that have nothing to do with the code. Acted-upon linking
+(issue #56) adds a second, git-grounded signal per distinct finding: did a commit pushed to the pull
+request _after_ the finding was posted actually change the anchored region — same file, within
+±3 lines, found by parsing that commit's own unified-diff hunk headers? Every finding lands in one of
+four buckets — `acted_upon`, `resolved_without_change`, `open_unaddressed`, or `outdated_by_rebase`
+(the file is gone at the current head, or this run could not tell) — and each bot gets an
+opportunity-adjusted rate that excludes findings posted after the pull request's last push, which
+never had a chance to be acted upon. This is a coarser proxy than a human tracing the code: it cannot
+follow a fix that lands in a different file (or a distant function in the same file) for the same
+root cause, and it checks each later commit against the finding's original anchor independently
+rather than tracking a line's drift through a chain of commits. The pull request that introduced this
+heuristic ran it against Keiko #2930 and compared the result finding-by-finding against a hand-verified
+manual pass posted on issue #56, including the cases where the two disagree and why.
+
 ```bash
 npm run arena -- 2926 2924          # writes corpus/evidence/arena-latest.{json,md}
 npm run arena -- --since 2026-07-01 # discovers pull requests instead of naming them
 node --test corpus/arena-lib.test.mjs # the pure computation's own tests; not part of `npm test`
+node --test corpus/arena-fetch.test.mjs # the fetch layer's own tests, including the commit timeline
 ```
 
-The evidence committed under `corpus/evidence/` is the first live run, recorded as the v0.10.0
-baseline. Its JSON never carries a comment body — locations, counts, and hashes only, matching this
+The evidence committed under `corpus/evidence/` started with the first live run, recorded as the
+v0.10.0 baseline; the v0.11.0 baseline adds acted-upon linking, run live against Keiko #2930, #2926,
+and #2924. Its JSON never carries a comment body — locations, counts, and hashes only, matching this
 repository's evidence-redaction discipline; a short quoted stub would still be another bot's
 generated prose distributed through this repository, not just this reviewer's own.
 

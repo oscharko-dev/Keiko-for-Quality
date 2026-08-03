@@ -4,7 +4,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildEvidenceDocument, extractConversations, renderMarkdown } from "./arena-lib.mjs";
-import { discoverPullRequestNumbers, fetchPullRequestReviewThreads } from "./arena-fetch.mjs";
+import {
+  discoverPullRequestNumbers,
+  fetchPullRequestCommitTimeline,
+  fetchPullRequestReviewThreads,
+} from "./arena-fetch.mjs";
 
 /**
  * The reviewer arena scoreboard (issue #39): measures Keiko for Quality head-to-head against
@@ -114,7 +118,11 @@ function loadPr(owner, repoName, number) {
         "with more replies than this run paged in — see corpus/arena-fetch.mjs",
     );
   }
-  return { number, headSha, ...extractConversations(threads) };
+  // Issue #56: the commit timeline behind acted-upon linking. Costs one extra API call per commit
+  // in the pull request (see `fetchPullRequestCommitTimeline`), paid on every measured pull
+  // request — the same read-only, no-publication, no-model-call budget the rest of this tool uses.
+  const commits = fetchPullRequestCommitTimeline(owner, repoName, number);
+  return { number, headSha, commits, ...extractConversations(threads) };
 }
 
 function writeOutputs(options, document, markdown) {
