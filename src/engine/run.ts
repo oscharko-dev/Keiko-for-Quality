@@ -7,6 +7,7 @@ import { sha256, type Sha256 } from "../core/brands.js";
 import type { CompiledProfile } from "../config/profile.js";
 import type { GuidelineIndex } from "../config/guidelines.js";
 import { readModelToken, type RuntimeConfig } from "../config/runtime.js";
+import { startModelProxy, type ModelProxy } from "./model-proxy.js";
 import type { Diagnostics } from "../diagnostics/sink.js";
 import { run, ExecFailure } from "../git/exec.js";
 import type { ReviewPair } from "../inventory/inventory.js";
@@ -144,6 +145,17 @@ export function reviewArguments(options: EngineRunOptions, rulePath: string): st
  * The output is returned to the caller as a value and never written to a log, an artifact, or a
  * diagnostic. Its only consumers are the strict parser and, after validation, the publisher.
  */
+/**
+ * Review sampling is pinned, not defaulted (v0.11.0). Measured across eight corpus runs on
+ * gpt-oss-120b with a byte-identical prompt, per-case outcomes flipped run to run — sampling
+ * variance no rule text reduces. Zero is a deliberate product choice for a reviewer: the same
+ * change should get the same review twice, and the qualification bar ("everything, twice in a
+ * row") is only meaningful under it. The engine offers no sampling control of its own, so the
+ * loopback proxy (`model-proxy.ts`) pins it on the wire; the anthropic protocol path is exempt
+ * because the proxy speaks OpenAI chat completions.
+ */
+const REVIEW_TEMPERATURE = 0;
+
 export async function runEngine(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
@@ -153,10 +165,19 @@ export async function runEngine(
 
   const home = await mkdtemp(join(tmpdir(), "kfq-engine-"));
   const started = Date.now();
+  let proxy: ModelProxy | undefined;
   try {
     await mkdir(join(home, "state"), { recursive: true, mode: 0o700 });
     const { rulePath, ruleDigest } = await writeRuleFile(options, home);
+    proxy =
+      options.config.protocol === "anthropic"
+        ? undefined
+        : await startModelProxy({
+            upstreamUrl: options.config.endpoint,
+            temperature: REVIEW_TEMPERATURE,
+          });
     const env = engineEnvironment(options, token, home);
+    if (proxy !== undefined) env.OCR_LLM_URL = proxy.url;
     await configureEngine(options, home, env);
 
     const result = await run(options.binaryPath, reviewArguments(options, rulePath), {
@@ -183,6 +204,9 @@ export async function runEngine(
     });
     throw new EngineRunError(reason);
   } finally {
+    // The proxy dies with the invocation on every path — an orphaned listener would outlive the
+    // credentials' purpose even though it never holds them.
+    await proxy?.close();
     // Transient review state — the rule file, engine session data, and any temporary artifacts —
     // is removed whether or not the run succeeded.
     await rm(home, { recursive: true, force: true });

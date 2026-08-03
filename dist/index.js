@@ -1607,6 +1607,9 @@ async function requestPair(prompt, deps) {
       body: JSON.stringify({
         model: deps.model,
         messages: [{ role: "user", content: prompt }],
+        // Pinned for the same reason the review itself is (model-proxy.ts): a classification
+        // vote that changes between identical invocations is noise, not judgement.
+        temperature: 0,
         // Generous on purpose: reasoning models spend tokens before the final channel, and a cap
         // that starves the final answer reads exactly like non-compliance.
         max_completion_tokens: 4e3
@@ -2079,6 +2082,83 @@ import { mkdir as mkdir2, mkdtemp, rm, writeFile as writeFile2 } from "node:fs/p
 import { tmpdir } from "node:os";
 import { join as join2 } from "node:path";
 
+// src/engine/model-proxy.ts
+import { createServer } from "node:http";
+var FORWARDED_HEADERS = ["authorization", "api-key", "content-type", "accept"];
+function upstreamHeaders(request) {
+  const headers = {};
+  for (const name of FORWARDED_HEADERS) {
+    const value = request.headers[name];
+    if (typeof value === "string") headers[name] = value;
+  }
+  return headers;
+}
+function readBody(request) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    request.on("data", (chunk) => chunks.push(chunk));
+    request.on("end", () => {
+      resolve(Buffer.concat(chunks));
+    });
+    request.on("error", reject);
+  });
+}
+function pinSampling(path, body, temperature) {
+  if (!path.endsWith("/chat/completions")) return body;
+  try {
+    const parsed = JSON.parse(body.toString("utf8"));
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return body;
+    return Buffer.from(JSON.stringify({ ...parsed, temperature }), "utf8");
+  } catch {
+    return body;
+  }
+}
+async function forward(options2, request, response) {
+  const doFetch = options2.fetchImpl ?? fetch;
+  try {
+    const body = await readBody(request);
+    const path = request.url ?? "/";
+    const method = request.method ?? "POST";
+    const withBody = method !== "GET" && method !== "HEAD";
+    const upstream = await doFetch(`${options2.upstreamUrl.replace(/\/+$/, "")}${path}`, {
+      method,
+      headers: upstreamHeaders(request),
+      ...withBody ? { body: new Uint8Array(pinSampling(path, body, options2.temperature)) } : {}
+    });
+    response.writeHead(upstream.status, {
+      "content-type": upstream.headers.get("content-type") ?? "application/json"
+    });
+    response.end(Buffer.from(await upstream.arrayBuffer()));
+  } catch {
+    response.writeHead(502, { "content-type": "application/json" });
+    response.end('{"error":{"message":"upstream unreachable"}}');
+  }
+}
+function startModelProxy(options2) {
+  const server = createServer((request, response) => {
+    void forward(options2, request, response);
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        server.close();
+        reject(new Error("proxy address unavailable"));
+        return;
+      }
+      resolve({
+        url: `http://127.0.0.1:${String(address.port)}`,
+        close: () => new Promise((done) => {
+          server.close(() => {
+            done();
+          });
+        })
+      });
+    });
+  });
+}
+
 // src/git/exec.ts
 import { execFile } from "node:child_process";
 var ExecFailure = class extends Error {
@@ -2193,15 +2273,22 @@ function reviewArguments(options2, rulePath) {
     String(options2.allottedBudget)
   ];
 }
+var REVIEW_TEMPERATURE = 0;
 async function runEngine(options2, diagnostics) {
   const token = readModelToken(options2.config, options2.env);
   if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
   const home = await mkdtemp(join2(tmpdir(), "kfq-engine-"));
   const started = Date.now();
+  let proxy;
   try {
     await mkdir2(join2(home, "state"), { recursive: true, mode: 448 });
     const { rulePath, ruleDigest } = await writeRuleFile(options2, home);
+    proxy = options2.config.protocol === "anthropic" ? void 0 : await startModelProxy({
+      upstreamUrl: options2.config.endpoint,
+      temperature: REVIEW_TEMPERATURE
+    });
     const env = engineEnvironment(options2, token, home);
+    if (proxy !== void 0) env.OCR_LLM_URL = proxy.url;
     await configureEngine(options2, home, env);
     const result = await run(options2.binaryPath, reviewArguments(options2, rulePath), {
       cwd: options2.repositoryPath,
@@ -2224,6 +2311,7 @@ async function runEngine(options2, diagnostics) {
     });
     throw new EngineRunError(reason);
   } finally {
+    await proxy?.close();
     await rm(home, { recursive: true, force: true });
   }
 }

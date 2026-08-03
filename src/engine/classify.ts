@@ -140,6 +140,9 @@ async function requestPair(prompt: string, deps: ClassifyEndpoint): Promise<Atte
       body: JSON.stringify({
         model: deps.model,
         messages: [{ role: "user", content: prompt }],
+        // Pinned for the same reason the review itself is (model-proxy.ts): a classification
+        // vote that changes between identical invocations is noise, not judgement.
+        temperature: 0,
         // Generous on purpose: reasoning models spend tokens before the final channel, and a cap
         // that starves the final answer reads exactly like non-compliance.
         max_completion_tokens: 4000,
