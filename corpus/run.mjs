@@ -17,7 +17,7 @@ import { generateRuleDocument, registerTsExtensionHooks } from "./rule-source.mj
 
 registerTsExtensionHooks();
 const { sanitizeFindingBody } = await import("../src/publish/sanitize.ts");
-const { repairClassification } = await import("../src/engine/classify.ts");
+const { repairClassification, auditClassification } = await import("../src/engine/classify.ts");
 
 /**
  * Measures the reviewer against the seeded-defect corpus.
@@ -155,13 +155,15 @@ function runEngine(dir) {
  * report never hides them.
  */
 async function repairFindings(result) {
-  const outcome = await repairClassification(result.comments ?? [], {
+  const deps = {
     endpoint: process.env.OCR_LLM_URL ?? "",
     token: process.env.OCR_LLM_TOKEN ?? "",
     model: process.env.OCR_LLM_MODEL ?? "",
-  });
-  result.comments = outcome.findings;
-  const total = (result.summary?.total_tokens ?? 0) + outcome.tokens;
+  };
+  const repaired = await repairClassification(result.comments ?? [], deps);
+  const audited = await auditClassification(repaired.findings, deps);
+  result.comments = audited.findings;
+  const total = (result.summary?.total_tokens ?? 0) + repaired.tokens + audited.tokens;
   result.summary = { ...(result.summary ?? {}), total_tokens: total };
 }
 

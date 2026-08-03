@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   FINDING_CATEGORIES,
   FINDING_SEVERITIES,
+  auditClassification,
   needsClassification,
   repairClassification,
   type ClassifiableFinding,
@@ -157,5 +158,44 @@ describe("repairClassification", () => {
         expect(needsClassification(finding({ category, severity }))).toBe(false);
       }
     }
+  });
+});
+
+describe("auditClassification", () => {
+  it("adopts a moved classification in either direction and counts it", async () => {
+    const { fetchImpl, calls } = fakeFetch([
+      { status: 200, content: '{"category":"security","severity":"critical"}', tokens: 120 },
+    ]);
+    const input = [finding({ category: "security", severity: "high" })];
+    const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
+    expect(outcome.findings[0]).toMatchObject({ category: "security", severity: "critical" });
+    expect(outcome).toMatchObject({ changed: 1, tokens: 120 });
+    expect(calls[0]?.body.messages[0]?.content).toContain("Audit the classification");
+  });
+
+  it("keeps the original untouched when the audit confirms it — a true high stays high", async () => {
+    const { fetchImpl } = fakeFetch([
+      { status: 200, content: '{"category":"test","severity":"high"}', tokens: 80 },
+    ]);
+    const input = [finding({ category: "test", severity: "high" })];
+    const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
+    expect(outcome.findings[0]).toBe(input[0]);
+    expect(outcome).toMatchObject({ changed: 0, tokens: 80 });
+  });
+
+  it("keeps the original when the audit reply is invalid — the audit never destroys", async () => {
+    const { fetchImpl } = fakeFetch([{ status: 200, content: "not json at all" }]);
+    const input = [finding({ category: "bug", severity: "medium" })];
+    const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
+    expect(outcome.findings[0]).toBe(input[0]);
+    expect(outcome.changed).toBe(0);
+  });
+
+  it("skips unclassified findings — those belong to the repair pass", async () => {
+    const { fetchImpl, calls } = fakeFetch([]);
+    const input = [finding()];
+    const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
+    expect(outcome.findings[0]).toBe(input[0]);
+    expect(calls).toHaveLength(0);
   });
 });

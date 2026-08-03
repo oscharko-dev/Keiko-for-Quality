@@ -122,6 +122,11 @@ export const REASON_CODES = [
   // honest residue: findings that stayed unclassified rather than being guessed at, and `tokens`
   // is what the repair itself spent, so the extra calls never hide inside the engine's own total.
   "classify.repaired",
+  // Classification self-audit (v0.11.0): every classified finding re-derives category/severity
+  // from its own text through the written ladder, because the measured miscalibration on
+  // open-weight models roams between cases rather than sitting still. `changed` counts adopted
+  // moves in either direction; the audit never invents and never touches unclassified findings.
+  "classify.audited",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
