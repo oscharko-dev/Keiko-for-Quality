@@ -587,6 +587,229 @@ function currentPlatformDigest(pin = ENGINE_PIN, platform = process.platform, ar
   return pin.platforms[platformKey(platform, arch)]?.sha256;
 }
 
+// src/engine/result.ts
+var SUPPORTED_MANIFEST_SCHEMA = "ocr.run-manifest/v1";
+var RUN_STATUSES = /* @__PURE__ */ new Set(["success", "skipped", "failed"]);
+var TERMINAL_STATES = /* @__PURE__ */ new Set([
+  "complete",
+  "partial",
+  "failed",
+  "skipped"
+]);
+var LIMITS = {
+  maxResultBytes: 32 * 1024 * 1024,
+  maxFindings: 1e3,
+  maxWarnings: 1e3,
+  maxCoverage: 2e4,
+  maxBodyChars: 2e4,
+  maxLine: 1e7
+};
+function parseCoverageEntries(value, field) {
+  if (value === void 0) return [];
+  return asArray(value, field, LIMITS.maxCoverage).map((entry, i) => {
+    const object = asObject(entry, `${field}[${String(i)}]`);
+    return { path: asString(object.path, `${field}[${String(i)}].path`) };
+  });
+}
+function parseCoverage(value, field) {
+  const object = asObject(value, field);
+  return {
+    selected: parseCoverageEntries(object.selected, `${field}.selected`),
+    completed: parseCoverageEntries(object.completed, `${field}.completed`),
+    reused: parseCoverageEntries(object.reused, `${field}.reused`),
+    failed: parseCoverageEntries(object.failed, `${field}.failed`),
+    waived: parseCoverageEntries(object.waived, `${field}.waived`)
+  };
+}
+function parseLine(value, field) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > LIMITS.maxLine) {
+    throw new ValidationError(field);
+  }
+  return value;
+}
+function parseFindings2(value, field) {
+  if (value === void 0 || value === null) return [];
+  return asArray(value, field, LIMITS.maxFindings).map((entry, i) => {
+    const scope = `${field}[${String(i)}]`;
+    const object = asObject(entry, scope);
+    const start = parseLine(object.start_line, `${scope}.start_line`);
+    const end = parseLine(object.end_line, `${scope}.end_line`);
+    if (end < start) throw new ValidationError(`${scope}.end_line`);
+    return {
+      // The engine's path comes from candidate-controlled input and is used to address the GitHub
+      // API, so it is re-validated here rather than trusted because the engine echoed it.
+      path: repoPath(asString(object.path, `${scope}.path`), `${scope}.path`),
+      content: asString(object.content, `${scope}.content`, LIMITS.maxBodyChars),
+      startLine: start,
+      endLine: end,
+      severity: optionalToken2(object.severity, `${scope}.severity`),
+      category: optionalToken2(object.category, `${scope}.category`)
+    };
+  });
+}
+function optionalToken2(value, field) {
+  if (value === void 0 || value === null || value === "") return void 0;
+  const token = asString(value, field, 64);
+  if (!/^[a-z][a-z0-9_-]*$/i.test(token)) throw new ValidationError(field);
+  return token;
+}
+function parseWarnings(value, field) {
+  if (value === void 0 || value === null) return [];
+  return asArray(value, field, LIMITS.maxWarnings).map((entry, i) => {
+    const scope = `${field}[${String(i)}]`;
+    const object = asObject(entry, scope);
+    return {
+      type: asString(object.type, `${scope}.type`, 200),
+      // Not a validated repository path: the engine also reports warnings without a file.
+      file: typeof object.file === "string" ? object.file.slice(0, 1024) : ""
+    };
+  });
+}
+function parseSummary(value) {
+  if (value === void 0 || value === null) {
+    return { totalTokens: 0, budgetExceeded: false, filesReviewed: 0 };
+  }
+  const object = asObject(value, "summary");
+  const tokens = object.total_tokens;
+  const reviewed = object.files_reviewed;
+  return {
+    totalTokens: typeof tokens === "number" && Number.isFinite(tokens) ? Math.trunc(tokens) : 0,
+    budgetExceeded: object.budget_exceeded === true,
+    filesReviewed: typeof reviewed === "number" && Number.isFinite(reviewed) ? Math.trunc(reviewed) : 0
+  };
+}
+function parseTerminalState(value) {
+  if (typeof value !== "string") return "unknown";
+  return TERMINAL_STATES.has(value) ? value : "unknown";
+}
+function parseEngineResult(text3) {
+  if (text3.length === 0 || text3.length > LIMITS.maxResultBytes) {
+    throw new ValidationError("result.size");
+  }
+  const root = asObject(parseJson(text3, "result"), "result");
+  const rawManifest = root.manifest;
+  const manifestPresent = rawManifest !== void 0 && rawManifest !== null;
+  const manifest = manifestPresent ? asObject(rawManifest, "result.manifest") : {};
+  const summary = parseSummary(root.summary);
+  const rawStatus = root.status;
+  const status = typeof rawStatus === "string" && RUN_STATUSES.has(rawStatus) ? rawStatus : "unknown";
+  return {
+    manifestPresent,
+    status,
+    filesReviewed: summary.filesReviewed,
+    schemaVersion: manifestPresent ? asString(manifest.schema_version, "result.manifest.schema_version", 128) : "",
+    terminalState: parseTerminalState(manifest.terminal_state),
+    coverage: manifestPresent ? parseCoverage(manifest.coverage, "result.manifest.coverage") : { selected: [], completed: [], reused: [], failed: [], waived: [] },
+    findings: parseFindings2(root.comments, "result.comments"),
+    warnings: parseWarnings(root.warnings, "result.warnings"),
+    totalTokens: summary.totalTokens,
+    budgetExceeded: summary.budgetExceeded
+  };
+}
+
+// src/engine/settle.ts
+function incomplete(mode, reason, findings, counts = {}, covered = NO_COVERED_PATHS) {
+  return { status: "incomplete", mode, reason, counts, findings, coveredPaths: covered };
+}
+var NO_COVERED_PATHS = /* @__PURE__ */ new Set();
+function verdictsSurviveIncompleteness(reason) {
+  return reason === "settlement.incomplete.budget_exceeded" || reason === "settlement.incomplete.coverage_gap";
+}
+function coveredPaths(result) {
+  const covered = /* @__PURE__ */ new Set();
+  for (const entry of result.coverage.completed) covered.add(entry.path);
+  for (const entry of result.coverage.reused) covered.add(entry.path);
+  return covered;
+}
+var NO_MEMOIZED_PATHS = /* @__PURE__ */ new Set();
+function findCoverageGap(inventory, result, memoizedPaths) {
+  const covered = coveredPaths(result);
+  let gap = 0;
+  for (const path of inventory.reviewablePaths) {
+    if (!covered.has(path) && !memoizedPaths.has(path)) gap += 1;
+  }
+  return gap;
+}
+function unlistedWarnings(profile, result) {
+  let unlisted = 0;
+  for (const warning of result.warnings) {
+    if (!profile.benignWarnings.has(warning.type)) unlisted += 1;
+  }
+  return unlisted;
+}
+function commonDisqualifier(mode, result, profile, config) {
+  const unlisted = unlistedWarnings(profile, result);
+  if (unlisted > 0) {
+    return incomplete(mode, "settlement.incomplete.warning_not_allowlisted", result.findings, {
+      unlisted
+    });
+  }
+  if (result.budgetExceeded || result.totalTokens > config.tokenBudget) {
+    return incomplete(
+      mode,
+      "settlement.incomplete.budget_exceeded",
+      result.findings,
+      { tokens: result.totalTokens },
+      coveredPaths(result)
+    );
+  }
+  if (result.findings.length > config.maxFindings) {
+    return incomplete(mode, "settlement.incomplete.engine_error", result.findings, {
+      findings: result.findings.length
+    });
+  }
+  return void 0;
+}
+function settleReconciled(inventory, result, profile, config, memoizedPaths) {
+  if (result.schemaVersion !== SUPPORTED_MANIFEST_SCHEMA) {
+    return incomplete("reconciled", "settlement.incomplete.schema_rejected", []);
+  }
+  if (result.terminalState !== "complete") {
+    return incomplete("reconciled", "settlement.incomplete.terminal_state", result.findings);
+  }
+  if (result.coverage.failed.length > 0) {
+    return incomplete("reconciled", "settlement.incomplete.coverage_failed", result.findings, {
+      failed: result.coverage.failed.length
+    });
+  }
+  const gap = findCoverageGap(inventory, result, memoizedPaths);
+  if (gap > 0) {
+    return incomplete(
+      "reconciled",
+      "settlement.incomplete.coverage_gap",
+      result.findings,
+      { gap, reviewable: inventory.reviewablePaths.size },
+      coveredPaths(result)
+    );
+  }
+  return commonDisqualifier("reconciled", result, profile, config) ?? {
+    status: "complete",
+    mode: "reconciled",
+    findings: result.findings
+  };
+}
+function settleCounted(inventory, result, profile, config, memoizedPaths) {
+  if (result.status !== "success") {
+    return incomplete("counted", "settlement.incomplete.terminal_state", result.findings);
+  }
+  const expected = Math.max(0, inventory.reviewablePaths.size - memoizedPaths.size);
+  if (result.filesReviewed < expected) {
+    return incomplete("counted", "settlement.incomplete.coverage_gap", result.findings, {
+      gap: expected - result.filesReviewed,
+      reviewable: expected,
+      reviewed: result.filesReviewed
+    });
+  }
+  return commonDisqualifier("counted", result, profile, config) ?? {
+    status: "complete",
+    mode: "counted",
+    findings: result.findings
+  };
+}
+function settle(inventory, result, profile, config, memoizedPaths = NO_MEMOIZED_PATHS) {
+  return result.manifestPresent ? settleReconciled(inventory, result, profile, config, memoizedPaths) : settleCounted(inventory, result, profile, config, memoizedPaths);
+}
+
 // src/publish/marker.ts
 import { createHash as createHash2 } from "node:crypto";
 var MARKER_PREFIX = "keiko-for-quality";
@@ -1210,126 +1433,6 @@ async function acquireEngine(directory, diagnostics, pin = ENGINE_PIN, platform 
   return { binaryPath, digest: target.sha256 };
 }
 
-// src/engine/result.ts
-var SUPPORTED_MANIFEST_SCHEMA = "ocr.run-manifest/v1";
-var RUN_STATUSES = /* @__PURE__ */ new Set(["success", "skipped", "failed"]);
-var TERMINAL_STATES = /* @__PURE__ */ new Set([
-  "complete",
-  "partial",
-  "failed",
-  "skipped"
-]);
-var LIMITS = {
-  maxResultBytes: 32 * 1024 * 1024,
-  maxFindings: 1e3,
-  maxWarnings: 1e3,
-  maxCoverage: 2e4,
-  maxBodyChars: 2e4,
-  maxLine: 1e7
-};
-function parseCoverageEntries(value, field) {
-  if (value === void 0) return [];
-  return asArray(value, field, LIMITS.maxCoverage).map((entry, i) => {
-    const object = asObject(entry, `${field}[${String(i)}]`);
-    return { path: asString(object.path, `${field}[${String(i)}].path`) };
-  });
-}
-function parseCoverage(value, field) {
-  const object = asObject(value, field);
-  return {
-    selected: parseCoverageEntries(object.selected, `${field}.selected`),
-    completed: parseCoverageEntries(object.completed, `${field}.completed`),
-    reused: parseCoverageEntries(object.reused, `${field}.reused`),
-    failed: parseCoverageEntries(object.failed, `${field}.failed`),
-    waived: parseCoverageEntries(object.waived, `${field}.waived`)
-  };
-}
-function parseLine(value, field) {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > LIMITS.maxLine) {
-    throw new ValidationError(field);
-  }
-  return value;
-}
-function parseFindings2(value, field) {
-  if (value === void 0 || value === null) return [];
-  return asArray(value, field, LIMITS.maxFindings).map((entry, i) => {
-    const scope = `${field}[${String(i)}]`;
-    const object = asObject(entry, scope);
-    const start = parseLine(object.start_line, `${scope}.start_line`);
-    const end = parseLine(object.end_line, `${scope}.end_line`);
-    if (end < start) throw new ValidationError(`${scope}.end_line`);
-    return {
-      // The engine's path comes from candidate-controlled input and is used to address the GitHub
-      // API, so it is re-validated here rather than trusted because the engine echoed it.
-      path: repoPath(asString(object.path, `${scope}.path`), `${scope}.path`),
-      content: asString(object.content, `${scope}.content`, LIMITS.maxBodyChars),
-      startLine: start,
-      endLine: end,
-      severity: optionalToken2(object.severity, `${scope}.severity`),
-      category: optionalToken2(object.category, `${scope}.category`)
-    };
-  });
-}
-function optionalToken2(value, field) {
-  if (value === void 0 || value === null || value === "") return void 0;
-  const token = asString(value, field, 64);
-  if (!/^[a-z][a-z0-9_-]*$/i.test(token)) throw new ValidationError(field);
-  return token;
-}
-function parseWarnings(value, field) {
-  if (value === void 0 || value === null) return [];
-  return asArray(value, field, LIMITS.maxWarnings).map((entry, i) => {
-    const scope = `${field}[${String(i)}]`;
-    const object = asObject(entry, scope);
-    return {
-      type: asString(object.type, `${scope}.type`, 200),
-      // Not a validated repository path: the engine also reports warnings without a file.
-      file: typeof object.file === "string" ? object.file.slice(0, 1024) : ""
-    };
-  });
-}
-function parseSummary(value) {
-  if (value === void 0 || value === null) {
-    return { totalTokens: 0, budgetExceeded: false, filesReviewed: 0 };
-  }
-  const object = asObject(value, "summary");
-  const tokens = object.total_tokens;
-  const reviewed = object.files_reviewed;
-  return {
-    totalTokens: typeof tokens === "number" && Number.isFinite(tokens) ? Math.trunc(tokens) : 0,
-    budgetExceeded: object.budget_exceeded === true,
-    filesReviewed: typeof reviewed === "number" && Number.isFinite(reviewed) ? Math.trunc(reviewed) : 0
-  };
-}
-function parseTerminalState(value) {
-  if (typeof value !== "string") return "unknown";
-  return TERMINAL_STATES.has(value) ? value : "unknown";
-}
-function parseEngineResult(text3) {
-  if (text3.length === 0 || text3.length > LIMITS.maxResultBytes) {
-    throw new ValidationError("result.size");
-  }
-  const root = asObject(parseJson(text3, "result"), "result");
-  const rawManifest = root.manifest;
-  const manifestPresent = rawManifest !== void 0 && rawManifest !== null;
-  const manifest = manifestPresent ? asObject(rawManifest, "result.manifest") : {};
-  const summary = parseSummary(root.summary);
-  const rawStatus = root.status;
-  const status = typeof rawStatus === "string" && RUN_STATUSES.has(rawStatus) ? rawStatus : "unknown";
-  return {
-    manifestPresent,
-    status,
-    filesReviewed: summary.filesReviewed,
-    schemaVersion: manifestPresent ? asString(manifest.schema_version, "result.manifest.schema_version", 128) : "",
-    terminalState: parseTerminalState(manifest.terminal_state),
-    coverage: manifestPresent ? parseCoverage(manifest.coverage, "result.manifest.coverage") : { selected: [], completed: [], reused: [], failed: [], waived: [] },
-    findings: parseFindings2(root.comments, "result.comments"),
-    warnings: parseWarnings(root.warnings, "result.warnings"),
-    totalTokens: summary.totalTokens,
-    budgetExceeded: summary.budgetExceeded
-  };
-}
-
 // src/engine/rule-identity.ts
 import { createHash as createHash4 } from "node:crypto";
 
@@ -1791,98 +1894,6 @@ async function runEngine(options2, diagnostics) {
   } finally {
     await rm(home, { recursive: true, force: true });
   }
-}
-
-// src/engine/settle.ts
-function incomplete(mode, reason, findings, counts = {}) {
-  return { status: "incomplete", mode, reason, counts, findings };
-}
-function coveredPaths(result) {
-  const covered = /* @__PURE__ */ new Set();
-  for (const entry of result.coverage.completed) covered.add(entry.path);
-  for (const entry of result.coverage.reused) covered.add(entry.path);
-  return covered;
-}
-var NO_MEMOIZED_PATHS = /* @__PURE__ */ new Set();
-function findCoverageGap(inventory, result, memoizedPaths) {
-  const covered = coveredPaths(result);
-  let gap = 0;
-  for (const path of inventory.reviewablePaths) {
-    if (!covered.has(path) && !memoizedPaths.has(path)) gap += 1;
-  }
-  return gap;
-}
-function unlistedWarnings(profile, result) {
-  let unlisted = 0;
-  for (const warning of result.warnings) {
-    if (!profile.benignWarnings.has(warning.type)) unlisted += 1;
-  }
-  return unlisted;
-}
-function commonDisqualifier(mode, result, profile, config) {
-  const unlisted = unlistedWarnings(profile, result);
-  if (unlisted > 0) {
-    return incomplete(mode, "settlement.incomplete.warning_not_allowlisted", result.findings, {
-      unlisted
-    });
-  }
-  if (result.budgetExceeded || result.totalTokens > config.tokenBudget) {
-    return incomplete(mode, "settlement.incomplete.budget_exceeded", result.findings, {
-      tokens: result.totalTokens
-    });
-  }
-  if (result.findings.length > config.maxFindings) {
-    return incomplete(mode, "settlement.incomplete.engine_error", result.findings, {
-      findings: result.findings.length
-    });
-  }
-  return void 0;
-}
-function settleReconciled(inventory, result, profile, config, memoizedPaths) {
-  if (result.schemaVersion !== SUPPORTED_MANIFEST_SCHEMA) {
-    return incomplete("reconciled", "settlement.incomplete.schema_rejected", []);
-  }
-  if (result.terminalState !== "complete") {
-    return incomplete("reconciled", "settlement.incomplete.terminal_state", result.findings);
-  }
-  if (result.coverage.failed.length > 0) {
-    return incomplete("reconciled", "settlement.incomplete.coverage_failed", result.findings, {
-      failed: result.coverage.failed.length
-    });
-  }
-  const gap = findCoverageGap(inventory, result, memoizedPaths);
-  if (gap > 0) {
-    return incomplete("reconciled", "settlement.incomplete.coverage_gap", result.findings, {
-      gap,
-      reviewable: inventory.reviewablePaths.size
-    });
-  }
-  return commonDisqualifier("reconciled", result, profile, config) ?? {
-    status: "complete",
-    mode: "reconciled",
-    findings: result.findings
-  };
-}
-function settleCounted(inventory, result, profile, config, memoizedPaths) {
-  if (result.status !== "success") {
-    return incomplete("counted", "settlement.incomplete.terminal_state", result.findings);
-  }
-  const expected = Math.max(0, inventory.reviewablePaths.size - memoizedPaths.size);
-  if (result.filesReviewed < expected) {
-    return incomplete("counted", "settlement.incomplete.coverage_gap", result.findings, {
-      gap: expected - result.filesReviewed,
-      reviewable: expected,
-      reviewed: result.filesReviewed
-    });
-  }
-  return commonDisqualifier("counted", result, profile, config) ?? {
-    status: "complete",
-    mode: "counted",
-    findings: result.findings
-  };
-}
-function settle(inventory, result, profile, config, memoizedPaths = NO_MEMOIZED_PATHS) {
-  return result.manifestPresent ? settleReconciled(inventory, result, profile, config, memoizedPaths) : settleCounted(inventory, result, profile, config, memoizedPaths);
 }
 
 // src/git/plumbing.ts
@@ -2824,7 +2835,14 @@ function prepareMemoization(request, inventory, diagnostics) {
   });
   return memo;
 }
-async function settleIncomplete(request, inventory, reason, diagnostics, findings = [], memo = INERT_MEMO, counts) {
+function truncatedCacheFields(request, inventory, memo, findings, covered) {
+  const finalized = covered === void 0 ? void 0 : finalizeCacheStore(request, inventory, memo, findings, covered);
+  return {
+    cacheAppended: finalized?.appended ?? 0,
+    ...finalized === void 0 ? {} : { updatedCacheStore: finalized.store }
+  };
+}
+async function settleIncomplete(request, inventory, reason, diagnostics, findings = [], memo = INERT_MEMO, counts, covered) {
   diagnostics.record(reason, {
     headSha: request.head,
     ...counts !== void 0 ? { counts } : {}
@@ -2843,7 +2861,7 @@ async function settleIncomplete(request, inventory, reason, diagnostics, finding
     outcome: "incomplete",
     reason,
     ...inventoryCounts(inventory),
-    cacheAppended: 0,
+    ...truncatedCacheFields(request, inventory, memo, findings, covered),
     ...cacheCounts(memo),
     ...publish === void 0 ? {} : { publish }
   };
@@ -2890,14 +2908,15 @@ function publicationDegradedCounts(outcome) {
     readback_failures: outcome.readbackFailures
   };
 }
-function finalizeCacheStore(request, inventory, memo, engineFindings) {
+function finalizeCacheStore(request, inventory, memo, engineFindings, restrictTo) {
   if (request.cacheStore === void 0) return void 0;
   if (memo.ruleDigest === void 0 || memo.engineDigest === void 0 || memo.pathSetDigest === void 0) {
     return void 0;
   }
+  const eligible = restrictTo === void 0 ? memo.eligiblePaths : new Set([...memo.eligiblePaths].filter((path) => restrictTo.has(path)));
   const newEntries = buildNewEntries({
     inventory,
-    eligiblePaths: memo.eligiblePaths,
+    eligiblePaths: eligible,
     hitPaths: memo.hitPaths,
     findings: engineFindings,
     ruleDigest: memo.ruleDigest,
@@ -3014,7 +3033,9 @@ async function performReview(request, diagnostics) {
       settlement.reason,
       diagnostics,
       mergeHitFindings(settlement.findings, memo.hits),
-      memo
+      memo,
+      void 0,
+      verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths : void 0
     );
   }
   if (!await headIsCurrent(request)) {
@@ -3269,7 +3290,10 @@ async function saveCacheStore(path, store, appended, diagnostics) {
   }
 }
 async function maybeSaveCacheStore(storePath, report, diagnostics) {
-  if (storePath === "" || report.outcome !== "complete" || report.updatedCacheStore === void 0) {
+  if (storePath === "" || report.updatedCacheStore === void 0) return;
+  if (report.outcome === "incomplete") {
+    if (report.reason === void 0 || !verdictsSurviveIncompleteness(report.reason)) return;
+  } else if (report.outcome !== "complete") {
     return;
   }
   await saveCacheStore(storePath, report.updatedCacheStore, report.cacheAppended, diagnostics);
