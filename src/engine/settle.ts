@@ -56,6 +56,19 @@ export type Settlement =
        * blocks, and nothing here may be read as a clean review.
        */
       readonly findings: readonly EngineFinding[];
+      /**
+       * The paths the engine reports it actually reviewed on this run.
+       *
+       * Present so a caller can tell "not reviewed yet" from "reviewed, and the run fell short
+       * elsewhere". A budget-truncated run has real verdicts for the files it reached; without
+       * this set the only safe assumption is that none of them are trustworthy, which is what
+       * made a large pull request re-price every file on every push and never converge
+       * (Keiko-for-Quality#75).
+       *
+       * Empty whenever the manifest could not be read — a rejected schema leaves no coverage data
+       * to believe, and an empty set denies memoization rather than guessing.
+       */
+      readonly coveredPaths: ReadonlySet<string>;
     };
 
 function incomplete(
@@ -63,8 +76,37 @@ function incomplete(
   reason: ReasonCode,
   findings: readonly EngineFinding[],
   counts: Record<string, number> = {},
+  covered: ReadonlySet<string> = NO_COVERED_PATHS,
 ): Settlement {
-  return { status: "incomplete", mode, reason, counts, findings };
+  return { status: "incomplete", mode, reason, counts, findings, coveredPaths: covered };
+}
+
+/**
+ * The safe default: no path is known to have been reviewed.
+ *
+ * Every incomplete settlement that does not deliberately pass a covered set gets this, so adding
+ * a new incomplete branch can only ever deny memoization, never grant it by omission.
+ */
+const NO_COVERED_PATHS: ReadonlySet<string> = new Set();
+
+/**
+ * Whether an incompleteness leaves the verdicts for reviewed files intact.
+ *
+ * Two different facts wear the same "incomplete" label. A budget overrun or a coverage gap means
+ * the engine did not reach every file — but what it did reach, it judged properly, and discarding
+ * those verdicts costs the whole review again on the next push. A rejected schema, a bad terminal
+ * state, an implausible finding count, or a failed coverage entry mean the manifest itself is not
+ * to be believed, so nothing it says about any file may be replayed later with confidence it
+ * never earned.
+ *
+ * The distinction lives here, once, rather than as a condition at each call site: a new reason
+ * code is denied by default and has to be argued into this list.
+ */
+export function verdictsSurviveIncompleteness(reason: ReasonCode): boolean {
+  return (
+    reason === "settlement.incomplete.budget_exceeded" ||
+    reason === "settlement.incomplete.coverage_gap"
+  );
 }
 
 /** Paths the engine claims it actually reviewed, or safely reused a prior review for. */
@@ -125,9 +167,13 @@ function commonDisqualifier(
     });
   }
   if (result.budgetExceeded || result.totalTokens > config.tokenBudget) {
-    return incomplete(mode, "settlement.incomplete.budget_exceeded", result.findings, {
-      tokens: result.totalTokens,
-    });
+    return incomplete(
+      mode,
+      "settlement.incomplete.budget_exceeded",
+      result.findings,
+      { tokens: result.totalTokens },
+      coveredPaths(result),
+    );
   }
   // A result carrying more findings than the consumer believes plausible is more likely a
   // misconfigured model or a prompt-injection success than a genuinely terrible change.
@@ -170,10 +216,13 @@ function settleReconciled(
   }
   const gap = findCoverageGap(inventory, result, memoizedPaths);
   if (gap > 0) {
-    return incomplete("reconciled", "settlement.incomplete.coverage_gap", result.findings, {
-      gap,
-      reviewable: inventory.reviewablePaths.size,
-    });
+    return incomplete(
+      "reconciled",
+      "settlement.incomplete.coverage_gap",
+      result.findings,
+      { gap, reviewable: inventory.reviewablePaths.size },
+      coveredPaths(result),
+    );
   }
   return (
     commonDisqualifier("reconciled", result, profile, config) ?? {

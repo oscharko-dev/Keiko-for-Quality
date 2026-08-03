@@ -11,6 +11,7 @@ import { loadReviewProfile } from "../config/profile.js";
 import { createDiagnostics, type Diagnostics } from "../diagnostics/sink.js";
 import { parseJson } from "../core/validate.js";
 import { ENGINE_PIN } from "../engine/pinned-release.js";
+import { verdictsSurviveIncompleteness } from "../engine/settle.js";
 import { maintainRunSummary } from "../publish/summary.js";
 import { performReview, type ReviewReport } from "../review.js";
 import { evaluateEligibility } from "./eligibility.js";
@@ -123,17 +124,31 @@ async function saveCacheStore(
 }
 
 /**
- * Only a `complete` settlement may write back — checked here too, independent of whatever
- * `performReview` itself guarantees, because a store write is irreversible in a way a diagnostic is
- * not: writing a cache entry for a run this repository does not consider fully reviewed would let a
- * later, unrelated run replay it with confidence it never earned.
+ * Which runs may write back — checked here too, independent of whatever `performReview` itself
+ * guarantees, because a store write is irreversible in a way a diagnostic is not: a cache entry
+ * for a file this repository never actually reviewed would be replayed later with confidence it
+ * never earned.
+ *
+ * A complete settlement always may. An incomplete one may only when its reason leaves the
+ * reviewed files' verdicts intact — a budget overrun or a coverage gap, where the engine simply
+ * did not reach every file — and never for a rejected schema, a bad terminal state, or an
+ * implausible finding count, where the manifest itself is not to be believed. `performReview`
+ * enforces the same rule one layer up by supplying a store only in those cases, and restricts its
+ * entries to the paths the engine reports it reached; this check is the independent second one.
+ *
+ * Without it a large pull request could never converge: every push exceeded the budget, settled
+ * incomplete, persisted nothing, and re-priced every file from scratch (Keiko-for-Quality#75).
  */
 async function maybeSaveCacheStore(
   storePath: string,
   report: ReviewReport,
   diagnostics: Diagnostics,
 ): Promise<void> {
-  if (storePath === "" || report.outcome !== "complete" || report.updatedCacheStore === undefined) {
+  if (storePath === "" || report.updatedCacheStore === undefined) return;
+  if (report.outcome === "incomplete") {
+    // An incomplete report without a reason cannot be argued into the allowed set, so it is not.
+    if (report.reason === undefined || !verdictsSurviveIncompleteness(report.reason)) return;
+  } else if (report.outcome !== "complete") {
     return;
   }
   await saveCacheStore(storePath, report.updatedCacheStore, report.cacheAppended, diagnostics);

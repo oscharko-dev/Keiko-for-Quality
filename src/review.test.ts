@@ -17,6 +17,7 @@ import type { RuntimeConfig } from "./config/runtime.js";
 import { blobId, commitSha, sha256 } from "./core/brands.js";
 import { createSilentDiagnostics } from "./diagnostics/sink.js";
 import { currentPlatformDigest } from "./engine/pinned-release.js";
+import { SUPPORTED_MANIFEST_SCHEMA } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
 import { GitHubApiError, GitHubClient } from "./github/client.js";
 import type { ReviewRequest } from "./review.js";
@@ -481,5 +482,71 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(report.outcome).toBe("abandoned");
       expect(createSpy).not.toHaveBeenCalled();
     });
+  });
+
+  /**
+   * The safety half of Keiko-for-Quality#75, and the reason that change is narrow.
+   *
+   * A budget-truncated run keeps the verdicts for files it reached, so a large pull request stops
+   * re-pricing everything on every push. The danger in doing that is worse than the cost it fixes:
+   * if the store also absorbed the files the engine never opened, they would be frozen as "clean"
+   * and replayed with confidence nobody earned — a review that silently stops reviewing.
+   *
+   * So this drives a real budget overrun whose manifest covers `src/a.ts` and NOT `src/b.ts`, and
+   * pins both halves: the reached file is persisted, the unreached one is not, at any price.
+   */
+  it("persists only what a budget-truncated run actually reviewed", async () => {
+    // Placed last on purpose: an earlier engine call would shift `mock.calls[0]` under the test
+    // that reads the first call to prove the exclude list reached the engine.
+    runEngineMock.mockClear();
+    const engineDigest = currentPlatformDigest();
+    expect(engineDigest).toBeDefined();
+    if (engineDigest === undefined) return;
+
+    const truncated = JSON.stringify({
+      status: "success",
+      summary: { files_reviewed: 1, total_tokens: 9_000_000, budget_exceeded: true },
+      comments: [],
+      manifest: {
+        schema_version: SUPPORTED_MANIFEST_SCHEMA,
+        terminal_state: "complete",
+        // The engine reached src/a.ts and stopped before src/b.ts.
+        coverage: {
+          selected: [{ path: "src/a.ts" }, { path: "src/b.ts" }],
+          completed: [{ path: "src/a.ts" }],
+          reused: [],
+          failed: [],
+          waived: [],
+        },
+      },
+    });
+
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+    runEngineMock.mockResolvedValue({ stdout: truncated, ruleDigest: engineDigest });
+
+    const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+    const report = await performReview(baseRequest(empty), createSilentDiagnostics());
+
+    expect(report.outcome).toBe("incomplete");
+    // A budget truncation surfaces as a COVERAGE GAP, not as `budget_exceeded`: the files the
+    // engine never reached are the gap, and `settleReconciled` asks that question before the
+    // budget one. That ordering is why both reasons have to be in the survivor set — pinning only
+    // `budget_exceeded` would have left the realistic case unmemoized and the fix inert.
+    expect(report.reason).toBe("settlement.incomplete.coverage_gap");
+
+    const persisted = report.updatedCacheStore;
+    expect(persisted).toBeDefined();
+    // Entries are keyed by blob, not by path, so identify them the way a replay would: by the head
+    // blob of the file in question. Asserting on a `path` field the entry does not carry would
+    // have compared undefined to undefined and passed over any behaviour at all.
+    const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+    const blobs = (persisted?.entries ?? []).map((e) => String(e.headBlob));
+    // Safety first, literally: the file the engine never opened must never be replayable as
+    // reviewed. This assertion leads so that a regression fails on the property that matters
+    // rather than on a count that merely correlates with it.
+    expect(blobs).not.toContain(headBlobB);
+    // And the file it did reach earned its verdict, which is the whole point of persisting at all.
+    expect(blobs).toContain(headBlobA);
+    expect(report.cacheAppended).toBe(1);
   });
 });
