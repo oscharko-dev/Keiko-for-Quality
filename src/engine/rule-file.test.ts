@@ -96,11 +96,16 @@ describe("buildRuleFile", () => {
     });
   });
 
-  it("applies its guidance to every path", () => {
+  it("applies its guidance to every path, and only its guidance", () => {
     const file = buildRuleFile(profileWith({}));
     expect(file.rules).toHaveLength(1);
     expect(file.rules[0]?.path).toBe("**/*");
-    expect(file.rules[0]?.merge_system_rule).toBe(true);
+    // Regression pin (2026-08-03): with the system-rule merge on, the engine appended its
+    // unversioned per-language checklist after this rule, and its yaml entry ("First-party
+    // (`actions/*`) pinned to `v4` is acceptable") directly contradicted the supply-chain
+    // section — models followed the checklist and the loosened-pin corpus case went unreported.
+    // The prompt the model reviews under is exactly the one the rule digest hashes.
+    expect(file.rules[0]?.merge_system_rule).toBe(false);
   });
 
   /**

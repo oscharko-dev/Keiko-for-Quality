@@ -15,7 +15,10 @@ test("builds the committed corpus profile through the production loader", async 
   const parsed = JSON.parse(document);
   assert.equal(parsed.rules.length, 1);
   assert.ok(parsed.rules[0].rule.includes("Look before you claim"));
-  assert.equal(parsed.rules[0].merge_system_rule, true);
+  // Same regression pin as rule-file.test.ts (2026-08-03): the engine's unversioned built-in
+  // checklist contradicted the supply-chain rule from the most authoritative prompt position, so
+  // the merge is off — the corpus must measure the product-owned prompt and nothing else.
+  assert.equal(parsed.rules[0].merge_system_rule, false);
 });
 
 // Release criterion for v0.10.0 (#26): the qualification run must exercise a profile that
