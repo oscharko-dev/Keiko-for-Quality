@@ -327,6 +327,33 @@ describe("runAction: writing the store back", () => {
    * pull request would have kept re-pricing every file on every push. The output carries the
    * write decision itself rather than a proxy a caller has to re-derive.
    */
+  /**
+   * A write that fails must not be reported as a write.
+   *
+   * `saveCacheStore` deliberately swallows the error — a store this run cannot write is a lost
+   * optimization, not a reason to fail a review that already published — but swallowing the
+   * OUTCOME too made `store_written` say `true` with nothing at the path. A consumer gating its
+   * hand-off on that output would then upload a file that does not exist, turning a silent lost
+   * optimization into a red job (CodeRabbit, #78).
+   */
+  it("reports store_written false when the write itself failed", async () => {
+    performReviewMock.mockResolvedValue(
+      report({
+        outcome: "complete",
+        cacheAppended: 1,
+        updatedCacheStore: { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [entry("src/a.ts")] },
+      }),
+    );
+    // A path whose parent does not exist: writeFile fails with ENOENT.
+    const env = await baseEnv({ reviewStorePath: join(dir, "no-such-dir", "store.json") });
+    const diagnostics = createDiagnostics(() => undefined);
+
+    await runAction(env, diagnostics);
+
+    expect((await readOutputs(env)).store_written).toBe("false");
+    expect(diagnostics.drain().map((r) => r.code)).toContain("cache.store_write_failed");
+  });
+
   it("reports store_written true for a truncated run that persisted", async () => {
     const updated: CacheStore = {
       schemaVersion: SUPPORTED_STORE_SCHEMA,

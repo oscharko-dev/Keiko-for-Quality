@@ -121,12 +121,18 @@ async function saveCacheStore(
   store: CacheStore,
   appended: number,
   diagnostics: Diagnostics,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await writeFile(path, serializeStore(store), "utf8");
     diagnostics.record("cache.appended", { counts: { entries: appended } });
+    return true;
   } catch {
+    // Swallowing the error is right — a store this run cannot write is a lost optimization, not a
+    // reason to fail a review that already published. Swallowing the OUTCOME is not: the caller
+    // reports `store_written`, and a consumer that believes it will try to hand off a file that
+    // is not there.
     diagnostics.record("cache.store_write_failed");
+    return false;
   }
 }
 
@@ -158,8 +164,12 @@ async function maybeSaveCacheStore(
   } else if (report.outcome !== "complete") {
     return false;
   }
-  await saveCacheStore(storePath, report.updatedCacheStore, report.cacheAppended, diagnostics);
-  return true;
+  return await saveCacheStore(
+    storePath,
+    report.updatedCacheStore,
+    report.cacheAppended,
+    diagnostics,
+  );
 }
 
 /**

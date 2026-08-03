@@ -3309,8 +3309,10 @@ async function saveCacheStore(path, store, appended, diagnostics) {
   try {
     await writeFile3(path, serializeStore(store), "utf8");
     diagnostics.record("cache.appended", { counts: { entries: appended } });
+    return true;
   } catch {
     diagnostics.record("cache.store_write_failed");
+    return false;
   }
 }
 async function maybeSaveCacheStore(storePath, report, diagnostics) {
@@ -3320,8 +3322,12 @@ async function maybeSaveCacheStore(storePath, report, diagnostics) {
   } else if (report.outcome !== "complete") {
     return false;
   }
-  await saveCacheStore(storePath, report.updatedCacheStore, report.cacheAppended, diagnostics);
-  return true;
+  return await saveCacheStore(
+    storePath,
+    report.updatedCacheStore,
+    report.cacheAppended,
+    diagnostics
+  );
 }
 async function maybeMaintainSummary(env, event, identity, report, diagnostics) {
   if (!readBooleanInput(env, "run_summary", true)) {
