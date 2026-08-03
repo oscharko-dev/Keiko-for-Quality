@@ -611,6 +611,170 @@ choose one on the caller's behalf.
     ],
   },
 
+  // --- Coverage gap classes from the epic #26 judged-uniques classification (issue #58). Each
+  // reproduces one measured MECHANISM from the CodeRabbit/Codex appendix as a small, self-contained
+  // diff rather than the literal finding, because a corpus case must be decidable from the diff
+  // alone (see the header note above on ground truth), never from proprietary source it cannot show.
+  {
+    id: "redaction-assertion-loosened",
+    // Mechanism from the appendix's deps.test.ts:1052-1076 ("Assert that diagnostics redact the
+    // configured email"): the exact-value check is narrowed to an exclusion check that any
+    // transformation of the input satisfies, including a broken one that still leaks part of it.
+    defect: { file: "src/diagnostics.test.ts", category: "test", severity: "high" },
+    about: "exact-value redaction check narrowed to a mere exclusion of the raw input",
+    anchors: ["redact*", "raw email", "differ*", "exact*", "leak*", "mask*"],
+    files: [
+      {
+        path: "src/diagnostics.test.ts",
+        base: `it("redacts the configured email from diagnostics", () => {
+  const output = renderDiagnostics({ email: "user@example.com" });
+  expect(output.email).toBe("[REDACTED]");
+});
+`,
+        head: `it("redacts the configured email from diagnostics", () => {
+  const output = renderDiagnostics({ email: "user@example.com" });
+  expect(output.email).not.toBe("user@example.com");
+});
+`,
+      },
+    ],
+  },
+  {
+    id: "stale-session-after-refresh",
+    // Mechanism from the appendix's SettingsPanel.test.tsx:685-704 class of async-flow tests: the
+    // test still performs the refetch, then asserts against the value captured before it instead
+    // of the refreshed result, so it proves nothing about the refresh it claims to cover.
+    defect: { file: "src/session.test.ts", category: "test", severity: "high" },
+    about: "assertion targets a session captured before the refresh it claims to verify",
+    anchors: ["stale", "refetch*", "re-fetch*", "refresh*", "discard*", "ignor*"],
+    files: [
+      {
+        path: "src/session.test.ts",
+        base: `it("extends the session expiry after a refresh", async () => {
+  const session = await getSession(USER_ID);
+  await refreshSession(session.id);
+  const refreshed = await getSession(USER_ID);
+  expect(refreshed.expiresAt).toBeGreaterThan(session.expiresAt);
+});
+`,
+        head: `it("extends the session expiry after a refresh", async () => {
+  const session = await getSession(USER_ID);
+  await refreshSession(session.id);
+  await getSession(USER_ID);
+  expect(session.expiresAt).toBeGreaterThan(0);
+});
+`,
+      },
+    ],
+  },
+  {
+    id: "cleared-list-omitted-from-update",
+    // Mechanism from the appendix's GatewaySetupDialog.tsx:555-557 ("Honor clearing the
+    // workflow-eligible model list"): an explicitly emptied selection is dropped from the update
+    // instead of sent, so a preserve-existing merge on the receiving end keeps the stale list.
+    defect: { file: "src/capabilities.ts", category: "bug", severity: "high" },
+    about: "an intentional empty selection is dropped from the update instead of sent explicitly",
+    anchors: ["empty", "clear*", "omit*", "unset", "workfloweligiblemodelids", "partial"],
+    files: [
+      {
+        path: "src/capabilities.ts",
+        base: `export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
+  return { workflowEligibleModelIds: selected };
+}
+`,
+        head: `export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
+  if (selected.length === 0) return {};
+  return { workflowEligibleModelIds: selected };
+}
+`,
+      },
+    ],
+  },
+  {
+    id: "empty-result-masks-failure",
+    // Mechanism from the appendix's codingContextRoutes.ts:241-249 ("Record the rejected Jira
+    // configuration"): the catch does not just swallow the error, it manufactures a
+    // success-shaped value a caller reads as legitimate business data, not as a hidden failure.
+    defect: { file: "src/alerts.ts", category: "bug", severity: "high" },
+    about: "fetch failure mapped to an empty result indistinguishable from zero alerts",
+    anchors: ["empty array", "empty list", "swallow*", "silent*", "indistinguishable", "rethrow*"],
+    files: [
+      {
+        path: "src/alerts.ts",
+        base: `export async function listPendingAlerts(client: AlertClient): Promise<Alert[]> {
+  try {
+    return await client.fetchAlerts();
+  } catch (error) {
+    logger.error("alerts.fetch-failed", { correlationId: client.id });
+    throw error;
+  }
+}
+`,
+        head: `export async function listPendingAlerts(client: AlertClient): Promise<Alert[]> {
+  try {
+    return await client.fetchAlerts();
+  } catch {
+    return [];
+  }
+}
+`,
+      },
+    ],
+  },
+  {
+    id: "false-no-caller-claim",
+    // Seeds the negative-existence trap named by the #2930 deep judge (issue #56): a comment
+    // claims no caller passes a value the removed check existed for, and a second file in the very
+    // same diff adds exactly that caller — visible without leaving this diff, so the claim is
+    // refuted by search, not by unseen code (see the corpus header's "decidable from the diff
+    // alone" rule above `CASES`).
+    defect: { file: "src/batch.ts", category: "bug", severity: "high" },
+    about: "guard removed on a no-caller claim contradicted by a caller added in the same diff",
+    anchors: ["infinite", "loop", "hang*", "never terminat*", "advance*", "increment"],
+    files: [
+      {
+        path: "src/batch.ts",
+        base: `export function splitIntoBatches<T>(items: readonly T[], size: number): T[][] {
+  if (size <= 0) throw new RangeError("batch size must be positive");
+  const batches: T[][] = [];
+  for (let i = 0; i < items.length; i += size) batches.push(items.slice(i, i + size));
+  return batches;
+}
+`,
+        head: `export function splitIntoBatches<T>(items: readonly T[], size: number): T[][] {
+  // No caller passes a non-positive size, so this check only rejects input that cannot occur.
+  const batches: T[][] = [];
+  for (let i = 0; i < items.length; i += size) batches.push(items.slice(i, i + size));
+  return batches;
+}
+`,
+      },
+      {
+        path: "src/digest.ts",
+        base: `import { splitIntoBatches } from "./batch.js";
+
+// Falls back to a sensible default digest size until the operator configures one in settings.
+export function digestBatches(
+  items: readonly string[],
+  configuredSize: number | undefined,
+): string[][] {
+  return splitIntoBatches(items, configuredSize ?? 20);
+}
+`,
+        head: `import { splitIntoBatches } from "./batch.js";
+
+// Falls back to 0 — "not yet configured" — until the operator sets a digest size in settings.
+export function digestBatches(
+  items: readonly string[],
+  configuredSize: number | undefined,
+): string[][] {
+  return splitIntoBatches(items, configuredSize ?? 0);
+}
+`,
+      },
+    ],
+  },
+
   // --- Precision cases: a correct change must produce no finding. ---
   {
     id: "clean-refactor",

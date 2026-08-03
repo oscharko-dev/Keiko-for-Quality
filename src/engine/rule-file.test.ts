@@ -182,6 +182,40 @@ describe("buildRuleFile", () => {
     ).toBe(true);
   });
 
+  /**
+   * Issue #58: the corpus's own measured gap (epic #26's judged-uniques classification) named
+   * mechanisms the rule text did not yet ask for. Each assertion here pins one addition to the
+   * text a corpus case (`corpus/cases.mjs`) now depends on being present — a regression here would
+   * silently widen the gap the case was added to close, with the case itself still green (an
+   * anchor-matching false pass would need the model to reconstruct the guidance on its own).
+   */
+  describe("issue #58 coverage-gap guidance", () => {
+    it("asks for a cleared value and a success-shaped error fallback to be treated as defects", () => {
+      const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+      expect(rule).toContain("empty, zero, or cleared value is not the same as no value provided");
+      expect(rule).toContain("maps every failure to a success-shaped fallback");
+    });
+
+    it("asks for a narrowed-to-exclusion or stale-reference assertion to be treated as weakened", () => {
+      const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+      expect(rule).toContain("exact-value assertion narrowed to merely excluding the old value");
+      expect(rule).toContain("captured before a later refresh or refetch");
+    });
+
+    it("requires an exhaustive-search statement before a negative-existence claim is published", () => {
+      const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+      expect(rule).toContain("before claiming nothing calls, passes, or reaches a value");
+      expect(rule).toContain("no caller passes X");
+    });
+
+    it("guards the two ghost-defect classes: a schema-ruled-out collision, and an unverified claim", () => {
+      const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+      expect(rule).toContain("primary key or unique constraint on the compared columns already");
+      expect(rule).toContain("before stating how an encoding, format, or algorithm behaves");
+      expect(rule).toContain("confidently wrong claim about padding, rounding");
+    });
+  });
+
   describe("path-scoped instructions", () => {
     it("renders no section, and changes nothing, when the profile declares none", () => {
       const withoutField = buildRuleFile(profileWith({}));
