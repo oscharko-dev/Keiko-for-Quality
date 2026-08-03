@@ -11,7 +11,8 @@ import {
   type ReviewCommentInput,
 } from "../github/client.js";
 import type { InventoryItem } from "../inventory/classify.js";
-import { composeBody, fingerprint } from "./marker.js";
+import { fingerprint, markerComment } from "./marker.js";
+import { composeFindingBody } from "./presentation.js";
 import { publishFindings, publishIncompleteNotice, type PublishContext } from "./publisher.js";
 
 const HEAD = commitSha("b".repeat(40));
@@ -319,7 +320,14 @@ describe("publishFindings", () => {
       });
       return {
         id: 1,
-        body: composeBody(body, marker),
+        // Built by the production composer, so this fixture cannot drift from the body a
+        // publication really carries — which is the shape deduplication has to recognise.
+        body: composeFindingBody(body, markerComment(marker), {
+          path: "src/retry.ts",
+          line: 1,
+          severity: "medium",
+          category: "bug",
+        }),
         path: "src/retry.ts",
         authorLogin: author,
         commitId: HEAD,

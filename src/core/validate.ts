@@ -22,19 +22,10 @@ export function asString(value: unknown, field: string, max = 4096): string {
   return value;
 }
 
-export function asOptionalString(value: unknown, field: string, max = 4096): string | undefined {
-  return value === undefined ? undefined : asString(value, field, max);
-}
-
 export function asInteger(value: unknown, field: string, min: number, max: number): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
     throw new ValidationError(field);
   }
-  return value;
-}
-
-export function asBoolean(value: unknown, field: string): boolean {
-  if (typeof value !== "boolean") throw new ValidationError(field);
   return value;
 }
 

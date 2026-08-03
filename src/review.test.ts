@@ -356,15 +356,20 @@ describe("performReview: review-cache memoization end to end", () => {
     const report = await performReview(request, diagnostics);
 
     expect(report.outcome).toBe("incomplete");
-    expect(report.reason).toBe("publish.finding_rejected_placement");
+    // The settlement reason moved family for Keiko-for-Quality#57 — from the publication
+    // diagnostic naming WHERE the failure was noticed to the settlement code saying what it means
+    // for coverage, which is what the published incomplete notice has to answer for a reader with
+    // no log access. The #63 invariant this test exists for is untouched: the run-level event
+    // still carries the full breakdown rather than a bare code. The per-finding diagnostic keeps
+    // its own name, and publisher.test.ts still pins it one layer down.
+    expect(report.reason).toBe("settlement.incomplete.publication_degraded");
     expect(report.publish).toMatchObject({ published: 0, rejectedPlacement: 1 });
 
-    // The run-level record — the last one with this code, since `publishFindings`' own per-finding
-    // record for the same code is written first — carries the full outcome breakdown redactedly:
-    // counts and codes only, never the finding's content or the rejection's own message.
+    // The run-level record carries the full outcome breakdown redactedly: counts and codes only,
+    // never the finding's content or the rejection's own message.
     const runLevel = diagnostics
       .drain()
-      .filter((record) => record.code === "publish.finding_rejected_placement")
+      .filter((record) => record.code === "settlement.incomplete.publication_degraded")
       .at(-1);
     expect(runLevel?.counts).toStrictEqual({
       published: 0,

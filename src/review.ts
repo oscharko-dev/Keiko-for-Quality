@@ -483,11 +483,17 @@ async function publishSettledFindings(
 
   // A finding the reviewer found but could not publish is a finding the consumer never saw. The
   // engine's own verdict was "complete", so this is the only place that fact can be recorded.
+  //
+  // The reason names the SETTLEMENT outcome (Keiko-for-Quality#57). It used to carry
+  // `publish.finding_rejected_placement`, a publication diagnostic: accurate about where the
+  // failure happened, but published in the incomplete notice, where the reader needs to know what
+  // it means for their coverage rather than which internal step noticed. The diagnostic keeps its
+  // name and its per-attempt breakdown; only the settlement reason moved family.
   if (publicationDegraded(publish)) {
     const report = await settleIncomplete(
       request,
       inventory,
-      "publish.finding_rejected_placement",
+      "settlement.incomplete.publication_degraded",
       diagnostics,
       [],
       memo,

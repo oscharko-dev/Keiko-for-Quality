@@ -666,6 +666,13 @@ var REASON_CODES = [
   "settlement.incomplete.warning_not_allowlisted",
   "settlement.incomplete.budget_exceeded",
   "settlement.incomplete.engine_error",
+  // A settlement's `reason` is published in the incomplete notice, so it answers "why was my
+  // change not fully reviewed" for a reader who has no access to the log. It must therefore name
+  // a SETTLEMENT outcome. The two below replace codes borrowed from other families — an engine
+  // diagnostic and a publication diagnostic — which described where the trouble was detected
+  // rather than what it meant for coverage. Those codes keep their diagnostic role unchanged.
+  "settlement.incomplete.schema_rejected",
+  "settlement.incomplete.publication_degraded",
   // Publication
   "publish.identity_resolved",
   "publish.identity_unresolved",
@@ -1833,7 +1840,7 @@ function commonDisqualifier(mode, result, profile, config) {
 }
 function settleReconciled(inventory, result, profile, config, memoizedPaths) {
   if (result.schemaVersion !== SUPPORTED_MANIFEST_SCHEMA) {
-    return incomplete("reconciled", "engine.run.schema_rejected", []);
+    return incomplete("reconciled", "settlement.incomplete.schema_rejected", []);
   }
   if (result.terminalState !== "complete") {
     return incomplete("reconciled", "settlement.incomplete.terminal_state", result.findings);
@@ -2915,7 +2922,7 @@ async function publishSettledFindings(request, inventory, settlement, memo, star
     const report = await settleIncomplete(
       request,
       inventory,
-      "publish.finding_rejected_placement",
+      "settlement.incomplete.publication_degraded",
       diagnostics,
       [],
       memo,
