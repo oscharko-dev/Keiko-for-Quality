@@ -342,7 +342,7 @@ describe("counted settlement (no manifest)", () => {
     // Nothing dispatched does not mean nothing to object to: an unlisted warning is about the run.
     const outcome = settle(
       inventory(["src/a.ts"]),
-      released({ status: "skipped", warnings: [{ type: "unknown-warning", message: "x" }] }),
+      released({ status: "skipped", warnings: [{ type: "unknown-warning", file: "src/a.ts" }] }),
       PROFILE,
       CONFIG,
       new Set(["src/a.ts"]),
