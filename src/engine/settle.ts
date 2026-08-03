@@ -253,10 +253,23 @@ function settleCounted(
   config: RuntimeConfig,
   memoizedPaths: ReadonlySet<string>,
 ): Settlement {
-  if (result.status !== "success") {
-    return incomplete("counted", "settlement.incomplete.terminal_state", result.findings);
-  }
   const expected = Math.max(0, inventory.reviewablePaths.size - memoizedPaths.size);
+  if (result.status !== "success") {
+    // Named for the field that actually failed: counted mode has no manifest, so there is no
+    // terminal state to report and the old code said something the run never claimed. The counts
+    // are the load-bearing half — a bare reason told an operator that the review was incomplete
+    // and nothing whatever about how much of it was missing, which is the difference between
+    // "one file failed on a large change" and "nothing was reviewed at all".
+    return incomplete(
+      "counted",
+      "settlement.incomplete.engine_status_not_success",
+      result.findings,
+      {
+        reviewed: result.filesReviewed,
+        expected,
+      },
+    );
+  }
   if (result.filesReviewed < expected) {
     return incomplete("counted", "settlement.incomplete.coverage_gap", result.findings, {
       gap: expected - result.filesReviewed,
