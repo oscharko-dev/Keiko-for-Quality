@@ -119,11 +119,24 @@ function buildRepo(testCase) {
   return dir;
 }
 
+/**
+ * Engine tuning the product owns (2026-08-03): the embedded default stops any per-file subtask at
+ * five minutes, and an open-weight model that reasons in long turns can hit that ceiling on a
+ * CLEAN file — the review then fails having found nothing, which scored a corpus case as an error
+ * four times before the session log named the cause ("main_task did not complete before
+ * stopping", 30 LLM rounds). Ten minutes converts those stops into completions; the decisiveness
+ * section of the rule is what keeps typical files far below either ceiling. The consumer workflow
+ * must ship the same config via OCR_CONFIG_PATH — the corpus measures the pipeline that runs.
+ */
+const ENGINE_CONFIG = JSON.stringify({ MAX_SUBTASK_EXECUTION_TIME_MINUTES: 10 });
+
 function runEngine(dir) {
   const home = mkdtempSync(join(tmpdir(), "kfq-home-"));
   try {
     const args = ["review", "--from", "HEAD~1", "--to", "HEAD", "--format", "json"];
     args.push("--rule", RULE);
+    const configPath = join(home, "ocr-config.json");
+    writeFileSync(configPath, ENGINE_CONFIG);
     const stdout = execFileSync(BINARY, args, {
       cwd: dir,
       encoding: "utf8",
@@ -137,6 +150,7 @@ function runEngine(dir) {
         OCR_LLM_MODEL: process.env.OCR_LLM_MODEL ?? "",
         OCR_USE_ANTHROPIC: process.env.OCR_USE_ANTHROPIC ?? "false",
         OCR_LLM_TIMEOUT: "180",
+        OCR_CONFIG_PATH: configPath,
         OCR_ENABLE_TELEMETRY: "false",
         OCR_CONTENT_LOGGING: "false",
       },
