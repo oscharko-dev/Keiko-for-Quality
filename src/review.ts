@@ -23,7 +23,11 @@ import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
 import { acquireEngine } from "./engine/acquire.js";
 import { currentPlatformDigest } from "./engine/pinned-release.js";
-import { repairClassification, needsClassification } from "./engine/classify.js";
+import {
+  auditClassification,
+  repairClassification,
+  needsClassification,
+} from "./engine/classify.js";
 import { parseEngineResult, type EngineFinding, type EngineResult } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
 import { runEngine } from "./engine/run.js";
@@ -444,18 +448,23 @@ async function repairFindingClassification(
   diagnostics: Diagnostics,
 ): Promise<EngineResult> {
   if (request.config.protocol === "anthropic") return parsed;
-  if (!parsed.findings.some(needsClassification)) return parsed;
+  if (parsed.findings.length === 0) return parsed;
   const token = readModelToken(request.config, request.env);
   if (token === undefined) return parsed;
-  const outcome = await repairClassification(parsed.findings, {
-    endpoint: request.config.endpoint,
-    token,
-    model: request.config.model,
+  const deps = { endpoint: request.config.endpoint, token, model: request.config.model };
+  let findings = parsed.findings;
+  if (findings.some(needsClassification)) {
+    const outcome = await repairClassification(findings, deps);
+    diagnostics.record("classify.repaired", {
+      counts: { repaired: outcome.repaired, failed: outcome.failed, tokens: outcome.tokens },
+    });
+    findings = outcome.findings;
+  }
+  const audit = await auditClassification(findings, deps);
+  diagnostics.record("classify.audited", {
+    counts: { changed: audit.changed, tokens: audit.tokens },
   });
-  diagnostics.record("classify.repaired", {
-    counts: { repaired: outcome.repaired, failed: outcome.failed, tokens: outcome.tokens },
-  });
-  return { ...parsed, findings: outcome.findings };
+  return { ...parsed, findings: audit.findings };
 }
 
 /** True when publication itself failed in a way that means the change was not fully reviewed. */
