@@ -18,12 +18,13 @@ import {
 } from "./cache/review-cache.js";
 import type { CompiledProfile } from "./config/profile.js";
 import type { GuidelineIndex } from "./config/guidelines.js";
-import type { RuntimeConfig } from "./config/runtime.js";
+import { readModelToken, type RuntimeConfig } from "./config/runtime.js";
 import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
 import { acquireEngine } from "./engine/acquire.js";
 import { currentPlatformDigest } from "./engine/pinned-release.js";
-import { parseEngineResult, type EngineFinding } from "./engine/result.js";
+import { repairClassification, needsClassification } from "./engine/classify.js";
+import { parseEngineResult, type EngineFinding, type EngineResult } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
 import { runEngine } from "./engine/run.js";
 import { settle, verdictsSurviveIncompleteness, type Settlement } from "./engine/settle.js";
@@ -422,10 +423,39 @@ async function executeEngine(
       diagnostics,
     );
     const parsed = parseEngineResult(output.stdout);
-    return settle(inventory, parsed, request.profile, request.config, memo.hitPaths);
+    const classified = await repairFindingClassification(parsed, request, diagnostics);
+    return settle(inventory, classified, request.profile, request.config, memo.hitPaths);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
+}
+
+/**
+ * Deterministic classification repair (v0.11.0) — `src/engine/classify.ts` carries the full why.
+ * In one sentence: not every serving stack enforces the engine's JSON schema, and a finding
+ * without `category`/`severity` cannot be triaged, so the two fields are re-asked through the
+ * smallest prompt that can carry them rather than left to prompt-compliance luck. The anthropic
+ * protocol is excluded because the repair speaks OpenAI chat completions, and that path already
+ * parses structured output strictly inside the engine.
+ */
+async function repairFindingClassification(
+  parsed: EngineResult,
+  request: ReviewRequest,
+  diagnostics: Diagnostics,
+): Promise<EngineResult> {
+  if (request.config.protocol === "anthropic") return parsed;
+  if (!parsed.findings.some(needsClassification)) return parsed;
+  const token = readModelToken(request.config, request.env);
+  if (token === undefined) return parsed;
+  const outcome = await repairClassification(parsed.findings, {
+    endpoint: request.config.endpoint,
+    token,
+    model: request.config.model,
+  });
+  diagnostics.record("classify.repaired", {
+    counts: { repaired: outcome.repaired, failed: outcome.failed, tokens: outcome.tokens },
+  });
+  return { ...parsed, findings: outcome.findings };
 }
 
 /** True when publication itself failed in a way that means the change was not fully reviewed. */
