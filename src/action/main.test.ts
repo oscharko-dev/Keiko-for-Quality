@@ -318,6 +318,60 @@ describe("runAction: writing the store back", () => {
     await expect(readFile(storePath, "utf8")).rejects.toThrow();
   });
 
+  /**
+   * `store_written` exists because a consumer cannot ask the right question from `outcome` alone.
+   *
+   * Found in review of the adopting workflow (Codex, oscharko-dev/Keiko#2962): the consumer gates
+   * its store hand-off on `outcome == 'complete'`, so a budget-truncated run's store — the whole
+   * point of #75 — would have been written on the runner and then stranded there, and a large
+   * pull request would have kept re-pricing every file on every push. The output carries the
+   * write decision itself rather than a proxy a caller has to re-derive.
+   */
+  it("reports store_written true for a truncated run that persisted", async () => {
+    const updated: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [entry("src/a.ts")],
+    };
+    performReviewMock.mockResolvedValue(
+      report({
+        outcome: "incomplete",
+        reason: "settlement.incomplete.budget_exceeded",
+        cacheAppended: 1,
+        updatedCacheStore: updated,
+      }),
+    );
+    const env = await baseEnv({ reviewStorePath: join(dir, "store.json") });
+
+    await runAction(
+      env,
+      createDiagnostics(() => undefined),
+    );
+
+    expect((await readOutputs(env)).store_written).toBe("true");
+  });
+
+  it.each([
+    ["an untrustworthy manifest", "settlement.incomplete.schema_rejected"],
+    ["a degraded publication", "settlement.incomplete.publication_degraded"],
+  ] as const)("reports store_written false when nothing was persisted: %s", async (_n, reason) => {
+    performReviewMock.mockResolvedValue(
+      report({
+        outcome: "incomplete",
+        reason,
+        cacheAppended: 1,
+        updatedCacheStore: { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [entry("src/a.ts")] },
+      }),
+    );
+    const env = await baseEnv({ reviewStorePath: join(dir, "store.json") });
+
+    await runAction(
+      env,
+      createDiagnostics(() => undefined),
+    );
+
+    expect((await readOutputs(env)).store_written).toBe("false");
+  });
+
   it.each([
     ["a budget overrun", "settlement.incomplete.budget_exceeded"],
     ["a coverage gap", "settlement.incomplete.coverage_gap"],
