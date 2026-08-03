@@ -116,6 +116,12 @@ export const REASON_CODES = [
   // from an ordinary content miss so production can tell the two apart.
   "cache.context_invalidated",
   "cache.appended",
+
+  // Classification repair (v0.11.0). Emitted only when at least one finding arrived without a
+  // usable category/severity pair and the constrained re-ask ran. `failed` on this record is the
+  // honest residue: findings that stayed unclassified rather than being guessed at, and `tokens`
+  // is what the repair itself spent, so the extra calls never hide inside the engine's own total.
+  "classify.repaired",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];

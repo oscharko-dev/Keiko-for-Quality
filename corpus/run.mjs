@@ -17,6 +17,7 @@ import { generateRuleDocument, registerTsExtensionHooks } from "./rule-source.mj
 
 registerTsExtensionHooks();
 const { sanitizeFindingBody } = await import("../src/publish/sanitize.ts");
+const { repairClassification } = await import("../src/engine/classify.ts");
 
 /**
  * Measures the reviewer against the seeded-defect corpus.
@@ -144,6 +145,24 @@ function runEngine(dir) {
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+}
+
+/**
+ * The same repair the shipped action applies (`src/engine/classify.ts`), because this harness must
+ * measure the pipeline production runs — a repair that existed only in the action would let the
+ * corpus score a different reviewer than the one that ships, and one that existed only here would
+ * qualify a reviewer nobody gets. Tokens the repair spends are folded into the case total so the
+ * report never hides them.
+ */
+async function repairFindings(result) {
+  const outcome = await repairClassification(result.comments ?? [], {
+    endpoint: process.env.OCR_LLM_URL ?? "",
+    token: process.env.OCR_LLM_TOKEN ?? "",
+    model: process.env.OCR_LLM_MODEL ?? "",
+  });
+  result.comments = outcome.findings;
+  const total = (result.summary?.total_tokens ?? 0) + outcome.tokens;
+  result.summary = { ...(result.summary ?? {}), total_tokens: total };
 }
 
 /**
@@ -305,6 +324,7 @@ for (const testCase of cases) {
     // directory it had already created.
     dir = buildRepo(testCase);
     const result = runEngine(dir);
+    await repairFindings(result);
     const scored = scoreOne(testCase, result);
     results.push(scored);
     const mark = scored.pass ? "PASS" : "FAIL";
