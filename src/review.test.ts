@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   computeKey,
@@ -26,9 +26,13 @@ const acquireEngineMock = vi.fn();
 vi.mock("./engine/acquire.js", () => ({ acquireEngine: acquireEngineMock }));
 
 const runEngineMock = vi.fn();
-vi.mock("./engine/run.js", () => ({ runEngine: runEngineMock }));
+vi.mock("./engine/run.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  runEngine: runEngineMock,
+}));
 
 const { computeAllottedBudget, performReview } = await import("./review.js");
+const { EngineRunError } = await import("./engine/run.js");
 
 describe("computeAllottedBudget", () => {
   it("matches the worked example: 87 files, 3,175 changed lines", () => {
@@ -548,5 +552,69 @@ describe("performReview: review-cache memoization end to end", () => {
     // And the file it did reach earned its verdict, which is the whole point of persisting at all.
     expect(blobs).toContain(headBlobA);
     expect(report.cacheAppended).toBe(1);
+  });
+
+  describe("performReview: bounded single resume (#57)", () => {
+    beforeEach(() => {
+      // The harness mocks are shared across this whole file and deliberately never auto-reset;
+      // these tests count invocations, so they start from a clean call history and a clean
+      // implementation queue — otherwise a leftover default from an earlier test would answer
+      // the call after the queued failures and turn "settles incomplete" into a false complete.
+      runEngineMock.mockReset();
+      acquireEngineMock.mockReset();
+    });
+
+    function nonSuccessStdout(): string {
+      return JSON.stringify({
+        status: "failed",
+        summary: { files_reviewed: 0, total_tokens: 0, budget_exceeded: false },
+        comments: [],
+      });
+    }
+
+    it("re-invokes once when the first run reports a non-success status, and the second stands", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: nonSuccessStdout(), ruleDigest: engineDigest })
+        .mockResolvedValueOnce({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      const codes = diagnostics.drain().map((record) => record.code);
+      expect(codes.filter((code) => code === "engine.resumed_once")).toHaveLength(1);
+    });
+
+    it("re-invokes once when the first run throws an EngineRunError", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit"))
+        .mockResolvedValueOnce({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const report = await performReview(baseRequest(undefined), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("settles incomplete after the second failure — one resume, never two", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: nonSuccessStdout(), ruleDigest: engineDigest })
+        .mockResolvedValueOnce({ stdout: nonSuccessStdout(), ruleDigest: engineDigest });
+
+      const report = await performReview(baseRequest(undefined), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("incomplete");
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+    });
   });
 });

@@ -119,24 +119,11 @@ function buildRepo(testCase) {
   return dir;
 }
 
-/**
- * Engine tuning the product owns (2026-08-03): the embedded default stops any per-file subtask at
- * five minutes, and an open-weight model that reasons in long turns can hit that ceiling on a
- * CLEAN file — the review then fails having found nothing, which scored a corpus case as an error
- * four times before the session log named the cause ("main_task did not complete before
- * stopping", 30 LLM rounds). Ten minutes converts those stops into completions; the decisiveness
- * section of the rule is what keeps typical files far below either ceiling. The consumer workflow
- * must ship the same config via OCR_CONFIG_PATH — the corpus measures the pipeline that runs.
- */
-const ENGINE_CONFIG = JSON.stringify({ MAX_SUBTASK_EXECUTION_TIME_MINUTES: 10 });
-
 function runEngine(dir) {
   const home = mkdtempSync(join(tmpdir(), "kfq-home-"));
   try {
     const args = ["review", "--from", "HEAD~1", "--to", "HEAD", "--format", "json"];
     args.push("--rule", RULE);
-    const configPath = join(home, "ocr-config.json");
-    writeFileSync(configPath, ENGINE_CONFIG);
     const stdout = execFileSync(BINARY, args, {
       cwd: dir,
       encoding: "utf8",
@@ -150,7 +137,6 @@ function runEngine(dir) {
         OCR_LLM_MODEL: process.env.OCR_LLM_MODEL ?? "",
         OCR_USE_ANTHROPIC: process.env.OCR_USE_ANTHROPIC ?? "false",
         OCR_LLM_TIMEOUT: "180",
-        OCR_CONFIG_PATH: configPath,
         OCR_ENABLE_TELEMETRY: "false",
         OCR_CONTENT_LOGGING: "false",
       },
@@ -158,6 +144,21 @@ function runEngine(dir) {
     return JSON.parse(stdout);
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Mirror of the shipped single resume (#57, `runEngineWithOneResume` in src/review.ts): the
+ * corpus must measure the pipeline production runs, and production re-invokes a failed engine
+ * run exactly once. The measured failure this absorbs is a per-file subtask spiral ("main_task
+ * did not complete before stopping" after ~30 LLM rounds) that hits roughly a quarter of runs on
+ * two specific cases; a second failure scores as the error it is.
+ */
+function runEngineWithOneResume(dir) {
+  try {
+    return runEngine(dir);
+  } catch {
+    return runEngine(dir);
   }
 }
 
@@ -339,7 +340,7 @@ for (const testCase of cases) {
     // in any of the four git calls, and a throw outside would abort the whole run and leak the
     // directory it had already created.
     dir = buildRepo(testCase);
-    const result = runEngine(dir);
+    const result = runEngineWithOneResume(dir);
     await repairFindings(result);
     const scored = scoreOne(testCase, result);
     results.push(scored);

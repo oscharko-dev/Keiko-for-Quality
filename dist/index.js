@@ -974,7 +974,12 @@ var REASON_CODES = [
   // from its own text through the written ladder, because the measured miscalibration on
   // open-weight models roams between cases rather than sitting still. `changed` counts adopted
   // moves in either direction; the audit never invents and never touches unclassified findings.
-  "classify.audited"
+  "classify.audited",
+  // Bounded resume (#57, v0.11.0): the engine run ended without a usable success — a thrown run
+  // error or a non-success status — and was re-invoked exactly once. Emitted at most once per
+  // review; a second failure settles incomplete exactly as before, so "incomplete never reads
+  // as clean" survives the resume.
+  "engine.resumed_once"
 ];
 var REASON_CODE_SET = new Set(REASON_CODES);
 function isReasonCode(value) {
@@ -1821,6 +1826,10 @@ var CATCH_ALL_RULE = [
   "  primary key or unique constraint on the compared columns already rules out the collision you",
   "  are worried about. A cursor cannot skip or repeat a row on a column that cannot repeat; do not",
   "  ask for a tie-breaker it does not need.",
+  "- **before concluding a changed loop bound, index calculation, or slice endpoint is correct** \u2014",
+  "  walk the edge concretely: run n=0, n=1, and the last index through the new expression and",
+  "  compare each against the old one. An off-by-one survives every skim and dies on one concrete",
+  "  walk; do the walk before concluding, not after a doubt.",
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
   "  or termination can recommend a fix that weakens correct code instead of improving it.",
@@ -3199,7 +3208,7 @@ async function executeEngine(request, inventory, memo, diagnostics) {
       reviewableChangedLines(inventory)
     );
     const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
-    const output = await runEngine(
+    const parsed = await runEngineWithOneResume(
       {
         binaryPath: engine.binaryPath,
         repositoryPath: request.repositoryPath,
@@ -3214,7 +3223,6 @@ async function executeEngine(request, inventory, memo, diagnostics) {
       },
       diagnostics
     );
-    const parsed = parseEngineResult(output.stdout);
     const classified = await repairFindingClassification(parsed, request, diagnostics);
     return settle(inventory, classified, request.profile, request.config, memo.hitPaths);
   } finally {
@@ -3240,6 +3248,19 @@ async function repairFindingClassification(parsed, request, diagnostics) {
     counts: { changed: audit.changed, tokens: audit.tokens }
   });
   return { ...parsed, findings: audit.findings };
+}
+async function runEngineWithOneResume(options2, diagnostics) {
+  try {
+    const first = await runEngine(options2, diagnostics);
+    const parsed = parseEngineResult(first.stdout);
+    if (parsed.status === "success") return parsed;
+    diagnostics.record("engine.resumed_once");
+  } catch (error) {
+    if (!(error instanceof EngineRunError)) throw error;
+    diagnostics.record("engine.resumed_once");
+  }
+  const second = await runEngine(options2, diagnostics);
+  return parseEngineResult(second.stdout);
 }
 function publicationDegraded(outcome) {
   return outcome.rejectedSanitization > 0 || outcome.rejectedPlacement > 0 || outcome.readbackFailures > 0;
