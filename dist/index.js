@@ -1610,6 +1610,7 @@ async function requestPair(prompt, deps) {
         // Pinned for the same reason the review itself is (model-proxy.ts): a classification
         // vote that changes between identical invocations is noise, not judgement.
         temperature: 0,
+        seed: 42,
         // Generous on purpose: reasoning models spend tokens before the final channel, and a cap
         // that starves the final answer reads exactly like non-compliance.
         max_completion_tokens: 4e3
@@ -2112,12 +2113,15 @@ function readBody(request) {
     request.on("error", reject);
   });
 }
-function pinSampling(path, body, temperature) {
+function pinSampling(path, body, options2) {
   if (!path.endsWith("/chat/completions")) return body;
   try {
     const parsed = JSON.parse(body.toString("utf8"));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return body;
-    return Buffer.from(JSON.stringify({ ...parsed, temperature }), "utf8");
+    return Buffer.from(
+      JSON.stringify({ ...parsed, temperature: options2.temperature, seed: options2.seed }),
+      "utf8"
+    );
   } catch {
     return body;
   }
@@ -2132,7 +2136,7 @@ async function forward(options2, request, response) {
     const upstream = await doFetch(`${options2.upstreamUrl.replace(/\/+$/, "")}${path}`, {
       method,
       headers: upstreamHeaders(request),
-      ...withBody ? { body: new Uint8Array(pinSampling(path, body, options2.temperature)) } : {}
+      ...withBody ? { body: new Uint8Array(pinSampling(path, body, options2)) } : {}
     });
     response.writeHead(upstream.status, {
       "content-type": upstream.headers.get("content-type") ?? "application/json"
@@ -2283,6 +2287,7 @@ function reviewArguments(options2, rulePath) {
   ];
 }
 var REVIEW_TEMPERATURE = 0;
+var REVIEW_SEED = 42;
 async function runEngine(options2, diagnostics) {
   const token = readModelToken(options2.config, options2.env);
   if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
@@ -2294,7 +2299,8 @@ async function runEngine(options2, diagnostics) {
     const { rulePath, ruleDigest } = await writeRuleFile(options2, home);
     proxy = options2.config.protocol === "anthropic" ? void 0 : await startModelProxy({
       upstreamUrl: options2.config.endpoint,
-      temperature: REVIEW_TEMPERATURE
+      temperature: REVIEW_TEMPERATURE,
+      seed: REVIEW_SEED
     });
     const env = engineEnvironment(options2, token, home);
     if (proxy !== void 0) env.OCR_LLM_URL = proxy.url;

@@ -130,6 +130,7 @@ async function runEngine(dir) {
   const proxy = await startModelProxy({
     upstreamUrl: process.env.OCR_LLM_URL ?? "",
     temperature: 0,
+    seed: 42,
   });
   try {
     const args = ["review", "--from", "HEAD~1", "--to", "HEAD", "--format", "json"];

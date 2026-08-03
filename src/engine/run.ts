@@ -156,6 +156,13 @@ export function reviewArguments(options: EngineRunOptions, rulePath: string): st
  */
 const REVIEW_TEMPERATURE = 0;
 
+/**
+ * Arbitrary but fixed. Temperature zero alone measured non-deterministic on Azure's gpt-oss
+ * serving (identical requests diverged); with an explicit seed, three identical requests returned
+ * byte-identical completions. The value carries no meaning — its constancy does.
+ */
+const REVIEW_SEED = 42;
+
 export async function runEngine(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
@@ -175,6 +182,7 @@ export async function runEngine(
         : await startModelProxy({
             upstreamUrl: options.config.endpoint,
             temperature: REVIEW_TEMPERATURE,
+            seed: REVIEW_SEED,
           });
     const env = engineEnvironment(options, token, home);
     if (proxy !== undefined) env.OCR_LLM_URL = proxy.url;

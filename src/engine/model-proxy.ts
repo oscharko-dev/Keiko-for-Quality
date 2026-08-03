@@ -34,6 +34,12 @@ export interface ModelProxyOptions {
   readonly upstreamUrl: string;
   /** Applied to every chat-completions body, overwriting whatever the engine sent. */
   readonly temperature: number;
+  /**
+   * Sampling seed, pinned for the same reason as the temperature — measured on Azure gpt-oss-120b
+   * (2026-08-04): temperature 0 alone still diverged between identical requests (MoE/batching
+   * noise), while an explicit seed produced byte-identical completions three out of three.
+   */
+  readonly seed: number;
   readonly fetchImpl?: typeof fetch;
 }
 
@@ -65,12 +71,15 @@ function readBody(request: IncomingMessage): Promise<Buffer> {
  * else — other endpoints, malformed bodies — passes through byte-identical. Overwrite, not
  * default: the point is that the pinned value wins over whatever the engine chose.
  */
-function pinSampling(path: string, body: Buffer, temperature: number): Buffer {
+function pinSampling(path: string, body: Buffer, options: ModelProxyOptions): Buffer {
   if (!path.endsWith("/chat/completions")) return body;
   try {
     const parsed: unknown = JSON.parse(body.toString("utf8"));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return body;
-    return Buffer.from(JSON.stringify({ ...parsed, temperature }), "utf8");
+    return Buffer.from(
+      JSON.stringify({ ...parsed, temperature: options.temperature, seed: options.seed }),
+      "utf8",
+    );
   } catch {
     return body;
   }
@@ -90,7 +99,7 @@ async function forward(
     const upstream = await doFetch(`${options.upstreamUrl.replace(/\/+$/, "")}${path}`, {
       method,
       headers: upstreamHeaders(request),
-      ...(withBody ? { body: new Uint8Array(pinSampling(path, body, options.temperature)) } : {}),
+      ...(withBody ? { body: new Uint8Array(pinSampling(path, body, options)) } : {}),
     });
     response.writeHead(upstream.status, {
       "content-type": upstream.headers.get("content-type") ?? "application/json",

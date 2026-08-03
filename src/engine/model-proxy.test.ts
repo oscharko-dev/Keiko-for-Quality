@@ -65,7 +65,7 @@ describe("startModelProxy", () => {
   }> {
     const upstream = await startUpstream();
     cleanups.push(upstream.close);
-    const proxy = await startModelProxy({ upstreamUrl: upstream.url, temperature });
+    const proxy = await startModelProxy({ upstreamUrl: upstream.url, temperature, seed: 42 });
     cleanups.push(() => proxy.close());
     return { proxy, captured: upstream.captured };
   }
@@ -79,8 +79,13 @@ describe("startModelProxy", () => {
     });
     expect(response.status).toBe(200);
     expect(captured).toHaveLength(1);
-    const body = JSON.parse(captured[0]?.body ?? "{}") as { temperature?: number; model?: string };
+    const body = JSON.parse(captured[0]?.body ?? "{}") as {
+      temperature?: number;
+      model?: string;
+      seed?: number;
+    };
     expect(body.temperature).toBe(0);
+    expect(body.seed).toBe(42);
     expect(body.model).toBe("m");
     expect(captured[0]?.authorization).toBe("Bearer secret");
   });
@@ -116,6 +121,7 @@ describe("startModelProxy", () => {
     const proxy = await startModelProxy({
       upstreamUrl: "http://127.0.0.1:1",
       temperature: 0,
+      seed: 42,
     });
     cleanups.push(() => proxy.close());
     const response = await fetch(`${proxy.url}/chat/completions`, {
