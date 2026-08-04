@@ -4638,10 +4638,10 @@ async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnost
 }
 
 // src/review.ts
-var PER_FILE_TOKENS = 4e4;
+var PER_FILE_TOKENS = 64e3;
 var PER_LINE_TOKENS = 60;
 var ALLOTMENT_MARGIN = 1.3;
-var ALLOTMENT_FLOOR = 8e4;
+var ALLOTMENT_FLOOR = 15e4;
 var ALLOTMENT_CEILING = 6e6;
 var RETENTION = {
   maxEntries: PARSE_LIMITS.maxEntries,
