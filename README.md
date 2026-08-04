@@ -245,6 +245,67 @@ names, never as a live status of the pull request's current head.
 Disable it with `run_summary: false` (default `true`). Disabled means exactly that: no
 issue-comment API call is made at all, not even to check whether one already exists.
 
+## Local runs
+
+`npm run review` runs the identical shared pipeline the GitHub Action runs — same digest-pinned
+engine, same rule text, same inventory and settlement semantics — against a local repository
+instead of a pull request, and reports the result instead of publishing it. It is one-shot: it
+reviews the resolved head against an auto-resolved or explicit base and exits. There is no daemon
+and no watch mode, and it writes nothing into the repository it reviews.
+
+Requires Node 24 or newer. Configuration is environment variables, not action inputs:
+
+```bash
+KFQ_MODEL_ENDPOINT=https://api.anthropic.com \
+KFQ_MODEL_ID=claude-sonnet-5 \
+KFQ_MODEL_PROTOCOL=anthropic \
+KFQ_MODEL_TOKEN_ENV=KFQ_MODEL_TOKEN \
+KFQ_MODEL_TOKEN=<credential> \
+npm run review
+```
+
+| Variable              | Meaning                                                                                      |
+| --------------------- | -------------------------------------------------------------------------------------------- |
+| `KFQ_MODEL_ENDPOINT`  | HTTPS endpoint of the model provider.                                                        |
+| `KFQ_MODEL_ID`        | Model identifier.                                                                            |
+| `KFQ_MODEL_PROTOCOL`  | Wire protocol: `openai` or `anthropic`.                                                      |
+| `KFQ_MODEL_TOKEN_ENV` | Name of the environment variable holding the model credential — never the credential itself. |
+
+With no `--base`/`--target-branch`, the base resolves as `merge-base(HEAD, dev)`, trying the local
+`dev` branch and then `origin/dev`. Every other flag — `--repo`, `--profile`, `--base`,
+`--target-branch`, `--store`, `--out`, the per-file and whole-review timeouts, the token budget,
+and concurrency — is documented by the CLI itself, the reference rather than a copy of it:
+
+```bash
+npm run review -- --help
+```
+
+The process exit code carries the settlement outcome, never merely "did it crash":
+
+| Code | Meaning                                                               |
+| ---- | --------------------------------------------------------------------- |
+| `0`  | complete, zero findings                                               |
+| `1`  | complete, one or more findings                                        |
+| `2`  | incomplete — treat the change as unreviewed                           |
+| `3`  | abandoned — the reviewed head was superseded before the run completed |
+| `4`  | usage or configuration error                                          |
+| `5`  | internal error                                                        |
+
+`--format json` and `--format sarif` emit the same versioned wire contract both IDE extensions are
+built against; see [`docs/local-report-schema.md`](docs/local-report-schema.md) for the
+field-by-field schema, including the documented v1 gaps. The default `human` format is for a
+terminal, not for parsing.
+
+Every local run spends real model tokens against the credential `KFQ_MODEL_TOKEN_ENV` names — the
+same cost as a pull-request review, paid by the caller instead of the repository's own secret.
+`--store <path>` is the mitigation for repeated runs over unchanged content: a cache-eligible path
+with a still-valid stored entry is replayed instead of re-sent to the engine.
+
+The CLI never reads or forwards a GitHub token and writes nothing into the repository it reviews —
+the report goes to stdout or `--out`, and the optional review cache goes only to `--store`. A
+review store produced by a local run is never read by CI: the boundary is one-directional by
+design, not a gap to be closed later.
+
 ## Known limitations
 
 Stated plainly, because a reviewer that overstates its coverage is worse than none.
@@ -292,6 +353,12 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
     just short. Biased the same direction as the similarity stage: an uncertain call republishes
     rather than suppresses, because a re-opened settled question costs a reply, while a wrongly
     suppressed genuine recurrence costs a defect nobody sees again.
+11. **A local run reviews committed state only.** `--head`, `--base`, and `--target-branch` all
+    resolve to commits, so uncommitted or staged changes in the working tree are never part of what
+    gets reviewed. A working-tree snapshot mode is tracked as a separate, non-blocking capability.
+12. **No Windows engine binary.** The pinned engine publishes released binaries for Linux and macOS
+    (x64 and arm64) only. `npm run review` on Windows settles incomplete rather than falling back to
+    an unverified asset — the same fail-closed behaviour a digest mismatch produces.
 
 ## Measured quality
 
