@@ -776,7 +776,11 @@ async function executeEngine(
       reviewableChangedLines(inventory, excludedSet),
     );
     ledger.allotted = allottedBudget;
-    const { result: parsed, engineTokens } = await runEngineWithOneResume(
+    const {
+      result: parsed,
+      engineTokens,
+      alreadyReviewedPaths,
+    } = await runEngineWithOneResume(
       {
         binaryPath: engine.binaryPath,
         repositoryPath: request.repositoryPath,
@@ -798,7 +802,15 @@ async function executeEngine(
       diagnostics,
     );
     ledger.classify += classifyTokens;
-    return settle(inventory, classified, request.profile, request.config, memo.hitPaths);
+    // Widened, never replaced: `alreadyReviewedPaths` (empty except after a resume that narrowed
+    // its own dispatch — see `ResumeOutcome`'s doc comment) tells `settle()` those paths are
+    // covered by the FIRST attempt, not by the returned result's own coverage, exactly the same
+    // "covered by other means" contract `memo.hitPaths` already establishes for a cache hit.
+    const memoizedForSettlement =
+      alreadyReviewedPaths.length === 0
+        ? memo.hitPaths
+        : new Set([...memo.hitPaths, ...alreadyReviewedPaths]);
+    return settle(inventory, classified, request.profile, request.config, memoizedForSettlement);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -1141,12 +1153,28 @@ const RESUME_FLOOR_FRACTION = 0.25;
 
 /**
  * Exactly one bounded resume (#57). A run that ends without a usable success — the process threw,
- * or the result reports a non-success status — is re-invoked once, and the second outcome stands
- * whatever it is. One, not N: an unbounded retry converts a provider outage into a doubled bill,
- * and the measured failure mode this closes is a per-file subtask spiral that stops the whole
- * run after finding nothing (production Keiko#2963 paid its 44 files twice for exactly this; the
- * corpus reproduced the same signature four times before the session log named it). A second
- * failure settles incomplete precisely as it did before the resume existed.
+ * or the result reports a non-success status — is re-invoked once. One, not N: an unbounded retry
+ * converts a provider outage into a doubled bill, and the measured failure mode this closes is a
+ * per-file subtask spiral that stops the whole run after finding nothing (production Keiko#2963
+ * paid its 44 files twice for exactly this; the corpus reproduced the same signature four times
+ * before the session log named it).
+ *
+ * The second attempt's status, coverage, and tokens stand — that part of "the second outcome
+ * stands" is unchanged. What is no longer discarded is the first attempt's own paid-for work: the
+ * resumed invocation excludes every path the first attempt already produced a finding for (the
+ * same evidentiary bar `settle.ts`'s `memoizablePaths` uses — a finding proves the file was
+ * opened), so the resume spends its budget only on ground genuinely still unreviewed, and those
+ * carried-forward findings are folded into the returned result rather than silently re-paid for or
+ * lost (see `mergeResumedResult`). A first attempt whose process THREW rather than returning a
+ * parseable result has nothing to carry forward or exclude — `firstResult` stays `undefined` for
+ * that case, and the resume dispatches everything, exactly as before.
+ *
+ * A second attempt that itself throws no longer takes the whole run down with it: when a
+ * `firstResult` exists to fall back to, `engine.resume_failed` is recorded and that result stands
+ * on its own, non-success status and all — a genuinely worse outcome than a completed resume, but
+ * a strictly better one than losing every fact the first attempt established. A second failure
+ * with no `firstResult` (the first attempt itself threw) still propagates exactly as before: there
+ * is nothing to fall back to, so `settleOrReport`'s own catch is the correct place for it to land.
  *
  * A first attempt that already reports ITS OWN budget exceeded gets no resume at all: the
  * resume's budget can only be carved from what the first attempt left (see
@@ -1160,10 +1188,28 @@ const RESUME_FLOOR_FRACTION = 0.25;
  * attempt, so it is exactly that attempt's own total — never a guess at what a second would have
  * cost.
  */
+/**
+ * `alreadyReviewedPaths` is the fact `executeEngine` needs and this function alone can produce: the
+ * paths a resumed dispatch was deliberately NOT asked to cover, because the first attempt already
+ * proved it opened them. `mergeResumedResult` restores their FINDINGS to the returned result, but
+ * the returned `EngineResult`'s own `coverage`/`filesReviewed` still comes from whichever attempt's
+ * dispatch produced it — narrower than the full inventory by exactly this set. Without surfacing it,
+ * `settle()` (which never sees `runEngineWithOneResume`'s internals) would expect the returned
+ * result to account for paths it was told to skip, and report a coverage gap that is not real. Empty
+ * on every path where no resume narrowed anything: a same-first-attempt success, a skipped resume,
+ * and the resume-failed fallback (which returns the FIRST attempt's own, self-consistent result,
+ * whose own coverage already accounts for everything IT dispatched).
+ */
+interface ResumeOutcome {
+  readonly result: EngineResult;
+  readonly engineTokens: number;
+  readonly alreadyReviewedPaths: readonly string[];
+}
+
 async function runEngineWithOneResume(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
-): Promise<{ result: EngineResult; engineTokens: number }> {
+): Promise<ResumeOutcome> {
   // The resume runs on what the first attempt left, floored at RESUME_FLOOR_FRACTION of THIS
   // review's own allotment (see that constant's own comment) rather than a literal whole-review
   // ceiling held across attempts — that claim was never actually true of the old flat floor either.
@@ -1173,11 +1219,22 @@ async function runEngineWithOneResume(
   // Same honesty as the allotment above: a thrown first attempt leaves no parsed result behind,
   // so it contributes nothing measured to the total rather than a guess.
   let firstAttemptTokens = 0;
+  // The first attempt's own parsed result, kept so a second-attempt failure or a resumed dispatch
+  // has something real to fall back to or exclude from — see this function's own doc comment.
+  // `undefined` means there is nothing to fall back to: either no resume is needed (the first
+  // attempt succeeded, which returns directly below) or the first attempt itself threw.
+  let firstResult: EngineResult | undefined;
+  // Paths the resumed dispatch must skip because the first attempt already opened them and
+  // produced a finding — computed once, alongside `firstResult`, from the same evidence.
+  let alreadyReviewedPaths: readonly string[] = [];
   try {
     const first = await runEngine(options, diagnostics);
     const parsed = parseEngineResult(first.stdout);
-    if (parsed.status === "success") return { result: parsed, engineTokens: parsed.totalTokens };
+    if (parsed.status === "success") {
+      return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
+    }
     firstAttemptTokens = parsed.totalTokens;
+    firstResult = parsed;
     // No second opinion for a first attempt that already reports its budget exceeded (see this
     // function's own doc comment). It gets its own code rather than borrowing one: `resumed_once`
     // means a resume ran, and an absent line would leave an operator unable to tell a run that
@@ -1187,8 +1244,14 @@ async function runEngineWithOneResume(
       diagnostics.record("engine.resume_skipped_budget_exceeded", {
         counts: { spent: firstAttemptTokens, allotted: options.allottedBudget },
       });
-      return { result: parsed, engineTokens: firstAttemptTokens };
+      return { result: parsed, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
     }
+    // The same bar `memoizablePaths` (engine/settle.ts) uses: a finding proves the engine opened
+    // the file, unless the manifest says that same file's review itself failed, in which case the
+    // finding might be a partial verdict from before the failure and the path is not safe to skip.
+    alreadyReviewedPaths = parsed.findings
+      .filter((f) => !parsed.coverage.failed.some((c) => c.path === f.path))
+      .map((f) => f.path as string);
     remaining = clamp(
       options.allottedBudget - parsed.totalTokens,
       Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION),
@@ -1199,16 +1262,72 @@ async function runEngineWithOneResume(
     if (!(error instanceof EngineRunError)) throw error;
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   }
-  // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
-  // would replay itself byte-for-byte — measured, not hypothesized (the seeded verification
-  // spiral failed 2/2 where the unseeded one failed ~1/4). Varying exactly one bit of entropy on
-  // the one bounded retry is what turns it into a second opinion.
-  const second = await runEngine(
-    { ...options, samplingSeed: RESUME_SEED, allottedBudget: remaining },
-    diagnostics,
-  );
-  const parsedSecond = parseEngineResult(second.stdout);
-  return { result: parsedSecond, engineTokens: firstAttemptTokens + parsedSecond.totalTokens };
+  try {
+    // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
+    // would replay itself byte-for-byte — measured, not hypothesized (the seeded verification
+    // spiral failed 2/2 where the unseeded one failed ~1/4). Varying exactly one bit of entropy on
+    // the one bounded retry is what turns it into a second opinion. `mechanicallyCleanPaths` is
+    // widened, never replaced: the resume must still skip everything the first dispatch already
+    // excluded (renames, cache hits) on top of what the first ATTEMPT now proves was reviewed.
+    const second = await runEngine(
+      {
+        ...options,
+        samplingSeed: RESUME_SEED,
+        allottedBudget: remaining,
+        mechanicallyCleanPaths: [...options.mechanicallyCleanPaths, ...alreadyReviewedPaths],
+      },
+      diagnostics,
+    );
+    const parsedSecond = parseEngineResult(second.stdout);
+    const merged =
+      firstResult === undefined
+        ? parsedSecond
+        : mergeResumedResult(firstResult, parsedSecond, alreadyReviewedPaths);
+    return {
+      result: merged,
+      engineTokens: firstAttemptTokens + parsedSecond.totalTokens,
+      alreadyReviewedPaths,
+    };
+  } catch (error) {
+    // Mirrors the first attempt's own rescue above: only a genuine `EngineRunError` (spawn/timeout/
+    // nonzero-exit) is ever caught here, never a `ValidationError` from a malformed-but-successfully
+    // -spawned second result — reject-rather-than-repair applies to the second attempt exactly as
+    // much as the first, and a malformed result is not evidence the first attempt's own findings
+    // are still trustworthy. Rethrown, too, when there is nothing to fall back to: a first attempt
+    // that itself threw leaves `firstResult` undefined, and the caller's own handling of that case
+    // is unchanged from before this fallback existed.
+    if (!(error instanceof EngineRunError) || firstResult === undefined) throw error;
+    diagnostics.record("engine.resume_failed", { counts: { spent: firstAttemptTokens } });
+    // The returned result is `firstResult` UNCHANGED — its own coverage already accounts for
+    // everything IT dispatched, so there is nothing narrower than usual for `settle()` to be told
+    // about here (unlike the merged-success path above, whose returned coverage comes from the
+    // SECOND attempt's narrower dispatch).
+    return { result: firstResult, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
+  }
+}
+
+/**
+ * Folds a resumed dispatch's own outcome together with the findings the first attempt already
+ * earned for the paths it excluded — `status`, `terminalState`, `coverage`, `budgetExceeded`, and
+ * `totalTokens` all come from `second` alone, since that is what actually governs whether the run
+ * as a whole is complete or incomplete; only the finding LIST gains back what the first attempt
+ * already paid to produce and the resume was deliberately told not to re-open.
+ *
+ * Without this, excluding `excludedPaths` from the resumed dispatch (the cost fix this pairs with)
+ * would silently convert real, already-paid-for findings into an invisible false-clean the moment
+ * the resumed dispatch's own coverage no longer mentions those paths at all — worse than the
+ * double-spend it replaces, because a double-spend at least kept the findings.
+ */
+function mergeResumedResult(
+  first: EngineResult,
+  second: EngineResult,
+  excludedPaths: readonly string[],
+): EngineResult {
+  if (excludedPaths.length === 0) return second;
+  const carried = new Set(excludedPaths);
+  const carriedFindings = first.findings.filter((f) => carried.has(f.path as string));
+  if (carriedFindings.length === 0) return second;
+  return { ...second, findings: [...carriedFindings, ...second.findings] };
 }
 
 /** True when publication itself failed in a way that means the change was not fully reviewed. */

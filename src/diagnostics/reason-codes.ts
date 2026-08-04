@@ -142,9 +142,16 @@ export const REASON_CODES = [
 
   // Bounded resume (#57, v0.11.0): the engine run ended without a usable success — a thrown run
   // error or a non-success status — and was re-invoked exactly once. Emitted at most once per
-  // review; a second failure settles incomplete exactly as before, so "incomplete never reads
-  // as clean" survives the resume.
+  // review; "incomplete never reads as clean" survives the resume regardless of which of the two
+  // outcomes below follows it.
   "engine.resumed_once",
+  // The resumed attempt ITSELF threw (v0.13.0) — a second timeout, spawn failure, or nonzero exit,
+  // the same failure classes the resume exists to recover from, recurring on attempt two. Falls
+  // back to the first attempt's own result (its status, coverage, and findings) rather than losing
+  // every fact that attempt established: `settle()` still gets real data to judge, even though the
+  // run is very likely to settle incomplete on it. `counts.spent` is the first attempt's own token
+  // total — the only spend this outcome has anything measured to report.
+  "engine.resume_failed",
 
   // The resume that deliberately did NOT happen (v0.12.0): the first attempt reported its budget
   // exhausted, and a second attempt cannot review more of a change than the budget allows — it can

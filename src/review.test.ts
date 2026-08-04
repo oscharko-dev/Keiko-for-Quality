@@ -1217,6 +1217,225 @@ describe("performReview: review-cache memoization end to end", () => {
   });
 
   /**
+   * The resume's own carry-forward (v0.13.0): a first attempt's real findings are neither re-paid
+   * for nor silently lost — the resumed dispatch excludes the paths they came from, and the
+   * findings themselves are folded back into whatever the resume produces.
+   */
+  describe("performReview: resume carries the first attempt's own findings forward", () => {
+    beforeEach(() => {
+      runEngineMock.mockReset();
+      acquireEngineMock.mockReset();
+    });
+
+    /** A non-success first attempt carrying one real finding against `src/a.ts`. */
+    function firstAttemptWithFinding(): string {
+      return JSON.stringify({
+        status: "failed",
+        summary: { files_reviewed: 1, total_tokens: 500, budget_exceeded: false },
+        comments: [
+          {
+            path: "src/a.ts",
+            content: "The retry loop never resets its attempt counter.",
+            start_line: 1,
+            end_line: 1,
+            severity: "high",
+            category: "bug",
+          },
+        ],
+      });
+    }
+
+    it("excludes the first attempt's finding paths from the resumed dispatch", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: firstAttemptWithFinding(), ruleDigest: engineDigest })
+        .mockResolvedValueOnce({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      await performReview(baseRequest(undefined), createSilentDiagnostics());
+
+      const secondOptions = runEngineMock.mock.calls[1]?.[0] as {
+        mechanicallyCleanPaths: readonly string[];
+      };
+      expect(secondOptions.mechanicallyCleanPaths).toContain("src/a.ts");
+    });
+
+    it("folds the first attempt's finding into the final result even though the resume never re-covers that path", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: firstAttemptWithFinding(), ruleDigest: engineDigest })
+        // The resume's own dispatch reports success over the REST of the inventory (src/b.ts) and
+        // says nothing about src/a.ts at all — exactly what excluding it from dispatch produces.
+        .mockResolvedValueOnce({ stdout: engineStdout(1), ruleDigest: engineDigest });
+
+      const request = baseRequest(undefined);
+      // The standard create/read-back echo this file's publish tests use throughout: the created
+      // comment's OWN body (carrying the real marker `publishComposedFinding` embeds) is what a
+      // real GitHub read-back would return, which is what makes `verifyPublication` pass.
+      const posted: ReviewComment[] = [];
+      vi.spyOn(request.client, "createReviewComment").mockImplementation((_ref, _num, input) => {
+        const comment: ReviewComment = {
+          id: posted.length + 1,
+          body: input.body,
+          path: input.path,
+          authorLogin: "keiko-for-quality[bot]",
+          commitId: input.commitId,
+          url: "https://example.test/c",
+        };
+        posted.push(comment);
+        return Promise.resolve(comment);
+      });
+      vi.spyOn(request.client, "getReviewComment").mockImplementation((_ref, id) =>
+        Promise.resolve(posted[id - 1]!),
+      );
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      // Complete, not incomplete: `files_reviewed: 1` in the resumed stdout plus the one memoized
+      // path is exactly `unreviewedByEngine` minus what dispatch actually covered — the coverage
+      // math still closes. The finding itself reached publication, proving it was not dropped.
+      expect(report.outcome).toBe("complete");
+      expect(request.client.createReviewComment).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not carry forward a finding on a path the manifest itself reports as failed", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const partialFailure = JSON.stringify({
+        status: "failed",
+        summary: { files_reviewed: 1, total_tokens: 500, budget_exceeded: false },
+        comments: [
+          {
+            path: "src/a.ts",
+            content: "A partial verdict from before the failure.",
+            start_line: 1,
+            end_line: 1,
+            severity: "high",
+            category: "bug",
+          },
+        ],
+        manifest: {
+          schema_version: SUPPORTED_MANIFEST_SCHEMA,
+          terminal_state: "partial",
+          coverage: {
+            selected: [{ path: "src/a.ts" }],
+            completed: [],
+            reused: [],
+            // The manifest itself says src/a.ts's own review failed — a finding filed alongside
+            // that is not proof the file was safely, fully reviewed, so it must not be excluded
+            // from the resumed dispatch on the strength of it alone.
+            failed: [{ path: "src/a.ts" }],
+            waived: [],
+          },
+        },
+      });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: partialFailure, ruleDigest: engineDigest })
+        .mockResolvedValueOnce({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      await performReview(baseRequest(undefined), createSilentDiagnostics());
+
+      const secondOptions = runEngineMock.mock.calls[1]?.[0] as {
+        mechanicallyCleanPaths: readonly string[];
+      };
+      expect(secondOptions.mechanicallyCleanPaths).not.toContain("src/a.ts");
+    });
+  });
+
+  /**
+   * The resume's own failure handling (v0.13.0): a second attempt that throws no longer takes the
+   * whole run down with it when the first attempt left something real to fall back to.
+   */
+  describe("performReview: resume-failed fallback (v0.13.0)", () => {
+    beforeEach(() => {
+      runEngineMock.mockReset();
+      acquireEngineMock.mockReset();
+    });
+
+    it("falls back to the first attempt's own result when the resumed attempt throws EngineRunError", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const nonSuccess = JSON.stringify({
+        status: "failed",
+        summary: { files_reviewed: 0, total_tokens: 500, budget_exceeded: false },
+        comments: [],
+      });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: nonSuccess, ruleDigest: engineDigest })
+        .mockRejectedValueOnce(new EngineRunError("engine.run.timeout"));
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      // A worse outcome than a completed resume, but not a crashed run: the first attempt's own
+      // non-success result stands, and settlement judges it exactly as it would with no resume.
+      expect(report.outcome).toBe("incomplete");
+      const codes = diagnostics.drain().map((r) => r.code);
+      expect(codes).toContain("engine.resume_failed");
+      const record = diagnostics.drain().find((r) => r.code === "engine.resume_failed");
+      expect(record?.counts).toStrictEqual({ spent: 500 });
+      // Both attempts' spend is real and must both land in run.spend, exactly as a completed
+      // resume would report — the fallback changes which result stands, not what was paid.
+      const spend = diagnostics.drain().find((r) => r.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 500, classify: 0, total: 500 });
+    });
+
+    /**
+     * "Rethrows" inside `runEngineWithOneResume` does not mean "rejects `performReview`'s own
+     * promise" — `settleOrReport` (review.ts) already wraps the whole engine step in a catch-all
+     * that turns ANY exception into `settlement.incomplete.engine_error`, and that pre-existing
+     * behavior is exactly what this resume-failed fallback preserves for the "nothing to fall back
+     * to" case: unchanged from before the fallback existed, not a new rejection path.
+     */
+    it("still settles incomplete (never a fallback) when the FIRST attempt threw and the resume also throws", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockRejectedValueOnce(new EngineRunError("engine.run.spawn_failed"))
+        .mockRejectedValueOnce(new EngineRunError("engine.run.timeout"));
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      expect(report.outcome).toBe("incomplete");
+      if (report.outcome === "incomplete") {
+        expect(report.reason).toBe("settlement.incomplete.engine_error");
+      }
+      // No fallback: there was no first RESULT to fall back to, only a first attempt that threw.
+      const codes = diagnostics.drain().map((r) => r.code);
+      expect(codes).not.toContain("engine.resume_failed");
+    });
+
+    it("still settles incomplete on a malformed (non-EngineRunError) failure from the resumed attempt, never falling back", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const nonSuccess = JSON.stringify({
+        status: "failed",
+        summary: { files_reviewed: 0, total_tokens: 500, budget_exceeded: false },
+        comments: [],
+      });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: nonSuccess, ruleDigest: engineDigest })
+        // Not valid engine-result JSON at all — parseEngineResult throws a ValidationError, which
+        // reject-rather-than-repair says must propagate unresumed even though a `firstResult` DOES
+        // exist here — the guard is `instanceof EngineRunError`, not "something to fall back to".
+        .mockResolvedValueOnce({ stdout: "not json", ruleDigest: engineDigest });
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      expect(report.outcome).toBe("incomplete");
+      if (report.outcome === "incomplete") {
+        expect(report.reason).toBe("settlement.incomplete.engine_error");
+      }
+      // Not the resume-failed fallback: a ValidationError never reaches that rescue at all.
+      const codes = diagnostics.drain().map((r) => r.code);
+      expect(codes).not.toContain("engine.resume_failed");
+    });
+  });
+
+  /**
    * Run-level spend accounting (v0.12.0). `executeEngine` records exactly one `run.spend` per run,
    * naming what the review actually cost — the defect this closes is `publish/summary.ts` reading
    * whichever `counts.tokens` record happened to fire last, which in practice was the
