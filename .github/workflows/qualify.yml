@@ -28,10 +28,12 @@ jobs:
   corpus:
     name: corpus
     runs-on: ubuntu-latest
-    # 23 cases at up to OCR_LLM_TIMEOUT (180 s) each is 69 minutes of worst-case model wait
-    # before any local work. Measured runs finish in about six, but a scheduled job has nothing
-    # waiting on it, and a timeout that cuts a healthy run produces a drift issue about the
-    # runner rather than about the reviewer.
+    # 32 cases — 35 changed files, and OCR_LLM_TIMEOUT (180 s) is a per-file budget — is 105
+    # minutes of worst-case model wait before any local work, and the harness's single resume
+    # can carry a failing case past that. The measured run was about six minutes when the corpus
+    # held 23 cases; it has not been re-measured since, and doing so costs real tokens. A
+    # scheduled job has nothing waiting on it, and a timeout that cuts a healthy run produces a
+    # drift issue about the runner rather than about the reviewer.
     timeout-minutes: 120
     # Arming switch, so this can be merged and reviewed before any credential exists. Until the
     # variable is set the job never starts and never consumes a token.

@@ -1,12 +1,13 @@
 import type { CommitSha, VersionTag } from "../core/brands.js";
+import type { ReasonCode } from "../diagnostics/reason-codes.js";
 import type { Diagnostics, DiagnosticRecord } from "../diagnostics/sink.js";
 import type { IssueComment, IssueCommentApi, RepoRef } from "../github/client.js";
-import type { ReviewReport } from "../review.js";
 import { extractMarker, markerComment, summaryMarker } from "./marker.js";
 import {
   composeSummaryBody,
   type SummaryBudget,
   type SummaryCounts,
+  type SummaryOutcome,
   type SummaryReport,
 } from "./presentation.js";
 import type { PublishOutcome } from "./publisher.js";
@@ -31,14 +32,48 @@ export interface SummaryPublishContext {
 }
 
 /**
- * Context this run's `ReviewReport` alone cannot supply: the head this run reviewed (an issue
- * comment carries no `commit_id`, so nothing else binds the comment to a commit), the triggering
- * event's own timestamp, the engine/action version identifiers already available to the run, and
- * how long the run itself took (Issue #59) — `ReviewReport` describes what happened, never how
- * long it took to happen.
+ * The structural view of a settled run this module projects into a summary comment.
+ *
+ * This module's OWN type, not `ReviewReport` (`src/review.ts`) imported — `presentation.ts` states
+ * the rule for this directory next to its `SummaryOutcome` declaration, and `report/types.ts`
+ * states it again for its own `ReportInput`: a leaf module must not depend on the top-level review
+ * orchestrator, only the orchestrator may depend on the leaf. Importing `ReviewReport` here was the
+ * one place `publish/` breached that, which also left `presentation.ts` paying for a `SummaryOutcome`
+ * mirror whose only producer read `outcome` straight off a `ReviewReport` one file over.
+ *
+ * Deliberately narrower than `ReviewReport`: the cache miss/append counters and `updatedCacheStore`
+ * are settlement bookkeeping no summary count reads. Every field is read-only and consumed by
+ * direct assignment (no `as` casts, no reflection), so a real `ReviewReport` is assignable here
+ * without an adapter — `action/main.ts` passes one — while a later rename or removal of any field
+ * below still fails to compile at that call site.
+ */
+export interface SummarySourceReport {
+  readonly outcome: SummaryOutcome;
+  /** Why the run did not settle `complete`. Rendered only for `"incomplete"` — see below. */
+  readonly reason?: ReasonCode;
+  /** Total changed paths classified, whatever the classification. */
+  readonly inventorySize: number;
+  /** Paths the engine must account for. */
+  readonly reviewablePaths: number;
+  /** Paths the profile's own `excluded` rules matched. */
+  readonly excludedPaths: number;
+  /** Paths downgraded to mechanically-clean — never sent to the engine. */
+  readonly mechanicallyClean: number;
+  /** Cache-eligible paths a stored entry answered instead of the engine. Always 0 when inert. */
+  readonly cacheHits: number;
+  /** Absent on a run that never reached publication — see `EMPTY_PUBLISH_OUTCOME` below. */
+  readonly publish?: PublishOutcome;
+}
+
+/**
+ * Context this run's report alone cannot supply: the head this run reviewed (an issue comment
+ * carries no `commit_id`, so nothing else binds the comment to a commit), the triggering event's
+ * own timestamp, the engine/action version identifiers already available to the run, and how long
+ * the run itself took (Issue #59) — the report describes what happened, never how long it took to
+ * happen.
  */
 export interface SummaryRunInput {
-  readonly report: ReviewReport;
+  readonly report: SummarySourceReport;
   readonly headSha: CommitSha;
   readonly eventTimestamp: string;
   readonly engineVersion: VersionTag;
@@ -96,7 +131,7 @@ const EMPTY_PUBLISH_OUTCOME: PublishOutcome = {
 };
 
 /**
- * Projects the same `ReviewReport` the action's own outputs are built from into `SummaryReport`.
+ * Projects the same settled report the action's own outputs are built from into `SummaryReport`.
  *
  * Every count is read directly off `report` — extended for this feature with the inventory
  * accounting `performReview` already computes — or off `report.publish`, never recomputed from a

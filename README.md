@@ -95,7 +95,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: git fetch --no-tags origin "pull/${PR}/head"
 
-      - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.8.0
+      - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.13.0
         env:
           # The credential is passed by variable NAME, never as an input.
           KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
@@ -179,8 +179,9 @@ works; it is weaker; the fallback exists so you can try the reviewer before regi
 
 ### Deduplication
 
-A finding is suppressed only when it is the same finding this reviewer already published, or the
-same finding at a location someone already gave a considered answer to, checked in three stages:
+A finding is suppressed against an existing conversation only when it is the same finding this
+reviewer already published, or the same finding at a location someone already gave a considered
+answer to, checked in three stages:
 
 1. **Exact marker.** Every published conversation carries a hidden fingerprint of its content. A
    later run recomputes the same fingerprint for the same defect and suppresses the repost.
@@ -199,6 +200,15 @@ same finding at a location someone already gave a considered answer to, checked 
    characters once signature lines (an automation footer, a `Co-Authored-By:` trailer) are stripped —
    never a bare "resolved" click with no reply, or a resolve with no reply at all. Counted separately
    as `dedup.dispositioned` so it is never confused with the two stages above.
+
+A fourth suppression runs earlier, and independently of those three, inside a single run. When the
+model describes one defect twice in one pass, the near-duplicates are clustered against each other —
+after sanitization, before any of the stages above — and only the best-articulated instance of each
+cluster goes on to those stages; a suppressed member never reaches them at all. No cross-run stage
+could have caught this case, because both candidates arrive before either one is published. The run
+loses redundancy, never coverage. Counted separately as `publish.finding_suppressed_intra_run`, so
+"the model repeats itself within a run" is never read as "a later run repeated an earlier one" — the
+two call for different remedies.
 
 The exact-marker stage ignores only a **resolved** conversation, not merely an **outdated** one: a
 marker fingerprints a finding's content, never the line it sits on, so a push that moves a thread's
@@ -230,7 +240,8 @@ The comment states, for every settlement outcome including `incomplete` and `aba
   identifiers;
 - a compact table of counts: total, reviewable, excluded, and mechanically-clean paths; paths
   replayed from the review-cache store versus freshly reviewed; findings published; and duplicates
-  suppressed, broken out by dedup stage (exact marker, phrasing-independent similarity);
+  suppressed, broken out by dedup stage (intra-run duplicate, exact marker, phrasing-independent
+  similarity, dispositioned recurrence);
 - the per-run token budget, and the engine-reported spend when it is available.
 
 It carries no finding body, no file content, and no free-form model text — every field is a
@@ -462,7 +473,7 @@ generated prose distributed through this repository, not just this reviewer's ow
 
 ```bash
 npm ci
-npm run verify            # typecheck, lint, format, test, build, bundle reproducibility
+npm run verify            # typecheck, lint, format, test, corpus tests, build, bundle reproducibility
 npm run check:engine-pin  # downloads and verifies every pinned engine asset
 ```
 

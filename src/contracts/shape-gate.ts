@@ -83,7 +83,6 @@ export interface UnionDecl {
 export interface UnionGap {
   readonly unionName: string;
   readonly member: string;
-  readonly counterpartMentions: number;
 }
 
 // -------------------------------------------------------------------------------------------
@@ -288,8 +287,23 @@ interface TypeTextShape {
   readonly ambiguous: boolean;
 }
 
-/** Matches (at the position `lastIndex` is set to) the start of what looks like another member. */
-const ANOTHER_MEMBER_START = /[ \t]*(?:[A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')[ \t]*\??[ \t]*:/y;
+/**
+ * Matches (at the position `lastIndex` is set to) the start of what looks like another member.
+ *
+ * The optional `?` is folded into `(?:\?[ \t]*)?` rather than left standing between two separate
+ * `[ \t]*` runs, which is what it used to be. Two blank runs separated by an OPTIONAL character are
+ * one blank run that can be cut in as many places as it is long, and every cut had to be retried
+ * before the `:` could fail: quadratic in the run's length (Sonar S8786). This one was not
+ * theoretical. It is tested once per top-level newline of a member's raw type text — repository
+ * source, bounded only by `MAX_SOURCE_CHARS` — so `foo:\n  bar`, a long run of spaces, and no colon
+ * is an input a diff can actually carry; at 40,000 spaces that single call took ~700 ms before this
+ * change and is unmeasurable after it.
+ *
+ * The folded form matches exactly the same text: blanks, then at most one `?` with its own trailing
+ * blanks, then the colon — `a:`, `a ?:`, `a? :`, `a  ?  :` all still match, `a??:` still does not —
+ * but a blank now belongs to exactly one run, so there is nothing left to retry.
+ */
+const ANOTHER_MEMBER_START = /[ \t]*(?:[A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')[ \t]*(?:\?[ \t]*)?:/y;
 
 /**
  * Walks a member's type text once, tracking `{`/`}` nesting depth and testing every top-level
@@ -326,8 +340,23 @@ type MemberOutcome =
   | { readonly kind: "reject" }
   | { readonly kind: "member"; readonly member: FlatMember };
 
+/**
+ * The type-text group is `(\S[\s\S]*)?`, not the `([\s\S]*)` it used to be. `[\s\S]` includes
+ * whitespace, so it and the `\s*` in front of it could divide the blanks after the colon in as many
+ * ways as there are blanks — the ambiguity Sonar S8786 flags. Unlike `ANOTHER_MEMBER_START` above,
+ * this one could never actually cost anything: the only thing following it is `$`, and a `[\s\S]*`
+ * that has consumed the rest of the string always satisfies `$`, so no division was ever retried.
+ * The rewrite closes the ambiguity, not a denial of service.
+ *
+ * It captures the identical text. Greedy `\s*` already took every blank after the colon, so the
+ * group could only ever start at a non-blank; requiring `\S` there states that instead of leaving it
+ * implied. `analyzeTypeText` is handed this group RAW, un-trimmed, and its ASI-ambiguity check turns
+ * on where the newlines fall in it, so byte-identical capture is the whole point. Type text that is
+ * empty or blank-only now leaves the group unset rather than `""`, which `classifyMemberText`'s
+ * `match[3] ?? ""` already collapses to the same empty string it rejected before.
+ */
 const PROPERTY_SIGNATURE =
-  /^(?:readonly\s+)?([A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')(\??)\s*:\s*([\s\S]*)$/;
+  /^(?:readonly\s+)?([A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')(\??)\s*:\s*(\S[\s\S]*)?$/;
 const NEW_SIGNATURE = /^new\b/;
 
 function unquote(raw: string): string {
@@ -727,8 +756,9 @@ export function findUncoveredUnionMembers(
     const baseMembers = new Set(baseUnion.members);
     for (const member of headUnion.members) {
       if (baseMembers.has(member)) continue;
-      const counterpartMentions = countLiteralMentions(counterpartSource, member);
-      if (counterpartMentions === 0) gaps.push({ unionName: name, member, counterpartMentions });
+      if (countLiteralMentions(counterpartSource, member) === 0) {
+        gaps.push({ unionName: name, member });
+      }
     }
   }
   return gaps;
@@ -741,7 +771,11 @@ export function findUncoveredUnionMembers(
  * header) — and it is the one place this gate composes text a human, not this gate, will read.
  */
 function escapeForCodeSpan(text: string): string {
-  return text.replace(/[`\\]/g, "\\$&");
+  // `String.raw` so the replacement reads as the three characters it actually is — a backslash, then
+  // `replace`'s own `$&` placeholder for the matched character — instead of hiding the backslash
+  // behind a second one (Sonar S7780), the same form `HEADER_PATTERN_SOURCE` above already uses.
+  // `$&` is inert in a template literal: only `${` begins a substitution.
+  return text.replace(/[`\\]/g, String.raw`\$&`);
 }
 
 /**

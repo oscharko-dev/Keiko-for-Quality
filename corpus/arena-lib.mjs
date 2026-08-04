@@ -961,7 +961,12 @@ function scoreboardRow(arenaId, metrics) {
   ].map(String);
 }
 
-function renderTable(header, rows) {
+/**
+ * Renders a Markdown table. Shared with `corpus/arena-trend.mjs` and `corpus/live-telemetry.mjs`,
+ * which render their own evidence tables through this one copy rather than each keeping an
+ * identical private one — a cell containing `|` is unescaped here, and that is worth fixing once.
+ */
+export function renderTable(header, rows) {
   const lines = [`| ${header.join(" | ")} |`, `| ${header.map(() => "---").join(" | ")} |`];
   for (const row of rows) lines.push(`| ${row.join(" | ")} |`);
   return lines.join("\n");

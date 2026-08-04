@@ -7,7 +7,8 @@ npm ci
 npm run verify
 ```
 
-`verify` runs typecheck, lint, format check, tests, build, and the bundle reproducibility check.
+`verify` runs typecheck, lint, format check, tests, the corpus tests, build, and the bundle
+reproducibility check.
 
 **`npm test` alone is not the bar.** Vitest transpiles without type-checking, so it will go green on
 code `tsc` rejects and lint refuses. That has already happened once in this repository's short

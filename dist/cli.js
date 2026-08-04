@@ -13,7 +13,7 @@ import { createHash } from "node:crypto";
 var FULL_SHA = /^[0-9a-f]{40}$/;
 var SHA256 = /^[0-9a-f]{64}$/;
 var VERSION = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
-var CONTROL_CHARACTERS = new RegExp("[\\u0000-\\u001F\\u007F-\\u009F]");
+var CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/;
 var ValidationError = class extends Error {
   field;
   constructor(field) {
@@ -413,9 +413,6 @@ var GlobSet = class {
   matches(path) {
     return this.matchers.some((matcher) => matcher.test(path));
   }
-  get size() {
-    return this.matchers.length;
-  }
 };
 
 // src/config/profile.ts
@@ -433,7 +430,7 @@ var MAX_PATHS_PER_INSTRUCTION = 16;
 var MAX_INSTRUCTION_PATH_LENGTH = 512;
 var MAX_INSTRUCTION_TEXT_LENGTH = 1024;
 var MAX_TOTAL_INSTRUCTION_TEXT_LENGTH = 8192;
-var CONTROL_EXCEPT_NEWLINE = new RegExp("[\\u0000-\\u0009\\u000B-\\u001F\\u007F-\\u009F]");
+var CONTROL_EXCEPT_NEWLINE = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/;
 function parseExclusions(value, field) {
   return asArray(value, field, 512).map((entry, i) => {
     const scope = `${field}[${String(i)}]`;
@@ -1135,6 +1132,10 @@ function parseNumstatCount(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : 0;
 }
+function recordNumstatEntry(binary, changedLines, path, isBinary, lines) {
+  if (isBinary) binary.add(path);
+  changedLines.set(path, lines);
+}
 function parseNumstat(text) {
   const parts = text.split("\0");
   const binary = /* @__PURE__ */ new Set();
@@ -1150,14 +1151,10 @@ function parseNumstat(text) {
     const inlinePath = fields.slice(2).join("	");
     if (inlinePath === "") {
       const target = parts[i + 2];
-      if (target !== void 0) {
-        if (isBinary) binary.add(target);
-        changedLines.set(target, lines);
-      }
+      if (target !== void 0) recordNumstatEntry(binary, changedLines, target, isBinary, lines);
       i += 3;
     } else {
-      if (isBinary) binary.add(inlinePath);
-      changedLines.set(inlinePath, lines);
+      recordNumstatEntry(binary, changedLines, inlinePath, isBinary, lines);
       i += 1;
     }
   }
@@ -1339,21 +1336,21 @@ var REASON_CODES = [
 var REASON_CODE_SET = new Set(REASON_CODES);
 
 // src/publish/sanitize.ts
-var CONTROL_EXCEPT_WHITESPACE = new RegExp("[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]");
-var BIDIRECTIONAL = new RegExp("[\\u202A-\\u202E\\u2066-\\u2069\\u200E\\u200F\\u061C]");
-var ZERO_WIDTH = new RegExp("[\\u200B\\u200C\\u200D\\u2060\\uFEFF\\u180E]");
-var HTML_TAG = new RegExp("<[A-Za-z!/?]");
-var SUGGESTION_BLOCK = new RegExp("```+\\s*suggestion", "i");
-var MENTION = new RegExp("(^|[^\\w`])@[A-Za-z0-9][A-Za-z0-9-]{0,38}", "m");
-var IMAGE = new RegExp("!\\[");
-var LINK = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.|^//[A-Za-z0-9-]+\\.[A-Za-z])", "m");
+var CONTROL_EXCEPT_WHITESPACE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/;
+var BIDIRECTIONAL = /[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/;
+var ZERO_WIDTH = /[\u200B\u200C\u200D\u2060\uFEFF\u180E]/;
+var HTML_TAG = /<[A-Za-z!/?]/;
+var SUGGESTION_BLOCK = /(?<!`)```+\s*suggestion/i;
+var MENTION = /(^|[^\w`])@[A-Za-z0-9][A-Za-z0-9-]{0,38}/m;
+var IMAGE = /!\[/;
+var LINK = /([A-Za-z][A-Za-z0-9+.-]*:\/\/|\bwww\.|^\/\/[A-Za-z0-9-]+\.[A-Za-z])/m;
 var CREDENTIAL_SHAPES = [
-  new RegExp("gh[pousr]_[A-Za-z0-9]{16,}"),
-  new RegExp("github_pat_[A-Za-z0-9_]{20,}"),
-  new RegExp("sk-[A-Za-z0-9]{20,}"),
-  new RegExp("-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-  new RegExp("(?:AKIA|ASIA)[A-Z0-9]{16}"),
-  new RegExp("eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.")
+  /gh[pousr]_[A-Za-z0-9]{16,}/,
+  /github_pat_\w{20,}/,
+  /sk-[A-Za-z0-9]{20,}/,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /(?:AKIA|ASIA)[A-Z0-9]{16}/,
+  /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./
 ];
 var MAX_BODY_CHARS = 8e3;
 var MIN_BODY_CHARS = 12;
@@ -1369,7 +1366,7 @@ var MASKED_CHECKS = [
   { pattern: LINK, reason: "link" },
   { pattern: MENTION, reason: "mention" }
 ];
-var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+var FENCE_OPEN = /^ {0,3}(`{3,}(?!`)|~{3,}(?!~))(.*)$/;
 var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 var INLINE_SPAN = /(?<!`)(`+)(?!`)([^\n]+?)\1(?!`)/g;
 function closingFenceIndex(lines, from, marker) {
@@ -1389,13 +1386,16 @@ function openingFenceMarker(line) {
 }
 function maskFencedBlocks(body) {
   const lines = body.split("\n");
-  for (let i = 0; i < lines.length; i += 1) {
+  let i = 0;
+  while (i < lines.length) {
     const marker = openingFenceMarker(lines[i] ?? "");
-    if (marker === void 0) continue;
-    const close = closingFenceIndex(lines, i + 1, marker);
-    if (close === -1) continue;
+    const close = marker === void 0 ? -1 : closingFenceIndex(lines, i + 1, marker);
+    if (close === -1) {
+      i += 1;
+      continue;
+    }
     for (let k = i + 1; k < close; k += 1) lines[k] = (lines[k] ?? "").replace(/./g, "x");
-    i = close;
+    i = close + 1;
   }
   return lines.join("\n");
 }
@@ -1408,12 +1408,9 @@ function maskCodeRegions(body) {
 function looksLikeCredential(text) {
   return CREDENTIAL_SHAPES.some((pattern) => pattern.test(text));
 }
-var MENTION_NEUTRALIZE = new RegExp(
-  "(^|[^\\w`])(@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:/[A-Za-z0-9][A-Za-z0-9-]{0,38})?)",
-  "gm"
-);
-var LINK_NEUTRALIZE = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.)\\S*", "g");
-var URL_TRAILING_PUNCTUATION = /[.,;:!?)\]}'"]+$/;
+var MENTION_NEUTRALIZE = /(^|[^\w`])(@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\/[A-Za-z0-9][A-Za-z0-9-]{0,38})?)/gm;
+var LINK_NEUTRALIZE = /([A-Za-z][A-Za-z0-9+.-]*:\/\/|\bwww\.)\S*/g;
+var URL_TRAILING_PUNCTUATION = /(?<![.,;:!?)\]}'"])[.,;:!?)\]}'"]+$/;
 var GENERIC_HEAD = /[A-Za-z_$][\w$]*</g;
 function mentionSpans(masked) {
   const spans = [];
@@ -1468,7 +1465,7 @@ function resolveOverlaps(spans) {
   const ordered = [...spans].sort((a, b) => a.start - b.start);
   const accepted = [];
   for (const span of ordered) {
-    const last = accepted[accepted.length - 1];
+    const last = accepted.at(-1);
     if (last !== void 0 && span.start < last.end) continue;
     accepted.push(span);
   }
@@ -1495,12 +1492,16 @@ function neutralize(body) {
 }
 function hasUnclosedFence(body) {
   const lines = body.split("\n");
-  for (let i = 0; i < lines.length; i += 1) {
+  let i = 0;
+  while (i < lines.length) {
     const marker = openingFenceMarker(lines[i] ?? "");
-    if (marker === void 0) continue;
+    if (marker === void 0) {
+      i += 1;
+      continue;
+    }
     const close = closingFenceIndex(lines, i + 1, marker);
     if (close === -1) return true;
-    i = close;
+    i = close + 1;
   }
   return false;
 }
@@ -1511,12 +1512,13 @@ function withNeutralizedCount(body, neutralized) {
   return neutralized > 0 ? { ok: true, body, neutralized } : { ok: true, body };
 }
 function sanitizeFindingBody(raw) {
-  const body = raw.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const body = raw.replaceAll("\r\n", "\n").replaceAll(/\n{3,}/g, "\n\n").trim();
   if (body.length < MIN_BODY_CHARS) return { ok: false, reason: "empty" };
   for (const check of RAW_CHECKS) {
     if (check.pattern.test(body)) return { ok: false, reason: check.reason };
   }
   if (looksLikeCredential(body)) return { ok: false, reason: "credential" };
+  if (body.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
   const { body: candidate, neutralized } = neutralizeGuardingUnclosedFence(body);
   if (candidate.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
   const masked = maskCodeRegions(candidate);
@@ -1665,7 +1667,6 @@ var VERSION2 = versionTag("v1.8.4");
 var ENGINE_PIN = {
   engine: "alibaba/open-code-review",
   version: VERSION2,
-  releaseUrl: `https://github.com/alibaba/open-code-review/releases/tag/${VERSION2}`,
   platforms: {
     "linux-x64": {
       asset: "opencodereview-linux-amd64",
@@ -1847,10 +1848,15 @@ function validPair(parsed) {
   if (!FINDING_SEVERITIES.includes(severity)) return void 0;
   return { category, severity };
 }
+function withoutTrailingSlashes(value) {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end -= 1;
+  return value.slice(0, end);
+}
 async function requestPair(prompt, deps, seed) {
   const doFetch = deps.fetchImpl ?? fetch;
   try {
-    const response = await doFetch(`${deps.endpoint.replace(/\/+$/, "")}/chat/completions`, {
+    const response = await doFetch(`${withoutTrailingSlashes(deps.endpoint)}/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -2311,7 +2317,8 @@ function contractPairsSection(pairs) {
     ...lines
   ].join("\n");
 }
-function buildRuleFile(profile, guidelines = { paths: [] }, mechanicallyClean = []) {
+var NO_GUIDELINES = Object.freeze({ paths: Object.freeze([]) });
+function buildRuleFile(profile, guidelines = NO_GUIDELINES, mechanicallyClean = []) {
   const include = [...profile.profile.reviewRelevant];
   if (include.length === 0) {
     throw new TypeError("profile.reviewRelevant must declare at least one pattern");
@@ -2377,6 +2384,11 @@ function readBody(request) {
 function isChatCompletionsPath(path) {
   const pathname = path.split("?")[0] ?? path;
   return pathname.endsWith("/chat/completions");
+}
+function withoutTrailingSlashes2(value) {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end -= 1;
+  return value.slice(0, end);
 }
 function pinSampling(path, body, options2, includeCacheKey) {
   if (!isChatCompletionsPath(path)) return { body, cacheKeyInjected: false };
@@ -2457,7 +2469,7 @@ async function forward(options2, request, response, usage, latch) {
     const withBody = method !== "GET" && method !== "HEAD";
     const isChatCompletions = isChatCompletionsPath(path);
     countRequest(usage, isChatCompletions);
-    const url = `${options2.upstreamUrl.replace(/\/+$/, "")}${path}`;
+    const url = `${withoutTrailingSlashes2(options2.upstreamUrl)}${path}`;
     const upstream = await fetchWithCacheKeyFallback(
       doFetch,
       url,
@@ -2480,6 +2492,13 @@ async function forward(options2, request, response, usage, latch) {
     } catch {
     }
   }
+}
+function closeServer(server) {
+  return new Promise((done) => {
+    server.close(() => {
+      done();
+    });
+  });
 }
 function startModelProxy(options2) {
   const usage = {
@@ -2504,11 +2523,7 @@ function startModelProxy(options2) {
       }
       resolve2({
         url: `http://127.0.0.1:${String(address.port)}`,
-        close: () => new Promise((done) => {
-          server.close(() => {
-            done();
-          });
-        }),
+        close: () => closeServer(server),
         usage: () => ({ ...usage })
       });
     });
@@ -2606,6 +2621,10 @@ function recordModelUsage(diagnostics, proxy, options2) {
     }
   });
 }
+function failureReason(error) {
+  if (!(error instanceof ExecFailure)) return "engine.run.spawn_failed";
+  return error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit";
+}
 async function runEngine(options2, diagnostics) {
   const token = readModelToken(options2.config, options2.env);
   if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
@@ -2633,7 +2652,7 @@ async function runEngine(options2, diagnostics) {
     });
     return { stdout: result.stdout.toString("utf8"), ruleDigest };
   } catch (error) {
-    const reason = error instanceof ExecFailure ? error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit" : "engine.run.spawn_failed";
+    const reason = failureReason(error);
     diagnostics.record(reason, {
       headSha: options2.pair.head,
       durationMs: Date.now() - started
@@ -2654,9 +2673,9 @@ var MAX_TYPE_ALIAS_CHARS = 200;
 var MAX_PASS_FINDINGS = 10;
 var SCAN_WINDOW = 400;
 var INTERFACE_START = /^\s*export\s+interface\s+([A-Za-z_$][\w$]*)/;
-var TYPE_ALIAS_START = /^\s*export\s+type\s+([A-Za-z_$][\w$]*)\s*=\s*(.*)$/;
+var TYPE_ALIAS_START = /^\s*export\s+type\s+([A-Za-z_$][\w$]*)\s*=\s*(\S.*)?$/;
 var FUNCTION_START = /^\s*export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/;
-var CONST_START = /^\s*export\s+const\s+([A-Za-z_$][\w$]*)\s*:\s*(.+)$/;
+var CONST_START = /^\s*export\s+const\s+([A-Za-z_$][\w$]*)\s*:\s*(\S.*|.)$/;
 function collapseWhitespace(text) {
   return text.replace(/\s+/g, " ").trim();
 }
@@ -2826,7 +2845,7 @@ ${summary}`;
 async function postChangePassRequest(prompt, deps) {
   const doFetch = deps.fetchImpl ?? fetch;
   try {
-    const response = await doFetch(`${deps.endpoint.replace(/\/+$/, "")}/chat/completions`, {
+    const response = await doFetch(`${deps.endpoint.replace(/(?<!\/)\/+$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -3047,7 +3066,7 @@ function matchingBrace(source, openIndex) {
   }
   return -1;
 }
-var ANOTHER_MEMBER_START = /[ \t]*(?:[A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')[ \t]*\??[ \t]*:/y;
+var ANOTHER_MEMBER_START = /[ \t]*(?:[A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')[ \t]*(?:\?[ \t]*)?:/y;
 function analyzeTypeText(text) {
   let depth = 0;
   let peak = 0;
@@ -3069,7 +3088,7 @@ function analyzeTypeText(text) {
   }
   return { maxDepth: peak, ambiguous };
 }
-var PROPERTY_SIGNATURE = /^(?:readonly\s+)?([A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')(\??)\s*:\s*([\s\S]*)$/;
+var PROPERTY_SIGNATURE = /^(?:readonly\s+)?([A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')(\??)\s*:\s*(\S[\s\S]*)?$/;
 var NEW_SIGNATURE = /^new\b/;
 function unquote(raw) {
   const first = raw.charAt(0);
@@ -3281,14 +3300,15 @@ function findUncoveredUnionMembers(baseSource, headSource, counterpartSource) {
     const baseMembers = new Set(baseUnion.members);
     for (const member of headUnion.members) {
       if (baseMembers.has(member)) continue;
-      const counterpartMentions = countLiteralMentions(counterpartSource, member);
-      if (counterpartMentions === 0) gaps.push({ unionName: name, member, counterpartMentions });
+      if (countLiteralMentions(counterpartSource, member) === 0) {
+        gaps.push({ unionName: name, member });
+      }
     }
   }
   return gaps;
 }
 function escapeForCodeSpan(text) {
-  return text.replace(/[`\\]/g, "\\$&");
+  return text.replace(/[`\\]/g, String.raw`\$&`);
 }
 function describeMismatch(mismatch, leftPath, rightPath) {
   const presentPath = mismatch.missingFrom === "right" ? leftPath : rightPath;
@@ -3322,7 +3342,7 @@ var MAX_PIN_SITES = 200;
 var MAX_SOURCE_CHARS2 = 2e6;
 var SHA_SOURCE = String.raw`\b[0-9a-f]{40}\b`;
 var USES_PREFIX = /\buses\s*:\s*["']?[^\s"'@]+@$/;
-var ASSIGNMENT_PREFIX = /[A-Za-z_$][\w$.-]*\s*[:=]\s*["'`]?$/;
+var ASSIGNMENT_PREFIX = /[A-Za-z_$][\d.-]*\s*[:=]\s*["'`]?$/;
 function commentMarkerIndex(prefix) {
   const hash = prefix.indexOf("#");
   let slashes = prefix.indexOf("//");
@@ -3356,7 +3376,7 @@ function collectPinSites(lines) {
   const shaPattern = new RegExp(SHA_SOURCE, "gi");
   const out = [];
   for (let i = 0; i < lines.length; i += 1) {
-    if (scanLine(shaPattern, lines[i] ?? "", i + 1, out)) return out;
+    if (scanLine(shaPattern, lines[i] ?? "", i + 1, out)) break;
   }
   return out;
 }
@@ -3422,13 +3442,13 @@ function detectPinDesync(base, head) {
   return results;
 }
 function escapeForCodeSpan2(text) {
-  return text.replace(/[`\\]/g, "\\$&");
+  return text.replace(/[`\\]/g, String.raw`\$&`);
 }
 function formatLineList(sites) {
   const lines = [...new Set(sites.map((site) => site.line))].sort((a, b) => a - b);
   const label = lines.length === 1 ? "line" : "lines";
   if (lines.length <= 1) return `${label} ${String(lines[0] ?? "?")}`;
-  const last = lines[lines.length - 1] ?? "?";
+  const last = lines.at(-1) ?? "?";
   return `${label} ${lines.slice(0, -1).join(", ")} and ${String(last)}`;
 }
 function describePinDesync(desync, path) {
@@ -3528,8 +3548,8 @@ async function resolveReviewPair(ctx, base, head) {
   return { base, head, mergeBase: await mergeBase(ctx, base, head) };
 }
 function bucketKey(item) {
-  const kind = item.classification.kind.replace(/-/g, "_");
-  return item.classification.kind === "mechanically-clean" ? `${kind}_${item.classification.reason.replace(/-/g, "_")}` : kind;
+  const kind = item.classification.kind.replaceAll("-", "_");
+  return item.classification.kind === "mechanically-clean" ? `${kind}_${item.classification.reason.replaceAll("-", "_")}` : kind;
 }
 function countByKind(items) {
   const counts = {};
@@ -3576,7 +3596,7 @@ function isSubstantiveDisposition(lastReply, identity) {
 // src/publish/marker.ts
 import { createHash as createHash5 } from "node:crypto";
 var MARKER_PREFIX = "keiko-for-quality";
-var MARKER_PATTERN = new RegExp(`<!--\\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\\s*-->`);
+var MARKER_PATTERN = new RegExp(String.raw`<!--\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\s*-->`);
 var FIELD_SEPARATOR2 = "\0";
 function normalizeUnicodeText(input) {
   return input.normalize("NFC").replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").replace(/[\u2018\u2019\u201A\u201B]/g, "'").replace(/[\u201C\u201D\u201E\u201F]/g, '"').replace(new RegExp("\\p{Zs}", "gu"), " ").toLowerCase();
@@ -3752,6 +3772,16 @@ function classifySuppression(finding, sanitizedBody, marker, existingMarkers, ex
   if (findsDispositionedConversation(candidate, existingThreads, identity)) return "dispositioned";
   return void 0;
 }
+function suppressionCode(suppression) {
+  switch (suppression) {
+    case "exact":
+      return "publish.finding_suppressed_duplicate";
+    case "similar":
+      return "publish.finding_suppressed_similar";
+    case "dispositioned":
+      return "dedup.dispositioned";
+  }
+}
 function findingMarker(context, finding, sanitizedBody) {
   return fingerprint({
     repository: `${context.ref.owner}/${context.ref.repo}`,
@@ -3848,8 +3878,7 @@ function planCrossRun(context, candidate, prefetch, counters, diagnostics) {
     if (suppression === "exact") counters.suppressedExactDuplicate += 1;
     else if (suppression === "similar") counters.suppressedSimilar += 1;
     else counters.suppressedDispositioned += 1;
-    const code = suppression === "exact" ? "publish.finding_suppressed_duplicate" : suppression === "similar" ? "publish.finding_suppressed_similar" : "dedup.dispositioned";
-    diagnostics.record(code, { headSha: context.headSha });
+    diagnostics.record(suppressionCode(suppression), { headSha: context.headSha });
     return void 0;
   }
   return { finding, sanitizedBody };
@@ -3906,8 +3935,7 @@ function computeAllottedBudget(tokenBudget, reviewableFileCount, reviewableChang
   const clamped = clamp(sizeScaled, ALLOTMENT_FLOOR, ALLOTMENT_CEILING);
   return Math.round(Math.min(tokenBudget, clamped));
 }
-var EMPTY_EXCLUDE = /* @__PURE__ */ new Set();
-function reviewableChangedLines(inventory, excluded = EMPTY_EXCLUDE) {
+function reviewableChangedLines(inventory, excluded) {
   let total = 0;
   for (const item of inventory.items) {
     if (item.reviewable && !excluded.has(item.path)) total += item.changedLines;
@@ -3940,7 +3968,7 @@ var INERT_MEMO = {
   pathSetDigest: void 0,
   contextInvalidated: 0
 };
-var EMPTY_FRESH = /* @__PURE__ */ new Set();
+var EMPTY_BATCH = { findings: [], fresh: /* @__PURE__ */ new Set() };
 function cacheCounts(memo) {
   return { cacheHits: memo.hits.size, cacheMisses: memo.eligiblePaths.size - memo.hits.size };
 }
@@ -4077,6 +4105,20 @@ async function collectPinDesyncFindings(ctx, request, inventory, findings) {
   }
   return found;
 }
+function pushGateFindings(findings, path, items, describe) {
+  for (const item of items) {
+    if (findings.length >= MAX_GATE_FINDINGS) return true;
+    findings.push({
+      path,
+      content: describe(item),
+      startLine: 0,
+      endLine: 0,
+      category: "bug",
+      severity: "high"
+    });
+  }
+  return false;
+}
 async function compareAgainstCounterparts(ctx, base, head, item, pair, findings) {
   const path = item.path;
   const left = await readTextAtCommit(ctx, head, path);
@@ -4087,29 +4129,23 @@ async function compareAgainstCounterparts(ctx, base, head, item, pair, findings)
     const right = await readTextAtCommit(ctx, head, counterpart);
     if (right === void 0) continue;
     compared += 1;
-    for (const mismatch of compareDeclaredContracts(left, right)) {
-      if (findings.length >= MAX_GATE_FINDINGS) return compared;
-      findings.push({
-        path: item.path,
-        content: describeMismatch(mismatch, path, counterpart),
-        startLine: 0,
-        endLine: 0,
-        category: "bug",
-        severity: "high"
-      });
-    }
+    const mismatches = compareDeclaredContracts(left, right);
+    const capped = pushGateFindings(
+      findings,
+      item.path,
+      mismatches,
+      (mismatch) => describeMismatch(mismatch, path, counterpart)
+    );
+    if (capped) return compared;
     if (leftBase === void 0) continue;
-    for (const gap of findUncoveredUnionMembers(leftBase, left, right)) {
-      if (findings.length >= MAX_GATE_FINDINGS) return compared;
-      findings.push({
-        path: item.path,
-        content: describeUnionGap(gap, path, counterpart),
-        startLine: 0,
-        endLine: 0,
-        category: "bug",
-        severity: "high"
-      });
-    }
+    const gaps = findUncoveredUnionMembers(leftBase, left, right);
+    const cappedByGaps = pushGateFindings(
+      findings,
+      item.path,
+      gaps,
+      (gap) => describeUnionGap(gap, path, counterpart)
+    );
+    if (cappedByGaps) return compared;
   }
   return compared;
 }
@@ -4198,14 +4234,14 @@ async function runEngineWithOneResume(options2, diagnostics) {
 }
 var AUDIT_RESERVE_PER_FINDING = 2e3;
 var NO_AUDITED = /* @__PURE__ */ new Map();
-async function auditFreshSurvivors(request, fresh, ledger, diagnostics) {
+async function auditFreshSurvivors(run2, fresh) {
   if (fresh.length === 0) return NO_AUDITED;
-  const deps = classifyDeps(request);
+  const deps = classifyDeps(run2.request);
   if (deps === void 0) return NO_AUDITED;
-  const remaining = request.config.tokenBudget - ledger.engine - ledger.classify;
+  const remaining = run2.request.config.tokenBudget - run2.ledger.engine - run2.ledger.classify;
   if (remaining < AUDIT_RESERVE_PER_FINDING * fresh.length) {
-    diagnostics.record("classify.skipped_budget", {
-      headSha: request.head,
+    run2.diagnostics.record("classify.skipped_budget", {
+      headSha: run2.request.head,
       counts: { skipped: fresh.length, remaining }
     });
     return NO_AUDITED;
@@ -4214,8 +4250,8 @@ async function auditFreshSurvivors(request, fresh, ledger, diagnostics) {
     fresh.map((survivor) => survivor.finding),
     deps
   );
-  ledger.classify += audit.tokens;
-  diagnostics.record("classify.audited", {
+  run2.ledger.classify += audit.tokens;
+  run2.diagnostics.record("classify.audited", {
     counts: { changed: audit.changed, tokens: audit.tokens }
   });
   const byOriginal = /* @__PURE__ */ new Map();
@@ -4232,10 +4268,10 @@ function substituteAudited(survivors, auditedByOriginal) {
     return audited === void 0 ? survivor : { ...survivor, finding: audited };
   });
 }
-async function planAndAudit(request, context, findings, freshEngineFindings, ledger, diagnostics, prefetch) {
-  const plan = await planPublication(context, findings, diagnostics, prefetch);
-  const fresh = plan.survivors.filter((survivor) => freshEngineFindings.has(survivor.finding));
-  const auditedByOriginal = await auditFreshSurvivors(request, fresh, ledger, diagnostics);
+async function planAndAudit(run2, context, batch, prefetch) {
+  const plan = await planPublication(context, batch.findings, run2.diagnostics, prefetch);
+  const fresh = plan.survivors.filter((survivor) => batch.fresh.has(survivor.finding));
+  const auditedByOriginal = await auditFreshSurvivors(run2, fresh);
   return {
     plan,
     survivors: substituteAudited(plan.survivors, auditedByOriginal),
@@ -4308,18 +4344,10 @@ function localSpend(ledger) {
     allotted: ledger.allotted
   };
 }
-async function localFindings(request, inventory, findings, freshEngineFindings, ledger, diagnostics) {
-  if (findings.length === 0) return { findings: [], auditedByOriginal: NO_AUDITED };
-  const context = localPublishContext(request, inventory);
-  const { survivors, auditedByOriginal } = await planAndAudit(
-    request,
-    context,
-    findings,
-    freshEngineFindings,
-    ledger,
-    diagnostics,
-    EMPTY_PREFETCH
-  );
+async function localFindings(run2, inventory, batch) {
+  if (batch.findings.length === 0) return { findings: [], auditedByOriginal: NO_AUDITED };
+  const context = localPublishContext(run2.request, inventory);
+  const { survivors, auditedByOriginal } = await planAndAudit(run2, context, batch, EMPTY_PREFETCH);
   return { findings: survivors.map(toLocalFinding), auditedByOriginal };
 }
 function emptyLocalReport(inventory, ruleDigest, engineVersion) {
@@ -4334,75 +4362,70 @@ function emptyLocalReport(inventory, ruleDigest, engineVersion) {
     cacheMisses: 0
   };
 }
-async function localIncompleteReport(request, inventory, reason, ledger, diagnostics, findings, freshEngineFindings, reviewed, ruleDigest, engineVersion, memo) {
-  diagnostics.record(reason, { headSha: request.head });
-  const reported = await localFindings(
-    request,
-    inventory,
-    findings,
-    freshEngineFindings,
-    ledger,
-    diagnostics
-  );
+async function localIncompleteReport(run2, inventory, reason, batch, reviewed, memo) {
+  run2.diagnostics.record(reason, { headSha: run2.request.head });
+  const reported = await localFindings(run2, inventory, batch);
   return {
     outcome: "incomplete",
     reason,
     findings: reported.findings,
-    spend: localSpend(ledger),
+    spend: localSpend(run2.ledger),
     inventory: {
       total: inventory.items.length,
       reviewable: inventory.reviewablePaths.size,
       reviewed
     },
-    ruleDigest,
-    engineVersion,
+    ruleDigest: run2.ruleDigest,
+    engineVersion: run2.engineVersion,
     // An incomplete outcome never writes a store back (`finalizeCacheStore`'s admission rule), but
     // the hit/miss counts are facts about what was attempted, memo or not.
     ...memo === void 0 ? { cacheHits: 0, cacheMisses: 0 } : cacheCounts(memo)
   };
 }
-async function localSettleOrReport(request, inventory, memo, ledger, diagnostics, ruleDigest, engineVersion) {
+async function localSettleOrReport(run2, inventory, memo) {
   try {
-    const settlement = await executeEngine(request, inventory, memo, ledger, diagnostics);
-    diagnostics.record(
+    const settlement = await executeEngine(
+      run2.request,
+      inventory,
+      memo,
+      run2.ledger,
+      run2.diagnostics
+    );
+    run2.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
-      { headSha: request.head }
+      { headSha: run2.request.head }
     );
     return settlement;
   } catch {
     return localIncompleteReport(
-      request,
+      run2,
       inventory,
       "settlement.incomplete.engine_error",
-      ledger,
-      diagnostics,
-      [],
-      EMPTY_FRESH,
+      EMPTY_BATCH,
       memo.hitPaths.size,
-      ruleDigest,
-      engineVersion,
       memo
     );
   }
 }
-async function completeLocalReport(request, inventory, settlement, memo, ledger, diagnostics, ruleDigest, engineVersion) {
-  const gate = await collectGateFindings(request, inventory, diagnostics);
-  const changePass = await collectChangePassFindings(request, inventory, ledger, diagnostics);
+async function completeLocalReport(run2, inventory, settlement, memo) {
+  const gate = await collectGateFindings(run2.request, inventory, run2.diagnostics);
+  const changePass = await collectChangePassFindings(
+    run2.request,
+    inventory,
+    run2.ledger,
+    run2.diagnostics
+  );
   const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
   const freshEngineFindings = /* @__PURE__ */ new Set([
     ...settlement.findings,
     ...changePass
   ]);
-  const reported = await localFindings(
-    request,
-    inventory,
-    merged,
-    freshEngineFindings,
-    ledger,
-    diagnostics
-  );
+  const reported = await localFindings(run2, inventory, {
+    findings: merged,
+    fresh: freshEngineFindings
+  });
   const finalized = finalizeCacheStore(
-    request,
+    run2.request,
     inventory,
     memo,
     findingsForStorage(settlement.findings, reported.auditedByOriginal)
@@ -4410,130 +4433,88 @@ async function completeLocalReport(request, inventory, settlement, memo, ledger,
   return {
     outcome: "complete",
     findings: reported.findings,
-    spend: localSpend(ledger),
+    spend: localSpend(run2.ledger),
     inventory: {
       total: inventory.items.length,
       reviewable: inventory.reviewablePaths.size,
       reviewed: inventory.reviewablePaths.size
     },
-    ruleDigest,
-    engineVersion,
+    ruleDigest: run2.ruleDigest,
+    engineVersion: run2.engineVersion,
     ...cacheCounts(memo),
     ...finalized === void 0 ? {} : { updatedCacheStore: finalized.store }
   };
 }
-async function localPreEngineReport(request, inventory, ledger, diagnostics, started, ruleDigest, engineVersion) {
+async function localPreEngineReport(run2, inventory, started) {
   if (inventory.unclassified.length > 0) {
-    return localIncompleteReport(
-      request,
-      inventory,
-      "inventory.unclassified_path",
-      ledger,
-      diagnostics,
-      [],
-      EMPTY_FRESH,
-      0,
-      ruleDigest,
-      engineVersion
-    );
+    return localIncompleteReport(run2, inventory, "inventory.unclassified_path", EMPTY_BATCH, 0);
   }
   if (inventory.reviewablePaths.size === 0) {
-    diagnostics.record("settlement.complete", {
-      headSha: request.head,
+    run2.diagnostics.record("settlement.complete", {
+      headSha: run2.request.head,
       durationMs: Date.now() - started
     });
-    return emptyLocalReport(inventory, ruleDigest, engineVersion);
+    return emptyLocalReport(inventory, run2.ruleDigest, run2.engineVersion);
   }
   return void 0;
 }
-async function localResolveInventory(request, diagnostics) {
-  diagnostics.record("run.started", { headSha: request.head });
-  const ctx = gitContext(request);
-  const pair = await resolvePairOrReport(ctx, request, diagnostics);
-  diagnostics.record("review_pair.resolved", { headSha: request.head });
+async function localResolveInventory(run2) {
+  run2.diagnostics.record("run.started", { headSha: run2.request.head });
+  const ctx = gitContext(run2.request);
+  const pair = await resolvePairOrReport(ctx, run2.request, run2.diagnostics);
+  run2.diagnostics.record("review_pair.resolved", { headSha: run2.request.head });
   return buildInventory(
     ctx,
-    request.profile,
+    run2.request.profile,
     pair,
-    request.config.renameDetectionPercent,
-    diagnostics
+    run2.request.config.renameDetectionPercent,
+    run2.diagnostics
   );
 }
-async function localSettleReport(request, inventory, settlement, memo, ledger, diagnostics, started, ruleDigest, engineVersion) {
+async function localSettleReport(run2, inventory, settlement, memo, started) {
   if (settlement.status === "incomplete") {
     const reviewed = verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths.size + memo.hitPaths.size : memo.hitPaths.size;
     return localIncompleteReport(
-      request,
+      run2,
       inventory,
       settlement.reason,
-      ledger,
-      diagnostics,
-      mergeHitFindings(settlement.findings, memo.hits),
-      new Set(settlement.findings),
+      {
+        findings: mergeHitFindings(settlement.findings, memo.hits),
+        fresh: new Set(settlement.findings)
+      },
       reviewed,
-      ruleDigest,
-      engineVersion,
       memo
     );
   }
-  const report = await completeLocalReport(
-    request,
-    inventory,
-    settlement,
-    memo,
-    ledger,
-    diagnostics,
-    ruleDigest,
-    engineVersion
-  );
-  diagnostics.record("settlement.complete", {
-    headSha: request.head,
+  const report = await completeLocalReport(run2, inventory, settlement, memo);
+  run2.diagnostics.record("settlement.complete", {
+    headSha: run2.request.head,
     durationMs: Date.now() - started
   });
   return report;
 }
-async function performLocalReviewInner(request, diagnostics, ledger, ruleDigest, engineVersion) {
+async function performLocalReviewInner(run2) {
   const started = Date.now();
-  const inventory = await localResolveInventory(request, diagnostics);
-  const preEngine = await localPreEngineReport(
-    request,
-    inventory,
-    ledger,
-    diagnostics,
-    started,
-    ruleDigest,
-    engineVersion
-  );
+  const inventory = await localResolveInventory(run2);
+  const preEngine = await localPreEngineReport(run2, inventory, started);
   if (preEngine !== void 0) return preEngine;
-  const memo = prepareMemoization(request, inventory, diagnostics);
-  const settlement = await localSettleOrReport(
-    request,
-    inventory,
-    memo,
-    ledger,
-    diagnostics,
-    ruleDigest,
-    engineVersion
-  );
+  const memo = prepareMemoization(run2.request, inventory, run2.diagnostics);
+  const settlement = await localSettleOrReport(run2, inventory, memo);
   if ("outcome" in settlement) return settlement;
-  return localSettleReport(
-    request,
-    inventory,
-    settlement,
-    memo,
-    ledger,
-    diagnostics,
-    started,
-    ruleDigest,
-    engineVersion
-  );
+  return localSettleReport(run2, inventory, settlement, memo, started);
 }
 async function performLocalReview(request, diagnostics) {
   const ledger = { allotted: 0, engine: 0, classify: 0 };
   const ruleDigest = promptIdentityDigest(request.profile, request.guidelines);
   const engineVersion = ENGINE_PIN.version;
   try {
-    return await performLocalReviewInner(request, diagnostics, ledger, ruleDigest, engineVersion);
+    return await performLocalReviewInner({
+      request,
+      ledger,
+      diagnostics,
+      ruleDigest,
+      engineVersion
+    });
   } finally {
     if (ledger.engine > 0 || ledger.classify > 0) {
       diagnostics.record("run.spend", {
@@ -4585,10 +4566,15 @@ function createDiagnostics(writer) {
   };
 }
 
+// src/report/types.ts
+function isFileLevel(finding) {
+  return finding.startLine === 0 && finding.endLine === 0;
+}
+
 // src/report/json.ts
 var JSON_REPORT_SCHEMA = "keiko-for-quality.local-report/v1";
 function toJsonFinding(finding) {
-  const fileLevel = finding.startLine === 0 && finding.endLine === 0;
+  const fileLevel = isFileLevel(finding);
   return {
     path: finding.path,
     startLine: fileLevel ? null : finding.startLine,
@@ -4660,7 +4646,7 @@ function buildRules() {
   ];
 }
 function toResult(finding) {
-  const fileLevel = finding.startLine === 0 && finding.endLine === 0;
+  const fileLevel = isFileLevel(finding);
   return {
     ruleId: finding.category === void 0 ? UNCLASSIFIED_RULE_ID : categoryRuleId(finding.category),
     level: severityToLevel(finding.severity),
@@ -4938,7 +4924,8 @@ function shortSha(sha) {
 function formatFinding(finding, index) {
   const location = `${finding.path}:${String(finding.startLine)}-${String(finding.endLine)}`;
   const classification = [finding.category, finding.severity].filter(Boolean).join("/");
-  const header = `[${String(index + 1)}] ${location}${classification === "" ? "" : ` (${classification})`}`;
+  const classificationSuffix = classification === "" ? "" : ` (${classification})`;
+  const header = `[${String(index + 1)}] ${location}${classificationSuffix}`;
   const sanitized = sanitizeFindingBody(finding.body);
   if (!sanitized.ok) {
     return `${header}
@@ -5035,6 +5022,8 @@ Options:
   --store <path>                 Review-cache store file, read before the run and written back only
                                   on a settlement whose verdicts survive it.
   --out <path>                   Write the report here instead of stdout.
+  --format <human|json|sarif>    Report format. Default: human. json and sarif emit the versioned
+                                  wire contract (docs/local-report-schema.md).
   --file-timeout-seconds <n>     Per-file engine timeout. Default: 300.
   --review-timeout-seconds <n>   Whole-review wall-clock ceiling. Default: 1800.
   --token-budget <n>             Hard token ceiling for one review. Default: 2000000.
@@ -5153,6 +5142,7 @@ if (isEntryModule()) {
 export {
   EXIT_CODE,
   HELP_TEXT,
+  STRING_FLAGS,
   buildRuntimeConfig,
   checkNodeVersion,
   exitCodeForReport,

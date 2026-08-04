@@ -39,6 +39,7 @@ const {
   runCli,
   EXIT_CODE,
   HELP_TEXT,
+  STRING_FLAGS,
 } = await import("./cli.js");
 type RawArgs = Parameters<typeof resolveCliArgs>[0];
 
@@ -161,6 +162,8 @@ describe("parseArgs", () => {
       "store.json",
       "--out",
       "out.txt",
+      "--format",
+      "json",
       "--file-timeout-seconds",
       "60",
       "--review-timeout-seconds",
@@ -182,6 +185,7 @@ describe("parseArgs", () => {
       guidelines: "AGENTS.md",
       store: "store.json",
       out: "out.txt",
+      format: "json",
       fileTimeoutSeconds: "60",
       reviewTimeoutSeconds: "900",
       tokenBudget: "1000",
@@ -236,6 +240,36 @@ describe("parseArgs", () => {
 
   it("accepts --target-branch alone", () => {
     expect(parseArgs(["--target-branch", "trunk"]).ok).toBe(true);
+  });
+
+  it.each(["human", "json", "sarif"])("accepts --format %s", (format) => {
+    const result = parseArgs(["--format", format]);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.values.format).toBe(format);
+  });
+
+  it("rejects a --format outside the vocabulary, naming the accepted values", () => {
+    const result = parseArgs(["--format", "nope"]);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.message).toContain("human");
+      expect(result.message).toContain("sarif");
+    }
+  });
+});
+
+/**
+ * AGENTS.md makes `npm run review -- --help` the authoritative flag reference and forbids restating
+ * the list elsewhere, so a flag registered in `STRING_FLAGS` but absent from `HELP_TEXT` has no
+ * listing a user can reach — which is exactly what happened to `--format` for a whole release.
+ * This walks the registry rather than a hand-written copy of it, so the guard covers flags that do
+ * not exist yet; remove any Options row and exactly this test goes red.
+ */
+describe("HELP_TEXT", () => {
+  it.each(Object.keys(STRING_FLAGS))("documents %s as its own Options row", (flag) => {
+    // Row-anchored, not a bare substring: a flag named only inside some other row's prose is not
+    // a listing, and this is the failure the pin exists to catch.
+    expect(HELP_TEXT).toContain(`\n  ${flag} `);
   });
 });
 
@@ -469,7 +503,7 @@ describe("renderHuman", () => {
 function expectSingleLineUsageError(stderrLines: readonly string[]): void {
   const message = stderrLines.join("");
   expect(message.startsWith("error: ")).toBe(true);
-  expect(message.trim().split("\n").length).toBe(1);
+  expect(message.trim().split("\n")).toHaveLength(1);
   expect(message).not.toContain("    at ");
 }
 
@@ -515,6 +549,14 @@ describe("runCli", () => {
       });
       expect(await runCli(deps)).toBe(EXIT_CODE.usageError);
       expectSingleLineUsageError(stderrLines);
+    });
+
+    it("exits 4 for a --format outside the vocabulary, without calling runLocalReview", async () => {
+      const { deps, stderrLines, runLocalReview } = makeDeps({ argv: ["--format", "nope"] });
+      expect(await runCli(deps)).toBe(EXIT_CODE.usageError);
+      expect(stderrLines.join("")).toContain("--format");
+      expectSingleLineUsageError(stderrLines);
+      expect(runLocalReview).not.toHaveBeenCalled();
     });
   });
 
@@ -676,6 +718,85 @@ describe("runCli", () => {
       expect(code).toBe(EXIT_CODE.completeClean);
       expect(stdoutLines.join("")).toContain("Keiko for Quality — local review");
       expect(stderrLines.join("")).toContain("warning");
+    });
+  });
+
+  /**
+   * The seam, not the schema. `src/report/json.test.ts` and `src/report/sarif.test.ts` already pin
+   * both wire formats field by field; what nothing covered until now is `src/cli.ts`'s own adapter
+   * between the orchestrator's report and those renderers — `--format` reaching `renderReport` at
+   * all, and `toReportFinding`'s narrowing onto the closed classification vocabulary.
+   */
+  describe("--format", () => {
+    it("emits the versioned JSON wire contract on stdout under --format json", async () => {
+      const { deps, stdoutLines, runLocalReview } = makeDeps({ argv: ["--format", "json"] });
+      runLocalReview.mockResolvedValue(
+        baseReport({
+          findings: [
+            {
+              path: "src/a.ts",
+              startLine: 3,
+              endLine: 5,
+              category: "bug",
+              severity: "high",
+              body: "x".repeat(20),
+            },
+          ],
+        }),
+      );
+      const code = await runCli(deps);
+      expect(code).toBe(EXIT_CODE.completeWithFindings);
+      // Spelled out rather than imported: this identifier is the contract the IDE extensions pin
+      // to (docs/local-report-schema.md), so a test that imported it could never notice it moving.
+      const report = JSON.parse(stdoutLines.join(""));
+      expect(report.schema).toBe("keiko-for-quality.local-report/v1");
+      expect(report.findings).toHaveLength(1);
+      expect(report.findings[0].path).toBe("src/a.ts");
+      expect(report.findings[0].category).toBe("bug");
+    });
+
+    // Reject rather than repair, in miniature (CONTRIBUTING.md). The orchestrator types
+    // `category`/`severity` as plain strings; the renderers guarantee a fixed SARIF rule set and
+    // schema-stable JSON values only over the closed vocabulary. So `toReportFinding` drops a value
+    // it does not recognise — it never passes it through, and it never substitutes a nearest match.
+    // `null` below is how the JSON renderer spells "absent" under its fixed-key-set rule.
+    it("drops an out-of-vocabulary category and severity rather than passing them through", async () => {
+      const { deps, stdoutLines, runLocalReview } = makeDeps({ argv: ["--format", "json"] });
+      runLocalReview.mockResolvedValue(
+        baseReport({
+          findings: [
+            {
+              path: "src/a.ts",
+              startLine: 1,
+              endLine: 1,
+              category: "nonsense",
+              severity: "catastrophic",
+              body: "x".repeat(20),
+            },
+          ],
+        }),
+      );
+      expect(await runCli(deps)).toBe(EXIT_CODE.completeWithFindings);
+      const rendered = stdoutLines.join("");
+      expect(rendered).not.toContain("nonsense");
+      expect(rendered).not.toContain("catastrophic");
+      const report = JSON.parse(rendered);
+      expect(report.findings[0].category).toBeNull();
+      expect(report.findings[0].severity).toBeNull();
+    });
+
+    // Dispatch only — `src/report/sarif.test.ts` owns the format itself.
+    it("dispatches --format sarif to the SARIF renderer", async () => {
+      const { deps, stdoutLines } = makeDeps({ argv: ["--format", "sarif"] });
+      await runCli(deps);
+      const log = JSON.parse(stdoutLines.join(""));
+      expect(log.runs[0].tool.driver.name).toBe("keiko-for-quality");
+    });
+
+    it("defaults to the human format when --format is not given", async () => {
+      const { deps, stdoutLines } = makeDeps({ argv: [] });
+      await runCli(deps);
+      expect(stdoutLines.join("")).toContain("Keiko for Quality — local review");
     });
   });
 

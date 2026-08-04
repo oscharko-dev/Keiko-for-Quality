@@ -146,12 +146,6 @@ export function reviewArguments(options: EngineRunOptions, rulePath: string): st
 }
 
 /**
- * Runs one review and returns its raw stdout.
- *
- * The output is returned to the caller as a value and never written to a log, an artifact, or a
- * diagnostic. Its only consumers are the strict parser and, after validation, the publisher.
- */
-/**
  * Review sampling is pinned, not defaulted (v0.11.0). Measured across eight corpus runs on
  * gpt-oss-120b with a byte-identical prompt, per-case outcomes flipped run to run — sampling
  * variance no rule text reduces. Zero is a deliberate product choice for a reviewer: the same
@@ -228,6 +222,25 @@ function recordModelUsage(
   });
 }
 
+/**
+ * Classifies a failure thrown out of the invocation into the reason recorded for it.
+ *
+ * A named function rather than the nested ternary it replaces (Sonar S3358) — the same three
+ * outcomes, only flatter. `ExecFailure` carries `timedOut` (`git/exec.ts`) precisely so this
+ * classification never has to infer a timeout from an exit code, and anything that is not an
+ * `ExecFailure` never reached a process that could exit at all: that is the spawn-failure path.
+ */
+function failureReason(error: unknown): EngineRunError["reason"] {
+  if (!(error instanceof ExecFailure)) return "engine.run.spawn_failed";
+  return error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit";
+}
+
+/**
+ * Runs one review and returns its raw stdout.
+ *
+ * The output is returned to the caller as a value and never written to a log, an artifact, or a
+ * diagnostic. Its only consumers are the strict parser and, after validation, the publisher.
+ */
 export async function runEngine(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
@@ -262,12 +275,7 @@ export async function runEngine(
 
     return { stdout: result.stdout.toString("utf8"), ruleDigest };
   } catch (error) {
-    const reason =
-      error instanceof ExecFailure
-        ? error.timedOut
-          ? "engine.run.timeout"
-          : "engine.run.nonzero_exit"
-        : "engine.run.spawn_failed";
+    const reason = failureReason(error);
     diagnostics.record(reason, {
       headSha: options.pair.head,
       durationMs: Date.now() - started,

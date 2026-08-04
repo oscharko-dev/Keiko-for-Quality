@@ -248,6 +248,26 @@ function parseNumstatCount(value: string | undefined): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/**
+ * Files one numstat record's counts under the final (post-rename) path it names.
+ *
+ * `listChanges` looks both indexes up by `RawChange.path`, which is that same final path, so the
+ * two record shapes `parseNumstat` walks — an ordinary one-field entry and a rename's three-field
+ * one — differ only in where that path is read from, never in what gets recorded about it. Holding
+ * the two writes here rather than once per branch leaves `parseNumstat` about the NUL framing
+ * alone, which is the part that is easy to get wrong.
+ */
+function recordNumstatEntry(
+  binary: Set<string>,
+  changedLines: Map<string, number>,
+  path: string,
+  isBinary: boolean,
+  lines: number,
+): void {
+  if (isBinary) binary.add(path);
+  changedLines.set(path, lines);
+}
+
 /** Parses `git diff --numstat -z`; binary entries report `-` for both counts. */
 function parseNumstat(text: string): NumstatIndex {
   const parts = text.split("\0");
@@ -266,14 +286,10 @@ function parseNumstat(text: string): NumstatIndex {
     const inlinePath = fields.slice(2).join("\t");
     if (inlinePath === "") {
       const target = parts[i + 2];
-      if (target !== undefined) {
-        if (isBinary) binary.add(target);
-        changedLines.set(target, lines);
-      }
+      if (target !== undefined) recordNumstatEntry(binary, changedLines, target, isBinary, lines);
       i += 3;
     } else {
-      if (isBinary) binary.add(inlinePath);
-      changedLines.set(inlinePath, lines);
+      recordNumstatEntry(binary, changedLines, inlinePath, isBinary, lines);
       i += 1;
     }
   }

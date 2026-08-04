@@ -1,3 +1,4 @@
+import { isFileLevel } from "./types.js";
 import type { ReportFinding, ReportInput, ReportInventory, ReportSpend } from "./types.js";
 
 /**
@@ -41,7 +42,7 @@ export interface JsonReport {
 }
 
 function toJsonFinding(finding: ReportFinding): JsonReportFinding {
-  const fileLevel = finding.startLine === 0 && finding.endLine === 0;
+  const fileLevel = isFileLevel(finding);
   return {
     path: finding.path,
     startLine: fileLevel ? null : finding.startLine,

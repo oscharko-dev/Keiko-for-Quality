@@ -13,7 +13,7 @@ import { parseRuntimeConfig, type RuntimeConfig } from "../config/runtime.js";
  */
 
 function inputKey(name: string): string {
-  return `INPUT_${name.replace(/ /g, "_").toUpperCase()}`;
+  return `INPUT_${name.replaceAll(" ", "_").toUpperCase()}`;
 }
 
 export function readInput(env: NodeJS.ProcessEnv, name: string): string {

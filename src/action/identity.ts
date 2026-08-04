@@ -6,7 +6,6 @@ export interface ResolvedIdentity {
   readonly client: GitHubClient;
   /** The login GitHub will attribute this reviewer's comments to. */
   readonly login: string;
-  readonly usedApp: boolean;
 }
 
 /**
@@ -51,11 +50,7 @@ export async function resolveIdentity(
   if (appId !== "" && privateKey !== "") {
     const minted = await mintInstallationToken(apiBase, appId, privateKey, owner, repo, nowSeconds);
     diagnostics.record("publish.identity_resolved");
-    return {
-      client: buildClient(apiBase, minted.token, env),
-      login: minted.login,
-      usedApp: true,
-    };
+    return { client: buildClient(apiBase, minted.token, env), login: minted.login };
   }
 
   const token = (env.INPUT_GITHUB_TOKEN ?? "").trim();
@@ -67,5 +62,5 @@ export async function resolveIdentity(
   const client = buildClient(apiBase, token, env);
   const login = (await client.resolveViewerLogin()) ?? "github-actions[bot]";
   diagnostics.record("publish.identity_resolved");
-  return { client, login, usedApp: false };
+  return { client, login };
 }

@@ -3,7 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ARENA_BOT_ORDER, BOT_IDENTITIES } from "./arena-lib.mjs";
+import { ARENA_BOT_ORDER, BOT_IDENTITIES, renderTable } from "./arena-lib.mjs";
 
 /**
  * The reviewer arena's release-over-release trend (companion to `corpus/arena.mjs`).
@@ -116,12 +116,6 @@ export function summarizeBaseline(label, document) {
 
 function formatPercent(rate) {
   return rate === null ? "n/a" : `${String(Math.round(rate * 100))}%`;
-}
-
-function renderTable(header, rows) {
-  const lines = [`| ${header.join(" | ")} |`, `| ${header.map(() => "---").join(" | ")} |`];
-  for (const row of rows) lines.push(`| ${row.join(" | ")} |`);
-  return lines.join("\n");
 }
 
 const BASELINE_TABLE_HEADER = [

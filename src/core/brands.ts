@@ -37,9 +37,16 @@ const FULL_SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const VERSION = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
-/** C0 controls, DEL, and C1 controls. */
+/**
+ * C0 controls, DEL, and C1 controls.
+ *
+ * A literal rather than `new RegExp("…")`: the string form's `\\u0000` is already a single
+ * backslash by the time the constructor parses the pattern, so both forms compile to the same
+ * `source` with the same (empty) flags — U+0000–U+001F and U+007F–U+009F either way. The literal
+ * just says so with one less layer of escaping to read through.
+ */
 // eslint-disable-next-line no-control-regex -- detecting control characters is this pattern's purpose
-const CONTROL_CHARACTERS = new RegExp("[\\u0000-\\u001F\\u007F-\\u009F]");
+const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/;
 
 export class ValidationError extends Error {
   public readonly field: string;
@@ -99,10 +106,6 @@ export function repoPath(value: string, field = "path"): RepoPath {
   const segments = value.split("/");
   if (segments.some((s) => s === ".." || s === "." || s === "")) throw new ValidationError(field);
   return value as RepoPath;
-}
-
-export function isCommitSha(value: string): boolean {
-  return FULL_SHA.test(value.trim().toLowerCase());
 }
 
 export function hasControlCharacters(value: string): boolean {

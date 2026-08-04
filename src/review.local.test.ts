@@ -4,11 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  computeKey,
+  computePathSetDigest,
+  modelId,
+  protocol,
+  SUPPORTED_STORE_SCHEMA,
+  type CacheStore,
+} from "./cache/review-cache.js";
 import { compileProfile, type ReviewProfile } from "./config/profile.js";
 import type { RuntimeConfig } from "./config/runtime.js";
-import { commitSha } from "./core/brands.js";
+import { blobId, commitSha, type Sha256 } from "./core/brands.js";
 import { createSilentDiagnostics } from "./diagnostics/sink.js";
-import { ENGINE_PIN } from "./engine/pinned-release.js";
+import { currentPlatformDigest, ENGINE_PIN } from "./engine/pinned-release.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
 import type { LocalReviewRequest } from "./review.js";
 
@@ -26,6 +34,20 @@ vi.mock("./engine/run.js", async (importOriginal) => ({
 }));
 
 const { performLocalReview } = await import("./review.js");
+
+/**
+ * The pin covers this platform or the store-backed block below cannot run here — never a silent
+ * skip, for the same reason `review.test.ts`'s own `requireEngineDigest` exists: a cache key is
+ * built from `currentPlatformDigest()`, which is `undefined` on any platform `ENGINE_PIN.platforms`
+ * does not name, and returning early there would report a test that asserted nothing as a pass.
+ */
+function requireEngineDigest(): Sha256 {
+  const digest = currentPlatformDigest();
+  if (digest === undefined) {
+    throw new Error("review.local.test.ts needs a pinned engine digest for this platform");
+  }
+  return digest;
+}
 
 describe("performLocalReview (issue #95)", () => {
   let repo: string;
@@ -99,8 +121,11 @@ describe("performLocalReview (issue #95)", () => {
   /**
    * Deliberately builds a request with NO `cacheStore` key at all — not `cacheStore: undefined` —
    * matching how `exactOptionalPropertyTypes` distinguishes "absent" from "present but undefined".
-   * Every test in this file uses it, which is itself the "works with cacheStore undefined" proof
-   * the epic's acceptance criteria call for: nothing here special-cases the field's absence.
+   * Every test in THIS describe block uses it, which is itself the "works with cacheStore
+   * undefined" proof the epic's acceptance criteria call for: nothing here special-cases the
+   * field's absence. Its store-supplied counterpart is the sibling block at the bottom of this
+   * file ("performLocalReview: review-cache memoization end to end"), which builds its own request
+   * against its own fixture repository — the two together are what pin both sides of the field.
    */
   function baseRequest(overrides: Partial<LocalReviewRequest> = {}): LocalReviewRequest {
     return {
@@ -350,5 +375,181 @@ describe("performLocalReview (issue #95)", () => {
         "spend",
       ].sort(),
     );
+  });
+});
+
+/**
+ * `--store` end to end on the LOCAL path (README's "Local runs": the mitigation for repeated runs
+ * over unchanged content).
+ *
+ * The block above proves `performLocalReview` behaves when no store is supplied. Nothing proved it
+ * behaves when one IS: `baseRequest` never sets `cacheStore`, so `prepareMemoization` short-circuits
+ * to `INERT_MEMO` before computing a single digest, and every cache assertion in that block is taken
+ * under that inert branch — they would all stay green if the local pipeline's memo wiring were
+ * replaced by `INERT_MEMO` wholesale. The CLI half is no help either: `cli.test.ts` stubs
+ * `runLocalReview` outright, and `corpus/real-diffs.mjs` says in its own comment that it has never
+ * had a `--store` flag. So a shipped, documented surface was pinned by nothing that could fail.
+ *
+ * A deliberate sibling of `describe("performLocalReview (issue #95)")` rather than another test
+ * inside it: this needs a two-file fixture, and adding a second file to that block's shared
+ * repository would rewrite four passing assertions (`inventory.total === 1` twice, and the
+ * `files_reviewed` counts) to add one — churn for tests that are already correct about the
+ * single-file case they were written for. Its own `mkdtemp` repository costs one more `git init`
+ * and changes nothing that already passes.
+ *
+ * What it pins is the thing a mock cannot fake: the hit reaches the REAL `runEngine` call as an
+ * exclusion, not merely the settlement arithmetic `settle.test.ts` covers in isolation — the same
+ * claim `review.test.ts`'s first memoization test makes for the action path, now made for the path
+ * `npm run review -- --store` actually takes.
+ */
+describe("performLocalReview: review-cache memoization end to end", () => {
+  let repo: string;
+  let baseSha: string;
+  let headSha: string;
+  let baseBlobA: string;
+  let headBlobA: string;
+
+  /** Same test-side git environment the block above uses, bound to this block's own repository. */
+  function git(args: readonly string[]): string {
+    return execFileSync("git", args, {
+      cwd: repo,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "t",
+        GIT_AUTHOR_EMAIL: "t@example.test",
+        GIT_COMMITTER_NAME: "t",
+        GIT_COMMITTER_EMAIL: "t@example.test",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+      },
+    });
+  }
+
+  beforeAll(async () => {
+    repo = await mkdtemp(join(tmpdir(), "kfq-review-local-store-"));
+    git(["init", "-q", "-b", "main"]);
+    await mkdir(join(repo, "src"), { recursive: true });
+    await writeFile(join(repo, "src/a.ts"), "export const a = 1;\n");
+    await writeFile(join(repo, "src/b.ts"), "export const b = 1;\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+    baseSha = git(["rev-parse", "HEAD"]).trim();
+    baseBlobA = git(["rev-parse", `${baseSha}:src/a.ts`]).trim();
+
+    await writeFile(join(repo, "src/a.ts"), "export const a = 2;\n");
+    await writeFile(join(repo, "src/b.ts"), "export const b = 2;\n");
+    git(["add", "-A"]);
+    git(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+    headSha = git(["rev-parse", "HEAD"]).trim();
+    headBlobA = git(["rev-parse", `${headSha}:src/a.ts`]).trim();
+  });
+
+  afterAll(async () => {
+    await rm(repo, { recursive: true, force: true });
+  });
+
+  beforeEach(() => {
+    // This test reads `mock.calls[0]`, so it starts from a clean call history rather than inheriting
+    // whatever the block above left on these module-level mocks.
+    acquireEngineMock.mockReset();
+    runEngineMock.mockReset();
+  });
+
+  const PROFILE = compileProfile({
+    version: 1,
+    reviewRelevant: ["src/**"],
+    deletionCritical: [],
+    generated: [],
+    excluded: [],
+    benignWarnings: [],
+    pathInstructions: [],
+  } satisfies ReviewProfile);
+
+  const CONFIG: RuntimeConfig = {
+    protocol: "anthropic",
+    endpoint: "https://model.example.test/v1",
+    model: "claude-sonnet-4-5",
+    tokenEnvName: "MODEL_TOKEN",
+    language: "English",
+    concurrency: 4,
+    fileTimeoutSeconds: 300,
+    reviewTimeoutSeconds: 1800,
+    tokenBudget: 2_000_000,
+    maxFindings: 50,
+    renameDetectionPercent: 50,
+  };
+
+  it("threads a cache hit into the engine's own exclude list and writes the miss back to the store", async () => {
+    // Unlike the block above, which uses an arbitrary fake digest as an opaque mock value, this key
+    // has to match what `prepareMemoization` computes for itself — and it computes the ENGINE
+    // digest from the pin, not from the acquisition mock.
+    const engineDigest = requireEngineDigest();
+    const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+    const model = modelId(CONFIG.model);
+    const proto = protocol(CONFIG.protocol);
+    const base = blobId(baseBlobA);
+    const head = blobId(headBlobA);
+    const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+    // Both files are ordinary edits in this fixture's base..head diff and neither is a rename, so
+    // the token list is exactly their bare paths — what `computePrPathSetDigest` derives internally
+    // from the real inventory this run builds.
+    const store: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [
+        {
+          key,
+          baseBlob: base,
+          headBlob: head,
+          ruleDigest,
+          engineDigest,
+          prPathSetDigest: computePathSetDigest(["src/a.ts", "src/b.ts"]),
+          modelId: model,
+          protocol: proto,
+          findings: [],
+        },
+      ],
+    };
+
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+    // Counted mode, one file reviewed: two reviewable paths minus the one the store answered.
+    runEngineMock.mockResolvedValue({
+      stdout: JSON.stringify({
+        status: "success",
+        summary: { files_reviewed: 1, total_tokens: 100, budget_exceeded: false },
+        comments: [],
+      }),
+      ruleDigest: engineDigest,
+    });
+
+    const report = await performLocalReview(
+      {
+        base: commitSha(baseSha),
+        head: commitSha(headSha),
+        repositoryPath: repo,
+        config: CONFIG,
+        profile: PROFILE,
+        guidelines: { paths: [] },
+        env: {},
+        pathValue: process.env.PATH ?? "/usr/bin:/bin",
+        cacheStore: store,
+      },
+      createSilentDiagnostics(),
+    );
+
+    // The engine was asked to skip exactly the hit path. This is the assertion the whole block
+    // exists for: it can only pass if the local pipeline built a real `MemoContext` and threaded it
+    // all the way into the engine invocation.
+    const [calledOptions] = runEngineMock.mock.calls[0] as [{ mechanicallyCleanPaths: string[] }];
+    expect(calledOptions.mechanicallyCleanPaths).toContain("src/a.ts");
+
+    expect(report.outcome).toBe("complete");
+    expect(report.cacheHits).toBe(1);
+    expect(report.cacheMisses).toBe(1);
+    // Length, not mere presence: with nothing new to admit, `finalizeCacheStore` hands back the
+    // input store with `appended: 0`, which is a populated `updatedCacheStore` that would prove
+    // nothing about admission. Two entries means src/a.ts's own entry survived untouched AND
+    // src/b.ts was newly admitted by this run.
+    expect(report.updatedCacheStore?.entries).toHaveLength(2);
   });
 });

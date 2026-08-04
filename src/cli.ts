@@ -113,7 +113,19 @@ interface RawArgs {
 
 type StringFlagField = Exclude<keyof RawArgs, "help">;
 
-const STRING_FLAGS: Readonly<Record<string, StringFlagField>> = {
+/**
+ * Every `--flag <value>` this CLI accepts, mapped to the `RawArgs` field it fills.
+ *
+ * Exported for one reason. `--help` is this tool's authoritative flag reference — AGENTS.md defers
+ * to `npm run review -- --help` and forbids restating the list anywhere else — so a flag that is
+ * registered here but missing from `HELP_TEXT` has no listing a user can reach at all. That already
+ * happened to `--format`: registered below, vocabulary-checked in `validateParsedArgs`, defaulted in
+ * `resolveCliArgs` and dispatched in `renderReport`, yet absent from the help for the whole of its
+ * first release, while docs/cli-asset-pin.md named it part of the process contract IDE extensions
+ * pin by digest. `src/cli.test.ts` now walks these keys and demands an Options row for each, which
+ * turns "add a flag, forget the help row" from an invisible documentation hole into a red test.
+ */
+export const STRING_FLAGS: Readonly<Record<string, StringFlagField>> = {
   "--repo": "repo",
   "--profile": "profile",
   "--target-branch": "targetBranch",
@@ -466,7 +478,11 @@ function shortSha(sha: string): string {
 function formatFinding(finding: LocalReviewFinding, index: number): string {
   const location = `${finding.path}:${String(finding.startLine)}-${String(finding.endLine)}`;
   const classification = [finding.category, finding.severity].filter(Boolean).join("/");
-  const header = `[${String(index + 1)}] ${location}${classification === "" ? "" : ` (${classification})`}`;
+  // Named rather than nested inside the header template — the same string either way, but the
+  // "no classification means no parenthetical at all" branch reads as its own expression instead of
+  // as a template inside a template.
+  const classificationSuffix = classification === "" ? "" : ` (${classification})`;
+  const header = `[${String(index + 1)}] ${location}${classificationSuffix}`;
 
   const sanitized = sanitizeFindingBody(finding.body);
   if (!sanitized.ok) {
@@ -614,6 +630,8 @@ Options:
   --store <path>                 Review-cache store file, read before the run and written back only
                                   on a settlement whose verdicts survive it.
   --out <path>                   Write the report here instead of stdout.
+  --format <human|json|sarif>    Report format. Default: human. json and sarif emit the versioned
+                                  wire contract (docs/local-report-schema.md).
   --file-timeout-seconds <n>     Per-file engine timeout. Default: 300.
   --review-timeout-seconds <n>   Whole-review wall-clock ceiling. Default: 1800.
   --token-budget <n>             Hard token ceiling for one review. Default: 2000000.

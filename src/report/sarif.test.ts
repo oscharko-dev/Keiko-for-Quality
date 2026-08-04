@@ -109,6 +109,26 @@ describe("physicalLocation fidelity", () => {
       endLine: 10,
     });
   });
+
+  it("drops the region for a 0-anchor file-level finding while keeping the artifact location", () => {
+    // `isFileLevel` (types.ts) is the shared decision both renderers make; this pins what SARIF
+    // renders it TO. It is not an edge case: every deterministic-gate finding is emitted with
+    // `startLine: 0, endLine: 0` (review.ts, contracts/change-pass.ts), so a local run whose only
+    // findings come from the contract gates takes this branch for all of them. The region must be
+    // ABSENT rather than present-and-empty — `toBeUndefined` alone would also pass on a `region:
+    // undefined` key, which is a different object once serialized — and the artifact location has
+    // to survive, since a result with no location at all would say nothing about which file drifted.
+    const [run] = buildSarifLog(
+      baseInput({
+        findings: [{ ...FINDING, path: "src/contracts/shape-gate.ts", startLine: 0, endLine: 0 }],
+      }),
+    ).runs;
+    const physicalLocation = run.results[0]?.locations[0]?.physicalLocation;
+
+    expect(physicalLocation?.region).toBeUndefined();
+    expect(Object.keys(physicalLocation ?? {})).toEqual(["artifactLocation"]);
+    expect(physicalLocation?.artifactLocation.uri).toBe("src/contracts/shape-gate.ts");
+  });
 });
 
 describe("incomplete never reads as clean", () => {
@@ -222,7 +242,11 @@ describe("SARIF 2.1.0 structural shape", () => {
       expect(result.locations.length).toBeGreaterThan(0);
       const region = result.locations[0].physicalLocation.region;
       expect(typeof result.locations[0].physicalLocation.artifactLocation.uri).toBe("string");
-      // A region is optional (file-level findings drop it); when present it carries real lines.
+      // `baseInput`'s fixture carries only line-anchored findings, so every result in THIS loop
+      // must have a region with real lines. A region is optional in general — a file-level
+      // finding legitimately has none — but that branch is unreachable from here and is covered
+      // by its own case in "physicalLocation fidelity" above, so this assertion is not the place
+      // to look for it.
       expect(region).toBeDefined();
       expect(typeof region?.startLine).toBe("number");
       expect(typeof region?.endLine).toBe("number");

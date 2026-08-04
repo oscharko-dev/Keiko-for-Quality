@@ -1,4 +1,5 @@
 import js from "@eslint/js";
+import { defineConfig } from "eslint/config";
 import tseslint from "typescript-eslint";
 
 const NODE_SCRIPT_GLOBALS = {
@@ -9,7 +10,13 @@ const NODE_SCRIPT_GLOBALS = {
   URL: "readonly",
 };
 
-export default tseslint.config(
+// The `extends` helper is ESLint core's `defineConfig`, not `tseslint.config` — typescript-eslint
+// deprecated its own wrapper in favour of it. The two resolve `extends` differently on one point
+// only: core intersects a block's `files` with the extended config's, where tseslint replaced them.
+// For every block below that is the same selection, because the one extended config that carries
+// `files` of its own (`typescript-eslint/eslint-recommended`, `**/*.{ts,tsx,mts,cts}`) is a superset
+// of the block that extends it (`src/**/*.ts`), and the others declare none.
+export default defineConfig(
   {
     ignores: ["build/**", "dist/**", "coverage/**", "node_modules/**"],
   },

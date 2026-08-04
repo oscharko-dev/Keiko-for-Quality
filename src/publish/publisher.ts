@@ -1,4 +1,5 @@
 import type { CommitSha } from "../core/brands.js";
+import type { ReasonCode } from "../diagnostics/reason-codes.js";
 import type { Diagnostics } from "../diagnostics/sink.js";
 import { FINDING_SEVERITIES } from "../engine/classify.js";
 import type { EngineFinding } from "../engine/result.js";
@@ -286,6 +287,30 @@ function classifySuppression(
   if (findsSimilarOpenConversation(candidate, existingThreads, identity)) return "similar";
   if (findsDispositionedConversation(candidate, existingThreads, identity)) return "dispositioned";
   return undefined;
+}
+
+/**
+ * The reason code each cross-run suppression stage reports under.
+ *
+ * `dedup.dispositioned` deliberately breaks the `publish.finding_suppressed_*` naming its two
+ * siblings share — see the code's own comment in `reason-codes.ts`: it answers "did someone already
+ * settle this" rather than "is this the same finding", a different question that earns its own
+ * top-level prefix.
+ *
+ * A `switch` over `classifySuppression`'s own closed union, not a chain of conditionals: every stage
+ * now names its code explicitly, and a fourth stage added to that union is a compile error here —
+ * where the nested ternary this replaces would have quietly reported it as `dedup.dispositioned`,
+ * which was merely the last branch's fallthrough rather than a decision about it.
+ */
+function suppressionCode(suppression: "exact" | "similar" | "dispositioned"): ReasonCode {
+  switch (suppression) {
+    case "exact":
+      return "publish.finding_suppressed_duplicate";
+    case "similar":
+      return "publish.finding_suppressed_similar";
+    case "dispositioned":
+      return "dedup.dispositioned";
+  }
 }
 
 /** The placement ladder, composition, publication, and read-back for a finding past both dedup stages. */
@@ -604,13 +629,7 @@ function planCrossRun(
     if (suppression === "exact") counters.suppressedExactDuplicate += 1;
     else if (suppression === "similar") counters.suppressedSimilar += 1;
     else counters.suppressedDispositioned += 1;
-    const code =
-      suppression === "exact"
-        ? "publish.finding_suppressed_duplicate"
-        : suppression === "similar"
-          ? "publish.finding_suppressed_similar"
-          : "dedup.dispositioned";
-    diagnostics.record(code, { headSha: context.headSha });
+    diagnostics.record(suppressionCode(suppression), { headSha: context.headSha });
     return undefined;
   }
 

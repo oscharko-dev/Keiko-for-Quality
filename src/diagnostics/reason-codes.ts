@@ -181,31 +181,3 @@ const REASON_CODE_SET: ReadonlySet<string> = new Set<string>(REASON_CODES);
 export function isReasonCode(value: string): value is ReasonCode {
   return REASON_CODE_SET.has(value);
 }
-
-/**
- * Operator guidance per code family. Kept coarse on purpose: a precise remediation string would
- * drift from the code that emits it, and a stale runbook is worse than a general one.
- */
-export const REASON_CODE_GUIDANCE: Readonly<Record<string, string>> = {
-  eligibility: "The head was not reviewed by policy. No action unless the policy is wrong.",
-  review_pair: "The base/head pair could not be resolved. Check that both commits are fetched.",
-  inventory: "A changed path had no classification. Extend the review profile to cover it.",
-  engine: "The engine could not be acquired or completed. Check the pin and the model endpoint.",
-  settlement: "The review did not complete. Treat the pull request as unreviewed.",
-  publish: "Findings could not be published. Check the App installation and its permissions.",
-  dedup:
-    "A finding was suppressed against a settled disposition rather than published. No action " +
-    "unless the disposition itself was wrong — reopen the original thread to contest it.",
-  config: "The supplied configuration was rejected. Compare it against the documented schema.",
-  run: "Run lifecycle marker.",
-  cache:
-    "The review store could not be read or written, or a save was skipped. Coverage is unaffected; only re-review cost is.",
-  model:
-    "Usage telemetry observed by the loopback proxy. No action; it exists so spend and cache " +
-    "behaviour are measured rather than assumed.",
-  contracts:
-    "Cross-artifact surface telemetry. No action unless a gate finding is wrong — then fix the " +
-    "declared pair in the profile, not the gate.",
-  classify:
-    "Classification repair or audit telemetry. No action; findings stay publishable either way.",
-};

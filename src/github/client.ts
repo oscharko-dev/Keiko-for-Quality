@@ -321,7 +321,14 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
   private readonly graphqlBase: string;
 
   public constructor(apiBase: string, token: string, graphqlBase: string = DEFAULT_GRAPHQL_BASE) {
-    this.apiBase = apiBase.replace(/\/+$/, "");
+    // Trailing slashes go, so every `${this.apiBase}${path}` below joins exactly once. The
+    // lookbehind is not decoration: the plain `\/+$` it replaced is super-linear (Sonar S8786) —
+    // unanchored at the start, the engine retries at every index inside a run of slashes,
+    // re-expanding the run before `$` fails, which is quadratic in that run's length. `(?<!\/)`
+    // admits only the index a run starts at, and the leftmost index from which slashes run to end
+    // of string IS the start of the final run, so the match — and therefore the stripped result —
+    // is unchanged for every input.
+    this.apiBase = apiBase.replace(/(?<!\/)\/+$/, "");
     this.token = token;
     this.graphqlBase = graphqlBase;
   }

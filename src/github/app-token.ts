@@ -13,12 +13,26 @@ import { createSign } from "node:crypto";
  * silence a real finding.
  */
 
+/**
+ * Base64url (RFC 7515 §2, the JWS encoding): standard base64 with `+`/`/` swapped for `-`/`_` and
+ * the `=` padding dropped. Applied to all three JWT segments, the signature included.
+ *
+ * The padding strip is `(?<!=)=+$`, not the plain `=+$` it replaced. The two match exactly the same
+ * thing — the leftmost index from which `=` runs to end of string IS the start of the final run of
+ * `=`, and that is the only index the lookbehind admits — but `=+$` is super-linear (Sonar S8786):
+ * nothing anchors its start, so the engine retries at every index inside a run of `=`, re-expanding
+ * the run before `$` fails, which is quadratic in the run's length. The lookbehind lets a match
+ * start only where a run starts, so the scan is linear. Same technique, for the same reason, as
+ * `publish/sanitize.ts`'s INLINE_SPAN. This closed an ambiguity rather than a live denial of
+ * service: base64 padding is at most two characters, so nothing reaching this function could make
+ * the quadratic case bite.
+ */
 function base64Url(input: Buffer | string): string {
   return Buffer.from(input)
     .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/(?<!=)=+$/, "");
 }
 
 /**

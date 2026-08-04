@@ -102,7 +102,7 @@ describe("findPinSites bounds", () => {
       { length: 200 },
       (_, i) => `KEY${String(i)}: "${String(i).padStart(40, "0")}"`,
     ).join("\n");
-    expect(findPinSites(source).length).toBe(200);
+    expect(findPinSites(source)).toHaveLength(200);
   });
 
   it("returns an empty result once a source has more than 200 pin sites", () => {
@@ -115,7 +115,7 @@ describe("findPinSites bounds", () => {
 
   it("returns an empty result once a source exceeds 4,000 lines", () => {
     const control = `uses: owner/repo@${OLD_SHA}`;
-    expect(findPinSites(control).length).toBe(1); // control: within bounds
+    expect(findPinSites(control)).toHaveLength(1); // control: within bounds
     const padded = "# pad\n".repeat(4001) + control;
     expect(findPinSites(padded)).toEqual([]);
   });
@@ -124,7 +124,7 @@ describe("findPinSites bounds", () => {
     // Padding is spaces, not newlines, so this is ONE line — the line-count bound above never
     // triggers, and only the independent character-count bound can be what stops this.
     const huge = `uses: owner/repo@${OLD_SHA}` + " ".repeat(10_000_000);
-    expect(huge.split("\n").length).toBe(1);
+    expect(huge.split("\n")).toHaveLength(1);
     expect(findPinSites(huge)).toEqual([]);
   });
 });
