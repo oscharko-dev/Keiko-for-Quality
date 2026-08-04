@@ -8,6 +8,15 @@
 export { performReview } from "./review.js";
 export type { ReviewRequest, ReviewReport, ReviewOutcome } from "./review.js";
 
+/**
+ * The publication-free decomposition of the pipeline above (issue #95): same inventory, engine,
+ * classification, and dedup/sanitization behaviour as `performReview`, minus the two GitHub-only
+ * stages `request.client` feeds there (head currency and publication). Findings come back as data —
+ * `performLocalReview` never constructs a `GitHubClient` and never makes a GitHub API call.
+ */
+export { performLocalReview } from "./review.js";
+export type { LocalReviewRequest, LocalReviewReport } from "./review.js";
+
 export {
   appendEntries,
   computeKey,

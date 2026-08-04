@@ -38,8 +38,6 @@ export const REASON_CODES = [
   "engine.run.timeout",
   "engine.run.spawn_failed",
   "engine.run.nonzero_exit",
-  "engine.run.output_unparsable",
-  "engine.run.schema_rejected",
 
   // Settlement
   "settlement.complete",
@@ -139,6 +137,13 @@ export const REASON_CODES = [
   // review; a second failure settles incomplete exactly as before, so "incomplete never reads
   // as clean" survives the resume.
   "engine.resumed_once",
+
+  // The resume that deliberately did NOT happen (v0.12.0): the first attempt reported its budget
+  // exhausted, and a second attempt cannot review more of a change than the budget allows — it can
+  // only re-pay for what the first one already did and settle incomplete anyway. Recorded rather
+  // than left silent because "no resume line in the log" would otherwise be indistinguishable
+  // between a run that never needed one and a run that was denied one.
+  "engine.resume_skipped_budget_exceeded",
 
   // Run-level spend accounting (v0.12.0): one record per engine execution naming what the review
   // actually cost — the engine's own reported total plus the classification side-calls. The parts

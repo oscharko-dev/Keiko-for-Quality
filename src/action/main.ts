@@ -299,10 +299,21 @@ export async function runAction(
   );
   if (identity === undefined) throw new Error("no posting identity configured");
 
-  const config = runtimeConfigFromInputs(env);
-  const profilePath = readRequiredInput(env, "profile");
-  const profile = loadReviewProfile(await readFile(profilePath, "utf8"));
-  const guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
+  let config: RuntimeConfig;
+  let profile: CompiledProfile;
+  let guidelines: GuidelineIndex;
+  try {
+    config = runtimeConfigFromInputs(env);
+    const profilePath = readRequiredInput(env, "profile");
+    profile = loadReviewProfile(await readFile(profilePath, "utf8"));
+    guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
+  } catch (error) {
+    // The supplied configuration — runtime inputs, the review profile, or the guidelines list —
+    // failed to validate. Recorded before rethrowing so an operator can tell this apart from
+    // every other cause `run.failed` alone would otherwise collapse it into.
+    diagnostics.record("config.invalid", { headSha: event.head });
+    throw error;
+  }
   diagnostics.record("config.loaded", { headSha: event.head });
 
   // Empty disables the feature entirely: no store is loaded, `cacheStore` stays `undefined`, and

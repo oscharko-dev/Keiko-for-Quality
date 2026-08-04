@@ -2,9 +2,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   compareContracts,
+  compareDeclaredContracts,
   describeMismatch,
+  describeUnionGap,
   extractFlatInterfaces,
+  extractStringUnions,
+  findUncoveredUnionMembers,
   type ShapeMismatch,
+  type UnionGap,
 } from "./shape-gate.js";
 import { sanitizeFindingBody } from "../publish/sanitize.js";
 
@@ -280,6 +285,162 @@ describe("extractFlatInterfaces never throws", () => {
   });
 });
 
+describe("extractStringUnions", () => {
+  it("parses an exported string-literal union's members, single line", () => {
+    const source = `export type Status = "draft" | "approved" | "rejected";`;
+    const result = extractStringUnions(source);
+    expect([...result.keys()]).toEqual(["Status"]);
+    expect(result.get("Status")?.members).toEqual(["draft", "approved", "rejected"]);
+  });
+
+  it("parses a multi-line union in Prettier's leading-pipe style", () => {
+    const source = `
+      export type CandidateStatus =
+        | "draft"
+        | "needs-review"
+        | "approved"
+        | "rejected";
+    `;
+    const result = extractStringUnions(source);
+    expect(result.get("CandidateStatus")?.members).toEqual([
+      "draft",
+      "needs-review",
+      "approved",
+      "rejected",
+    ]);
+  });
+
+  it("tolerates a comment before the first member in leading-pipe style", () => {
+    const source = `
+      export type Status =
+        // the initial state
+        | "draft"
+        | "approved";
+    `;
+    const result = extractStringUnions(source);
+    expect(result.get("Status")?.members).toEqual(["draft", "approved"]);
+  });
+
+  it("accepts single-quoted members exactly like double-quoted ones", () => {
+    const source = `export type Status = 'draft' | 'approved';`;
+    const result = extractStringUnions(source);
+    expect(result.get("Status")?.members).toEqual(["draft", "approved"]);
+  });
+
+  it("accepts a union mixing both quote styles across members", () => {
+    const source = `export type Status = "draft" | 'approved';`;
+    const result = extractStringUnions(source);
+    expect(result.get("Status")?.members).toEqual(["draft", "approved"]);
+  });
+
+  it("skips a non-exported type alias entirely", () => {
+    const source = `type Status = "draft" | "approved";`;
+    expect(extractStringUnions(source).size).toBe(0);
+  });
+
+  it("skips the whole alias when a member is a reference to another type, not a literal", () => {
+    const source = `export type Status = "draft" | Approved;`;
+    expect(extractStringUnions(source).size).toBe(0);
+  });
+
+  it("skips the whole alias when a member is a generic type", () => {
+    const source = `export type Status = "draft" | Array<string>;`;
+    expect(extractStringUnions(source).size).toBe(0);
+  });
+
+  it("skips the whole alias when a member is an object literal type", () => {
+    const source = `export type Status = "draft" | { kind: "other" };`;
+    expect(extractStringUnions(source).size).toBe(0);
+  });
+
+  it("skips the whole alias when a member is a template literal type", () => {
+    const source = 'export type Status = "draft" | `prefix-${string}`;';
+    expect(extractStringUnions(source).size).toBe(0);
+  });
+
+  it("skips an alias with no terminating semicolon before the source ends", () => {
+    const source = `export type Status = "draft" | "approved"`;
+    expect(extractStringUnions(source).size).toBe(0);
+  });
+
+  it("deduplicates a member repeated in the union, keeping first-appearance order", () => {
+    const source = `export type Status = "draft" | "approved" | "draft";`;
+    const result = extractStringUnions(source);
+    expect(result.get("Status")?.members).toEqual(["draft", "approved"]);
+  });
+
+  it("parses multiple unions from one source", () => {
+    const source = `
+      export type First = "a" | "b";
+      export type Second = "x" | "y";
+    `;
+    const result = extractStringUnions(source);
+    expect([...result.keys()].sort()).toEqual(["First", "Second"]);
+  });
+
+  it("does not let a pipe inside a string literal's own text desynchronize the split", () => {
+    const source = String.raw`export type Status = "a|b" | "c";`;
+    const result = extractStringUnions(source);
+    expect(result.get("Status")?.members).toEqual(["a|b", "c"]);
+  });
+});
+
+describe("extractStringUnions bounds", () => {
+  it("returns every union within the 200-union bound", () => {
+    const source = Array.from({ length: 200 }, (_, i) => `export type U${String(i)} = "a";`).join(
+      "\n",
+    );
+    expect(extractStringUnions(source).size).toBe(200);
+  });
+
+  it("returns an empty result once a source declares more than 200 unions", () => {
+    const source = Array.from({ length: 201 }, (_, i) => `export type U${String(i)} = "a";`).join(
+      "\n",
+    );
+    expect(extractStringUnions(source).size).toBe(0);
+  });
+
+  it("returns an empty result once a source exceeds 4,000 lines", () => {
+    const flat = 'export type Foo = "a" | "b";\n';
+    expect(extractStringUnions(flat).size).toBe(1); // control: within bounds
+    const padded = "// pad\n".repeat(4001) + flat;
+    expect(extractStringUnions(padded).size).toBe(0);
+  });
+});
+
+describe("extractStringUnions never throws", () => {
+  it("on deterministic binary-ish garbage", () => {
+    const garbage = Array.from({ length: 5000 }, (_, i) =>
+      String.fromCharCode((i * 41) % 256),
+    ).join("");
+    expect(() => extractStringUnions(garbage)).not.toThrow();
+    expect(extractStringUnions(garbage)).toBeInstanceOf(Map);
+  });
+
+  it("on an alias whose right-hand side never terminates", () => {
+    const source = `export type Foo = "a" | "b"`;
+    expect(() => extractStringUnions(source)).not.toThrow();
+    expect(extractStringUnions(source).size).toBe(0);
+  });
+
+  it("on a single ~10MB line", () => {
+    const huge = 'export type Foo = "' + "x".repeat(10_000_000) + '";';
+    expect(() => extractStringUnions(huge)).not.toThrow();
+    expect(extractStringUnions(huge).size).toBe(0);
+  });
+
+  it("on an empty string", () => {
+    expect(() => extractStringUnions("")).not.toThrow();
+    expect(extractStringUnions("").size).toBe(0);
+  });
+
+  it("on non-TypeScript text", () => {
+    const notCode = "the quick brown fox jumps over the lazy dog\n".repeat(50);
+    expect(() => extractStringUnions(notCode)).not.toThrow();
+    expect(extractStringUnions(notCode).size).toBe(0);
+  });
+});
+
 describe("compareContracts", () => {
   it("reports a member missing from the right side, with the correct direction", () => {
     const left = `export interface Foo { a: string; b: number; }`;
@@ -365,6 +526,198 @@ describe("compareContracts never throws", () => {
   });
 });
 
+describe("compareDeclaredContracts", () => {
+  describe("contract-response-field-dropped-shaped fixture", () => {
+    // The measured gap from the corpus port (issue #80): the server side declares `ImportResult`;
+    // the client's separately-declared response type is named `ImportResponse`. Different names, so
+    // plain `compareContracts` never pairs them (pinned below) — exactly the shape
+    // `compareDeclaredContracts` exists to reach, for a pair the review profile has declared.
+    const IMPORT_RESULT = `
+      export interface ImportResult {
+        imported: number;
+        failed: number;
+        skippedCount: number;
+      }
+    `;
+    const IMPORT_RESPONSE = `
+      export interface ImportResponse {
+        imported: number;
+        failed: number;
+      }
+    `;
+
+    it("finds exactly one mismatch by falling back to positional pairing", () => {
+      expect(compareDeclaredContracts(IMPORT_RESULT, IMPORT_RESPONSE)).toEqual([
+        {
+          interfaceName: "ImportResult vs ImportResponse",
+          member: "skippedCount",
+          missingFrom: "right",
+          optionalOnPresentSide: false,
+        },
+      ]);
+    });
+
+    it("plain compareContracts still finds nothing for the same pair (the default stays strict)", () => {
+      expect(compareContracts(IMPORT_RESULT, IMPORT_RESPONSE)).toEqual([]);
+    });
+  });
+
+  it("refuses the positional fallback when either side declares more than one flat interface", () => {
+    const left = `
+      export interface Foo { a: string; }
+      export interface Extra { x: string; }
+    `;
+    const right = `export interface Bar { a: string; }`;
+    // Ambiguous which of the left's two interfaces the profile meant — silence, not a guess.
+    expect(compareDeclaredContracts(left, right)).toEqual([]);
+  });
+
+  it("refuses the positional fallback when the right side declares more than one flat interface", () => {
+    const left = `export interface Foo { a: string; }`;
+    const right = `
+      export interface Bar { a: string; }
+      export interface Extra { x: string; }
+    `;
+    expect(compareDeclaredContracts(left, right)).toEqual([]);
+  });
+
+  it("never runs the positional fallback when a same-name match is already present", () => {
+    const left = `export interface Foo { a: string; b: string; }`;
+    const right = `export interface Foo { a: string; }`;
+    const result = compareDeclaredContracts(left, right);
+    expect(result).toEqual([
+      { interfaceName: "Foo", member: "b", missingFrom: "right", optionalOnPresentSide: false },
+    ]);
+    // Confirms the label came from the same-name path, not positional pairing ("Foo vs Foo").
+    expect(result[0]?.interfaceName).toBe("Foo");
+  });
+
+  it("reports nothing for two identical single interfaces (same-name and positional paths agree)", () => {
+    const source = `export interface Foo { a: string; }`;
+    expect(compareDeclaredContracts(source, source)).toEqual([]);
+  });
+
+  it("reports nothing when neither side declares any flat interface (audit-validator-drift shape)", () => {
+    expect(compareDeclaredContracts("not typescript at all", "also not typescript")).toEqual([]);
+  });
+});
+
+describe("compareDeclaredContracts never throws", () => {
+  it("when either side is binary-ish garbage", () => {
+    const garbage = Array.from({ length: 3000 }, (_, i) =>
+      String.fromCharCode((i * 59) % 256),
+    ).join("");
+    const flat = `export interface Foo { a: string; }`;
+    expect(() => compareDeclaredContracts(garbage, flat)).not.toThrow();
+    expect(() => compareDeclaredContracts(flat, garbage)).not.toThrow();
+    expect(() => compareDeclaredContracts(garbage, garbage)).not.toThrow();
+  });
+});
+
+describe("findUncoveredUnionMembers", () => {
+  describe("status-union-widened-consumer-missed-shaped fixture", () => {
+    // The corpus port's measured gap (issue #80): the status module gains "rejected"; the
+    // deliverability predicate that must handle every status value is untouched by the diff that
+    // adds it, and never mentions "rejected" anywhere in its own text.
+    const BASE_STATUS = `export type CandidateStatus = "draft" | "needs-review" | "approved";`;
+    const HEAD_STATUS = `export type CandidateStatus = "draft" | "needs-review" | "approved" | "rejected";`;
+    const CONSUMER = `
+      import type { CandidateStatus } from "./candidate-status.js";
+
+      export function isDeliverable(status: CandidateStatus): boolean {
+        return status !== "needs-review";
+      }
+    `;
+
+    it("finds exactly one gap: the added rejected member the consumer never mentions", () => {
+      expect(findUncoveredUnionMembers(BASE_STATUS, HEAD_STATUS, CONSUMER)).toEqual([
+        { unionName: "CandidateStatus", member: "rejected", counterpartMentions: 0 },
+      ]);
+    });
+
+    it("reports nothing once the counterpart mentions the literal anywhere, even in a comment", () => {
+      const consumerWithComment = `
+        import type { CandidateStatus } from "./candidate-status.js";
+
+        // TODO: handle "rejected" once product decides what it should do.
+        export function isDeliverable(status: CandidateStatus): boolean {
+          return status !== "needs-review";
+        }
+      `;
+      expect(findUncoveredUnionMembers(BASE_STATUS, HEAD_STATUS, consumerWithComment)).toEqual([]);
+    });
+
+    it("also recognizes a single-quoted mention as coverage", () => {
+      const consumerWithSingleQuote = `
+        import type { CandidateStatus } from "./candidate-status.js";
+
+        const handled = ['draft', 'needs-review', 'approved', 'rejected'];
+        export function isDeliverable(status: CandidateStatus): boolean {
+          return handled.includes(status) && status !== "needs-review";
+        }
+      `;
+      expect(findUncoveredUnionMembers(BASE_STATUS, HEAD_STATUS, consumerWithSingleQuote)).toEqual(
+        [],
+      );
+    });
+  });
+
+  it("reports nothing for a brand-new union (absent from base entirely)", () => {
+    const base = `export type Other = "x";`;
+    const head = `
+      export type Other = "x";
+      export type CandidateStatus = "draft" | "rejected";
+    `;
+    expect(findUncoveredUnionMembers(base, head, "no mention here")).toEqual([]);
+  });
+
+  it("reports nothing when no member was added, only reordered", () => {
+    const base = `export type CandidateStatus = "draft" | "approved";`;
+    const head = `export type CandidateStatus = "approved" | "draft";`;
+    expect(findUncoveredUnionMembers(base, head, "irrelevant")).toEqual([]);
+  });
+
+  it("treats a union with a non-literal member as entirely skipped, not partially covered", () => {
+    const base = `export type CandidateStatus = "draft" | "approved";`;
+    const head = `export type CandidateStatus = "draft" | "approved" | Legacy;`;
+    // "Legacy" disqualifies the whole head union (see extractStringUnions), so there is no head
+    // entry to compare against base at all — not a gap, and not a false "added: Legacy" either.
+    expect(extractStringUnions(head).size).toBe(0);
+    expect(findUncoveredUnionMembers(base, head, "irrelevant")).toEqual([]);
+  });
+
+  it("reports a gap per added member, independently", () => {
+    const base = `export type CandidateStatus = "draft";`;
+    const head = `export type CandidateStatus = "draft" | "approved" | "rejected";`;
+    const counterpart = `if (status === "approved") return true;`; // mentions "approved" only
+    expect(findUncoveredUnionMembers(base, head, counterpart)).toEqual([
+      { unionName: "CandidateStatus", member: "rejected", counterpartMentions: 0 },
+    ]);
+  });
+});
+
+describe("findUncoveredUnionMembers never throws", () => {
+  it("when any argument is binary-ish garbage", () => {
+    const garbage = Array.from({ length: 2000 }, (_, i) =>
+      String.fromCharCode((i * 67) % 256),
+    ).join("");
+    const base = `export type Foo = "a";`;
+    const head = `export type Foo = "a" | "b";`;
+    expect(() => findUncoveredUnionMembers(garbage, head, "x")).not.toThrow();
+    expect(() => findUncoveredUnionMembers(base, garbage, "x")).not.toThrow();
+    expect(() => findUncoveredUnionMembers(base, head, garbage)).not.toThrow();
+    expect(() => findUncoveredUnionMembers(garbage, garbage, garbage)).not.toThrow();
+  });
+
+  it("on an oversized counterpart source", () => {
+    const base = `export type Foo = "a";`;
+    const head = `export type Foo = "a" | "b";`;
+    const hugeCounterpart = "x".repeat(2_000_001);
+    expect(() => findUncoveredUnionMembers(base, head, hugeCounterpart)).not.toThrow();
+    expect(findUncoveredUnionMembers(base, head, hugeCounterpart)).toEqual([]);
+  });
+});
+
 describe("describeMismatch", () => {
   const MISMATCH: ShapeMismatch = {
     interfaceName: "FigmaCodegenResponse",
@@ -405,6 +758,33 @@ describe("describeMismatch", () => {
   it("never emits the opaque type text, only presence and absence", () => {
     const body = describeMismatch(MISMATCH, LEFT_PATH, RIGHT_PATH);
     expect(body).not.toContain("number");
+  });
+});
+
+describe("describeUnionGap", () => {
+  const GAP: UnionGap = {
+    unionName: "CandidateStatus",
+    member: "rejected",
+    counterpartMentions: 0,
+  };
+  const CHANGED_PATH = "src/candidate-status.ts";
+  const COUNTERPART_PATH = "src/candidate-deliverability.ts";
+
+  it("renders an imperative first line, a blank line, then prose", () => {
+    const body = describeUnionGap(GAP, CHANGED_PATH, COUNTERPART_PATH);
+    const [firstLine, blank, ...rest] = body.split("\n");
+    expect(firstLine).toMatch(/\.$/);
+    expect(firstLine?.length).toBeLessThan(100);
+    expect(blank).toBe("");
+    expect(rest.join("\n").length).toBeGreaterThan(0);
+  });
+
+  it("names the union, the added member, and both files", () => {
+    const body = describeUnionGap(GAP, CHANGED_PATH, COUNTERPART_PATH);
+    expect(body).toContain("rejected");
+    expect(body).toContain("CandidateStatus");
+    expect(body).toContain(CHANGED_PATH);
+    expect(body).toContain(COUNTERPART_PATH);
   });
 });
 
@@ -479,6 +859,52 @@ describe("describeMismatch output is always publishable", () => {
       optionalOnPresentSide: false,
     };
     const body = describeMismatch(mismatch, PATHS[0], PATHS[1]);
+    expect(sanitizeFindingBody(body).ok).toBe(true);
+  });
+});
+
+describe("describeUnionGap output is always publishable", () => {
+  const PATHS = ["src/candidate-status.ts", "src/candidate-deliverability.ts"] as const;
+
+  const CASES: readonly UnionGap[] = [
+    { unionName: "CandidateStatus", member: "rejected", counterpartMentions: 0 },
+    { unionName: "CandidateStatus", member: "needs-review", counterpartMentions: 0 },
+    { unionName: "AccountTier", member: "enterprise-trial", counterpartMentions: 0 },
+  ];
+
+  it.each(CASES.map((gap) => [gap] as const))(
+    "round-trips %j through the real sanitizeFindingBody",
+    (gap) => {
+      const body = describeUnionGap(gap, PATHS[0], PATHS[1]);
+      expect(sanitizeFindingBody(body)).toEqual({ ok: true, body });
+    },
+  );
+
+  it("stays publishable for every gap produced by the status-union-widened fixture", () => {
+    const base = `export type CandidateStatus = "draft" | "needs-review" | "approved";`;
+    const head = `export type CandidateStatus = "draft" | "needs-review" | "approved" | "rejected";`;
+    const consumer = `
+      import type { CandidateStatus } from "./candidate-status.js";
+
+      export function isDeliverable(status: CandidateStatus): boolean {
+        return status !== "needs-review";
+      }
+    `;
+    const gaps = findUncoveredUnionMembers(base, head, consumer);
+    expect(gaps.length).toBeGreaterThan(0);
+    for (const gap of gaps) {
+      const body = describeUnionGap(gap, PATHS[0], PATHS[1]);
+      expect(sanitizeFindingBody(body).ok).toBe(true);
+    }
+  });
+
+  it("stays publishable even for an unusual literal value", () => {
+    const gap: UnionGap = {
+      unionName: "Weird",
+      member: "not an identifier <script>",
+      counterpartMentions: 0,
+    };
+    const body = describeUnionGap(gap, PATHS[0], PATHS[1]);
     expect(sanitizeFindingBody(body).ok).toBe(true);
   });
 });

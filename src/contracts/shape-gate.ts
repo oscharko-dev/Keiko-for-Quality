@@ -40,6 +40,15 @@
  * - text that merely resembles `export interface Name { ... }` inside a string or a comment is not
  *   distinguished from the real thing. Real source files essentially never do this; a full tokenizer
  *   to rule it out would be exactly the parser this module deliberately does not carry.
+ *
+ * Two further checks share this module and its no-imports, never-throws, skip-rather-than-guess
+ * discipline without changing the guarantee above. `extractStringUnions`/`findUncoveredUnionMembers`
+ * answer the same kind of question for a string-literal type union instead of an interface: a member
+ * added to the union on one side that a counterpart file never mentions, anywhere, as text.
+ * `compareDeclaredContracts` is an opt-in variant of `compareContracts` for a pair of files the review
+ * profile has already declared as counterparts, covering the case where the two sides describe the
+ * same shape under two different interface names. Each is documented in full at its own declaration
+ * below; `compareContracts` and `extractFlatInterfaces` are exactly as they were, unchanged by either.
  */
 
 /** One property signature member of a flat interface. `typeText` is the raw, unparsed type text. */
@@ -64,6 +73,19 @@ export interface ShapeMismatch {
   readonly optionalOnPresentSide: boolean;
 }
 
+/** An exported type alias this gate fully understood: every member is a bare quoted string literal. */
+export interface UnionDecl {
+  readonly name: string;
+  readonly members: readonly string[];
+}
+
+/** A member added to a union between two revisions that a declared counterpart file never mentions. */
+export interface UnionGap {
+  readonly unionName: string;
+  readonly member: string;
+  readonly counterpartMentions: number;
+}
+
 // -------------------------------------------------------------------------------------------
 // Bounds. Each exists so a pathological or merely huge input costs a fixed, small amount of work
 // rather than an amount proportional to how bad the input is — "beyond -> empty result" is a
@@ -74,6 +96,9 @@ export interface ShapeMismatch {
 
 /** Exceeding this returns an empty result. Guards against a source with far more declarations than any real file. */
 const MAX_INTERFACES = 200;
+
+/** Exceeding this returns an empty result. Mirrors `MAX_INTERFACES`, applied to string-literal unions. */
+const MAX_UNIONS = 200;
 
 /** Exceeding this returns an empty result. */
 const MAX_LINES = 4000;
@@ -373,6 +398,102 @@ function parseMembers(body: string): readonly FlatMember[] | null {
 }
 
 // -------------------------------------------------------------------------------------------
+// String-literal union parsing: `export type Name = "a" | "b";`, no other member shape tolerated.
+// -------------------------------------------------------------------------------------------
+
+const UNION_HEADER_PATTERN_SOURCE = String.raw`\bexport\s+type\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=`;
+
+interface UnionHeaderMatch {
+  readonly name: string;
+  readonly afterEquals: number;
+}
+
+/** Every `export type Name =` occurrence, capped one past `MAX_UNIONS` so scanning a source with far too many stops early. */
+function matchAllUnionHeaders(source: string): readonly UnionHeaderMatch[] {
+  const pattern = new RegExp(UNION_HEADER_PATTERN_SOURCE, "g");
+  const out: UnionHeaderMatch[] = [];
+  let match = pattern.exec(source);
+  while (match !== null) {
+    out.push({ name: match[1] ?? "", afterEquals: pattern.lastIndex });
+    if (out.length > MAX_UNIONS) return out;
+    match = pattern.exec(source);
+  }
+  return out;
+}
+
+/**
+ * Index of the top-level `;` terminating a type alias's right-hand side, starting at `from` and
+ * skipping string/template literal and comment content the same way `matchingBrace` skips them for an
+ * interface body — so a semicolon quoted or commented inside the right-hand side is never mistaken for
+ * the statement's end. Returns -1 when `source` ends first: an alias with no clear boundary, which
+ * this gate leaves unparsed rather than guesses about, the same as an interface whose body never
+ * closes.
+ */
+function findAliasTerminator(source: string, from: number): number {
+  let i = from;
+  while (i < source.length) {
+    if (source.charAt(i) === ";") return i;
+    const skipped = skipLiteralOrComment(source, i);
+    i = skipped > i ? skipped : i + 1;
+  }
+  return -1;
+}
+
+/**
+ * Splits a type alias's right-hand side on top-level `|`, skipping string/template literal and
+ * comment content so a `|` inside a literal's own text (`"a|b"`) or a comment is never mistaken for a
+ * union separator — the same discipline `parseMembers` applies to `;`/`,` inside an interface body. No
+ * bracket-depth tracking is needed beyond that: any candidate this produces that is not a bare quoted
+ * literal is rejected outright by `parseStringUnionMembers`, regardless of exactly where a generic's or
+ * an object type's own internal `|` happened to fall.
+ */
+function splitUnionMembers(rhs: string): readonly string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let i = 0;
+  while (i < rhs.length) {
+    if (rhs.charAt(i) === "|") {
+      parts.push(rhs.slice(start, i));
+      start = i + 1;
+      i += 1;
+      continue;
+    }
+    const skipped = skipLiteralOrComment(rhs, i);
+    i = skipped > i ? skipped : i + 1;
+  }
+  parts.push(rhs.slice(start));
+  return parts;
+}
+
+/** A bare double- or single-quoted string literal filling an entire (trimmed) union member candidate. */
+const STRING_LITERAL_MEMBER = /^(?:"[^"\n]*"|'[^'\n]*')$/;
+
+/**
+ * Classifies a type alias's whole right-hand side. Every `|`-separated candidate must be a bare quoted
+ * string literal once a leading comment is stripped and it is trimmed; an empty candidate (Prettier's
+ * leading-pipe multi-line style leaves one before the first member) is dropped rather than rejected,
+ * but anything else that is not a clean literal — a generic, a type reference, an object type, a
+ * template literal — disqualifies the WHOLE alias, returning null. No partial credit, mirroring
+ * `parseMembers`: a union this gate reports on must be one it is certain it read completely and
+ * correctly.
+ */
+function parseStringUnionMembers(rhs: string): readonly string[] | null {
+  const seen = new Set<string>();
+  const members: string[] = [];
+  for (const rawPart of splitUnionMembers(rhs)) {
+    const candidate = stripLeadingComments(rawPart).trim();
+    if (candidate.length === 0) continue;
+    if (!STRING_LITERAL_MEMBER.test(candidate)) return null;
+    const literal = unquote(candidate);
+    if (!seen.has(literal)) {
+      seen.add(literal);
+      members.push(literal);
+    }
+  }
+  return members.length === 0 ? null : members;
+}
+
+// -------------------------------------------------------------------------------------------
 // Public API.
 // -------------------------------------------------------------------------------------------
 
@@ -408,6 +529,36 @@ export function extractFlatInterfaces(source: string): ReadonlyMap<string, FlatI
   for (const header of headers) {
     const flat = extractOneInterface(source, header);
     if (flat !== null) result.set(header.name, flat);
+  }
+  return result;
+}
+
+/**
+ * Extracts every exported, string-literal-only type union from TypeScript source text — `export type
+ * Name = "a" | "b" | "c";`, on one line or spread across several, including Prettier's leading-pipe
+ * multi-line style. An alias is extracted only when every `|`-separated member is a bare double- or
+ * single-quoted string literal; anything else on the right-hand side (a generic, a reference to
+ * another type, an object literal, a template literal) disqualifies the WHOLE alias — see
+ * `parseStringUnionMembers` — following the exact discipline `extractFlatInterfaces` applies to a
+ * member it cannot classify: no partial credit, because a partially-read union is exactly the shape of
+ * input this gate must never guess about.
+ *
+ * Never throws, and returns an empty map rather than a partial one once `source` exceeds this module's
+ * bounds (`MAX_SOURCE_CHARS`/`MAX_LINES`/`MAX_UNIONS`) — including on input that is not TypeScript at
+ * all.
+ */
+export function extractStringUnions(source: string): ReadonlyMap<string, UnionDecl> {
+  const empty: ReadonlyMap<string, UnionDecl> = new Map();
+  if (source.length > MAX_SOURCE_CHARS || source.split("\n").length > MAX_LINES) return empty;
+  const headers = matchAllUnionHeaders(source);
+  if (headers.length > MAX_UNIONS) return empty;
+
+  const result = new Map<string, UnionDecl>();
+  for (const header of headers) {
+    const terminator = findAliasTerminator(source, header.afterEquals);
+    if (terminator === -1) continue;
+    const members = parseStringUnionMembers(source.slice(header.afterEquals, terminator));
+    if (members !== null) result.set(header.name, { name: header.name, members });
   }
   return result;
 }
@@ -464,6 +615,126 @@ export function compareContracts(left: string, right: string): readonly ShapeMis
 }
 
 /**
+ * `compareContracts`'s opt-in sibling for a pair the review profile has explicitly declared as
+ * counterparts (`src/config/profile.ts`'s `ContractPair`) — covers the shape `compareContracts`
+ * deliberately never reaches: Keiko#2963's actual declarations are named `ImportResult` on the server
+ * side and `ImportResponse` on the client side, two different names `compareContracts` never pairs
+ * (see its own doc comment on why guessing that two differently-named declarations mirror each other
+ * is out of scope for a deterministic gate).
+ *
+ * Runs the same, completely UNCHANGED same-name comparison first. Only when that yields nothing, and
+ * each side extracts to EXACTLY ONE flat interface, does it fall back to comparing those two
+ * positionally — reporting the pair's `interfaceName` as `"<leftName> vs <rightName>"` rather than a
+ * single shared name.
+ *
+ * Why the positional fallback cannot manufacture a false positive: it never runs on an arbitrary
+ * `left`/`right` pair of this gate's own choosing. The caller reaches this function only for a pair the
+ * repository owner already declared as counterparts in the review profile — "these two files describe
+ * the same shape" is the profile's assertion, not an inference this gate performs. Given that premise,
+ * requiring exactly one flat interface on each side removes the only remaining question this gate would
+ * otherwise have to guess at: WHICH declaration on each side is the one meant. With exactly one
+ * candidate per side there is no second choice to have gotten wrong; with two or more, that question
+ * reopens, so the fallback refuses outright (an empty result) rather than pick one — the same
+ * fail-toward-nothing discipline as everywhere else in this module. A same-name match already found is
+ * never second-guessed by the fallback either: `compareContracts` finding anything at all means a
+ * shared name already answered the pairing question, so the positional path never runs.
+ *
+ * `compareContracts` itself is entirely unchanged by this function's existence: undeclared callers —
+ * anything not routed through a profile's `contractPairs` — keep exactly today's strict, same-name-only
+ * behaviour.
+ */
+export function compareDeclaredContracts(left: string, right: string): readonly ShapeMismatch[] {
+  const sameName = compareContracts(left, right);
+  if (sameName.length > 0) return sameName;
+
+  const leftInterfaces = extractFlatInterfaces(left);
+  const rightInterfaces = extractFlatInterfaces(right);
+  if (leftInterfaces.size !== 1 || rightInterfaces.size !== 1) return [];
+
+  // Two steps, not one nested pattern: destructuring straight through to `[[name, iface]] = map`
+  // types the inner tuple as possibly `undefined` under `noUncheckedIndexedAccess` with no chance to
+  // narrow it. `leftEntries.size`/`rightEntries.size` already guarantee exactly one entry each; these
+  // checks only satisfy the type system, they can never actually be true.
+  const [leftEntry] = leftInterfaces;
+  const [rightEntry] = rightInterfaces;
+  if (leftEntry === undefined || rightEntry === undefined) return [];
+
+  const [leftName, leftInterface] = leftEntry;
+  const [rightName, rightInterface] = rightEntry;
+  return compareMembers(`${leftName} vs ${rightName}`, leftInterface, rightInterface);
+}
+
+/** Number of non-overlapping occurrences of `needle` in `source`, scanned left to right. */
+function countOccurrences(source: string, needle: string): number {
+  if (needle.length === 0) return 0;
+  let count = 0;
+  let from = 0;
+  for (;;) {
+    const index = source.indexOf(needle, from);
+    if (index === -1) return count;
+    count += 1;
+    from = index + needle.length;
+  }
+}
+
+/**
+ * How many times `literal`'s exact text occurs quoted, either quote style, anywhere in `source` — a
+ * raw substring search over the WHOLE text, deliberately including comments: this function is asked
+ * only "does a human's text mention this value", never "does live code branch on it", and a mention
+ * inside a comment already answers that question. See `findUncoveredUnionMembers`'s own doc comment.
+ */
+function countLiteralMentions(source: string, literal: string): number {
+  return countOccurrences(source, `"${literal}"`) + countOccurrences(source, `'${literal}'`);
+}
+
+/**
+ * Finds union members added between `baseSource` and `headSource` that `counterpartSource` never
+ * mentions as a quoted literal, anywhere — the union-typed counterpart to `compareContracts`'s member
+ * presence/absence check, and the strongest new check this module gained for it: issue #80's
+ * `status-union-widened-consumer-missed` shape, where a status module gains a member and the one
+ * function meant to branch on every status value is untouched by the diff that adds it.
+ *
+ * A union present in both `baseSource` and `headSource` under the same name is compared member by
+ * member; only members present in `headSource` but absent from `baseSource`'s own list count as
+ * "added" (a member merely reordered is not). For each added member, `counterpartSource` — the raw,
+ * UNPARSED text of the file the profile declares as this file's counterpart — is searched for the
+ * member's literal text, quoted either way (`"rejected"` or `'rejected'`), anywhere at all: inside a
+ * live branch, inside a comment, inside an unrelated string. A single such occurrence is treated as
+ * proof a human already had the chance to consider this value, so nothing is reported for it — this is
+ * why the claim behind a reported gap is a fact about TEXT ("this exact literal occurs zero times in
+ * this file") and never an inference about behaviour ("this file mishandles this value"): the latter
+ * needs real control-flow analysis this module does not have and must not pretend to.
+ *
+ * Reports nothing when: the union does not exist in `baseSource` under this name (a brand-new union
+ * was never "widened" — there is nothing an older counterpart could have missed); no member was added;
+ * or the counterpart mentions the literal at all. A union either source could not extract as a clean,
+ * string-literal-only alias (see `extractStringUnions`) is invisible here exactly as if it were
+ * absent — the same "skip the whole declaration" discipline, one level up.
+ */
+export function findUncoveredUnionMembers(
+  baseSource: string,
+  headSource: string,
+  counterpartSource: string,
+): readonly UnionGap[] {
+  if (counterpartSource.length > MAX_SOURCE_CHARS) return [];
+  const baseUnions = extractStringUnions(baseSource);
+  const headUnions = extractStringUnions(headSource);
+
+  const gaps: UnionGap[] = [];
+  for (const [name, headUnion] of headUnions) {
+    const baseUnion = baseUnions.get(name);
+    if (baseUnion === undefined) continue;
+    const baseMembers = new Set(baseUnion.members);
+    for (const member of headUnion.members) {
+      if (baseMembers.has(member)) continue;
+      const counterpartMentions = countLiteralMentions(counterpartSource, member);
+      if (counterpartMentions === 0) gaps.push({ unionName: name, member, counterpartMentions });
+    }
+  }
+  return gaps;
+}
+
+/**
  * Neutralizes a backtick or backslash so a name or path can be embedded inside a Markdown code span
  * without prematurely closing it. This duplicates `publish/sanitize.ts`'s `escapeInline` in
  * miniature rather than importing it — this module stays import-free by design (see the file
@@ -508,5 +779,35 @@ export function describeMismatch(
       `writes into \`${member}\` therefore has no field to occupy on the consuming side: it is ` +
       `silently dropped in transit, or read back as undefined, wherever code trusts the two ` +
       `declarations to describe the same shape.`,
+  ].join("\n");
+}
+
+/**
+ * Renders one union gap as a finding-body paragraph in the same prescribed shape `describeMismatch`
+ * uses (see that function's own doc comment): an imperative first line ending in a period, a blank
+ * line, then plain prose naming the union, the added member, the file that gained it, the counterpart
+ * file that never mentions it, and the concrete consequence.
+ *
+ * Every value is escaped and wrapped in backticks exactly as `describeMismatch` does — a union
+ * member's literal text is read out of source text, not authored by this product, so it is exactly as
+ * untrusted as an interface or member name, and the same code-span treatment keeps it inert for
+ * `sanitizeFindingBody`'s masked checks.
+ */
+export function describeUnionGap(
+  gap: UnionGap,
+  changedPath: string,
+  counterpartPath: string,
+): string {
+  const member = escapeForCodeSpan(gap.member);
+  const unionName = escapeForCodeSpan(gap.unionName);
+  const changed = escapeForCodeSpan(changedPath);
+  const counterpart = escapeForCodeSpan(counterpartPath);
+  return [
+    `Handle the new \`${member}\` member of \`${unionName}\` in \`${counterpart}\`.`,
+    "",
+    `\`${unionName}\` in \`${changed}\` gained the member \`${member}\`, and \`${counterpart}\` does ` +
+      `not mention \`${member}\` anywhere. A value carrying this new member can reach \`${counterpart}\` ` +
+      `with no branch written to handle it, silently falling through whatever case already covers the ` +
+      `members that existed before.`,
   ].join("\n");
 }

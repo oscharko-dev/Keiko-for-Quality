@@ -263,7 +263,11 @@ export async function runEngine(
     return { stdout: result.stdout.toString("utf8"), ruleDigest };
   } catch (error) {
     const reason =
-      error instanceof ExecFailure ? "engine.run.nonzero_exit" : "engine.run.spawn_failed";
+      error instanceof ExecFailure
+        ? error.timedOut
+          ? "engine.run.timeout"
+          : "engine.run.nonzero_exit"
+        : "engine.run.spawn_failed";
     diagnostics.record(reason, {
       headSha: options.pair.head,
       durationMs: Date.now() - started,
