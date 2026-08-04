@@ -102,7 +102,21 @@ function extractBudget(records: readonly DiagnosticRecord[]): SummaryBudget {
   let allotted: number | undefined;
   let spent: number | undefined;
   for (const record of records) {
-    if (record.code === "engine.run.completed" && record.counts?.budget !== undefined) {
+    // FIRST `engine.run.completed`, not the last. A resumed run (`runEngineWithOneResume`,
+    // `review.ts`) emits this diagnostic once per attempt, and the second attempt's `counts.budget`
+    // is the REMAINDER carved out of the first's — so taking the last one reported the resume's
+    // leftover as though it were the whole run's ceiling, next to a `spent` that is cumulative
+    // across both attempts. The two numbers were then measured on different bases, and the line
+    // read as a catastrophic overrun that never happened: `corpus/evidence/live-telemetry-
+    // 2026-08-04-keiko-2981-double-run.md` records it as "80000 allotted, 3562109 reported", where
+    // 80,000 was the resume's own floor and the run's real allotment was 2.97M. The first attempt's
+    // value is the allotment `computeAllottedBudget` gave this run, which is the figure `spent`
+    // belongs next to.
+    if (
+      record.code === "engine.run.completed" &&
+      record.counts?.budget !== undefined &&
+      allotted === undefined
+    ) {
       allotted = record.counts.budget;
     }
     if (record.code === "run.spend" && record.counts?.total !== undefined) {
@@ -125,6 +139,7 @@ const EMPTY_PUBLISH_OUTCOME: PublishOutcome = {
   suppressedExactDuplicate: 0,
   suppressedSimilar: 0,
   suppressedDispositioned: 0,
+  suppressedRecurrence: 0,
   rejectedSanitization: 0,
   rejectedPlacement: 0,
   readbackFailures: 0,
@@ -161,6 +176,8 @@ export function buildSummaryReport(
     suppressedExactDuplicate: publish.suppressedExactDuplicate,
     suppressedSimilar: publish.suppressedSimilar,
     suppressedDispositioned: publish.suppressedDispositioned,
+    // Same optional-field fallback as `suppressedIntraRun` above, for the same reason.
+    suppressedRecurrence: publish.suppressedRecurrence ?? 0,
   };
   return {
     outcome: report.outcome,

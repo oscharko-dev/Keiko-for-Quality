@@ -42,6 +42,19 @@ export interface ExistingConversation {
   /** True once the conversation is resolved or the diff hunk it anchored is now outdated. */
   readonly resolved: boolean;
   /**
+   * True for a thread whose diff hunk a later push moved — and which nobody has resolved: still
+   * open, still blocking the merge, and carrying a line anchor that no longer means anything.
+   *
+   * Deliberately NOT a de-folding of `resolved` above, whose folding is a precision choice for the
+   * line-overlap stages and stays exactly as it is (see `toExistingConversation` in
+   * `publisher.ts`). This is the one extra fact `findsOutdatedRecurrence` below needs and cannot
+   * recover from `resolved`: that field cannot tell "someone decided this" from "a push moved the
+   * hunk", and those two demand opposite treatment. Absent — not `false` — when the caller did not
+   * compute it, which reads as "not known to be outdated" and keeps every existing caller's
+   * behaviour unchanged.
+   */
+  readonly outdatedOnly?: boolean;
+  /**
    * True when `resolved` and this thread's last reply was a substantive disposition rather than a
    * bare resolve (Keiko-for-Quality#64) — see `disposition.ts`. Always `false` when not resolved,
    * and computed independently of `resolved` so a caller can never read it as "resolved" on its own.
@@ -103,6 +116,37 @@ const SIMILARITY_THRESHOLD = 0.5;
 
 /** Below this many shared content words, a ratio above the threshold is not a meaningful signal. */
 const MIN_SHARED_TOKENS = 4;
+
+/**
+ * The bar `findsOutdatedRecurrence` holds instead of a line anchor, and why it is higher.
+ *
+ * Every other stage in this file narrows on THREE independent signals: same path, overlapping
+ * lines, similar body. The outdated stage has only two, because its whole premise is that the
+ * thread's coordinates are stale and must not be compared. Dropping a narrowing condition without
+ * tightening the others would trade one stage's precision for another's recall, so the body has to
+ * carry the decision alone — on BOTH bounds at once, each raised over the anchored stages':
+ * seven tenths of the smaller body's content words, and at least eight of them shared outright.
+ *
+ * Calibrated against the production repeats on oscharko-dev/Keiko#2981, where one unfixed
+ * regression-guard objection was filed three times across three pushes, each as its own new
+ * blocking conversation. Measured on the real bodies, after this file's own tokenizer and stopword
+ * filter:
+ *
+ * - the genuine restatement pair shares 10 content words at an overlap of 0.71;
+ * - the nearest false positive — a DIFFERENT defect written into the same sentence template ("do
+ *   not lower the configured retry ceiling; this weakens a timeout guard and may hide unintended
+ *   socket exhaustion") — shares 6 at an overlap of 0.50, the exact shape `SIMILARITY_THRESHOLD`'s
+ *   own comment warns can outscore a real paraphrase;
+ * - an unrelated defect in the same file scores far below both.
+ *
+ * So each bound separates the two cases on its own, and the pair has to clear both. 0.70 rather
+ * than a rounder 0.75 is that measurement, not a preference: the real restatement sits at 0.71,
+ * and a threshold above it would make this stage inert on the exact evidence that motivated it.
+ */
+const RECURRENCE_THRESHOLD = 0.7;
+
+/** `MIN_SHARED_TOKENS`' counterpart for the coordinate-free stage — see `RECURRENCE_THRESHOLD`. */
+const MIN_RECURRENCE_SHARED_TOKENS = 8;
 
 /**
  * Minimum length, after whitespace collapse, for a shared fenced code block to count toward
@@ -382,6 +426,66 @@ export function findsDispositionedConversation(
       thread.dispositioned &&
       isSameFindingAtSameLocation(candidate, thread, identity),
   );
+}
+
+/**
+ * True when `candidate` restates a finding this reviewer already has on the pull request in an
+ * OUTDATED but still-unresolved conversation — the same defect, re-filed after a push moved the
+ * hunk the original thread anchored.
+ *
+ * This is the third cross-run stage, and the one the two above structurally cannot cover. Both of
+ * them route through `isSameFindingAtSameLocation`, whose `linesOverlap` check needs a trustworthy
+ * anchor on the existing side; once GitHub marks a thread outdated it nulls `line`/`start_line`,
+ * the client falls back to the ORIGINAL coordinates, and comparing a candidate's current line
+ * against those is noise. `toExistingConversation` (`publisher.ts`) therefore folds `outdated` into
+ * `resolved` for those stages on purpose, which leaves every outdated thread invisible to all of
+ * them — correct for a location-matching stage, and the reason a long-lived pull request
+ * accumulates one new blocking conversation per push for one unfixed defect.
+ *
+ * Measured on oscharko-dev/Keiko#2981: across thirteen runs this reviewer filed the same
+ * regression-guard objection three times against one file and the same "removed i18n keys break
+ * their consumers" objection five times, each at a drifted line, each as a fresh conversation the
+ * author then had to resolve by hand — against 18 and 26 total comments from the two other review
+ * bots on the same pull request over the same period.
+ *
+ * Suppressing here loses nothing a reader needs: the original conversation is still open, still
+ * says the same thing, and still blocks the merge, so the objection has already been made. That is
+ * exactly why the stage is restricted to `outdatedOnly` — a thread nobody has resolved. A RESOLVED
+ * thread must still never silence a recurrence (Keiko-for-Quality#38): someone looked and decided,
+ * and a defect that comes back after that has to be able to speak again. `findsDispositionedConversation`
+ * remains the only stage that reads resolved threads, and only the substantively answered ones.
+ *
+ * The narrowing that replaces the anchor is `RECURRENCE_THRESHOLD` — see that constant. Note the
+ * shared-code-block shortcut in `similarByContent` is deliberately NOT reachable from here: a
+ * quoted snippet identifies a location, and location is the one thing this stage has agreed not to
+ * trust.
+ */
+export function findsOutdatedRecurrence(
+  candidate: SimilarityCandidate,
+  existing: readonly ExistingConversation[],
+  identity: string,
+): boolean {
+  return existing.some(
+    (thread) =>
+      thread.outdatedOnly === true &&
+      thread.authorLogin === identity &&
+      thread.path === candidate.path &&
+      recurrenceBodiesMatch(candidate.body, thread.body),
+  );
+}
+
+/**
+ * `bodiesAreSimilar`'s coordinate-free counterpart: the same asymmetric stripping (the existing
+ * side is a composed, published document; the candidate side is raw sanitized prose), the same
+ * tokenizer, and deliberately neither the code-block shortcut nor the ordinary thresholds — see
+ * `RECURRENCE_THRESHOLD` and `findsOutdatedRecurrence` for both reasons.
+ */
+function recurrenceBodiesMatch(candidateBody: string, existingBody: string): boolean {
+  const { score, shared } = tokenOverlap(
+    tokenize(candidateBody),
+    tokenize(stripComposedArtifacts(existingBody)),
+  );
+  return shared >= MIN_RECURRENCE_SHARED_TOKENS && score >= RECURRENCE_THRESHOLD;
 }
 
 /**

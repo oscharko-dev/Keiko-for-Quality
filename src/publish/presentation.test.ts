@@ -162,6 +162,7 @@ describe("composeSummaryBody", () => {
     suppressedExactDuplicate: 1,
     suppressedSimilar: 2,
     suppressedDispositioned: 0,
+    suppressedRecurrence: 0,
   };
 
   function summaryReport(overrides: Partial<SummaryReport> = {}): SummaryReport {

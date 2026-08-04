@@ -310,17 +310,36 @@ interface LocalRun {
 /**
  * Measured blended cost per reviewable file, rounded up. The formula's dominant term by design.
  *
- * Recalibrated 2026-08-04 from the first three live v0.12.0 data points (32k for a one-file
- * config change, 65k/file across a 55-file feature PR, 200k/file across a five-file dense-code
- * PR): the previous 40k — calibrated on single-file corpus cases — under-priced the 55-file live
- * run so far that the engine's own budget stop fired at 84% coverage and the run settled
- * incomplete after 3.56M tokens; the follow-up push then re-paid the full amount (7.1M total, two
- * incompletes, evidence in corpus/evidence/). At 64k — the live median — that same run's
- * allotment is ~4.7M and it completes. Deliberately the median, not the 200k tail: the allotment
- * is a stop-loss, and provisioning every run for the dense-code worst case would neuter it (see
- * ALLOTMENT_MARGIN's own comment for where the tail is handled instead).
+ * Recalibrated 2026-08-05 to the live MEAN, from four v0.12.0/v0.13.0 data points: 32k for a
+ * one-file config change, 65k/file across a 55-file feature PR, 200k/file across a five-file
+ * dense-code PR, and 103.9k/file across the 37-file oscharko-dev/Keiko#2970 run (3,843,796 tokens,
+ * wire-confirmed against `model.usage`). Mean of the four: 100.2k.
+ *
+ * The previous value was 64k, chosen as the live median with the argument that "the allotment is a
+ * stop-loss, and provisioning every run for the dense-code worst case would neuter it". Two things
+ * were wrong with that, and both showed up in production:
+ *
+ * **The median is the wrong statistic for a sum.** The allotment prices `N` files at once, and a
+ * sum of `N` draws concentrates around `N x mean`, not `N x median`. On this measured spread the
+ * mean sits well above the median, so a median-calibrated allotment is not "the typical run" — it
+ * is a ceiling the typical multi-file run is expected to cross. #2970 crossed it by 11.8% and
+ * #2981 truncated thirteen times running.
+ *
+ * **Widening the ceiling is nearly free; hitting it is not.** `--max-tokens-budget` is a ceiling,
+ * not an allocation: a run that does not need the headroom never spends it, so raising this costs
+ * zero tokens on every run that was going to fit. Hitting it costs the ENTIRE run — the engine
+ * stops mid-dispatch, the settlement is incomplete, the pull request gets a blocking notice, and
+ * (before this same change's `memoizablePaths`) the next push re-paid every file from zero. The
+ * asymmetry is roughly "nothing" against "twice the full price", so the calibration target is the
+ * aggregate a large change actually needs, not the middle of the per-file spread.
+ *
+ * Still bounded, and deliberately so: `ALLOTMENT_CEILING` and the consumer's own `tokenBudget` both
+ * still cap the result, and the formula stays size-scaled, so a one-file typo fix cannot reach a
+ * multi-million-token allotment however this constant moves. That is what keeps it a stop-loss
+ * against a runaway run — which is the failure it can actually protect against — rather than a
+ * budget for an ordinary large one.
  */
-const PER_FILE_TOKENS = 64_000;
+const PER_FILE_TOKENS = 100_000;
 
 /**
  * A weak secondary term, in tokens per changed line.
@@ -343,11 +362,15 @@ const ALLOTMENT_MARGIN = 1.3;
 /**
  * Floor beneath which a 1-2-file pull request would otherwise get an unworkably small allotment.
  *
- * Raised 80k -> 150k alongside the 2026-08-04 PER_FILE_TOKENS recalibration above: at 64k/file a
- * single file prices at ~83k and the old floor never bound again, while the measured one-file
- * spread (32k config change vs a five-file run at 200k/file) says small dense changes need real
- * headroom. Risk-free since the audit guard subtracts from the consumer ceiling, not from this
- * stop-loss (see auditFreshSurvivors).
+ * Raised 80k -> 150k alongside the 2026-08-04 PER_FILE_TOKENS recalibration above, because the
+ * measured one-file spread (32k config change vs a five-file run at 200k/file) says small dense
+ * changes need real headroom. Risk-free since the audit guard subtracts from the consumer ceiling,
+ * not from this stop-loss (see auditFreshSurvivors).
+ *
+ * Left at 150k through the 2026-08-05 move to 100k/file, and now genuinely close to inert: one file
+ * prices at 130k before the line term, so the floor still binds only for a change under ~330 changed
+ * lines in a single file. Kept rather than removed — it is the guard for exactly that shape, and the
+ * 32k/200k spread lives entirely inside the band it covers.
  *
  * Sized for a WHOLE review, not for a second attempt bounded inside one — see
  * `RESUME_FLOOR_FRACTION` (near `runEngineWithOneResume`) for the resume's own floor, and for why
