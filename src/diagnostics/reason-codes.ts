@@ -127,6 +127,12 @@ export const REASON_CODES = [
   // open-weight models roams between cases rather than sitting still. `changed` counts adopted
   // moves in either direction; the audit never invents and never touches unclassified findings.
   "classify.audited",
+
+  // Bounded resume (#57, v0.11.0): the engine run ended without a usable success — a thrown run
+  // error or a non-success status — and was re-invoked exactly once. Emitted at most once per
+  // review; a second failure settles incomplete exactly as before, so "incomplete never reads
+  // as clean" survives the resume.
+  "engine.resumed_once",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];

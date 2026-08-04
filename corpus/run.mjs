@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,6 +19,9 @@ import { generateRuleDocument, registerTsExtensionHooks } from "./rule-source.mj
 registerTsExtensionHooks();
 const { sanitizeFindingBody } = await import("../src/publish/sanitize.ts");
 const { repairClassification, auditClassification } = await import("../src/engine/classify.ts");
+const { startModelProxy } = await import("../src/engine/model-proxy.ts");
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Measures the reviewer against the seeded-defect corpus.
@@ -119,12 +123,19 @@ function buildRepo(testCase) {
   return dir;
 }
 
-function runEngine(dir) {
+async function runEngine(dir, seed = 42) {
   const home = mkdtempSync(join(tmpdir(), "kfq-home-"));
+  // The production sampling pin (src/engine/model-proxy.ts, temperature 0) — the corpus measures
+  // the pipeline that ships, and the pin is precisely what makes "twice in a row" meaningful.
+  const proxy = await startModelProxy({
+    upstreamUrl: process.env.OCR_LLM_URL ?? "",
+    temperature: 0,
+    seed,
+  });
   try {
     const args = ["review", "--from", "HEAD~1", "--to", "HEAD", "--format", "json"];
     args.push("--rule", RULE);
-    const stdout = execFileSync(BINARY, args, {
+    const { stdout } = await execFileAsync(BINARY, args, {
       cwd: dir,
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
@@ -132,7 +143,7 @@ function runEngine(dir) {
         PATH: FIXED_PATH,
         HOME: home,
         LC_ALL: "C",
-        OCR_LLM_URL: process.env.OCR_LLM_URL ?? "",
+        OCR_LLM_URL: proxy.url,
         OCR_LLM_TOKEN: process.env.OCR_LLM_TOKEN ?? "",
         OCR_LLM_MODEL: process.env.OCR_LLM_MODEL ?? "",
         OCR_USE_ANTHROPIC: process.env.OCR_USE_ANTHROPIC ?? "false",
@@ -143,8 +154,33 @@ function runEngine(dir) {
     });
     return JSON.parse(stdout);
   } finally {
+    await proxy.close();
     rmSync(home, { recursive: true, force: true });
   }
+}
+
+/**
+ * Mirror of the shipped single resume (#57, `runEngineWithOneResume` in src/review.ts): the
+ * corpus must measure the pipeline production runs, and production re-invokes a failed engine
+ * run exactly once. The measured failure this absorbs is a per-file subtask spiral ("main_task
+ * did not complete before stopping" after ~30 LLM rounds) that hits roughly a quarter of runs on
+ * two specific cases; a second failure scores as the error it is.
+ */
+async function runEngineWithOneResume(dir) {
+  let result;
+  try {
+    result = await runEngine(dir);
+  } catch {
+    // Seed 43, mirroring the shipped resume: pinned sampling replays a deterministic failure
+    // byte-for-byte, so the one retry varies exactly that one bit of entropy.
+    return await runEngine(dir, 43);
+  }
+  // Production's second trigger, mirrored: the engine reports a failed run as
+  // {"status":"failed"} on EXIT CODE ZERO, which resolves here — without this check the corpus
+  // measured one attempt where production makes two. (The budget half of the shipped resume has
+  // no corpus analogue: corpus runs are deliberately unbudgeted.)
+  if (result?.status !== "success") return await runEngine(dir, 43);
+  return result;
 }
 
 /**
@@ -325,7 +361,7 @@ for (const testCase of cases) {
     // in any of the four git calls, and a throw outside would abort the whole run and leak the
     // directory it had already created.
     dir = buildRepo(testCase);
-    const result = runEngine(dir);
+    const result = await runEngineWithOneResume(dir);
     await repairFindings(result);
     const scored = scoreOne(testCase, result);
     results.push(scored);
