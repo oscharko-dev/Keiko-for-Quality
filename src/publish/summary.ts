@@ -143,6 +143,7 @@ const EMPTY_PUBLISH_OUTCOME: PublishOutcome = {
   rejectedSanitization: 0,
   rejectedPlacement: 0,
   readbackFailures: 0,
+  apiFailures: 0,
 };
 
 /**
@@ -178,6 +179,14 @@ export function buildSummaryReport(
     suppressedDispositioned: publish.suppressedDispositioned,
     // Same optional-field fallback as `suppressedIntraRun` above, for the same reason.
     suppressedRecurrence: publish.suppressedRecurrence ?? 0,
+    // The four counters `publicationDegraded` (review.ts) actually decides on — see
+    // `SummaryCounts`'s own doc comment. `apiFailures` alone needs the same optional-field
+    // fallback as `suppressedIntraRun`/`suppressedRecurrence` above; the other three have always
+    // been non-optional on `PublishOutcome`.
+    rejectedSanitization: publish.rejectedSanitization,
+    rejectedPlacement: publish.rejectedPlacement,
+    readbackFailures: publish.readbackFailures,
+    apiFailures: publish.apiFailures ?? 0,
   };
   return {
     outcome: report.outcome,

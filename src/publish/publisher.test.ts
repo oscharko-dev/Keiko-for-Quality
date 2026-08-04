@@ -866,6 +866,46 @@ describe("intra-run deduplication (v0.12.0)", () => {
     expect(api.created).toHaveLength(1);
   });
 
+  /**
+   * The bug this pins: clustering used to compare a new candidate only against a cluster's CURRENT
+   * representative, not every member. Three candidates arriving in a chain — A~B share vocabulary,
+   * B~C share a different code snippet, but A and C share neither — must still collapse into one
+   * cluster, because B is real evidence C belongs with A even though C no longer resembles A
+   * directly. Comparing only against the representative (A, which outranks B on severity and so
+   * stays representative) would find no match for C and let it publish as a spurious "new" finding.
+   */
+  it("still clusters a candidate that matches a non-representative member, not only the current representative", async () => {
+    const sharedSnippetAB =
+      "```\nexpect(retryCount).toBe(3);\nexpect(counter.attempts).toBe(3);\n```";
+    const sharedSnippetBC = "```\nbackoff = Math.min(backoff * 2, MAX_BACKOFF_MS);\n```";
+    const bodyA = `This is a critical concern about the connector fallback logic. ${sharedSnippetAB}`;
+    const bodyB =
+      `This is a critical concern about the connector fallback logic, and also about ` +
+      `counters. ${sharedSnippetAB} ${sharedSnippetBC}`;
+    const bodyC =
+      `This is a totally different observation about something else entirely unrelated. ` +
+      `${sharedSnippetBC}`;
+
+    const outcome = await publishFindings(
+      context,
+      [
+        // A outranks B on severity, so A — not B — stays this cluster's representative once B
+        // joins, which is exactly what makes the old (representative-only) comparison miss C.
+        variant(bodyA, { severity: "critical" }),
+        variant(bodyB),
+        variant(bodyC),
+      ],
+      diagnostics,
+    );
+
+    expect(outcome).toMatchObject({
+      published: 1,
+      suppressed: 2,
+      suppressedIntraRun: 2,
+    });
+    expect(api.created).toHaveLength(1);
+  });
+
   it("records publish.finding_suppressed_intra_run once per suppressed variant, headSha only", async () => {
     const localDiagnostics = createSilentDiagnostics();
     await publishFindings(

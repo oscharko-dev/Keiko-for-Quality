@@ -235,6 +235,16 @@ export interface SummaryCounts {
    *  `findsOutdatedRecurrence`. Always a plain number here, for the same reason
    *  `suppressedIntraRun` above is. */
   readonly suppressedRecurrence: number;
+  /**
+   * The four counters `publicationDegraded` (`review.ts`) actually decides complete-vs-incomplete
+   * on. Without them, a reader of the summary comment could see `findingsPublished` fall short of
+   * what the run's own diagnostics implied and have no visible reason why — these are that reason,
+   * surfaced on the one comment meant to answer "what happened this run" without requiring a log.
+   */
+  readonly rejectedSanitization: number;
+  readonly rejectedPlacement: number;
+  readonly readbackFailures: number;
+  readonly apiFailures: number;
 }
 
 /**
@@ -330,6 +340,10 @@ function countRows(counts: SummaryCounts): readonly string[] {
     ["Suppressed (similar)", counts.suppressedSimilar],
     ["Suppressed (dispositioned)", counts.suppressedDispositioned],
     ["Suppressed (outdated recurrence)", counts.suppressedRecurrence],
+    ["Rejected (sanitization)", counts.rejectedSanitization],
+    ["Rejected (placement)", counts.rejectedPlacement],
+    ["Read-back failures", counts.readbackFailures],
+    ["API failures", counts.apiFailures],
   ];
   return rows.map(([label, value]) => `| ${label} | ${String(value)} |`);
 }

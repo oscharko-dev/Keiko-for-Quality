@@ -209,7 +209,11 @@ describe("composeSummaryBody", () => {
     suppressedExactDuplicate: 1,
     suppressedSimilar: 2,
     suppressedDispositioned: 0,
-    suppressedRecurrence: 0,
+    suppressedRecurrence: 6,
+    rejectedSanitization: 7,
+    rejectedPlacement: 8,
+    readbackFailures: 9,
+    apiFailures: 10,
   };
 
   function summaryReport(overrides: Partial<SummaryReport> = {}): SummaryReport {
@@ -310,6 +314,13 @@ describe("composeSummaryBody", () => {
       expect(body).toContain("| Suppressed (exact duplicate) | 1 |");
       expect(body).toContain("| Suppressed (similar) | 2 |");
       expect(body).toContain("| Suppressed (dispositioned) | 0 |");
+      expect(body).toContain("| Suppressed (outdated recurrence) | 6 |");
+      // The four counters `publicationDegraded` (review.ts) actually decides complete-vs-incomplete
+      // on — previously computed but never surfaced on this comment.
+      expect(body).toContain("| Rejected (sanitization) | 7 |");
+      expect(body).toContain("| Rejected (placement) | 8 |");
+      expect(body).toContain("| Read-back failures | 9 |");
+      expect(body).toContain("| API failures | 10 |");
     });
 
     // Keiko-for-Quality#50's visibility requirement: replay staleness and dedup behaviour must stay

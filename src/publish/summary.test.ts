@@ -249,9 +249,10 @@ describe("buildSummaryReport", () => {
         suppressedExactDuplicate: 1,
         suppressedSimilar: 2,
         suppressedDispositioned: 1,
-        rejectedSanitization: 0,
-        rejectedPlacement: 0,
-        readbackFailures: 0,
+        rejectedSanitization: 5,
+        rejectedPlacement: 6,
+        readbackFailures: 7,
+        apiFailures: 8,
       },
     });
     const summary = buildSummaryReport(runInput({ report: r }), []);
@@ -266,6 +267,13 @@ describe("buildSummaryReport", () => {
     expect(summary.counts.suppressedExactDuplicate).toBe(r.publish?.suppressedExactDuplicate);
     expect(summary.counts.suppressedSimilar).toBe(r.publish?.suppressedSimilar);
     expect(summary.counts.suppressedDispositioned).toBe(r.publish?.suppressedDispositioned);
+    // The four counters that actually decide complete vs. incomplete (`publicationDegraded`,
+    // review.ts) — previously computed but never surfaced on the one comment meant to answer
+    // "what happened this run" without a log.
+    expect(summary.counts.rejectedSanitization).toBe(r.publish?.rejectedSanitization);
+    expect(summary.counts.rejectedPlacement).toBe(r.publish?.rejectedPlacement);
+    expect(summary.counts.readbackFailures).toBe(r.publish?.readbackFailures);
+    expect(summary.counts.apiFailures).toBe(r.publish?.apiFailures);
   });
 
   it("derives freshlyReviewed as the one arithmetic step: reviewablePaths minus cacheHits", () => {
@@ -287,6 +295,10 @@ describe("buildSummaryReport", () => {
     expect(summary.counts.suppressedExactDuplicate).toBe(0);
     expect(summary.counts.suppressedSimilar).toBe(0);
     expect(summary.counts.suppressedDispositioned).toBe(0);
+    expect(summary.counts.rejectedSanitization).toBe(0);
+    expect(summary.counts.rejectedPlacement).toBe(0);
+    expect(summary.counts.readbackFailures).toBe(0);
+    expect(summary.counts.apiFailures).toBe(0);
   });
 
   /**
@@ -300,6 +312,11 @@ describe("buildSummaryReport", () => {
   it("defaults suppressedIntraRun to zero when publish is present but omits the optional field", () => {
     const summary = buildSummaryReport(runInput(), []);
     expect(summary.counts.suppressedIntraRun).toBe(0);
+  });
+
+  it("defaults apiFailures to zero when publish is present but omits the optional field", () => {
+    const summary = buildSummaryReport(runInput(), []);
+    expect(summary.counts.apiFailures).toBe(0);
   });
 
   it("carries the reason code only for an incomplete outcome", () => {

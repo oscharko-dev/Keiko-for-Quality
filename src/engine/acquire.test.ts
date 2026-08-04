@@ -175,6 +175,57 @@ describe("acquireEngine: cache present but digest-mismatched", () => {
   });
 });
 
+/**
+ * `download`'s streaming cap (v0.13.0): enforced against bytes actually received, not the declared
+ * `content-length` header, which the fast-path check right above it already rejects when honest.
+ * These simulate the dishonest/absent case a fixed `Response` (built from a whole `Buffer`, like
+ * every fixture elsewhere in this file) cannot: a stream whose declared header disagrees with — or
+ * says nothing about — what it actually sends.
+ */
+describe("acquireEngine: streaming size enforcement", () => {
+  /** A response whose `content-length` header is a LIE — `declaredBytes` may be far smaller than
+   *  what the body stream actually yields, exactly the shape an absent or understated header lets
+   *  through the fast-path check unbounded. */
+  function dishonestResponse(actual: Buffer, declaredBytes: number): Response {
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(actual));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-length": String(declaredBytes) },
+    });
+  }
+
+  it("rejects a stream whose actual bytes exceed the cap even though the declared length did not", async () => {
+    // One byte over the cap, chosen small enough that buffering it in full (the old post-hoc
+    // check) would have passed just as easily as a genuinely oversized payload — this is a
+    // regression pin for the streaming enforcement itself, not for the cap's own value.
+    const oversized = Buffer.alloc(256 * 1024 * 1024 + 1, 1);
+    globalThis.fetch = (() => Promise.resolve(dishonestResponse(oversized, 10))) as typeof fetch;
+
+    const diagnostics = createSilentDiagnostics();
+    await expect(
+      acquireEngine(workspace, diagnostics, PIN, PLATFORM, ARCH, {
+        RUNNER_TOOL_CACHE: cacheRoot,
+      }),
+    ).rejects.toMatchObject({ reason: "engine.acquire.download_failed" });
+    expect(diagnostics.drain().some((r) => r.code === "engine.acquire.download_failed")).toBe(true);
+  });
+
+  it("still accepts an honest stream at or under the cap when the declared length understates it", async () => {
+    globalThis.fetch = (() => Promise.resolve(dishonestResponse(GOOD_BYTES, 1))) as typeof fetch;
+
+    const result = await acquireEngine(workspace, createSilentDiagnostics(), PIN, PLATFORM, ARCH, {
+      RUNNER_TOOL_CACHE: cacheRoot,
+    });
+
+    expect(result.digest).toBe(GOOD_DIGEST);
+  });
+});
+
 describe("acquireEngine: cache root cannot be written", () => {
   it("still succeeds, over a swallowed cache-write failure, and returns a usable workspace binary", async () => {
     // A plain FILE sitting where the cache needs a DIRECTORY makes `mkdir(..., {recursive:true})`

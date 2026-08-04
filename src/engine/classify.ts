@@ -176,6 +176,17 @@ interface AttemptResult {
   readonly transportOk: boolean;
 }
 
+/**
+ * Bounds one classify/audit call against a hung endpoint. Sized for what this call actually asks —
+ * one finding, two closed vocabularies, a ~200-token constrained prompt (see the module doc) — not
+ * for the engine's own `fileTimeoutSeconds`, which prices a full multi-turn file review. Generous
+ * enough that a genuinely slow but working response still completes; short enough that a stalled
+ * connection degrades to the existing "failed attempt, not a crash" outcome (`transportOk: false`)
+ * within the same run instead of blocking it indefinitely — this call sits inside `performReview`'s
+ * own critical path, both for the initial repair and for the publish-time audit.
+ */
+const REQUEST_TIMEOUT_MS = 45_000;
+
 async function requestPair(
   prompt: string,
   deps: ClassifyEndpoint,
@@ -202,6 +213,7 @@ async function requestPair(
         // that starves the final answer reads exactly like non-compliance.
         max_completion_tokens: 4000,
       }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) return { pair: undefined, tokens: 0, transportOk: false };
     const body = (await response.json()) as {

@@ -34,6 +34,38 @@ function reportDownloadFailed(diagnostics: Diagnostics, version: EnginePin["vers
   throw new AcquisitionError("engine.acquire.download_failed");
 }
 
+/**
+ * Reads `response.body` as a stream, cancelling as soon as the accumulated size crosses
+ * `MAX_BINARY_BYTES` — enforced against bytes actually received, not the declared `content-length`
+ * this function's caller already rejects as a cheap fast path. `content-length` is trustworthy only
+ * when the server sends an honest one; an absent header (0, the fast path's own fallback) or an
+ * understated one would otherwise let `download`'s old post-hoc check buffer an unbounded response
+ * in full before ever measuring it. `response.body === null` (a response with no body at all, e.g.
+ * certain redirects or a 204) degrades to the same download-failed outcome as any other malformed
+ * response, via the caller's own `reader === undefined` check.
+ */
+async function readBounded(response: Response): Promise<Buffer | undefined> {
+  const reader = response.body?.getReader();
+  if (reader === undefined) return undefined;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_BINARY_BYTES) {
+        await reader.cancel();
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks);
+}
+
 async function download(
   url: string,
   diagnostics: Diagnostics,
@@ -43,8 +75,8 @@ async function download(
   if (!response.ok) reportDownloadFailed(diagnostics, version);
   const declared = Number(response.headers.get("content-length") ?? "0");
   if (declared > MAX_BINARY_BYTES) reportDownloadFailed(diagnostics, version);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.byteLength === 0 || bytes.byteLength > MAX_BINARY_BYTES) {
+  const bytes = await readBounded(response);
+  if (bytes === undefined || bytes.byteLength === 0) {
     reportDownloadFailed(diagnostics, version);
   }
   return bytes;
