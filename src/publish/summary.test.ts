@@ -70,6 +70,7 @@ function report(overrides: Partial<ReviewReport> = {}): ReviewReport {
     mechanicallyClean: 1,
     cacheHits: 2,
     cacheMisses: 4,
+    contextInvalidated: 0,
     cacheAppended: 0,
     publish: {
       published: 2,
@@ -242,6 +243,7 @@ describe("buildSummaryReport", () => {
       excludedPaths: 30,
       mechanicallyClean: 10,
       cacheHits: 12,
+      contextInvalidated: 3,
       publish: {
         published: 2,
         suppressed: 4,
@@ -262,6 +264,7 @@ describe("buildSummaryReport", () => {
     expect(summary.counts.excludedPaths).toBe(r.excludedPaths);
     expect(summary.counts.mechanicallyClean).toBe(r.mechanicallyClean);
     expect(summary.counts.cacheHits).toBe(r.cacheHits);
+    expect(summary.counts.contextInvalidated).toBe(r.contextInvalidated);
     expect(summary.counts.findingsPublished).toBe(r.publish?.published);
     expect(summary.counts.suppressedIntraRun).toBe(r.publish?.suppressedIntraRun);
     expect(summary.counts.suppressedExactDuplicate).toBe(r.publish?.suppressedExactDuplicate);

@@ -61,6 +61,10 @@ export interface SummarySourceReport {
   readonly mechanicallyClean: number;
   /** Cache-eligible paths a stored entry answered instead of the engine. Always 0 when inert. */
   readonly cacheHits: number;
+  /** Of the cache misses, how many were specifically a content match the changed-path-set shape
+   *  invalidated — see `ReviewReport.contextInvalidated` (review.ts) for the full rationale.
+   *  Always 0 when inert. */
+  readonly contextInvalidated: number;
   /** Absent on a run that never reached publication — see `EMPTY_PUBLISH_OUTCOME` below. */
   readonly publish?: PublishOutcome;
 }
@@ -167,6 +171,7 @@ export function buildSummaryReport(
     excludedPaths: report.excludedPaths,
     mechanicallyClean: report.mechanicallyClean,
     cacheHits: report.cacheHits,
+    contextInvalidated: report.contextInvalidated,
     freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits),
     findingsPublished: publish.published,
     // Unlike the four counts below, this one stays optional on `PublishOutcome` even once `publish`

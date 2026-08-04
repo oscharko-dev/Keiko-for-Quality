@@ -203,6 +203,7 @@ describe("composeSummaryBody", () => {
     excludedPaths: 8,
     mechanicallyClean: 4,
     cacheHits: 5,
+    contextInvalidated: 2,
     freshlyReviewed: 25,
     findingsPublished: 3,
     suppressedIntraRun: 0,
@@ -308,6 +309,7 @@ describe("composeSummaryBody", () => {
       expect(body).toContain("| Excluded | 8 |");
       expect(body).toContain("| Mechanically clean | 4 |");
       expect(body).toContain("| Replayed from cache | 5 |");
+      expect(body).toContain("| Cache miss (path-set shape changed) | 2 |");
       expect(body).toContain("| Freshly reviewed | 25 |");
       expect(body).toContain("| Findings published | 3 |");
       expect(body).toContain("| Suppressed (intra-run duplicate) | 0 |");

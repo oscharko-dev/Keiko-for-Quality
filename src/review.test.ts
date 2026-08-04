@@ -905,6 +905,143 @@ describe("performReview: review-cache memoization end to end", () => {
    * `performReview` actually reaches it, with the right arguments, on every outcome, and that its
    * result only ever adds a diagnostic — never changes what the run reports.
    */
+  /**
+   * Three more review-cache fixes from the same audit pass (v0.13.0), each closing a path where a
+   * real, already-paid-for review verdict used to be silently discarded or left to age out on the
+   * wrong clock.
+   */
+  describe("performReview: review-cache completeness (v0.13.0)", () => {
+    it("promotes a cache hit to newest on write-back, not just freshly-admitted entries", async () => {
+      const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+      const engineDigest = requireEngineDigest();
+      const model = modelId(CONFIG.model);
+      const proto = protocol(CONFIG.protocol);
+      const base = blobId(baseBlobA);
+      const head = blobId(headBlobA);
+      const hitKey = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+      const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+      // A decoy entry for a path outside this diff entirely — never touched by lookup or write-
+      // back, so its position is a stable anchor: it must stay FIRST regardless of what happens to
+      // the hit entry, and the hit entry moving to AFTER it (not staying before it) is exactly what
+      // "promoted to newest" means.
+      const decoyKey = computeKey(
+        blobId("c".repeat(40)),
+        blobId("d".repeat(40)),
+        ruleDigest,
+        engineDigest,
+        model,
+        proto,
+      );
+      const store: CacheStore = {
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
+        entries: [
+          {
+            key: decoyKey,
+            baseBlob: blobId("c".repeat(40)),
+            headBlob: blobId("d".repeat(40)),
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            modelId: model,
+            protocol: proto,
+            findings: [],
+          },
+          {
+            key: hitKey,
+            baseBlob: base,
+            headBlob: head,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            modelId: model,
+            protocol: proto,
+            findings: [],
+          },
+        ],
+      };
+
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // src/b.ts is freshly reviewed (a miss); src/a.ts is answered from the store (a hit).
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(1), ruleDigest: engineDigest });
+
+      const report = await performReview(baseRequest(store), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(report.cacheHits).toBe(1);
+      const entries = report.updatedCacheStore?.entries ?? [];
+      expect(entries.map((e) => e.key)).toContain(hitKey);
+      // The decoy (never touched) stays exactly where it was; the hit — freshly confirmed by this
+      // run — moves to the newest position, after both the decoy AND the newly-admitted src/b.ts
+      // entry. Before this fix, a hit's position never moved at all.
+      const hitIndex = entries.findIndex((e) => e.key === hitKey);
+      const decoyIndex = entries.findIndex((e) => e.key === decoyKey);
+      expect(hitIndex).toBeGreaterThan(decoyIndex);
+      expect(hitIndex).toBe(entries.length - 1);
+    });
+
+    it("still writes back the real findings of a complete review whose publication degraded on one finding", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: engineStdoutWithFinding(2),
+        ruleDigest: engineDigest,
+      });
+
+      const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+      const request = baseRequest(empty);
+      // Every placement rung — including the trailing file-level fallback — is rejected the same
+      // way, so the one finding this run produced degrades publication without ever succeeding.
+      vi.spyOn(request.client, "createReviewComment").mockRejectedValue(new GitHubApiError(422));
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("incomplete");
+      expect(report.reason).toBe("settlement.incomplete.publication_degraded");
+      // The engine's own verdict was complete — both files reached, both judged — so both earn a
+      // replayable entry despite the one finding never reaching GitHub.
+      expect(report.cacheAppended).toBe(2);
+      const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+      const blobs = (report.updatedCacheStore?.entries ?? []).map((e) => String(e.headBlob));
+      expect(blobs).toContain(headBlobA);
+      expect(blobs).toContain(headBlobB);
+    });
+
+    it("still writes back a complete review's real findings when the head moves just before publication", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+      const request = baseRequest(empty);
+      // First call is the pre-flight check (before the engine runs) and must see the current head,
+      // or the run would abandon before ever reaching the engine and this test would prove nothing.
+      // The second call is the post-settlement check this fix targets, and reports a DIFFERENT head
+      // — a push that landed while the engine was still running.
+      vi.spyOn(request.client, "getPullRequest")
+        .mockResolvedValueOnce({
+          headSha: commitSha(headSha),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        })
+        .mockResolvedValueOnce({
+          headSha: commitSha("f".repeat(40)),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        });
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("abandoned");
+      // A blob-content-keyed cache entry is exactly as replayable as if this run had reached
+      // publication — the head moving is a fact about the pull request, not about the blobs this
+      // run actually reviewed.
+      expect(report.cacheAppended).toBe(2);
+      expect(report.updatedCacheStore?.entries).toHaveLength(2);
+    });
+  });
+
   describe("performReview: superseded-notice cleanup (v0.13.0)", () => {
     it("calls resolveSupersededOwnNotices with this run's own ref/pull/identity on a complete run", async () => {
       const engineDigest = requireEngineDigest();

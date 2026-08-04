@@ -218,6 +218,9 @@ export interface SummaryCounts {
   readonly mechanicallyClean: number;
   /** Reviewable paths a review-cache hit answered instead of the engine (v0.9.0). Always 0 when inert. */
   readonly cacheHits: number;
+  /** Of the cache misses, how many were a content match the changed-path-set shape invalidated —
+   *  see `ReviewReport.contextInvalidated` (review.ts). Always 0 when inert. */
+  readonly contextInvalidated: number;
   /** Reviewable paths actually sent to the engine this run: `reviewablePaths - cacheHits`. */
   readonly freshlyReviewed: number;
   readonly findingsPublished: number;
@@ -333,6 +336,7 @@ function countRows(counts: SummaryCounts): readonly string[] {
     ["Excluded", counts.excludedPaths],
     ["Mechanically clean", counts.mechanicallyClean],
     ["Replayed from cache", counts.cacheHits],
+    ["Cache miss (path-set shape changed)", counts.contextInvalidated],
     ["Freshly reviewed", counts.freshlyReviewed],
     ["Findings published", counts.findingsPublished],
     ["Suppressed (intra-run duplicate)", counts.suppressedIntraRun],

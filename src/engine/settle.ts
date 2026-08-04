@@ -99,13 +99,25 @@ const NO_COVERED_PATHS: ReadonlySet<string> = new Set();
  * to be believed, so nothing it says about any file may be replayed later with confidence it
  * never earned.
  *
+ * `publication_degraded` (v0.13.0) is not produced by this module — `review.ts`'s own
+ * `reportDegradedPublication` constructs it directly — but this function is the one shared
+ * authority every caller (`review.ts`, `action/main.ts`, `cli.ts`) consults for the identical
+ * question, regardless of which subsystem raised the reason, so it belongs here rather than as a
+ * one-off condition at each call site. It survives for the strongest possible version of this
+ * function's own rule: the ENGINE's verdict was `complete` — every reviewable path was reached and
+ * judged — and only the DELIVERY of that verdict to GitHub had a hiccup on one finding. Nothing
+ * about the engine's own coverage is in question, which a budget overrun or a coverage gap cannot
+ * claim; discarding those verdicts would cost the whole review again on a retry over a failure that
+ * was never the engine's to begin with.
+ *
  * The distinction lives here, once, rather than as a condition at each call site: a new reason
  * code is denied by default and has to be argued into this list.
  */
 export function verdictsSurviveIncompleteness(reason: ReasonCode): boolean {
   return (
     reason === "settlement.incomplete.budget_exceeded" ||
-    reason === "settlement.incomplete.coverage_gap"
+    reason === "settlement.incomplete.coverage_gap" ||
+    reason === "settlement.incomplete.publication_degraded"
   );
 }
 

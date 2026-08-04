@@ -152,6 +152,15 @@ async function saveCacheStore(
  *
  * Without it a large pull request could never converge: every push exceeded the budget, settled
  * incomplete, persisted nothing, and re-priced every file from scratch (Keiko-for-Quality#75).
+ *
+ * `abandoned` (v0.13.0) joins the allowed set for the identical reason: `performReview`'s own
+ * post-publish staleness check now populates `updatedCacheStore` on that outcome too, and only for
+ * the one case where doing so is sound — the ENGINE's verdict was already `complete` before the
+ * pull request's head moved out from under it, and a review-cache entry is keyed by blob content,
+ * not by head sha, so what was reviewed stays exactly as replayable as it would from a `complete`
+ * report. The check above this one is what makes trusting the outcome here safe: the PRE-flight
+ * abandon (before the engine ever runs) never attaches `updatedCacheStore` at all, so an `abandoned`
+ * report reaches this branch only in the one case `performReview` deliberately allowed.
  */
 async function maybeSaveCacheStore(
   storePath: string,
@@ -162,7 +171,7 @@ async function maybeSaveCacheStore(
   if (report.outcome === "incomplete") {
     // An incomplete report without a reason cannot be argued into the allowed set, so it is not.
     if (report.reason === undefined || !verdictsSurviveIncompleteness(report.reason)) return false;
-  } else if (report.outcome !== "complete") {
+  } else if (report.outcome !== "complete" && report.outcome !== "abandoned") {
     return false;
   }
   return await saveCacheStore(

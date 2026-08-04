@@ -77,6 +77,7 @@ function report(overrides: Partial<ReviewReport> = {}): ReviewReport {
     mechanicallyClean: 0,
     cacheHits: 0,
     cacheMisses: 0,
+    contextInvalidated: 0,
     cacheAppended: 0,
     ...overrides,
   };
@@ -293,6 +294,12 @@ describe("runAction: writing the store back", () => {
    * So the refusal is kept in full for the second class and lifted only for the first — and even
    * then `performReview` restricts the store's entries to the paths the engine reports it reached,
    * so a file that was never opened can still never be replayed as reviewed.
+   *
+   * `settlement.incomplete.publication_degraded` is deliberately NOT in this list (v0.13.0) — see
+   * "writes the verdicts a truncated run did earn" below, where it joined the OTHER class: the
+   * engine's own verdict there was `complete`, full coverage, properly judged; only delivery to
+   * GitHub had a hiccup on one finding, which says nothing about whether the manifest is
+   * trustworthy.
    */
   it.each([
     ["a rejected manifest schema", "settlement.incomplete.schema_rejected"],
@@ -300,7 +307,6 @@ describe("runAction: writing the store back", () => {
     ["a failed coverage entry", "settlement.incomplete.coverage_failed"],
     ["an implausible finding count", "settlement.incomplete.engine_error"],
     ["an unlisted warning", "settlement.incomplete.warning_not_allowlisted"],
-    ["a degraded publication", "settlement.incomplete.publication_degraded"],
     ["a non-success engine status", "settlement.incomplete.engine_status_not_success"],
   ] as const)("never writes when the manifest is not to be believed: %s", async (_name, reason) => {
     const updated: CacheStore = {
@@ -398,31 +404,39 @@ describe("runAction: writing the store back", () => {
     expect((await readOutputs(env)).store_written).toBe("true");
   });
 
-  it.each([
-    ["an untrustworthy manifest", "settlement.incomplete.schema_rejected"],
-    ["a degraded publication", "settlement.incomplete.publication_degraded"],
-  ] as const)("reports store_written false when nothing was persisted: %s", async (_n, reason) => {
-    performReviewMock.mockResolvedValue(
-      report({
-        outcome: "incomplete",
-        reason,
-        cacheAppended: 1,
-        updatedCacheStore: { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [entry("src/a.ts")] },
-      }),
-    );
-    const env = await baseEnv({ reviewStorePath: join(dir, "store.json") });
+  it.each([["an untrustworthy manifest", "settlement.incomplete.schema_rejected"]] as const)(
+    "reports store_written false when nothing was persisted: %s",
+    async (_n, reason) => {
+      performReviewMock.mockResolvedValue(
+        report({
+          outcome: "incomplete",
+          reason,
+          cacheAppended: 1,
+          updatedCacheStore: {
+            schemaVersion: SUPPORTED_STORE_SCHEMA,
+            entries: [entry("src/a.ts")],
+          },
+        }),
+      );
+      const env = await baseEnv({ reviewStorePath: join(dir, "store.json") });
 
-    await runAction(
-      env,
-      createDiagnostics(() => undefined),
-    );
+      await runAction(
+        env,
+        createDiagnostics(() => undefined),
+      );
 
-    expect((await readOutputs(env)).store_written).toBe("false");
-  });
+      expect((await readOutputs(env)).store_written).toBe("false");
+    },
+  );
 
   it.each([
     ["a budget overrun", "settlement.incomplete.budget_exceeded"],
     ["a coverage gap", "settlement.incomplete.coverage_gap"],
+    // Not a truncated engine run at all — the engine's own verdict was `complete`, full coverage,
+    // properly judged; delivery to GitHub had a hiccup on one finding. Grouped with the other two
+    // because the question this whole pair answers ("are the per-file verdicts still trustworthy")
+    // has the same answer, not because the underlying failure is the same shape.
+    ["a degraded publication", "settlement.incomplete.publication_degraded"],
   ] as const)("writes the verdicts a truncated run did earn: %s", async (_name, reason) => {
     const updated: CacheStore = {
       schemaVersion: SUPPORTED_STORE_SCHEMA,

@@ -156,6 +156,16 @@ export interface ReviewReport {
   readonly cacheHits: number;
   /** Cache-eligible paths that were sent to the engine anyway. Always 0 when inert. */
   readonly cacheMisses: number;
+  /**
+   * Of `cacheMisses`, how many were specifically a content match `prPathSetDigest` refused to
+   * replay because the pull request's changed-path-set shape moved since the entry was written
+   * (v0.10.0, issue #50) — distinct from a miss whose content was simply never reviewed before.
+   * Computed and diagnosed (`cache.context_invalidated`) since that feature shipped, but never
+   * surfaced anywhere an operator could see it without reading the raw diagnostics stream — this is
+   * the exact cost of the path-set-shape invalidation rule, made visible on the one report built
+   * for that purpose. Always 0 when inert.
+   */
+  readonly contextInvalidated: number;
   /** How many new-or-refreshed entries `updatedCacheStore` carries over what was read in. */
   readonly cacheAppended: number;
   /** Present only for a `complete` outcome with the feature enabled — the store to write back. */
@@ -575,8 +585,25 @@ interface IncompleteCause {
   readonly counts?: Readonly<Record<string, number>>;
 }
 
-function cacheCounts(memo: MemoContext): { cacheHits: number; cacheMisses: number } {
-  return { cacheHits: memo.hits.size, cacheMisses: memo.eligiblePaths.size - memo.hits.size };
+function cacheCounts(memo: MemoContext): {
+  cacheHits: number;
+  cacheMisses: number;
+  contextInvalidated: number;
+} {
+  return {
+    cacheHits: memo.hits.size,
+    cacheMisses: memo.eligiblePaths.size - memo.hits.size,
+    contextInvalidated: memo.contextInvalidated,
+  };
+}
+
+/** `cacheCounts`, narrowed to the two fields `LocalReviewReport` actually declares — that type
+ *  predates `contextInvalidated` and stays without it deliberately (issue #95's local-runs-never-
+ *  feed-CI invariant scopes what a local report needs to know to its own consumer, the CLI, which
+ *  has no run-summary comment for the field to inform). */
+function localCacheCounts(memo: MemoContext): { cacheHits: number; cacheMisses: number } {
+  const { cacheHits, cacheMisses } = cacheCounts(memo);
+  return { cacheHits, cacheMisses };
 }
 
 /**
@@ -1580,9 +1607,20 @@ function finalizeCacheStore(
     pathSetDigest: memo.pathSetDigest,
     config: request.config,
   });
-  if (newEntries.length === 0) return { store: request.cacheStore, appended: 0 };
+  // This run's own hits, carried alongside the freshly-built entries so `appendEntries`' existing
+  // key-match-and-promote logic (`review-cache.ts`) covers them too — a same-key entry is treated as
+  // "freshly confirmed, move to newest" whether it arrived here as newly-reviewed or as a replay.
+  // Without this, retention (`RETENTION.maxEntries`, oldest-evicted-first) is ordered by WRITE
+  // recency alone: a file reviewed once and replayed from cache on every push since ages out and is
+  // evicted exactly as if it had never been touched again, while a file that happens to get a fresh
+  // WRITE (any change, anywhere, invalidating its content key) keeps resetting its own clock. Genuine
+  // USE recency is what retention is supposed to approximate.
+  const touched = [...memo.hits.values()];
+  if (newEntries.length === 0 && touched.length === 0) {
+    return { store: request.cacheStore, appended: 0 };
+  }
   return {
-    store: appendEntries(request.cacheStore, newEntries, RETENTION),
+    store: appendEntries(request.cacheStore, [...newEntries, ...touched], RETENTION),
     appended: newEntries.length,
   };
 }
@@ -1595,11 +1633,29 @@ function finalizeCacheStore(
  * recorded (see `settleIncomplete`'s own doc comment for the general "every caller funnels through
  * here" contract this keeps).
  */
+/**
+ * The one narrow gap the incomplete-never-clean rule left open: the ENGINE's own verdict was
+ * `complete` — every reviewable path really was covered, and `settlement.findings` is real, fully
+ * earned model output — degraded publication is a delivery failure on top of a genuinely complete
+ * review, not evidence the review itself fell short. Discarding the cache write here meant a single
+ * placement rejection or read-back failure on ONE finding cost the ENTIRE review's worth of
+ * memoization, and every retry re-paid the full engine spend for ground that was never actually in
+ * question — the same "real, already-paid-for work must not be silently lost" principle the
+ * `review-cache.ts` module doc states for a truncated run, applied to the one settlement path that
+ * had been quietly exempt from it.
+ *
+ * Reuses the identical happy-path call (`publishSettledFindings`'s own `finalizeCacheStore(...,
+ * findingsForStorage(settlement.findings, auditedByOriginal))`) rather than threading anything
+ * through `settleIncomplete`'s own `covered`/`batch` machinery, which exists for the DIFFERENT
+ * truncated-engine-run shape and would re-publish findings this function's caller already attempted.
+ */
 async function reportDegradedPublication(
   run: ReviewRun,
   inventory: Inventory,
   memo: MemoContext,
   publish: PublishOutcome,
+  settlement: Extract<Settlement, { status: "complete" }>,
+  auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>,
 ): Promise<ReviewReport> {
   const report = await settleIncomplete(
     run,
@@ -1610,7 +1666,18 @@ async function reportDegradedPublication(
     },
     memo,
   );
-  return { ...report, publish };
+  const finalized = finalizeCacheStore(
+    run.request,
+    inventory,
+    memo,
+    findingsForStorage(settlement.findings, auditedByOriginal),
+  );
+  return {
+    ...report,
+    publish,
+    cacheAppended: finalized?.appended ?? report.cacheAppended,
+    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
+  };
 }
 
 async function publishSettledFindings(
@@ -1651,7 +1718,7 @@ async function publishSettledFindings(
   // it means for their coverage rather than which internal step noticed. The diagnostic keeps its
   // name and its per-attempt breakdown; only the settlement reason moved family.
   if (publicationDegraded(publish)) {
-    return reportDegradedPublication(run, inventory, memo, publish);
+    return reportDegradedPublication(run, inventory, memo, publish, settlement, auditedByOriginal);
   }
 
   run.diagnostics.record("settlement.complete", {
@@ -1682,6 +1749,7 @@ function emptyReviewReport(inventory: Inventory): ReviewReport {
     ...inventoryCounts(inventory),
     cacheHits: 0,
     cacheMisses: 0,
+    contextInvalidated: 0,
     cacheAppended: 0,
   };
 }
@@ -1901,7 +1969,21 @@ async function performReviewInner(
     );
   }
   const postRun = await abandonIfStale(run, inventory, memo);
-  if (postRun !== undefined) return postRun;
+  if (postRun !== undefined) {
+    // The engine's own verdict here was already `complete` — every reviewable path was covered,
+    // and `settlement.findings` is real, fully earned model output. The head moving between the
+    // engine finishing and this check is a fact about the PULL REQUEST, not about the blobs this
+    // run actually reviewed: a review-cache entry is keyed by blob content, not by head sha, so
+    // what was just paid for stays exactly as replayable as if this run had reached publication.
+    // Unaudited (`settlement.findings` directly, not `findingsForStorage`'s audited form) because
+    // this path never reaches `publishAudited` at all — there is nothing audited to prefer.
+    const finalized = finalizeCacheStore(run.request, inventory, memo, settlement.findings);
+    return {
+      ...postRun,
+      cacheAppended: finalized?.appended ?? postRun.cacheAppended,
+      ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
+    };
+  }
   return publishSettledFindings(run, inventory, settlement, memo, started);
 }
 
@@ -2049,7 +2131,7 @@ async function localIncompleteReport(
     engineVersion: run.engineVersion,
     // An incomplete outcome never writes a store back (`finalizeCacheStore`'s admission rule), but
     // the hit/miss counts are facts about what was attempted, memo or not.
-    ...(memo === undefined ? { cacheHits: 0, cacheMisses: 0 } : cacheCounts(memo)),
+    ...(memo === undefined ? { cacheHits: 0, cacheMisses: 0 } : localCacheCounts(memo)),
   };
 }
 
@@ -2140,7 +2222,7 @@ async function completeLocalReport(
     },
     ruleDigest: run.ruleDigest,
     engineVersion: run.engineVersion,
-    ...cacheCounts(memo),
+    ...localCacheCounts(memo),
     ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
   };
 }
