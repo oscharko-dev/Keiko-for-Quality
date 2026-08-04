@@ -110,6 +110,13 @@ jobs:
           model_token_env: SMOKE_UNUSED_TOKEN
           target_branches: smoke-eligibility-never
 
+      # Two reasons are accepted because the runner owns this step's event payload: a DRAFT pull
+      # request settles at the draft rung before the base-branch rung is ever consulted, and
+      # draftness is a property of whichever pull request happens to run this job (found the day
+      # the repository opened its first draft pull request, which failed here on its own
+      # draftness). Both values prove the claim this step actually makes — the bundle executed and
+      # settled at ELIGIBILITY, before any credential or model call. The exact base-branch rung is
+      # pinned deterministically below, where the payload is constructed rather than inherited.
       - name: Assert it settled at eligibility with a reason
         if: github.event_name == 'pull_request'
         env:
@@ -118,7 +125,10 @@ jobs:
         run: |
           echo "outcome=${OUTCOME} reason=${REASON}"
           test "${OUTCOME}" = "skipped"
-          test "${REASON}" = "eligibility.skipped.base_branch"
+          case "${REASON}" in
+            eligibility.skipped.base_branch|eligibility.skipped.draft) ;;
+            *) echo "::error::settled outside the eligibility family: ${REASON}"; exit 1 ;;
+          esac
 
       # The runner owns GITHUB_EVENT_PATH and ignores a step-level override, so the eligibility
       # matrix is driven by invoking the bundle directly. Same artifact, controlled payload.
@@ -155,6 +165,44 @@ jobs:
           cat "${RUNNER_TEMP}/fork-output.txt"
           grep -qx 'outcome=skipped' "${RUNNER_TEMP}/fork-output.txt"
           grep -qx 'reason=eligibility.skipped.fork' "${RUNNER_TEMP}/fork-output.txt"
+
+      # The exact base-branch rung, pinned against a CONSTRUCTED payload: the `uses:` smoke above
+      # inherits the runner's own event, so its rung depends on the live pull request's draftness —
+      # this invocation controls every field, so the sentinel base is the one and only reason the
+      # run can settle on.
+      - name: Assert the base-branch rung against a controlled payload
+        env:
+          INPUT_PROFILE: examples/review-profile.json
+          INPUT_MODEL_ENDPOINT: https://example.invalid/v1
+          INPUT_MODEL_ID: unused-on-this-path
+          INPUT_MODEL_PROTOCOL: anthropic
+          INPUT_MODEL_TOKEN_ENV: SMOKE_UNUSED_TOKEN
+          INPUT_TARGET_BRANCHES: smoke-eligibility-never
+        run: |
+          cat > "${RUNNER_TEMP}/base-branch-event.json" <<'JSON'
+          {
+            "action": "synchronize",
+            "pull_request": {
+              "number": 3,
+              "draft": false,
+              "head": {
+                "sha": "5555555555555555555555555555555555555555",
+                "repo": { "full_name": "oscharko-dev/Keiko-for-Quality" }
+              },
+              "base": {
+                "sha": "6666666666666666666666666666666666666666",
+                "ref": "dev",
+                "repo": { "full_name": "oscharko-dev/Keiko-for-Quality" }
+              }
+            }
+          }
+          JSON
+          GITHUB_EVENT_PATH="${RUNNER_TEMP}/base-branch-event.json" \
+          GITHUB_OUTPUT="${RUNNER_TEMP}/base-branch-output.txt" \
+            node dist/index.js
+          cat "${RUNNER_TEMP}/base-branch-output.txt"
+          grep -qx 'outcome=skipped' "${RUNNER_TEMP}/base-branch-output.txt"
+          grep -qx 'reason=eligibility.skipped.base_branch' "${RUNNER_TEMP}/base-branch-output.txt"
 
       # The redaction contract is a claim about what reaches a log. Assert it on real output.
       - name: Assert diagnostics carry no free-form text
