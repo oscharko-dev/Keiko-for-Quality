@@ -39,12 +39,14 @@ function isCacheEligible(item: InventoryItem): boolean {
 }
 
 /**
- * This item's own token in the pull request's changed-path-set digest (v0.10.0, issue #50).
+ * This item's own token in the reviewed changed-path-set digest (v0.10.0, issue #50).
  *
  * A rename folds the path it moved from into the token instead of contributing only its new name:
  * an old path silently disappearing from the diff is exactly the kind of context change an
  * unrelated file's cached verdict cannot see for itself. See `review-cache.ts`'s top-of-file
- * comment for the fuller "why names, not blobs" reasoning this token feeds.
+ * comment for the fuller "why names, not blobs" reasoning this token feeds. Only ever called on an
+ * item `computePrPathSetDigest` has already confirmed is reviewable — see that function for why a
+ * pure rename (downgraded to `mechanically-clean`, never reviewable) never reaches this function.
  */
 function pathSetToken(item: InventoryItem): string {
   const path = item.path as string;
@@ -52,14 +54,40 @@ function pathSetToken(item: InventoryItem): string {
 }
 
 /**
- * This run's whole-inventory path-set digest (v0.10.0, issue #50).
+ * This run's reviewed-path-set digest (v0.10.0, issue #50; narrowed to reviewable paths only).
  *
- * Every changed path counts, not only cache-eligible ones: the risk this bounds is a brand-new or
- * renamed-away neighbour changing an unrelated file's import surface, and that neighbour need not
- * itself be reviewable content for the risk to exist.
+ * Originally hashed every changed path in the inventory, on the reasoning that a brand-new or
+ * renamed-away neighbour can change an unrelated file's import surface regardless of whether that
+ * neighbour was itself reviewed content. That reasoning proved too wide in practice: a lockfile
+ * refresh, a generated-dist rebuild, or an excluded-docs edit invalidated every memoized verdict in
+ * the store, even though none of those paths are ever shown to the model — not on the run that wrote
+ * the cache entry, and not on the run that would replay it. A path the model never sees cannot be
+ * the "unrelated file's import surface" this digest exists to catch (see `review-cache.ts`'s
+ * top-of-file comment for that risk in full), so it is not review context and must not move the
+ * bound.
+ *
+ * `item.reviewable` is the same predicate `buildInventory` (`inventory/inventory.ts`) folds into
+ * `Inventory.reviewablePaths` and `engine/settle.ts` measures coverage against — not a new,
+ * independently-maintained idea of "counts," but the one the rest of the codebase already treats as
+ * "the engine must account for this." Filtering to it narrows the bound from "the pull request's
+ * shape" to "the *reviewed* set's shape," which is the thing replay soundness actually depends on:
+ * two runs that reviewed the same set of paths are comparable regardless of what unreviewed
+ * housekeeping happened alongside them. A rename still folds as `"<old>-><new>"` (via
+ * `pathSetToken`) exactly as before, but only when the renamed item itself is reviewable — a pure
+ * rename (`mechanically-clean`) contributes no token at all now, matching it never reaching the
+ * engine either (it is threaded into the engine's own exclude list — see `mechanicallyCleanPaths`).
+ *
+ * One-time cost, not a migration: every entry a store already holds was stamped under the old,
+ * whole-inventory digest. None of those equal a freshly computed reviewable-only digest even when
+ * the reviewed set itself has not moved, so the first run after this change re-prices every existing
+ * entry once — an ordinary content miss, indistinguishable from a cold cache, never a crash or a
+ * schema bump (`SUPPORTED_STORE_SCHEMA` is unchanged). The store self-heals forward from there:
+ * every entry written from this run on carries the new digest, and replay against those is sound
+ * again immediately.
  */
 export function computePrPathSetDigest(inventory: Inventory): Sha256 {
-  return computePathSetDigest(inventory.items.map(pathSetToken));
+  const reviewable = inventory.items.filter((item) => item.reviewable);
+  return computePathSetDigest(reviewable.map(pathSetToken));
 }
 
 export interface MemoLookupResult {
@@ -70,7 +98,7 @@ export interface MemoLookupResult {
   /**
    * Eligible paths whose content-based key matched a stored entry, but whose stored
    * `prPathSetDigest` did not match this run's (v0.10.0, issue #50) — replay was refused because
-   * the pull request's changed-file set moved since that entry was written. Already excluded from
+   * the reviewed changed-file set moved since that entry was written. Already excluded from
    * `hits`, so already counted as an ordinary miss by any `eligiblePaths.size - hits.size`
    * arithmetic; this field exists only so a caller can log *why*, distinct from a plain content miss.
    */
@@ -91,7 +119,7 @@ const EMPTY_LOOKUP: MemoLookupResult = {
  * memoization for this run — every path reports as a miss — rather than throwing and failing the
  * review itself. Memoization is a pure optimization layer; nothing about it may gate completeness.
  *
- * `pathSetDigest` (v0.10.0, issue #50) is this run's whole-inventory changed-path-set digest,
+ * `pathSetDigest` (v0.10.0, issue #50) is this run's reviewed changed-path-set digest,
  * computed once by the caller via `computePrPathSetDigest` so every path in this loop is compared
  * against the exact same value. A stored entry only counts as a hit when its own `prPathSetDigest`
  * equals this one; otherwise it is a content match this run refuses to replay, counted in
@@ -177,7 +205,7 @@ export interface NewEntryInputs {
   readonly ruleDigest: Sha256;
   readonly engineDigest: Sha256;
   /**
-   * This run's whole-inventory path-set digest (v0.10.0, issue #50), computed once by the caller
+   * This run's reviewed path-set digest (v0.10.0, issue #50), computed once by the caller
    * via `computePrPathSetDigest` — the same value `lookupMemoized` was given, so an entry this run
    * writes is stamped with exactly the digest a later run with an unchanged path set will match.
    */

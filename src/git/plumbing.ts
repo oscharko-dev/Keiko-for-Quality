@@ -79,6 +79,39 @@ export async function verifyCommit(ctx: GitContext, sha: CommitSha): Promise<voi
   await git(ctx, ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`], 4096);
 }
 
+/**
+ * The size past which `readTextAtCommit` stops pretending a file is reviewable text. Declared
+ * contract counterparts are source files; anything this large is generated output or an asset,
+ * and the deterministic shape gate reading through here must skip it rather than parse it.
+ */
+const MAX_TEXT_BLOB_BYTES = 1024 * 1024;
+
+/**
+ * Reads one path's content at a commit, as text — through plumbing, never a checkout, so candidate
+ * content stays data exactly like everywhere else in this file.
+ *
+ * Returns `undefined` for anything the caller must not treat as source text: a path absent at that
+ * commit, a blob past `MAX_TEXT_BLOB_BYTES`, or binary content (a NUL byte anywhere — git's own
+ * text heuristic, applied here because a declared counterpart that is secretly binary is a
+ * configuration mistake, and the only safe response of a no-false-positives gate is silence).
+ * Absence is an expected outcome, not an error: a profile may declare a counterpart that a given
+ * branch simply does not carry yet.
+ */
+export async function readTextAtCommit(
+  ctx: GitContext,
+  commit: CommitSha,
+  path: string,
+): Promise<string | undefined> {
+  let content: string;
+  try {
+    content = await git(ctx, ["cat-file", "blob", `${commit}:${path}`], MAX_TEXT_BLOB_BYTES);
+  } catch {
+    return undefined;
+  }
+  if (content.includes("\u0000")) return undefined;
+  return content;
+}
+
 export async function mergeBase(
   ctx: GitContext,
   base: CommitSha,

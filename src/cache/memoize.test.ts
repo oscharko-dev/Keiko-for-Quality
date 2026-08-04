@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { compileProfile, type ReviewProfile } from "../config/profile.js";
+import { compileProfile, type CompiledProfile, type ReviewProfile } from "../config/profile.js";
 import type { RuntimeConfig } from "../config/runtime.js";
 import { blobId, commitSha, repoPath, sha256, type Sha256 } from "../core/brands.js";
 import type { EngineFinding } from "../engine/result.js";
@@ -10,6 +10,7 @@ import { MODE_ABSENT, MODE_REGULAR, MODE_SYMLINK, type RawChange } from "../git/
 import {
   SUPPORTED_STORE_SCHEMA,
   computeKey,
+  computePathSetDigest,
   modelId,
   protocol,
   type CacheEntry,
@@ -31,6 +32,7 @@ const PROFILE = compileProfile({
   excluded: [],
   benignWarnings: [],
   pathInstructions: [],
+  contractPairs: [],
 } satisfies ReviewProfile);
 
 const CONFIG: RuntimeConfig = {
@@ -72,14 +74,21 @@ function rawChange(overrides: Omit<Partial<RawChange>, "path"> & { path: string 
 
 const SHA = commitSha("a".repeat(40));
 
-function inventoryOf(changes: readonly RawChange[]): Inventory {
-  const items = changes.map((change) => toItem(PROFILE, change));
+// Shared by every test below, and also by the `computePrPathSetDigest` tests that need a profile
+// other than the module-level default `PROFILE` (an excluding or a generating one) — one inventory
+// builder rather than a copy re-declared per profile variant.
+function inventoryWithProfile(profile: CompiledProfile, changes: readonly RawChange[]): Inventory {
+  const items = changes.map((change) => toItem(profile, change));
   return {
     pair: { base: SHA, head: SHA, mergeBase: SHA },
     items,
     reviewablePaths: new Set(items.filter((i) => i.reviewable).map((i) => i.path as string)),
     unclassified: [],
   };
+}
+
+function inventoryOf(changes: readonly RawChange[]): Inventory {
+  return inventoryWithProfile(PROFILE, changes);
 }
 
 function storeWithEntry(entry: CacheEntry): CacheStore {
@@ -360,7 +369,7 @@ describe("computePrPathSetDigest", () => {
     );
   });
 
-  it("changes when a file is added to the inventory", () => {
+  it("changes when a reviewable file is added to the inventory", () => {
     const a = rawChange({ path: "src/a.ts" });
     const b = rawChange({ path: "src/b.ts" });
     expect(computePrPathSetDigest(inventoryOf([a]))).not.toBe(
@@ -370,7 +379,9 @@ describe("computePrPathSetDigest", () => {
 
   it("changes when a plain add is replaced by a rename to the same new path", () => {
     // Proves the rename token is not simply the bare new path: an ordinary add at "src/new.ts" and
-    // a rename ending at "src/new.ts" must not be indistinguishable to this digest.
+    // a rename ending at "src/new.ts" must not be indistinguishable to this digest. Both sides stay
+    // classified `reviewed` (their content differs from `rawChange`'s own default oldBlob/newBlob
+    // pair), so neither is filtered out by the reviewable-only narrowing below.
     const added = rawChange({
       path: "src/new.ts",
       status: "A",
@@ -387,7 +398,41 @@ describe("computePrPathSetDigest", () => {
     );
   });
 
-  it("counts every changed path, including one the review profile excludes from review", () => {
+  it("folds a reviewable rename into its old->new token exactly as before the reviewable-only narrowing", () => {
+    // `renamed`'s newBlob ("b"-repeat, `rawChange`'s own default) differs from its oldBlob
+    // ("a"-repeat, also the default) so it is a content-changing rename, not a pure one — it stays
+    // classified `reviewed`, hence reviewable, hence not filtered. Pinned directly against the
+    // lower-level `computePathSetDigest` primitive rather than only against another
+    // `computePrPathSetDigest` call, so a regression that changed the fold format itself — not just
+    // whether folding happens — would also be caught here.
+    const renamed = rawChange({
+      path: "src/renamed.ts",
+      status: "R",
+      oldPath: repoPath("src/old.ts"),
+    });
+    expect(computePrPathSetDigest(inventoryOf([renamed]))).toBe(
+      computePathSetDigest(["src/old.ts->src/renamed.ts"]),
+    );
+  });
+
+  it("excludes a pure rename (mechanically-clean, not reviewable) from the digest entirely", () => {
+    // Identical blob and mode on both sides is exactly `isPureRename` (see `classify.ts`): the item
+    // is downgraded to `mechanically-clean`, never `reviewable`. It is never dispatched to the engine
+    // either — `mechanicallyCleanPaths` threads it into the exclude list instead — so it must not
+    // move a digest that now bounds only the reviewed set's shape.
+    const a = rawChange({ path: "src/a.ts" });
+    const pureRename = rawChange({
+      path: "src/renamed.ts",
+      status: "R",
+      oldPath: repoPath("src/old.ts"),
+      newBlob: blobId("a".repeat(40)), // matches rawChange's own default oldBlob: same content
+    });
+    expect(computePrPathSetDigest(inventoryOf([a]))).toBe(
+      computePrPathSetDigest(inventoryOf([a, pureRename])),
+    );
+  });
+
+  it("does not change when an excluded path is added between runs — excluded content is invisible to review, not review context", () => {
     const excludingProfile = compileProfile({
       version: 1,
       reviewRelevant: ["src/**"],
@@ -396,21 +441,32 @@ describe("computePrPathSetDigest", () => {
       excluded: [{ pattern: "docs/**", reason: "documentation" }],
       benignWarnings: [],
       pathInstructions: [],
+      contractPairs: [],
     } satisfies ReviewProfile);
-    function withExcludingProfile(changes: readonly RawChange[]): Inventory {
-      const items = changes.map((change) => toItem(excludingProfile, change));
-      return {
-        pair: { base: SHA, head: SHA, mergeBase: SHA },
-        items,
-        reviewablePaths: new Set(items.filter((i) => i.reviewable).map((i) => i.path as string)),
-        unclassified: [],
-      };
-    }
 
     const reviewed = rawChange({ path: "src/a.ts" });
     const excluded = rawChange({ path: "docs/notes.md" }); // matches the exclusion above verbatim
-    expect(computePrPathSetDigest(withExcludingProfile([reviewed]))).not.toBe(
-      computePrPathSetDigest(withExcludingProfile([reviewed, excluded])),
+    expect(computePrPathSetDigest(inventoryWithProfile(excludingProfile, [reviewed]))).toBe(
+      computePrPathSetDigest(inventoryWithProfile(excludingProfile, [reviewed, excluded])),
+    );
+  });
+
+  it("does not change when a generated path is added between runs — generated content is invisible to review too", () => {
+    const generatingProfile = compileProfile({
+      version: 1,
+      reviewRelevant: ["src/**"],
+      deletionCritical: [],
+      generated: ["dist/**"],
+      excluded: [],
+      benignWarnings: [],
+      pathInstructions: [],
+      contractPairs: [],
+    } satisfies ReviewProfile);
+
+    const reviewed = rawChange({ path: "src/a.ts" });
+    const generated = rawChange({ path: "dist/bundle.js" }); // matches the `generated` glob above
+    expect(computePrPathSetDigest(inventoryWithProfile(generatingProfile, [reviewed]))).toBe(
+      computePrPathSetDigest(inventoryWithProfile(generatingProfile, [reviewed, generated])),
     );
   });
 });

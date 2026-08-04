@@ -10,6 +10,7 @@ import {
   MODE_REGULAR,
   MODE_SYMLINK,
   listChanges,
+  readTextAtCommit,
   mergeBase,
   type GitContext,
 } from "./plumbing.js";
@@ -202,5 +203,20 @@ describe("listChanges", () => {
       expect(changes.find((c) => c.path === "src/added file with spaces.ts")?.changedLines).toBe(1);
       expect(changes.find((c) => c.path === "src/remove.ts")?.changedLines).toBe(1);
     });
+  });
+});
+
+describe("readTextAtCommit", () => {
+  it("reads a committed file's text through plumbing, never a checkout", async () => {
+    const content = await readTextAtCommit(ctx, commitSha(baseSha), "src/keep.ts");
+    expect(content).toBe("export const keep = 1;\n");
+  });
+
+  it("treats a path absent at the commit as an expected outcome, not an error", async () => {
+    expect(await readTextAtCommit(ctx, commitSha(baseSha), "src/never-existed.ts")).toBeUndefined();
+  });
+
+  it("refuses binary content rather than hand it to a text-parsing caller", async () => {
+    expect(await readTextAtCommit(ctx, commitSha(baseSha), "image.bin")).toBeUndefined();
   });
 });

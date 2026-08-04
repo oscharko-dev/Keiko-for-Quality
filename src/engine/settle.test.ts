@@ -237,6 +237,10 @@ describe("settle", () => {
         status: "incomplete",
         reason: "settlement.incomplete.engine_error",
       });
+      // The flood itself must never reach publication: the settlement just declared it implausible,
+      // and publishing it anyway would spam the pull request with the very output it distrusts —
+      // at two API calls per finding.
+      expect(outcome.findings).toStrictEqual([]);
     });
   });
 });

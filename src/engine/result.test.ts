@@ -123,21 +123,6 @@ describe("parseEngineResult", () => {
       expect(() => parseEngineResult(doc)).toThrow(ValidationError);
     });
 
-    it("rejects a severity token that is not a plain identifier", () => {
-      const doc = document({
-        comments: [
-          {
-            path: "src/a.ts",
-            content: "x".repeat(20),
-            start_line: 1,
-            end_line: 1,
-            severity: "high; drop table",
-          },
-        ],
-      });
-      expect(() => parseEngineResult(doc)).toThrow(ValidationError);
-    });
-
     it("tolerates absent optional classification fields", () => {
       const doc = document({
         comments: [{ path: "src/a.ts", content: "x".repeat(20), start_line: 1, end_line: 1 }],
@@ -149,6 +134,99 @@ describe("parseEngineResult", () => {
 
     it("accepts a document with no findings at all", () => {
       expect(parseEngineResult(document({ comments: [] })).findings).toEqual([]);
+    });
+
+    // A malformed classification token used to throw and, because `parseFindings` builds its list
+    // with a single `.map()`, take every OTHER finding in the same result down with it — a model
+    // answering `"severity": "high; drop table"` destroyed an otherwise-complete review. It now
+    // parses as absent instead, the same as if the model had never sent it, so the finding routes
+    // to the deterministic repair (`classify.ts`) instead of aborting the run.
+    describe("a malformed severity or category degrades to absent rather than aborting the run", () => {
+      it("parses a malformed severity token as undefined, keeping the rest of the finding", () => {
+        const doc = document({
+          comments: [
+            {
+              path: "src/a.ts",
+              content: "x".repeat(20),
+              start_line: 1,
+              end_line: 1,
+              severity: "high; drop table",
+              category: "bug",
+            },
+          ],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings).toHaveLength(1);
+        expect(result.findings[0]?.severity).toBeUndefined();
+        expect(result.findings[0]?.category).toBe("bug");
+        expect(result.findings[0]?.path).toBe("src/a.ts");
+        expect(result.findings[0]?.content).toBe("x".repeat(20));
+      });
+
+      it("parses a malformed category token as undefined, keeping the rest of the finding", () => {
+        const doc = document({
+          comments: [
+            {
+              path: "src/a.ts",
+              content: "x".repeat(20),
+              start_line: 1,
+              end_line: 1,
+              severity: "high",
+              category: "bug (logic)",
+            },
+          ],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings).toHaveLength(1);
+        expect(result.findings[0]?.category).toBeUndefined();
+        expect(result.findings[0]?.severity).toBe("high");
+      });
+
+      it("does not lose sibling findings when an earlier one carries a malformed category", () => {
+        const doc = document({
+          comments: [
+            {
+              path: "src/a.ts",
+              content: "the first finding, malformed",
+              start_line: 1,
+              end_line: 1,
+              category: "not a token!!",
+              severity: "high",
+            },
+            {
+              path: "src/b.ts",
+              content: "the second finding, well-formed",
+              start_line: 5,
+              end_line: 6,
+              category: "security",
+              severity: "critical",
+            },
+          ],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings).toHaveLength(2);
+        expect(result.findings[0]?.category).toBeUndefined();
+        expect(result.findings[1]).toMatchObject({
+          path: "src/b.ts",
+          category: "security",
+          severity: "critical",
+        });
+      });
+
+      it("still rejects a structural violation on a finding that also carries a malformed category", () => {
+        const doc = document({
+          comments: [
+            {
+              path: "../../etc/passwd",
+              content: "x".repeat(20),
+              start_line: 1,
+              end_line: 1,
+              category: "not a token!!",
+            },
+          ],
+        });
+        expect(() => parseEngineResult(doc)).toThrow(ValidationError);
+      });
     });
   });
 

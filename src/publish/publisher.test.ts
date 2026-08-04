@@ -13,7 +13,15 @@ import {
 import type { InventoryItem } from "../inventory/classify.js";
 import { fingerprint, markerComment } from "./marker.js";
 import { composeFindingBody } from "./presentation.js";
-import { publishFindings, publishIncompleteNotice, type PublishContext } from "./publisher.js";
+import {
+  executePublication,
+  planPublication,
+  prefetchExistingConversations,
+  publishFindings,
+  publishIncompleteNotice,
+  type PublicationPlan,
+  type PublishContext,
+} from "./publisher.js";
 
 const HEAD = commitSha("b".repeat(40));
 const REF: RepoRef = { owner: "acme", repo: "widget" };
@@ -38,10 +46,26 @@ class FakeApi implements ReviewCommentApi {
    * `rejectWith` alone cannot express since it rejects by anchor kind across every finding).
    */
   public rejectPaths = new Set<string>();
+  /**
+   * Path → arbitrary status: like `rejectPaths`, but not fixed at 422 — lets a test make exactly one
+   * finding's create call throw a real failure (a 403 that outlasted the client's own retries, say)
+   * while a different finding in the same run publishes normally, which is what per-finding API
+   * failure containment needs to exercise and `rejectWith` (shared by anchor kind across every
+   * finding) cannot express alone.
+   */
+  public rejectPathWith = new Map<string, number>();
+  /** Forces every `getReviewComment` call to throw, regardless of whether the id exists — a
+   *  transient read-after-write failure on an otherwise-successful POST. */
+  public failReadBack = false;
   public readBackOverride: Partial<ReviewComment> | undefined;
+  /** Counts `listReviewComments` calls so a test can assert a supplied prefetch avoided one. */
+  public listCalls = 0;
+  /** Counts `getReviewComment` calls so a test can assert the plan phase never read anything back. */
+  public getCalls = 0;
   private nextId = 100;
 
   public listReviewComments(): Promise<ReviewComment[]> {
+    this.listCalls += 1;
     return Promise.resolve(this.existing);
   }
 
@@ -51,6 +75,8 @@ class FakeApi implements ReviewCommentApi {
     input: ReviewCommentInput,
   ): Promise<ReviewComment> {
     if (this.rejectPaths.has(input.path)) return Promise.reject(new GitHubApiError(422));
+    const pathStatus = this.rejectPathWith.get(input.path);
+    if (pathStatus !== undefined) return Promise.reject(new GitHubApiError(pathStatus));
     const key = input.line === undefined ? "file" : (input.side ?? "RIGHT");
     const status = this.rejectWith.get(key);
     if (status !== undefined) return Promise.reject(new GitHubApiError(status));
@@ -68,6 +94,8 @@ class FakeApi implements ReviewCommentApi {
   }
 
   public getReviewComment(_ref: RepoRef, id: number): Promise<ReviewComment> {
+    this.getCalls += 1;
+    if (this.failReadBack) return Promise.reject(new GitHubApiError(404));
     const found = this.existing.find((c) => c.id === id);
     if (found === undefined) return Promise.reject(new GitHubApiError(404));
     return Promise.resolve({ ...found, ...this.readBackOverride });
@@ -302,15 +330,34 @@ describe("publishFindings", () => {
 
     it("does not treat a non-422 failure as a reason to try a different anchor", async () => {
       api.rejectWith.set("RIGHT", 403);
-      await expect(publishFindings(context, [finding()], diagnostics)).rejects.toThrow(
-        GitHubApiError,
-      );
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      // Fix 1: contained as an API failure rather than left to reject the whole run — but the
+      // ladder still must not have treated the 403 as a reason to try LEFT or file-level next, the
+      // way it correctly does for a 422. `api.created` staying empty is what proves that: had the
+      // ladder wrongly retried, the untouched LEFT/file anchors below would have succeeded.
+      expect(outcome).toMatchObject({ published: 0, apiFailures: 1 });
       expect(api.created).toHaveLength(0);
     });
   });
 
+  /**
+   * The exact-marker stage's own eligibility (`ownMarkers`, `publisher.ts`) diverges from the
+   * similarity stage's, deliberately: a marker fingerprints CONTENT, never a coordinate, so only a
+   * GENUINELY RESOLVED thread excludes it — an outdated-but-unresolved thread's marker stays active
+   * and keeps suppressing a repost. This is what stops a push that only moves a hunk, with nobody
+   * ever answering the thread, from republishing an already-published, still-open finding as a new
+   * conversation — measured as the dominant source of duplicate findings in the reviewer arena
+   * before this split existed. The four `resolved`/`outdated` combinations below are the complete
+   * eligibility matrix for this one stage; "similarity against an outdated-open thread" is pinned
+   * separately, in "paraphrase deduplication (similarity stage)", where the opposite choice is
+   * equally deliberate.
+   */
   describe("deduplication", () => {
-    function markedComment(author: string, body: string): ReviewComment {
+    function markedComment(
+      author: string,
+      body: string,
+      overrides: Partial<ReviewComment> = {},
+    ): ReviewComment {
       const marker = fingerprint({
         repository: "acme/widget",
         pullNumber: 7,
@@ -332,6 +379,7 @@ describe("publishFindings", () => {
         authorLogin: author,
         commitId: HEAD,
         url: "https://example.test/existing",
+        ...overrides,
       };
     }
 
@@ -368,6 +416,53 @@ describe("publishFindings", () => {
       api.existing = [markedComment(IDENTITY, BODY.toUpperCase())];
       const outcome = await publishFindings(context, [finding()], diagnostics);
       expect(outcome).toMatchObject({ published: 0, suppressed: 1 });
+    });
+
+    /**
+     * The four-row eligibility matrix for `ownMarkers`, `resolved`/`outdated` independent as
+     * `github/client.ts` now reports them.
+     */
+    describe("resolved/outdated eligibility", () => {
+      it("suppresses when its own marker's thread is open (neither resolved nor outdated) — unchanged", async () => {
+        api.existing = [markedComment(IDENTITY, BODY)];
+        const outcome = await publishFindings(context, [finding()], diagnostics);
+        expect(outcome).toMatchObject({
+          published: 0,
+          suppressed: 1,
+          suppressedExactDuplicate: 1,
+        });
+      });
+
+      it("republishes when its own marker's thread is genuinely resolved — unchanged (Keiko-for-Quality#38)", async () => {
+        api.existing = [markedComment(IDENTITY, BODY, { resolved: true })];
+        const outcome = await publishFindings(context, [finding()], diagnostics);
+        expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+      });
+
+      /**
+       * THE FIX, and the regression pin for the dominant duplicate source measured in the reviewer
+       * arena. Before `resolved`/`outdated` were reported as independent facts, an outdated thread
+       * read as `resolved: true` here — indistinguishable from a genuine resolution — so this exact
+       * marker would have been excluded from `ownMarkers` and the still-open finding it protects
+       * would have republished as a brand-new conversation on every push that moved the hunk. The
+       * marker fingerprints content, not a line number, so an outdated hunk must not by itself
+       * unlock a repost.
+       */
+      it("NOW SUPPRESSES when its own marker's thread is outdated but not resolved (the fix)", async () => {
+        api.existing = [markedComment(IDENTITY, BODY, { outdated: true })];
+        const outcome = await publishFindings(context, [finding()], diagnostics);
+        expect(outcome).toMatchObject({
+          published: 0,
+          suppressed: 1,
+          suppressedExactDuplicate: 1,
+        });
+      });
+
+      it("republishes when its own marker's thread is both outdated and genuinely resolved — resolved wins", async () => {
+        api.existing = [markedComment(IDENTITY, BODY, { resolved: true, outdated: true })];
+        const outcome = await publishFindings(context, [finding()], diagnostics);
+        expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+      });
     });
   });
 
@@ -426,6 +521,23 @@ describe("publishFindings", () => {
 
     it("does not suppress once the matching conversation is resolved", async () => {
       api.existing = [openComment(REPHRASED_SAME_DEFECT, { resolved: true })];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+
+    /**
+     * Precision choice, not an oversight — pinned separately from the exact-marker stage's own
+     * eligibility (see "resolved/outdated eligibility" above, where the same `outdated: true` shape
+     * suppresses instead). An outdated thread's line anchor is GitHub's `original_line`/
+     * `original_start_line` fallback (`client.ts`'s `toReviewComment`): a stale coordinate from
+     * before the push moved the hunk. This stage's whole job is judging a candidate's line overlap
+     * plus body similarity against an existing conversation, so matching against a stale coordinate
+     * would be noise, not signal — this stage deliberately keeps treating an outdated thread as
+     * ineligible even though the marker stage no longer does, for its own, unrelated reason (a
+     * marker does not depend on a coordinate at all).
+     */
+    it("does not suppress a rephrased repost against a thread that is outdated but not resolved", async () => {
+      api.existing = [openComment(REPHRASED_SAME_DEFECT, { outdated: true })];
       const outcome = await publishFindings(context, [finding()], diagnostics);
       expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
     });
@@ -577,6 +689,21 @@ describe("publishFindings", () => {
       const outcome = await publishFindings(context, [finding()], diagnostics);
       expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
     });
+
+    // Unchanged by the resolved/outdated split: `resolved` is set directly (`true`) on this fixture
+    // regardless of `outdated`, and this stage's own eligibility (`thread.resolved && thread.dispositioned`)
+    // never looked at `outdated` in the first place — a resolved thread's disposition does not become
+    // less considered just because a later push also moved its hunk.
+    it("still suppresses a dispositioned recurrence when the resolved thread is also outdated", async () => {
+      api.existing = [
+        resolvedComment({
+          outdated: true,
+          lastReply: { authorLogin: "a-contributor", body: REAL_DISPOSITION },
+        }),
+      ];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 0, suppressedDispositioned: 1 });
+    });
   });
 
   describe("read-back confirmation", () => {
@@ -591,6 +718,426 @@ describe("publishFindings", () => {
       const outcome = await publishFindings(context, [finding()], diagnostics);
       expect(outcome).toMatchObject({ published: 0, readbackFailures: 1 });
     });
+
+    // A GET that throws (a transient network fault, a 403 secondary rate limit that exhausted its
+    // own retries) must settle exactly like a GET that succeeds but reports a mismatch: the POST may
+    // have landed on GitHub even though this run could not confirm it, so it is unconfirmed, not a
+    // reason to abandon the run. Two findings prove the loop keeps going past the first one, too.
+    it("treats a thrown read-back GET as unconfirmed, not fatal, and keeps publishing later findings", async () => {
+      context = {
+        ...context,
+        items: new Map([
+          ["src/retry.ts", item()],
+          ["src/other.ts", item({ path: repoPath("src/other.ts") })],
+        ]),
+      };
+      api.failReadBack = true;
+      const outcome = await publishFindings(
+        context,
+        [finding(), finding({ path: repoPath("src/other.ts"), startLine: 40, endLine: 42 })],
+        diagnostics,
+      );
+      expect(outcome).toMatchObject({ published: 0, readbackFailures: 2, apiFailures: 0 });
+      // Both creates were attempted — only the read-back after each one failed.
+      expect(api.created).toHaveLength(2);
+    });
+  });
+
+  describe("per-finding API failure containment (Fix 1)", () => {
+    it("contains a thrown non-422 create failure to the one finding and still attempts the rest", async () => {
+      context = {
+        ...context,
+        items: new Map([
+          ["src/retry.ts", item()],
+          ["src/second.ts", item({ path: repoPath("src/second.ts") })],
+          ["src/third.ts", item({ path: repoPath("src/third.ts") })],
+        ]),
+      };
+      // Every attempt on src/second.ts's ladder throws a 403 — the shape of a secondary rate limit
+      // that has already exhausted the client's own retries — while the other two findings' paths
+      // are untouched by it.
+      api.rejectPathWith.set("src/second.ts", 403);
+      const localDiagnostics = createSilentDiagnostics();
+      const outcome = await publishFindings(
+        context,
+        [
+          finding(),
+          finding({ path: repoPath("src/second.ts"), startLine: 20, endLine: 22 }),
+          finding({ path: repoPath("src/third.ts"), startLine: 30, endLine: 32 }),
+        ],
+        localDiagnostics,
+      );
+
+      // The run resolved instead of rejecting (awaiting it above would itself have thrown
+      // otherwise), the doomed finding counted as an API failure rather than a placement rejection,
+      // and the finding queued behind it was still attempted and published.
+      expect(outcome).toMatchObject({ published: 2, rejectedPlacement: 0, apiFailures: 1 });
+      expect(api.created.map((c) => c.path)).toEqual(["src/retry.ts", "src/third.ts"]);
+      expect(
+        localDiagnostics.drain().filter((record) => record.code === "publish.api_failed"),
+      ).toHaveLength(1);
+    });
+  });
+});
+
+/**
+ * v0.12.0 — the intra-run deduplication stage: `planPublication` now clusters this run's own
+ * sanitized candidates against EACH OTHER, between sanitization and the cross-run checks, so a model
+ * that describes one defect several times in a single pass no longer publishes every retelling.
+ * Named for the shape Arena v0.11.0 measured in production (29 duplicate variants across 95
+ * published findings, 31%, one production location carrying one finding plus three variants) and for
+ * the fixture already in this codebase's own history: the three real, textually different paraphrases
+ * from oscharko-dev/Keiko#2926 (see `similarity.test.ts`'s `findsSimilarOpenConversation` suite,
+ * where the same three sentences are pinned as mutually similar under the identical token-overlap
+ * core `areIntraRunDuplicates` shares). This suite pins the REVIEWER's own production behaviour for
+ * that shape; `corpus/arena-lib.test.mjs` pins only the arena's separate measurement of it.
+ */
+describe("intra-run deduplication (v0.12.0)", () => {
+  const VARIANT_A =
+    "Restore the route's fallback connector construction when the primary endpoint is unset.";
+  const VARIANT_B =
+    "Restore the route's default connector construction when the primary endpoint is missing.";
+  const VARIANT_C =
+    "Keep the fallback port construction for route requests when no primary endpoint exists.";
+
+  function variant(body: string, overrides: Partial<EngineFinding> = {}): EngineFinding {
+    return finding({ content: body, ...overrides });
+  }
+
+  it("collapses three same-location variants into one published finding and two intra-run suppressions (the Keiko-for-Quality#2926 shape)", async () => {
+    const outcome = await publishFindings(
+      context,
+      [variant(VARIANT_A), variant(VARIANT_B), variant(VARIANT_C)],
+      diagnostics,
+    );
+    expect(outcome).toMatchObject({
+      published: 1,
+      suppressed: 2,
+      suppressedIntraRun: 2,
+      suppressedExactDuplicate: 0,
+      suppressedSimilar: 0,
+      suppressedDispositioned: 0,
+    });
+    expect(api.created).toHaveLength(1);
+  });
+
+  it("records publish.finding_suppressed_intra_run once per suppressed variant, headSha only", async () => {
+    const localDiagnostics = createSilentDiagnostics();
+    await publishFindings(
+      context,
+      [variant(VARIANT_A), variant(VARIANT_B), variant(VARIANT_C)],
+      localDiagnostics,
+    );
+    const records = localDiagnostics
+      .drain()
+      .filter((record) => record.code === "publish.finding_suppressed_intra_run");
+    expect(records).toHaveLength(2);
+    for (const record of records) {
+      expect(record).toStrictEqual({ code: "publish.finding_suppressed_intra_run", headSha: HEAD });
+    }
+  });
+
+  it("leaves distinct findings at distinct locations untouched", async () => {
+    context = {
+      ...context,
+      items: new Map([
+        ["src/retry.ts", item()],
+        ["src/other.ts", item({ path: repoPath("src/other.ts") })],
+      ]),
+    };
+    const outcome = await publishFindings(
+      context,
+      [
+        finding(),
+        finding({
+          path: repoPath("src/other.ts"),
+          content:
+            "This endpoint never validates that the request payload size stays under the " +
+            "configured limit before buffering it into memory.",
+          startLine: 40,
+          endLine: 42,
+        }),
+      ],
+      diagnostics,
+    );
+    expect(outcome).toMatchObject({ published: 2, suppressed: 0, suppressedIntraRun: 0 });
+    expect(api.created).toHaveLength(2);
+  });
+
+  /**
+   * `areIntraRunDuplicates`'s own suite (`similarity.test.ts`) pins the comparison in isolation; this
+   * proves the same guarantee end to end — a suppressed member's content and category never drive an
+   * API call or a diagnostic, because `planCrossRun` (`publisher.ts`) is only ever invoked on a
+   * cluster's representative.
+   */
+  it("suppresses a variant before it ever reaches the marker, similarity, or dispositioned stages", async () => {
+    // Keyed to VARIANT_B's own exact fingerprint. If `classifySuppression` ever ran on the
+    // VARIANT_B finding, it would report an exact-duplicate suppression instead of an intra-run one
+    // — VARIANT_B must never become this cluster's representative for that to stay untested, which
+    // is exactly why VARIANT_A is seeded at "critical" below.
+    const bMarker = fingerprint({
+      repository: "acme/widget",
+      pullNumber: 7,
+      path: "src/retry.ts",
+      rule: "bug",
+      body: VARIANT_B,
+    });
+    api.existing = [
+      {
+        id: 1,
+        body: composeFindingBody(VARIANT_B, markerComment(bMarker), {
+          path: "src/retry.ts",
+          line: 1,
+          severity: "medium",
+          category: "bug",
+        }),
+        path: "src/retry.ts",
+        authorLogin: IDENTITY,
+        commitId: HEAD,
+        url: "https://example.test/existing",
+      },
+    ];
+    const localDiagnostics = createSilentDiagnostics();
+    const outcome = await publishFindings(
+      context,
+      [variant(VARIANT_A, { severity: "critical" }), variant(VARIANT_B), variant(VARIANT_C)],
+      localDiagnostics,
+    );
+
+    // VARIANT_A (critical) is this cluster's representative throughout — see "representative
+    // selection" below for the severity tie-break this depends on — so VARIANT_B and VARIANT_C are
+    // the two suppressed members, and VARIANT_B's marker collision above is never evaluated.
+    expect(outcome).toMatchObject({
+      published: 1,
+      suppressed: 2,
+      suppressedIntraRun: 2,
+      suppressedExactDuplicate: 0,
+      suppressedSimilar: 0,
+      suppressedDispositioned: 0,
+    });
+    expect(api.created).toHaveLength(1);
+    expect(api.getCalls).toBe(1);
+
+    const codes = localDiagnostics.drain().map((record) => record.code);
+    expect(codes.filter((code) => code === "publish.finding_suppressed_intra_run")).toHaveLength(2);
+    expect(codes).not.toContain("publish.finding_suppressed_duplicate");
+    expect(codes).not.toContain("publish.finding_suppressed_similar");
+    expect(codes).not.toContain("dedup.dispositioned");
+  });
+
+  /**
+   * `clusterIntraRunDuplicates`'s (`publisher.ts`) own tie-break chain: severity first, sanitized
+   * body length second. Both variants below share enough vocabulary to cluster (VARIANT_A/VARIANT_B,
+   * pinned mutually similar in `similarity.test.ts`) but are distinguishable by a word unique to each
+   * — "fallback"/"unset" only in A, "default"/"missing" only in B — so asserting on the published
+   * body's own content, rather than on hand-counted string lengths, is what proves which one won.
+   */
+  describe("representative selection", () => {
+    it("prefers the higher-severity variant even when its body is the shorter of the two", async () => {
+      const longButLowSeverity =
+        `${VARIANT_B} This additional sentence exists purely to make this candidate's sanitized ` +
+        "body noticeably longer than the other one, so a length-only tie-break would wrongly " +
+        "prefer it over the higher-severity candidate it is compared against.";
+      const outcome = await publishFindings(
+        context,
+        [
+          variant(longButLowSeverity, { severity: "low" }),
+          variant(VARIANT_A, { severity: "critical" }),
+        ],
+        diagnostics,
+      );
+      expect(outcome.published).toBe(1);
+      expect(api.created).toHaveLength(1);
+      const body = api.created[0]?.body ?? "";
+      expect(body).toContain("fallback");
+      expect(body).not.toContain("default");
+    });
+
+    it("prefers the longer sanitized body when severities tie", async () => {
+      const longerAtEqualSeverity =
+        `${VARIANT_B} This additional sentence exists purely to make this candidate's sanitized ` +
+        "body noticeably longer than the other, equally severe, candidate it is compared against.";
+      const outcome = await publishFindings(
+        context,
+        [
+          variant(VARIANT_A, { severity: "high" }),
+          variant(longerAtEqualSeverity, { severity: "high" }),
+        ],
+        diagnostics,
+      );
+      expect(outcome.published).toBe(1);
+      expect(api.created).toHaveLength(1);
+      const body = api.created[0]?.body ?? "";
+      expect(body).toContain("default");
+      expect(body).not.toContain("fallback");
+    });
+  });
+
+  /**
+   * Keiko-for-Quality#2926's shape again, but with the cluster's own representative ALSO an
+   * exact-marker duplicate of a conversation this reviewer already published. The two suppression
+   * mechanisms are independent stages over independent findings within the same run (two members
+   * suppressed intra-run, one representative separately suppressed at the exact-marker stage), so
+   * their counts must land in their own buckets and the total must be their plain sum — never a
+   * finding counted twice, and never one stage's suppression masking the other's.
+   */
+  it("still suppresses at the exact-marker stage after surviving intra-run clustering as the representative — separate buckets, no double count", async () => {
+    const existingMarker = fingerprint({
+      repository: "acme/widget",
+      pullNumber: 7,
+      path: "src/retry.ts",
+      rule: "bug",
+      body: VARIANT_A,
+    });
+    api.existing = [
+      {
+        id: 1,
+        body: composeFindingBody(VARIANT_A, markerComment(existingMarker), {
+          path: "src/retry.ts",
+          line: 1,
+          severity: "critical",
+          category: "bug",
+        }),
+        path: "src/retry.ts",
+        authorLogin: IDENTITY,
+        commitId: HEAD,
+        url: "https://example.test/existing",
+      },
+    ];
+
+    const outcome = await publishFindings(
+      context,
+      [variant(VARIANT_A, { severity: "critical" }), variant(VARIANT_B), variant(VARIANT_C)],
+      diagnostics,
+    );
+
+    expect(outcome).toMatchObject({
+      published: 0,
+      suppressed: 3,
+      suppressedIntraRun: 2,
+      suppressedExactDuplicate: 1,
+      suppressedSimilar: 0,
+      suppressedDispositioned: 0,
+    });
+    expect(api.created).toHaveLength(0);
+  });
+});
+
+/**
+ * `publishFindings` is now `planPublication` followed by `executePublication` (see `publisher.ts`),
+ * a pure structural split made so a future caller can act on a survivor — the classification audit a
+ * follow-up change adds — before any API call is made for it. These exercise the two phases directly
+ * rather than only through `publishFindings`, which the suite above already covers end to end.
+ */
+describe("planPublication and executePublication", () => {
+  /**
+   * An existing IDENTITY-authored, unresolved, file-level comment whose marker is keyed on `rule` —
+   * lets a test seed a marker for a category a finding has not been given yet, which is exactly what
+   * the execute-time re-check below needs to exercise. File-level (no `line`/`startLine`) so it can
+   * never match the similarity/dispositioned stages, which this describe block does not exercise.
+   */
+  function existingMarkedComment(rule: string, body: string): ReviewComment {
+    const marker = fingerprint({
+      repository: "acme/widget",
+      pullNumber: 7,
+      path: "src/retry.ts",
+      rule,
+      body,
+    });
+    return {
+      id: 1,
+      body: composeFindingBody(body, markerComment(marker), {
+        path: "src/retry.ts",
+        line: 1,
+        severity: "medium",
+        category: rule,
+      }),
+      path: "src/retry.ts",
+      authorLogin: IDENTITY,
+      commitId: HEAD,
+      url: "https://example.test/existing",
+    };
+  }
+
+  it("planPublication alone produces the same suppression counters and diagnostics as a full publishFindings run, with zero create/read API calls", async () => {
+    // One finding suppressed as an exact duplicate, one rejected by sanitization — a mix that
+    // exercises both plan-phase counters at once rather than only the all-zero case.
+    const findings = [
+      finding(),
+      finding({
+        path: repoPath("src/other.ts"),
+        content: `${BODY} <script>x</script>`,
+        startLine: 20,
+        endLine: 22,
+      }),
+    ];
+
+    const baselineApi = new FakeApi();
+    baselineApi.existing = [existingMarkedComment("bug", BODY)];
+    const baselineContext: PublishContext = { ...context, client: baselineApi };
+    const baselineDiagnostics = createSilentDiagnostics();
+    const baselineOutcome = await publishFindings(baselineContext, findings, baselineDiagnostics);
+
+    api.existing = [existingMarkedComment("bug", BODY)];
+    const planDiagnostics = createSilentDiagnostics();
+    const plan = await planPublication(context, findings, planDiagnostics);
+
+    expect(plan.survivors).toHaveLength(0);
+    expect(plan.counters).toStrictEqual({
+      suppressed: 1,
+      suppressedIntraRun: 0,
+      suppressedExactDuplicate: 1,
+      suppressedSimilar: 0,
+      suppressedDispositioned: 0,
+      rejectedSanitization: 1,
+    });
+    // The property the split depends on being behavior-identical: the plan phase alone reproduces
+    // exactly the suppression/rejection half of what a full publishFindings run reports.
+    expect(plan.counters).toStrictEqual({
+      suppressed: baselineOutcome.suppressed,
+      suppressedIntraRun: baselineOutcome.suppressedIntraRun ?? 0,
+      suppressedExactDuplicate: baselineOutcome.suppressedExactDuplicate,
+      suppressedSimilar: baselineOutcome.suppressedSimilar,
+      suppressedDispositioned: baselineOutcome.suppressedDispositioned,
+      rejectedSanitization: baselineOutcome.rejectedSanitization,
+    });
+    expect(planDiagnostics.drain()).toStrictEqual(baselineDiagnostics.drain());
+
+    expect(api.created).toHaveLength(0);
+    expect(api.getCalls).toBe(0);
+  });
+
+  it("suppresses at the execute-time re-check when a survivor is reclassified to a category whose fingerprint matches an existing marker", async () => {
+    // Seeded for "security" — the category the survivor below is reclassified to AFTER planning,
+    // simulating the follow-up's classification audit running between plan and execute.
+    api.existing = [existingMarkedComment("security", BODY)];
+
+    const plan = await planPublication(context, [finding()], diagnostics);
+    // The finding's own category at plan time is still "bug", which does not match the
+    // security-keyed marker above, so it survives planning as an ordinary candidate.
+    expect(plan.survivors).toHaveLength(1);
+    expect(plan.counters).toMatchObject({ suppressed: 0, suppressedExactDuplicate: 0 });
+
+    const survivor = plan.survivors[0]!;
+    const reclassifiedPlan: PublicationPlan = {
+      ...plan,
+      survivors: [{ ...survivor, finding: { ...survivor.finding, category: "security" } }],
+    };
+
+    const outcome = await executePublication(context, reclassifiedPlan, diagnostics);
+    // Suppressed before any placement was attempted — never posted as a duplicate under the new
+    // category, and counted/diagnosed exactly like a plan-stage exact-marker suppression.
+    expect(outcome).toMatchObject({ published: 0, suppressed: 1, suppressedExactDuplicate: 1 });
+    expect(api.created).toHaveLength(0);
+  });
+
+  it("still publishes a survivor normally when the execute-time re-check finds no marker collision", async () => {
+    const plan = await planPublication(context, [finding()], diagnostics);
+    expect(plan.survivors).toHaveLength(1);
+
+    const outcome = await executePublication(context, plan, diagnostics);
+    expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    expect(api.created).toHaveLength(1);
   });
 });
 
@@ -634,5 +1181,57 @@ describe("publishIncompleteNotice", () => {
 
     await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
     expect(api.created).toHaveLength(2);
+  });
+
+  /**
+   * A prefetch a caller already ran moments ago in the same settlement path (`publishFindings` did,
+   * immediately before this, in production) must let this function skip its own list call entirely
+   * — otherwise the two functions still pay for the same list-and-walk twice, the exact duplication
+   * this parameter exists to remove. Absent, behaviour must stay byte-for-byte what every existing
+   * caller above already exercises.
+   */
+  describe("prefetch parameter", () => {
+    it("performs zero list calls when given a prefetched value", async () => {
+      const prefetch = await prefetchExistingConversations(context);
+      const callsBeforePrefetchedNotice = api.listCalls;
+
+      const verified = await publishIncompleteNotice(
+        context,
+        REASON,
+        ANCHOR,
+        diagnostics,
+        prefetch,
+      );
+
+      expect(api.listCalls).toBe(callsBeforePrefetchedNotice);
+      expect(verified).toBe(true);
+      expect(api.created).toHaveLength(1);
+    });
+
+    it("fetches its own conversations, exactly as before, when no prefetch is supplied", async () => {
+      const verified = await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
+
+      expect(api.listCalls).toBe(1);
+      expect(verified).toBe(true);
+      expect(api.created).toHaveLength(1);
+    });
+
+    it("still suppresses a repost of the identical (anchor, reason, head) via a supplied prefetch", async () => {
+      await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
+      const prefetch = await prefetchExistingConversations(context);
+      const callsBeforePrefetchedNotice = api.listCalls;
+
+      const verified = await publishIncompleteNotice(
+        context,
+        REASON,
+        ANCHOR,
+        diagnostics,
+        prefetch,
+      );
+
+      expect(api.listCalls).toBe(callsBeforePrefetchedNotice);
+      expect(verified).toBe(true);
+      expect(api.created).toHaveLength(1);
+    });
   });
 });

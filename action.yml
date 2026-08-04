@@ -117,6 +117,16 @@ inputs:
       head, and redacted counts. `false` disables it: no issue-comment API call is made at all.
     required: false
     default: "true"
+  cross_artifact_pass:
+    description: >-
+      Experimental. Whether to spend one extra, bounded model call per run asking only cross-file
+      contract questions — a producer shape a separately-declared consumer twin no longer covers, a
+      union member no consumer branch mentions — over a summary of every changed file's exported
+      declarations. Per-file review cannot see this defect class at all. `false` (the default)
+      leaves it off: no extra call, no behavioural change. Promotion to on-by-default depends on a
+      later qualification-corpus measurement, not on this input's mere existence.
+    required: false
+    default: "false"
 
 outputs:
   outcome:

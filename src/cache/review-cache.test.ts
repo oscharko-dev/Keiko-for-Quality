@@ -232,6 +232,65 @@ describe("appendEntries", () => {
     });
     expect(result.entries.map((e) => e.key)).toEqual([c.key]);
   });
+
+  // The store-size cliff (v0.11.0): `maxEntries` alone bounds entry COUNT, not the bytes those
+  // entries serialize to. A count limit generous enough to be useless as a byte bound (as
+  // `maxEntries` — 20,000 — is against `maxFindingsPerEntry`-sized entries) can write a store
+  // `readStore` rejects WHOLE on the very next run. These use entries large enough, in far fewer
+  // than 20,000 of them, to cross `maxStoreBytes` on their own — isolating the byte bound from the
+  // pre-existing count bound, which stays far out of reach (`PARSE_LIMITS.maxEntries`) throughout.
+  describe("appendEntries: the byte-size cliff", () => {
+    // Each entry's single finding is right at `maxFindingContentChars`, so every entry serializes
+    // to a little over 20 KB — comfortably crossing the 4 MiB store ceiling in the low hundreds of
+    // entries rather than needing anywhere near `maxEntries` (20,000) of them.
+    function bigEntry(model: string): CacheEntry {
+      return entryFor({ ...baseline(), model: modelId(model) }, [
+        finding({ content: "x".repeat(PARSE_LIMITS.maxFindingContentChars) }),
+      ]);
+    }
+
+    const RETENTION = {
+      maxEntries: PARSE_LIMITS.maxEntries,
+      maxFindingsPerEntry: PARSE_LIMITS.maxFindingsPerEntry,
+    };
+
+    it("evicts oldest entries so an append that would cross maxStoreBytes still parses back through the real reader", () => {
+      const fresh = Array.from({ length: 260 }, (_unused, i) => bigEntry(`model-${String(i)}`));
+      const result = appendEntries(EMPTY_STORE, fresh, RETENTION);
+
+      // 260 entries at ~20 KB each is well past 4 MiB uncapped — eviction must have happened.
+      expect(result.entries.length).toBeLessThan(fresh.length);
+
+      const text = serializeStore(result);
+      expect(text.length).toBeLessThanOrEqual(PARSE_LIMITS.maxStoreBytes);
+
+      // The real production reader, not a re-statement of its size rule: this is the guarantee
+      // that actually matters — a store `appendEntries` is willing to write must be one the very
+      // next run can read back, or the cliff this fix closes reopens silently.
+      const read = readStore(text);
+      expect(read.ok).toBe(true);
+    });
+
+    it("keeps the newest entries, in their original relative order, when evicting for byte size", () => {
+      const fresh = Array.from({ length: 260 }, (_unused, i) => bigEntry(`model-${String(i)}`));
+      const result = appendEntries(EMPTY_STORE, fresh, RETENTION);
+
+      const survivingKeys = result.entries.map((e) => e.key);
+      const inputKeys = fresh.map((e) => e.key);
+      const tailStart = inputKeys.length - survivingKeys.length;
+
+      // Survivors are a contiguous SUFFIX of the input — oldest-first eviction only, never a gap
+      // torn out of the middle — and the very last (newest) entry appended is always among them.
+      expect(survivingKeys).toEqual(inputKeys.slice(tailStart));
+      expect(result.entries.at(-1)?.key).toBe(fresh[fresh.length - 1]?.key);
+    });
+
+    it("leaves a store already within budget untouched by the byte bound", () => {
+      const small = [entryFor(baseline(), [finding()])];
+      const result = appendEntries(EMPTY_STORE, small, RETENTION);
+      expect(result.entries.map((e) => e.key)).toEqual(small.map((e) => e.key));
+    });
+  });
 });
 
 describe("serializeStore", () => {

@@ -37,23 +37,44 @@ export interface ReviewComment {
   /** Present only for a multi-line comment; a single-line comment carries `line` alone. */
   readonly startLine?: number;
   /**
-   * True once this comment's review thread is resolved or its diff hunk is outdated.
+   * True once this comment's review thread is genuinely RESOLVED — GitHub's `isResolved`: a human or
+   * bot marked the conversation done.
+   *
+   * Deliberately independent of `outdated` below: a later push moving the hunk this thread anchored
+   * and a person resolving the thread are two different events, and a thread can be either, both, or
+   * neither. Folding the two into one flag made an outdated-but-unresolved thread indistinguishable
+   * from a resolved one to every caller downstream — which silenced deduplication's exact-marker
+   * stage on every push that moved a still-open thread's hunk, measured as the dominant source of
+   * this reviewer's duplicate findings. They are reported as two separate facts so a caller can tell
+   * "someone decided this" apart from "a later push moved it," which is not the same fact and must
+   * not be treated as one.
    *
    * Best-effort, sourced from a separate GraphQL lookup the REST comments endpoint cannot answer
    * (GitHub exposes thread resolution only through `PullRequestReviewThread.isResolved`/
    * `isOutdated`). Absent — not `false` — means the lookup did not run or did not resolve this
-   * comment; callers must treat an absent value the same as `false` rather than as "known open".
+   * comment; callers must treat an absent value the same as `false`, i.e. "treated as open" — the
+   * documented degradation contract (see README's Deduplication section) — never as "known
+   * resolved".
    */
   readonly resolved?: boolean;
   /**
+   * True once this comment's review thread is OUTDATED — GitHub's `isOutdated`: a later push moved or
+   * removed the diff hunk the thread anchored. Independent of `resolved` above; see that field's doc
+   * comment for why the two are reported separately instead of folded into one flag.
+   *
+   * Best-effort, the same GraphQL lookup and the same absent-means-unknown-and-treated-as-open
+   * contract as `resolved`.
+   */
+  readonly outdated?: boolean;
+  /**
    * The last reply on this comment's thread, when the same GraphQL lookup found the thread
-   * genuinely RESOLVED (Keiko-for-Quality#64) — never set for a thread that is merely outdated, a
-   * distinct condition `resolved` alone does not separate from a considered resolution. Absent when
-   * the lookup did not run, the thread is not resolved, or GitHub reported no usable reply (a
-   * deleted author, for instance). A thread whose only comment is its own root finding reports that
-   * same root comment back here — there is nothing else to report — which is what lets a caller
-   * that also knows this reviewer's own identity tell a bare resolve apart from an answered one
-   * without this client needing to know what either of those mean.
+   * genuinely RESOLVED (Keiko-for-Quality#64) — never set for a thread that is merely outdated. Now
+   * that `outdated` is its own field, `resolved` alone already carries that distinction; this field's
+   * own rule is otherwise unchanged: absent when the lookup did not run, the thread is not resolved,
+   * or GitHub reported no usable reply (a deleted author, for instance). A thread whose only comment
+   * is its own root finding reports that same root comment back here — there is nothing else to
+   * report — which is what lets a caller that also knows this reviewer's own identity tell a bare
+   * resolve apart from an answered one without this client needing to know what either of those mean.
    */
   readonly lastReply?: ThreadLastReply;
 }
@@ -135,6 +156,39 @@ const RETRYABLE: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
 
 /**
+ * GitHub reports its secondary rate limit — tripped by rapid comment creation, exactly this
+ * client's own publish loop — as a 403, not the primary limit's 429, distinguished only by carrying
+ * a `retry-after` header and/or `x-ratelimit-remaining: 0`. A 403 with neither is an authorization
+ * failure instead: permanent by contract, where retrying would only spend three attempts repeating
+ * the same refusal before failing anyway. Throttling and authorization share a status code on this
+ * API; only the headers tell them apart, so both signals are checked rather than assuming either one
+ * is always present.
+ */
+function isSecondaryRateLimit(response: Response): boolean {
+  if (response.status !== 403) return false;
+  return (
+    response.headers.has("retry-after") || response.headers.get("x-ratelimit-remaining") === "0"
+  );
+}
+
+const MAX_RETRY_AFTER_SECONDS = 60;
+
+/**
+ * The server's own requested wait, in milliseconds, when it supplies one. Honored over the linear
+ * backoff below because guessing a shorter wait would just trip the same limit again — but capped so
+ * a large or malformed value cannot stall the job far longer than the job itself is worth; a run that
+ * would need to wait past the cap should fail and let the next trigger retry rather than block CI on
+ * someone else's outage.
+ */
+function retryAfterMs(response: Response): number | undefined {
+  const header = response.headers.get("retry-after");
+  if (header === null) return undefined;
+  const seconds = Number(header);
+  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+  return Math.min(seconds, MAX_RETRY_AFTER_SECONDS) * 1000;
+}
+
+/**
  * Walks every review thread on the pull request, each carrying whether it is resolved or outdated,
  * the database id — the same id the REST comments endpoint returns — of every comment inside it, and
  * (aliased `lastComment`) that same thread's true last comment, however many it has.
@@ -204,24 +258,42 @@ function extractLastReply(node: ReviewThreadNode): ThreadLastReply | undefined {
   return { authorLogin, body };
 }
 
+/** One review thread's state as it applies to every comment inside it — the internal shape
+ *  `collectThreadOverlays` builds and `applyThreadOverlays` unpacks onto `ReviewComment.resolved`/
+ *  `outdated`/`lastReply`, the public fields this collapses onto. */
+interface ThreadOverlay {
+  readonly resolved: boolean;
+  readonly outdated: boolean;
+  readonly lastReply: ThreadLastReply | undefined;
+}
+
 /**
- * `Map<databaseId, lastReply>` for every comment belonging to a resolved-or-outdated thread — see
- * `ReviewComment.resolved`. Key *presence* is the resolved/outdated signal (unchanged from the set
- * this collected before Keiko-for-Quality#64); the value is that thread's last reply, but only for a
- * thread GitHub reports as genuinely `isResolved` — a merely-outdated thread never had anyone decide
- * anything, so it is a key with an `undefined` value here, exactly like a resolved thread whose last
- * comment carried no usable author/body.
+ * `Map<databaseId, overlay>` for every comment belonging to a resolved-or-outdated thread, `resolved`
+ * and `outdated` carried as the two separate GraphQL facts they are: GitHub sets `isResolved` and
+ * `isOutdated` independently, so a thread can be either, both, or neither, and folding them into one
+ * flag (the shape this map held before this split) made an outdated-but-unresolved thread
+ * indistinguishable from a resolved one to every caller downstream. A comment whose thread is neither
+ * is left out of the map entirely rather than written with two `false`s, so `has()` alone still
+ * answers "did this comment's thread tell us anything" the way callers already rely on.
+ *
+ * `lastReply` keeps its pre-existing rule unchanged: populated only for a thread GitHub reports as
+ * genuinely `isResolved` (Keiko-for-Quality#64) — a merely-outdated thread never had anyone decide
+ * anything, so it is `undefined` here, exactly like a resolved thread whose last comment carried no
+ * usable author/body.
  */
 function collectThreadOverlays(
   nodes: readonly ReviewThreadNode[],
-  into: Map<number, ThreadLastReply | undefined>,
+  into: Map<number, ThreadOverlay>,
 ): void {
   for (const node of nodes) {
     const isResolved = node.isResolved === true;
-    if (!isResolved && node.isOutdated !== true) continue;
+    const isOutdated = node.isOutdated === true;
+    if (!isResolved && !isOutdated) continue;
     const lastReply = isResolved ? extractLastReply(node) : undefined;
     for (const comment of node.comments?.nodes ?? []) {
-      if (typeof comment.databaseId === "number") into.set(comment.databaseId, lastReply);
+      if (typeof comment.databaseId === "number") {
+        into.set(comment.databaseId, { resolved: isResolved, outdated: isOutdated, lastReply });
+      }
     }
   }
 }
@@ -269,10 +341,13 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
       });
       if (response.ok) return response;
       lastStatus = response.status;
-      if (!RETRYABLE.has(response.status)) throw new GitHubApiError(response.status);
-      // Linear backoff is sufficient: the retryable cases are transient, and a reviewer that
-      // hammers a rate-limited API makes the consumer's situation worse, not better.
-      await delay(attempt * 1000);
+      if (!RETRYABLE.has(response.status) && !isSecondaryRateLimit(response)) {
+        throw new GitHubApiError(response.status);
+      }
+      // Linear backoff is the default: the ordinary retryable cases are transient, and a reviewer
+      // that hammers a rate-limited API makes the consumer's situation worse, not better. A response
+      // naming its own wait (the secondary rate limit's `retry-after`) overrides it instead.
+      await delay(retryAfterMs(response) ?? attempt * 1000);
     }
     throw new GitHubApiError(lastStatus);
   }
@@ -321,19 +396,21 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
       for (const entry of batch) comments.push(toReviewComment(entry as Record<string, unknown>));
       if (batch.length < 100) break;
     }
-    return this.markResolved(ref, number, comments);
+    return this.applyThreadOverlays(ref, number, comments);
   }
 
   /**
-   * Layers resolved/outdated thread state onto comments already read from REST.
+   * Layers each thread's resolved/outdated state onto comments already read from REST — as two
+   * independent facts, `resolved` and `outdated`, never folded into one (see `ReviewComment.resolved`
+   * for why that distinction matters to deduplication).
    *
    * The REST comments endpoint has no notion of thread resolution — only GraphQL's
    * `PullRequestReviewThread.isResolved`/`isOutdated` answer it. This is deliberately best-effort:
    * a lookup failure (a token without the right scope, a transient error, GHES without the feature)
-   * degrades to "nothing known to be resolved", which is exactly today's behaviour without this
+   * degrades to "nothing known" on both facts, which is exactly today's behaviour without this
    * lookup — it never turns a dedup optimization into a reason the review itself fails.
    */
-  private async markResolved(
+  private async applyThreadOverlays(
     ref: RepoRef,
     number: number,
     comments: readonly ReviewComment[],
@@ -341,26 +418,27 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     const overlays = await this.fetchThreadOverlays(ref, number);
     if (overlays.size === 0) return [...comments];
     return comments.map((comment) => {
-      if (!overlays.has(comment.id)) return comment;
-      const lastReply = overlays.get(comment.id);
+      const overlay = overlays.get(comment.id);
+      if (overlay === undefined) return comment;
       return {
         ...comment,
-        resolved: true,
-        ...(lastReply !== undefined ? { lastReply } : {}),
+        ...(overlay.resolved ? { resolved: true } : {}),
+        ...(overlay.outdated ? { outdated: true } : {}),
+        ...(overlay.lastReply !== undefined ? { lastReply: overlay.lastReply } : {}),
       };
     });
   }
 
   /**
    * Bounded, best-effort GraphQL walk of every review thread, returning a map of every comment id
-   * belonging to a resolved-or-outdated thread to that thread's last reply (Keiko-for-Quality#64) —
-   * see `collectThreadOverlays` for exactly what "that thread's last reply" means per thread state.
+   * belonging to a resolved-or-outdated thread to that thread's own resolved/outdated/last-reply
+   * state (Keiko-for-Quality#64) — see `collectThreadOverlays` for exactly what each part means.
    */
   private async fetchThreadOverlays(
     ref: RepoRef,
     number: number,
-  ): Promise<ReadonlyMap<number, ThreadLastReply | undefined>> {
-    const overlays = new Map<number, ThreadLastReply | undefined>();
+  ): Promise<ReadonlyMap<number, ThreadOverlay>> {
+    const overlays = new Map<number, ThreadOverlay>();
     try {
       let cursor: string | null = null;
       for (let page = 1; page <= 20; page += 1) {
@@ -378,7 +456,7 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
         cursor = next;
       }
     } catch {
-      // Best-effort: see `markResolved`'s doc comment. A failed lookup is not a failed review.
+      // Best-effort: see `applyThreadOverlays`'s doc comment. A failed lookup is not a failed review.
       return new Map();
     }
     return overlays;

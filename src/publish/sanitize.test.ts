@@ -69,12 +69,15 @@ describe("sanitizeFindingBody", () => {
       });
     });
 
+    /**
+     * A bare `scheme://` or `www.` URL used to be an unconditional rejection here. It is now
+     * neutralized instead — see the "neutralization" describe block below — for every shape
+     * except this protocol-relative one: out of scope on purpose (`LINK_NEUTRALIZE`'s own
+     * comment), so it still rejects.
+     */
     it.each([
-      ["https url", `${VALID} see https://example.test/docs`],
       ["protocol-relative", `${VALID}\n//example.test/x`],
       ["protocol-relative, indented", `${VALID}\n//sub-domain.example.test/x`],
-      ["bare www", `${VALID} www.example.test`],
-      ["custom scheme", `${VALID} data://payload`],
     ])("rejects %s", (_name, body) => {
       expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "link" });
     });
@@ -93,9 +96,8 @@ describe("sanitizeFindingBody", () => {
       expect(sanitizeFindingBody(body).ok).toBe(true);
     });
 
-    it("rejects an @mention, which would notify a real person on the model's behalf", () => {
-      expect(sanitizeFindingBody(`${VALID} cc @octocat`)).toEqual({ ok: false, reason: "mention" });
-    });
+    // An @mention outside code used to be an unconditional rejection here too. It is now
+    // neutralized instead — see the "neutralization" describe block below.
 
     it("does not treat an email-like token inside code as a mention", () => {
       expect(sanitizeFindingBody(`${VALID} the value \`user@host\` is unvalidated`).ok).toBe(true);
@@ -166,6 +168,170 @@ describe("code-region masking (the corpus-blocking html false positive)", () => 
    */
   it("does not backtrack catastrophically on a body of backticks", () => {
     const hostile = "`".repeat(2000) + "<b>x</b>" + "`".repeat(2000);
+    const started = performance.now();
+    sanitizeFindingBody(hostile);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
+});
+
+describe("neutralization (turning a reversible formatting slip into inline code)", () => {
+  describe("rewrites and publishes what is provably reversible", () => {
+    it.each([
+      ["a JSDoc-style mention", `${VALID} Document the @param tag.`, "@param"],
+      ["a mention that looks like a real username", `${VALID} cc @octocat`, "@octocat"],
+      ["a scoped-package mention", `${VALID} bump the @types/node version`, "@types/node"],
+      ["a bare https URL", `${VALID} see https://example.test/docs`, "https://example.test/docs"],
+      ["a bare www host", `${VALID} check www.example.test`, "www.example.test"],
+      ["a non-http scheme", `${VALID} points at data://payload`, "data://payload"],
+      [
+        "an unbackticked generic",
+        `${VALID} Indexing a plain Record<string, string> resolves it.`,
+        "Record<string, string>",
+      ],
+    ])("neutralizes %s instead of discarding the finding", (_name, body, token) => {
+      const result = sanitizeFindingBody(body);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.body).toBe(body.replace(token, `\`${token}\``));
+      expect(result.neutralized).toBe(1);
+    });
+
+    it("stops a neutralized URL before trailing sentence punctuation, not inside it", () => {
+      const body = `${VALID} See https://example.test/docs, for details.`;
+      expect(sanitizeFindingBody(body)).toEqual({
+        ok: true,
+        body: `${VALID} See \`https://example.test/docs\`, for details.`,
+        neutralized: 1,
+      });
+    });
+
+    it("wraps a nested generic as a single span, not two overlapping ones", () => {
+      const body = `${VALID} Accepts a Map<string, Array<number>> today.`;
+      expect(sanitizeFindingBody(body)).toEqual({
+        ok: true,
+        body: `${VALID} Accepts a \`Map<string, Array<number>>\` today.`,
+        neutralized: 1,
+      });
+    });
+
+    it("neutralizes more than one span in the same body, in one pass", () => {
+      const body = `${VALID} cc @octocat, see https://example.test/docs.`;
+      const result = sanitizeFindingBody(body);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.body).toBe(`${VALID} cc \`@octocat\`, see \`https://example.test/docs\`.`);
+        expect(result.neutralized).toBe(2);
+      }
+    });
+
+    it("leaves `@` alone when not followed by a letter or digit — never a mention shape at all", () => {
+      const body = `${VALID} an array literal like @-verbatim is not a mention.`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: true, body });
+    });
+  });
+
+  describe("still rejects what is not provably reversible", () => {
+    it("does not neutralize a Markdown link's destination — the syntax itself must stay rejected", () => {
+      const body = `${VALID} Documented at [the guide](https://example.test/docs).`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "link" });
+    });
+
+    it("does not neutralize a Markdown image's destination", () => {
+      const body = `${VALID} See ![diagram](https://example.test/diagram.png) below.`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "image" });
+    });
+
+    it("still rejects a bare HTML tag — no identifier precedes it to read as a generic", () => {
+      const body = `${VALID} This renders <div>content</div> inline.`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "html" });
+    });
+
+    it("still rejects a credential, evaluated before neutralization ever runs", () => {
+      const body = `${VALID} cc @octocat ghp_abcdefghijklmnopqrstuvwxyz0123456789`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "credential" });
+    });
+
+    it("still rejects a suggestion fence, unaffected by neutralization", () => {
+      const body = `${VALID}\n\n\`\`\`suggestion\nfixed()\n\`\`\``;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "suggestion_block" });
+    });
+
+    it("still rejects a zero-width carrier, unaffected by neutralization", () => {
+      expect(sanitizeFindingBody(`${VALID}${ch(0x200b)}hidden`)).toEqual({
+        ok: false,
+        reason: "zero_width",
+      });
+    });
+
+    /**
+     * Masking cannot tell code from prose once a fence never closes (see `maskFencedBlocks`), so
+     * neutralization must not run at all there — not just skip the unclosed region, the whole
+     * body. Pinned for both an inner `<` and an inner `@`, since the gate is meant to be uniform
+     * across every neutralization category, not special-cased per check.
+     */
+    it("skips neutralization entirely inside an unclosed fence, so an inner generic still rejects", () => {
+      const body = `${VALID}\n\n\`\`\`\nIndexing a plain Record<string, string> resolves it.`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "html" });
+    });
+
+    it("skips neutralization entirely inside an unclosed fence, so an inner mention still rejects", () => {
+      const body = `${VALID}\n\n\`\`\`\ncc @octocat, see the diff.`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "mention" });
+    });
+  });
+
+  describe("never rewrites what is already inside a code span", () => {
+    it("leaves an @mention inside backticks untouched, with nothing neutralized", () => {
+      const body = `${VALID} the tag \`@param\` is documented above.`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: true, body });
+    });
+
+    it("leaves a generic already inside backticks untouched, with nothing neutralized", () => {
+      const body = "Indexing a plain `Record<string, string>` resolves it.";
+      expect(sanitizeFindingBody(body)).toEqual({ ok: true, body });
+    });
+
+    it("leaves a URL already inside a fenced block untouched, with nothing neutralized", () => {
+      const body = "Configured via:\n\n```\nhttps://example.test/docs\n```";
+      expect(sanitizeFindingBody(body)).toEqual({ ok: true, body });
+    });
+  });
+
+  it("rewrites nothing on a second pass over an already-neutralized body", () => {
+    const first = sanitizeFindingBody(`${VALID} cc @octocat, see https://example.test/docs.`);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.neutralized).toBe(2);
+    const second = sanitizeFindingBody(first.body);
+    expect(second).toEqual({ ok: true, body: first.body });
+  });
+
+  describe("bounds, checked after neutralization", () => {
+    // A backtick pair adds two characters, so a body that only clears 8000 once its own rewrite
+    // is undone must still be rejected — honesty about size outranks the convenience of a rewrite
+    // that only fits by construction.
+    it("rejects a body that only exceeds 8000 characters because neutralization added backticks", () => {
+      const body = `${"x".repeat(7996)} @a`;
+      expect(body.length).toBe(7999);
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "too_long" });
+    });
+
+    it("still neutralizes the identical shape comfortably under the bound", () => {
+      const body = `${"x".repeat(100)} @a`;
+      const result = sanitizeFindingBody(body);
+      expect(result.ok).toBe(true);
+      if (result.ok) expect(result.neutralized).toBe(1);
+    });
+  });
+
+  /**
+   * Every candidate here is `identifier<`, immediately followed by another identifier character —
+   * a shape `genericSpans` must consider and then reject as unbalanced, over and over, on a body
+   * built entirely out of that shape. A regression pin, not a benchmark: bounded (polynomial, not
+   * exponential) work on adversarial input is the property, not a specific millisecond figure.
+   */
+  it("does not blow up scanning many unbalanced identifier-then-`<` candidates", () => {
+    const hostile = `${VALID} ${"a<".repeat(2000)}`;
     const started = performance.now();
     sanitizeFindingBody(hostile);
     expect(performance.now() - started).toBeLessThan(1000);

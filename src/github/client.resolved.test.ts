@@ -5,10 +5,15 @@ import { GitHubClient } from "./client.js";
 
 /**
  * The REST comments endpoint has no notion of thread resolution — only GraphQL's
- * `PullRequestReviewThread.isResolved`/`isOutdated` answer it (Keiko-for-Quality#38, requirement 3:
- * "resolved/outdated conversations must not suppress"). These pin `listReviewComments`' merge of
- * that GraphQL lookup onto the REST comments it already reads, and its fail-safe degradation: a
- * broken lookup must cost nothing but the optimization it exists to provide.
+ * `PullRequestReviewThread.isResolved`/`isOutdated` answer it. These pin `listReviewComments`'s merge
+ * of that GraphQL lookup onto the REST comments it already reads — `resolved` and `outdated` surfaced
+ * as two independent facts, never folded into one flag (see `ReviewComment.resolved`/`outdated` in
+ * `client.ts` for why that split matters to deduplication) — and its fail-safe degradation: a broken
+ * lookup must cost nothing but the optimization it exists to provide, so a failure degrades BOTH
+ * facts to "unknown", which every caller downstream treats the same as "open" (Keiko-for-Quality#38,
+ * requirement 3: "resolved/outdated conversations must not suppress" — still exactly true for the
+ * similarity stage; see `publish/publisher.ts`'s `ownMarkers` for the one stage that now reads
+ * `outdated` differently, on purpose).
  */
 
 const REF = { owner: "acme", repo: "widget" };
@@ -76,7 +81,7 @@ describe("GitHubClient.listReviewComments resolved/outdated merge", () => {
     globalThis.fetch = original;
   });
 
-  it("marks a comment resolved when its thread is resolved", async () => {
+  it("marks a comment resolved, and not outdated, when its thread is resolved", async () => {
     globalThis.fetch = routingFetch(
       [[restComment(10), restComment(11)]],
       [threadsResponse([{ isResolved: true, comments: { nodes: [{ databaseId: 10 }] } }])],
@@ -86,10 +91,21 @@ describe("GitHubClient.listReviewComments resolved/outdated merge", () => {
     const comments = await client.listReviewComments(REF, 1);
 
     expect(comments.find((c) => c.id === 10)?.resolved).toBe(true);
+    expect(comments.find((c) => c.id === 10)?.outdated).toBeUndefined();
     expect(comments.find((c) => c.id === 11)?.resolved).toBeUndefined();
   });
 
-  it("marks a comment resolved when its thread is merely outdated", async () => {
+  /**
+   * The dominant source of this reviewer's own duplicate findings, measured live in the reviewer
+   * arena: GitHub marks a thread outdated the instant a push moves its hunk, regardless of whether
+   * anyone ever answered it. Before `resolved` and `outdated` were split into independent facts here,
+   * this thread would have read as `resolved: true` — indistinguishable from a genuinely resolved
+   * one — and `publish/publisher.ts`'s exact-marker stage would have read that as license to
+   * republish an already-published, still-open finding as a brand-new conversation on every push
+   * that touched the file. This is the client-level half of that fix: the two facts must arrive
+   * independently, never folded, so a caller downstream can tell them apart.
+   */
+  it("marks a comment outdated, but NOT genuinely resolved, when its thread is merely outdated", async () => {
     globalThis.fetch = routingFetch(
       [[restComment(20)]],
       [threadsResponse([{ isOutdated: true, comments: { nodes: [{ databaseId: 20 }] } }])],
@@ -98,10 +114,30 @@ describe("GitHubClient.listReviewComments resolved/outdated merge", () => {
 
     const comments = await client.listReviewComments(REF, 1);
 
-    expect(comments[0]?.resolved).toBe(true);
+    expect(comments[0]?.outdated).toBe(true);
+    expect(comments[0]?.resolved).toBeUndefined();
   });
 
-  it("leaves every comment unresolved when no thread is resolved or outdated", async () => {
+  // GitHub sets `isResolved` and `isOutdated` independently: a thread can be both at once (someone
+  // resolved it, and a later push also moved its hunk). Both facts must surface, not just one.
+  it("marks a comment both resolved and outdated when its thread is genuinely both", async () => {
+    globalThis.fetch = routingFetch(
+      [[restComment(22)]],
+      [
+        threadsResponse([
+          { isResolved: true, isOutdated: true, comments: { nodes: [{ databaseId: 22 }] } },
+        ]),
+      ],
+    );
+    const client = new GitHubClient("https://api.example.test", "token");
+
+    const comments = await client.listReviewComments(REF, 1);
+
+    expect(comments[0]?.resolved).toBe(true);
+    expect(comments[0]?.outdated).toBe(true);
+  });
+
+  it("leaves every comment unresolved and not outdated when no thread is resolved or outdated", async () => {
     globalThis.fetch = routingFetch(
       [[restComment(30)]],
       [
@@ -115,6 +151,7 @@ describe("GitHubClient.listReviewComments resolved/outdated merge", () => {
     const comments = await client.listReviewComments(REF, 1);
 
     expect(comments[0]?.resolved).toBeUndefined();
+    expect(comments[0]?.outdated).toBeUndefined();
   });
 
   it("follows GraphQL pagination across multiple thread pages", async () => {
@@ -196,7 +233,8 @@ describe("GitHubClient.listReviewComments resolved/outdated merge", () => {
       const comments = await client.listReviewComments(REF, 1);
 
       const comment = comments.find((c) => c.id === 81);
-      expect(comment?.resolved).toBe(true);
+      expect(comment?.outdated).toBe(true);
+      expect(comment?.resolved).toBeUndefined();
       expect(comment?.lastReply).toBeUndefined();
     });
 
@@ -322,7 +360,9 @@ describe("GitHubClient.listReviewComments resolved/outdated merge", () => {
     });
   });
 
-  it("degrades to unresolved for everyone when the GraphQL call fails, without throwing", async () => {
+  // Both facts must degrade together: a caller that only checked `resolved` for "unknown" and forgot
+  // `outdated` would still read this comment as eligible for suppression on a false premise.
+  it("degrades to unresolved AND not-outdated for everyone when the GraphQL call fails, without throwing", async () => {
     // 403, not a retryable status: this is the realistic shape of the failure (a token without
     // GraphQL scope), and it keeps the test from paying the retry/backoff delay a 5xx would trigger.
     globalThis.fetch = ((input: string | URL | Request) => {
@@ -336,15 +376,17 @@ describe("GitHubClient.listReviewComments resolved/outdated merge", () => {
 
     expect(comments).toHaveLength(1);
     expect(comments[0]?.resolved).toBeUndefined();
+    expect(comments[0]?.outdated).toBeUndefined();
   });
 
-  it("degrades to unresolved when GraphQL answers with an errors payload", async () => {
+  it("degrades to unresolved AND not-outdated when GraphQL answers with an errors payload", async () => {
     globalThis.fetch = routingFetch([[restComment(60)]], [{ errors: [{ message: "not found" }] }]);
     const client = new GitHubClient("https://api.example.test", "token");
 
     const comments = await client.listReviewComments(REF, 1);
 
     expect(comments[0]?.resolved).toBeUndefined();
+    expect(comments[0]?.outdated).toBeUndefined();
   });
 
   it("reads the line anchor from REST fields, falling back to the original position once outdated", async () => {
