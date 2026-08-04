@@ -29,14 +29,23 @@ export class AcquisitionError extends Error {
 /** 256 MiB. Far above any plausible engine binary, far below a memory-exhaustion payload. */
 const MAX_BINARY_BYTES = 256 * 1024 * 1024;
 
-async function download(url: string): Promise<Buffer> {
+function reportDownloadFailed(diagnostics: Diagnostics, version: EnginePin["version"]): never {
+  diagnostics.record("engine.acquire.download_failed", { version });
+  throw new AcquisitionError("engine.acquire.download_failed");
+}
+
+async function download(
+  url: string,
+  diagnostics: Diagnostics,
+  version: EnginePin["version"],
+): Promise<Buffer> {
   const response = await fetch(url, { redirect: "follow" });
-  if (!response.ok) throw new AcquisitionError("engine.acquire.download_failed");
+  if (!response.ok) reportDownloadFailed(diagnostics, version);
   const declared = Number(response.headers.get("content-length") ?? "0");
-  if (declared > MAX_BINARY_BYTES) throw new AcquisitionError("engine.acquire.download_failed");
+  if (declared > MAX_BINARY_BYTES) reportDownloadFailed(diagnostics, version);
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_BINARY_BYTES) {
-    throw new AcquisitionError("engine.acquire.download_failed");
+    reportDownloadFailed(diagnostics, version);
   }
   return bytes;
 }
@@ -134,7 +143,7 @@ async function acquireVerifiedBytes(
   const cached = await readCachedIfValid(cachedPath, target);
   if (cached !== undefined) return { bytes: cached, cacheHit: true };
 
-  const bytes = await download(assetUrl(pin, target.asset));
+  const bytes = await download(assetUrl(pin, target.asset), diagnostics, pin.version);
   const actual = digestOf(bytes);
   if (actual !== (target.sha256 as string)) {
     diagnostics.record("engine.acquire.digest_mismatch", {

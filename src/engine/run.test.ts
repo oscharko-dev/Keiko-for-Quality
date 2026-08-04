@@ -279,3 +279,63 @@ describe("runEngine: model.usage telemetry", () => {
     }
   });
 });
+
+/**
+ * Which `engine.run.*` diagnostic a failed `review` invocation is classified under. `ExecFailure`
+ * carries `timedOut` (git/exec.ts) precisely so this classification does not have to guess from a
+ * bare exit code — a killed-by-timeout process and an ordinary non-zero exit both report `code`s
+ * that mean nothing on their own (Node reports no real exit code for a timeout kill).
+ */
+describe("runEngine: exec failure classification", () => {
+  beforeEach(() => {
+    execRunMock.mockReset();
+  });
+
+  /** Succeeds the `config set` call unconditionally; only the `review` invocation fails. */
+  function failReviewWith(
+    error: unknown,
+  ): (command: string, args: readonly string[]) => Promise<ExecResult> {
+    return (_command, args) => {
+      if (args[0] === "review") throw error;
+      return Promise.resolve({ stdout: Buffer.from(""), stderr: "", code: 0 });
+    };
+  }
+
+  it("classifies a timed-out exec failure as engine.run.timeout, not nonzero_exit", async () => {
+    execRunMock.mockImplementation(failReviewWith(new ExecFailure("ocr", 1, true)));
+    const diagnostics = createSilentDiagnostics();
+
+    await expect(
+      runEngine(options({ env: { MODEL_TOKEN: "secret" } }), diagnostics),
+    ).rejects.toMatchObject({ reason: "engine.run.timeout" });
+
+    const codes = diagnostics.drain().map((record) => record.code);
+    expect(codes).toContain("engine.run.timeout");
+    expect(codes).not.toContain("engine.run.nonzero_exit");
+  });
+
+  it("still classifies an ordinary non-zero exit as engine.run.nonzero_exit", async () => {
+    execRunMock.mockImplementation(failReviewWith(new ExecFailure("ocr", 1, false)));
+    const diagnostics = createSilentDiagnostics();
+
+    await expect(
+      runEngine(options({ env: { MODEL_TOKEN: "secret" } }), diagnostics),
+    ).rejects.toMatchObject({ reason: "engine.run.nonzero_exit" });
+
+    const codes = diagnostics.drain().map((record) => record.code);
+    expect(codes).toContain("engine.run.nonzero_exit");
+    expect(codes).not.toContain("engine.run.timeout");
+  });
+
+  it("classifies a non-ExecFailure error as engine.run.spawn_failed", async () => {
+    execRunMock.mockImplementation(failReviewWith(new Error("boom")));
+    const diagnostics = createSilentDiagnostics();
+
+    await expect(
+      runEngine(options({ env: { MODEL_TOKEN: "secret" } }), diagnostics),
+    ).rejects.toMatchObject({ reason: "engine.run.spawn_failed" });
+
+    const codes = diagnostics.drain().map((record) => record.code);
+    expect(codes).toContain("engine.run.spawn_failed");
+  });
+});
