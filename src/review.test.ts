@@ -41,6 +41,22 @@ const { computeAllottedBudget, performReview } = await import("./review.js");
 const { EngineRunError } = await import("./engine/run.js");
 
 /**
+ * `performReview`'s `finally` block (v0.13.0, notice cleanup) now unconditionally calls
+ * `client.resolveSupersededOwnNotices` after every run, on every `GitHubClient` instance this file
+ * constructs — dozens of them, most via `baseRequest`, several inline in their own test. Spying on
+ * the PROTOTYPE once here, rather than adding the same spy to every construction site, is what keeps
+ * every one of those existing tests exercising a real, unmocked instance from making a real network
+ * call the moment this method runs — the call would still resolve to `0` (the method is best-effort
+ * and never throws), but only after paying a real DNS/connect attempt against a host
+ * (`api.example.test`) that resolves nowhere, on every single test in this file. A test that wants to
+ * assert on this call re-spies its own `client` instance, which shadows this prototype default for
+ * that instance alone.
+ */
+beforeEach(() => {
+  vi.spyOn(GitHubClient.prototype, "resolveSupersededOwnNotices").mockResolvedValue(0);
+});
+
+/**
  * The pin covers this platform or this suite cannot run here — never a silent skip.
  *
  * `currentPlatformDigest()` returns `undefined` on any platform `ENGINE_PIN.platforms` does not
@@ -881,6 +897,141 @@ describe("performReview: review-cache memoization end to end", () => {
     // which is what a run that reached `finalizeCacheStore` with an empty covered set would return.
     expect(report.updatedCacheStore).toBeUndefined();
     expect(report.cacheAppended).toBe(0);
+  });
+
+  /**
+   * The wiring half of the notice-cleanup feature — `GitHubClient.notice-cleanup.test.ts` pins the
+   * client-level mechanics (which threads qualify, the mutation itself); these pin that
+   * `performReview` actually reaches it, with the right arguments, on every outcome, and that its
+   * result only ever adds a diagnostic — never changes what the run reports.
+   */
+  describe("performReview: superseded-notice cleanup (v0.13.0)", () => {
+    it("calls resolveSupersededOwnNotices with this run's own ref/pull/identity on a complete run", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const request = baseRequest(undefined);
+      const cleanupSpy = vi
+        .spyOn(request.client, "resolveSupersededOwnNotices")
+        .mockResolvedValue(0);
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(cleanupSpy).toHaveBeenCalledWith(
+        request.ref,
+        request.pullNumber,
+        request.identity,
+        expect.any(Function),
+      );
+      // The predicate handed across is the real detector, not a stand-in — a notice's own fixed
+      // template must be recognised, and ordinary finding prose must not.
+      const predicate = cleanupSpy.mock.calls[0]?.[3] as (body: string) => boolean;
+      expect(predicate("Keiko for Quality could not complete its review. Reason code: `x`.")).toBe(
+        true,
+      );
+      expect(predicate("The retry loop never resets its attempt counter.")).toBe(false);
+    });
+
+    it("still calls it when this run itself settles incomplete", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "failed",
+          summary: { files_reviewed: 1, total_tokens: 1000, budget_exceeded: false },
+          comments: [],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      const request = baseRequest(undefined);
+      vi.spyOn(request.client, "createReviewComment").mockRejectedValue(new GitHubApiError(422));
+      const cleanupSpy = vi
+        .spyOn(request.client, "resolveSupersededOwnNotices")
+        .mockResolvedValue(0);
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("incomplete");
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("still calls it when the run is abandoned on a moved head", async () => {
+      const request = baseRequest(undefined);
+      vi.spyOn(request.client, "getPullRequest").mockResolvedValue({
+        headSha: commitSha("f".repeat(40)),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      });
+      const cleanupSpy = vi
+        .spyOn(request.client, "resolveSupersededOwnNotices")
+        .mockResolvedValue(0);
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("abandoned");
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("records a diagnostic only when at least one notice was actually resolved", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const request = baseRequest(undefined);
+      vi.spyOn(request.client, "resolveSupersededOwnNotices").mockResolvedValue(3);
+
+      const diagnostics = createSilentDiagnostics();
+      await performReview(request, diagnostics);
+
+      const record = diagnostics
+        .drain()
+        .find((r) => r.code === "cleanup.superseded_notices_resolved");
+      expect(record?.counts).toStrictEqual({ resolved: 3 });
+    });
+
+    it("records nothing when there was nothing to resolve", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const request = baseRequest(undefined);
+      vi.spyOn(request.client, "resolveSupersededOwnNotices").mockResolvedValue(0);
+
+      const diagnostics = createSilentDiagnostics();
+      await performReview(request, diagnostics);
+
+      const codes = diagnostics.drain().map((r) => r.code);
+      expect(codes).not.toContain("cleanup.superseded_notices_resolved");
+    });
+
+    /**
+     * `GitHubClient`'s own implementation never throws, but `ReviewCommentApi` is an interface —
+     * nothing structural stops some other implementer from rejecting, so `performReview` wraps the
+     * call itself defensively too (`review.ts`). A cleanup pass that fails must cost the next push
+     * one more stale thread, never the review this run actually produced.
+     */
+    it("does not fail the run when the cleanup call itself rejects", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const request = baseRequest(undefined);
+      vi.spyOn(request.client, "resolveSupersededOwnNotices").mockRejectedValue(
+        new Error("graphql unavailable"),
+      );
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(request, diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      const codes = diagnostics.drain().map((r) => r.code);
+      expect(codes).not.toContain("cleanup.superseded_notices_resolved");
+    });
   });
 
   describe("performReview: bounded single resume (#57)", () => {

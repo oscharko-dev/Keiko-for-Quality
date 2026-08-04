@@ -63,6 +63,7 @@ import {
   type PublishContext,
   type PublishOutcome,
 } from "./publish/publisher.js";
+import { isIncompleteNoticeBody } from "./publish/presentation.js";
 
 export interface ReviewRequest {
   readonly client: GitHubClient;
@@ -1661,6 +1662,40 @@ export async function performReview(
           total: ledger.engine + ledger.classify,
         },
       });
+    }
+    // Cleanup, not review: resolves this reviewer's own past incomplete-review notices whose target
+    // commit is no longer HEAD, so the "every conversation resolved" branch protection AGENTS.md
+    // documents (see its "Landing changes here" section) does not force a human to hand-resolve a
+    // notice that a later run — this one or an earlier one — already superseded. Deliberately
+    // unconditional on the outcome above: whether this run completed, settled incomplete, or was
+    // abandoned because a newer head already exists, a THREAD about an OLDER head being outdated is
+    // a fact about that thread alone, established by GitHub, not by anything this run decided.
+    // `resolveSupersededOwnNotices` is best-effort end to end (`github/client.ts`) and never throws,
+    // so it cannot turn a successful review into a failed one, or mask a genuine failure above with
+    // its own.
+    // `GitHubClient`'s own implementation never throws — every failure inside it, at either the
+    // lookup or the mutation, is already caught and folded into a lower resolved count. This
+    // `try` is defense in depth, not a hedge against a known gap: `ReviewCommentApi` is an
+    // interface, so nothing STRUCTURALLY stops a different implementer (a test double, a future
+    // alternative client) from rejecting, and cleanup must not be the thing that turns a genuinely
+    // successful review into a failed one just because it ran last, in the same `finally` that
+    // reports `run.spend`.
+    try {
+      const staleNoticesResolved = await request.client.resolveSupersededOwnNotices(
+        request.ref,
+        request.pullNumber,
+        request.identity,
+        isIncompleteNoticeBody,
+      );
+      if (staleNoticesResolved > 0) {
+        diagnostics.record("cleanup.superseded_notices_resolved", {
+          headSha: request.head,
+          counts: { resolved: staleNoticesResolved },
+        });
+      }
+    } catch {
+      // Nothing to report: a failed cleanup pass costs the next push one more stale thread to
+      // resolve by hand, never a failed review.
     }
   }
 }

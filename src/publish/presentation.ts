@@ -185,6 +185,23 @@ export function composeIncompleteNotice(reasonCode: string, marker: string): str
   ].join("\n");
 }
 
+/**
+ * True for a comment body this exact function produced — a fixed, product-controlled sentence,
+ * never model content, and never reachable from `composeFindingBody`: no entry in `CATEGORIES`
+ * above maps to "Coverage", the label line every incomplete notice starts with, so the two composers
+ * can never collide on their opening line, and the sentence checked here is stricter still.
+ *
+ * Exists so a later run can recognise its OWN past incomplete notices well enough to resolve the
+ * ones a subsequent push has superseded (`github/client.ts`'s `resolveSupersededOwnNotices`),
+ * without re-deriving the exact reason-code/head/path fingerprint that produced any given one just
+ * to ask "was this mine". Kept next to `composeIncompleteNotice` on purpose, the same discipline
+ * `rule-file.ts`/`sanitize.ts` document for themselves: change the template, update the detector in
+ * the same diff, or a later run stops recognising its own past notices.
+ */
+export function isIncompleteNoticeBody(body: string): boolean {
+  return body.includes("Keiko for Quality could not complete its review.");
+}
+
 /** Mirrors `ReviewOutcome` (`review.ts`) without importing it, so `publish/` never depends on the
  *  top-level review orchestrator — only the orchestrator depends on `publish/`. */
 export type SummaryOutcome = "complete" | "incomplete" | "abandoned";

@@ -100,6 +100,12 @@ class FakeApi implements ReviewCommentApi {
     if (found === undefined) return Promise.reject(new GitHubApiError(404));
     return Promise.resolve({ ...found, ...this.readBackOverride });
   }
+
+  /** Never exercised by this suite — the cleanup pass is a `review.ts`-level concern (`review.test.ts`
+   *  covers it), never reached from anything `publisher.ts` itself calls. */
+  public resolveSupersededOwnNotices(): Promise<number> {
+    return Promise.resolve(0);
+  }
 }
 
 function finding(overrides: Partial<EngineFinding> = {}): EngineFinding {

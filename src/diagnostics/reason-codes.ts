@@ -180,6 +180,13 @@ export const REASON_CODES = [
   // tokens — the number that decides whether prefix caching is working at all, which no other
   // layer can see. Counts only, like every other record: the proxy never quotes what it forwards.
   "model.usage",
+
+  // Superseded-notice cleanup: this reviewer's own past incomplete-review notices, resolved because
+  // a later push moved the hunk they anchored (`github/client.ts`'s `resolveSupersededOwnNotices`).
+  // Never affects completeness — a resolved GitHub thread is not a claim about review coverage, only
+  // about whether an operator still has to look at it. Recorded only when `resolved > 0`, the same
+  // "only when something happened" posture `run.spend` takes.
+  "cleanup.superseded_notices_resolved",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];

@@ -110,6 +110,12 @@ export interface ReviewCommentApi {
     input: ReviewCommentInput,
   ): Promise<ReviewComment>;
   getReviewComment(ref: RepoRef, id: number): Promise<ReviewComment>;
+  resolveSupersededOwnNotices(
+    ref: RepoRef,
+    number: number,
+    identity: string,
+    isNoticeBody: (body: string) => boolean,
+  ): Promise<number>;
 }
 
 /**
@@ -209,9 +215,10 @@ const RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: 
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $cursor) {
         nodes {
+          id
           isResolved
           isOutdated
-          comments(first: 100) { nodes { databaseId } }
+          comments(first: 100) { nodes { databaseId author { login } body } }
           lastComment: comments(last: 1) { nodes { author { login } body } }
         }
         pageInfo { hasNextPage endCursor }
@@ -221,9 +228,16 @@ const RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: 
 }`;
 
 interface ReviewThreadNode {
+  readonly id?: unknown;
   readonly isResolved?: unknown;
   readonly isOutdated?: unknown;
-  readonly comments?: { readonly nodes?: readonly { readonly databaseId?: unknown }[] };
+  readonly comments?: {
+    readonly nodes?: readonly {
+      readonly databaseId?: unknown;
+      readonly author?: { readonly login?: unknown } | null;
+      readonly body?: unknown;
+    }[];
+  };
   readonly lastComment?: {
     readonly nodes?: readonly {
       readonly author?: { readonly login?: unknown } | null;
@@ -296,6 +310,56 @@ function collectThreadOverlays(
       }
     }
   }
+}
+
+/**
+ * The GraphQL node ids of every thread this reviewer should resolve as superseded — the reads half
+ * of `resolveSupersededOwnNotices`, split out so it can be unit-tested against raw query nodes the
+ * same way `collectThreadOverlays` already is.
+ *
+ * A thread qualifies on three independent facts, all conjunctive: GitHub reports it OUTDATED (a
+ * later push moved the diff hunk this thread anchored — so whatever it says is about a commit that
+ * is no longer HEAD), still UNRESOLVED (nobody has already closed it, by hand or otherwise — a
+ * resolved thread is not this function's concern either way), and it carries at least one comment
+ * authored by `identity` whose body `isNoticeBody` recognises as this reviewer's own incomplete-
+ * review notice — never a finding, however outdated: a finding is an open question for a human, and
+ * auto-resolving it would defeat the entire point of raising it (Keiko-for-Quality#38's contract
+ * that a merely-outdated thread must not read as answered applies with even more force to a thread
+ * this function would resolve outright, not just treat as ineligible for a later match). Checked
+ * across the thread's own first 100 comments, not just its first: a human may have replied to the
+ * notice before this reviewer ever revisits the pull request, which still leaves the notice itself,
+ * wherever it sits in the thread, exactly as stale.
+ */
+function collectResolvableNoticeThreadIds(
+  nodes: readonly ReviewThreadNode[],
+  identity: string,
+  isNoticeBody: (body: string) => boolean,
+  into: string[],
+): void {
+  for (const node of nodes) {
+    if (node.isOutdated !== true || node.isResolved === true) continue;
+    if (typeof node.id !== "string") continue;
+    const hasOwnNotice = (node.comments?.nodes ?? []).some(
+      (comment) =>
+        comment.author?.login === identity &&
+        typeof comment.body === "string" &&
+        isNoticeBody(comment.body),
+    );
+    if (hasOwnNotice) into.push(node.id);
+  }
+}
+
+const RESOLVE_REVIEW_THREAD_MUTATION = `mutation($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) {
+    thread { id isResolved }
+  }
+}`;
+
+interface ResolveReviewThreadResponse {
+  readonly data?: {
+    readonly resolveReviewThread?: { readonly thread?: { readonly isResolved?: unknown } };
+  };
+  readonly errors?: unknown;
 }
 
 /** A GraphQL error response, or one with no page at all, ends the walk with nothing more to add. */
@@ -467,6 +531,91 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
       return new Map();
     }
     return overlays;
+  }
+
+  /**
+   * A second, separate walk of the same GraphQL connection `fetchThreadOverlays` reads, rather than
+   * threading `identity` and a body predicate through that general-purpose method: the two answer
+   * different questions for different callers (every comment's dedup-relevant state, versus which
+   * threads a cleanup pass should mutate), and `fetchThreadOverlays` runs on the hot dedup-prefetch
+   * path this method must never affect the shape or cost of. The duplicated pagination shell is a
+   * dozen identical lines, not a design this file has any other copy of to drift from.
+   */
+  private async fetchResolvableNoticeThreadIds(
+    ref: RepoRef,
+    number: number,
+    identity: string,
+    isNoticeBody: (body: string) => boolean,
+  ): Promise<readonly string[]> {
+    const ids: string[] = [];
+    try {
+      let cursor: string | null = null;
+      for (let page = 1; page <= 20; page += 1) {
+        const raw = (await this.graphqlJson(RESOLVED_THREADS_QUERY, {
+          owner: ref.owner,
+          repo: ref.repo,
+          number,
+          cursor,
+        })) as ReviewThreadsResponse;
+        const threads = reviewThreadsPage(raw);
+        if (threads === undefined) break;
+        collectResolvableNoticeThreadIds(threads.nodes ?? [], identity, isNoticeBody, ids);
+        const next = nextThreadsCursor(threads);
+        if (next === undefined) break;
+        cursor = next;
+      }
+    } catch {
+      // Best-effort, same posture as `fetchThreadOverlays`: whatever this pass found before the
+      // failure is discarded rather than acted on half-way — the next run tries again from scratch.
+      return [];
+    }
+    return ids;
+  }
+
+  /** One `resolveReviewThread` mutation. `false` on any failure — malformed response, GraphQL
+   *  `errors`, a thrown request error — never thrown, so one bad id cannot stop the rest of the
+   *  batch `resolveSupersededOwnNotices` is working through. */
+  private async resolveThread(threadId: string): Promise<boolean> {
+    try {
+      const raw = (await this.graphqlJson(RESOLVE_REVIEW_THREAD_MUTATION, {
+        threadId,
+      })) as ResolveReviewThreadResponse;
+      if (raw.errors !== undefined) return false;
+      return raw.data?.resolveReviewThread?.thread?.isResolved === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Resolves every one of this reviewer's own superseded incomplete-review notices on the pull
+   * request — see `collectResolvableNoticeThreadIds` for exactly what "superseded" means and why a
+   * finding thread can never qualify.
+   *
+   * Why this belongs on the client rather than being folded into `applyThreadOverlays`'s existing
+   * walk: this is the one method on this class that WRITES rather than reads, and it is reached from
+   * a different place in the review pipeline (once, after a run's own outcome is already decided)
+   * than the read-only dedup prefetch (before every publish decision, and the only path a local,
+   * publication-free run ever takes). Keeping it a separate, explicitly-named call is what lets a
+   * caller decide when a mutation is appropriate instead of one firing implicitly inside a read.
+   *
+   * Best-effort end to end, matching the class's posture everywhere else a GraphQL lookup feeds
+   * something that is never load-bearing for review correctness: a failed lookup or a failed resolve
+   * costs this run a stale thread staying open one push longer, never a failed review. Returns the
+   * count actually resolved, purely for diagnostics — no caller branches on it.
+   */
+  public async resolveSupersededOwnNotices(
+    ref: RepoRef,
+    number: number,
+    identity: string,
+    isNoticeBody: (body: string) => boolean,
+  ): Promise<number> {
+    const ids = await this.fetchResolvableNoticeThreadIds(ref, number, identity, isNoticeBody);
+    let resolved = 0;
+    for (const threadId of ids) {
+      if (await this.resolveThread(threadId)) resolved += 1;
+    }
+    return resolved;
   }
 
   public async createReviewComment(

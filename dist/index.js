@@ -1165,7 +1165,13 @@ var REASON_CODES = [
   // independent of the engine's self-report. `cached` carries the provider-reported cached prompt
   // tokens — the number that decides whether prefix caching is working at all, which no other
   // layer can see. Counts only, like every other record: the proxy never quotes what it forwards.
-  "model.usage"
+  "model.usage",
+  // Superseded-notice cleanup: this reviewer's own past incomplete-review notices, resolved because
+  // a later push moved the hunk they anchored (`github/client.ts`'s `resolveSupersededOwnNotices`).
+  // Never affects completeness — a resolved GitHub thread is not a claim about review coverage, only
+  // about whether an operator still has to look at it. Recorded only when `resolved > 0`, the same
+  // "only when something happened" posture `run.spend` takes.
+  "cleanup.superseded_notices_resolved"
 ];
 var REASON_CODE_SET = new Set(REASON_CODES);
 function isReasonCode(value) {
@@ -1466,6 +1472,9 @@ function composeIncompleteNotice(reasonCode, marker) {
     "",
     `<!-- ${marker} -->`
   ].join("\n");
+}
+function isIncompleteNoticeBody(body) {
+  return body.includes("Keiko for Quality could not complete its review.");
 }
 function shortSha(sha) {
   return sha.slice(0, 7);
@@ -3952,9 +3961,10 @@ var RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: In
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $cursor) {
         nodes {
+          id
           isResolved
           isOutdated
-          comments(first: 100) { nodes { databaseId } }
+          comments(first: 100) { nodes { databaseId author { login } body } }
           lastComment: comments(last: 1) { nodes { author { login } body } }
         }
         pageInfo { hasNextPage endCursor }
@@ -3982,6 +3992,21 @@ function collectThreadOverlays(nodes, into) {
     }
   }
 }
+function collectResolvableNoticeThreadIds(nodes, identity, isNoticeBody, into) {
+  for (const node of nodes) {
+    if (node.isOutdated !== true || node.isResolved === true) continue;
+    if (typeof node.id !== "string") continue;
+    const hasOwnNotice = (node.comments?.nodes ?? []).some(
+      (comment) => comment.author?.login === identity && typeof comment.body === "string" && isNoticeBody(comment.body)
+    );
+    if (hasOwnNotice) into.push(node.id);
+  }
+}
+var RESOLVE_REVIEW_THREAD_MUTATION = `mutation($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) {
+    thread { id isResolved }
+  }
+}`;
 function reviewThreadsPage(raw) {
   if (raw.errors !== void 0) return void 0;
   return raw.data?.repository?.pullRequest?.reviewThreads;
@@ -4117,6 +4142,76 @@ var GitHubClient = class {
       return /* @__PURE__ */ new Map();
     }
     return overlays;
+  }
+  /**
+   * A second, separate walk of the same GraphQL connection `fetchThreadOverlays` reads, rather than
+   * threading `identity` and a body predicate through that general-purpose method: the two answer
+   * different questions for different callers (every comment's dedup-relevant state, versus which
+   * threads a cleanup pass should mutate), and `fetchThreadOverlays` runs on the hot dedup-prefetch
+   * path this method must never affect the shape or cost of. The duplicated pagination shell is a
+   * dozen identical lines, not a design this file has any other copy of to drift from.
+   */
+  async fetchResolvableNoticeThreadIds(ref, number, identity, isNoticeBody) {
+    const ids = [];
+    try {
+      let cursor = null;
+      for (let page = 1; page <= 20; page += 1) {
+        const raw = await this.graphqlJson(RESOLVED_THREADS_QUERY, {
+          owner: ref.owner,
+          repo: ref.repo,
+          number,
+          cursor
+        });
+        const threads = reviewThreadsPage(raw);
+        if (threads === void 0) break;
+        collectResolvableNoticeThreadIds(threads.nodes ?? [], identity, isNoticeBody, ids);
+        const next = nextThreadsCursor(threads);
+        if (next === void 0) break;
+        cursor = next;
+      }
+    } catch {
+      return [];
+    }
+    return ids;
+  }
+  /** One `resolveReviewThread` mutation. `false` on any failure — malformed response, GraphQL
+   *  `errors`, a thrown request error — never thrown, so one bad id cannot stop the rest of the
+   *  batch `resolveSupersededOwnNotices` is working through. */
+  async resolveThread(threadId) {
+    try {
+      const raw = await this.graphqlJson(RESOLVE_REVIEW_THREAD_MUTATION, {
+        threadId
+      });
+      if (raw.errors !== void 0) return false;
+      return raw.data?.resolveReviewThread?.thread?.isResolved === true;
+    } catch {
+      return false;
+    }
+  }
+  /**
+   * Resolves every one of this reviewer's own superseded incomplete-review notices on the pull
+   * request — see `collectResolvableNoticeThreadIds` for exactly what "superseded" means and why a
+   * finding thread can never qualify.
+   *
+   * Why this belongs on the client rather than being folded into `applyThreadOverlays`'s existing
+   * walk: this is the one method on this class that WRITES rather than reads, and it is reached from
+   * a different place in the review pipeline (once, after a run's own outcome is already decided)
+   * than the read-only dedup prefetch (before every publish decision, and the only path a local,
+   * publication-free run ever takes). Keeping it a separate, explicitly-named call is what lets a
+   * caller decide when a mutation is appropriate instead of one firing implicitly inside a read.
+   *
+   * Best-effort end to end, matching the class's posture everywhere else a GraphQL lookup feeds
+   * something that is never load-bearing for review correctness: a failed lookup or a failed resolve
+   * costs this run a stale thread staying open one push longer, never a failed review. Returns the
+   * count actually resolved, purely for diagnostics — no caller branches on it.
+   */
+  async resolveSupersededOwnNotices(ref, number, identity, isNoticeBody) {
+    const ids = await this.fetchResolvableNoticeThreadIds(ref, number, identity, isNoticeBody);
+    let resolved = 0;
+    for (const threadId of ids) {
+      if (await this.resolveThread(threadId)) resolved += 1;
+    }
+    return resolved;
   }
   async createReviewComment(ref, number, input) {
     const payload = {
@@ -5309,6 +5404,21 @@ async function performReview(request, diagnostics) {
           total: ledger.engine + ledger.classify
         }
       });
+    }
+    try {
+      const staleNoticesResolved = await request.client.resolveSupersededOwnNotices(
+        request.ref,
+        request.pullNumber,
+        request.identity,
+        isIncompleteNoticeBody
+      );
+      if (staleNoticesResolved > 0) {
+        diagnostics.record("cleanup.superseded_notices_resolved", {
+          headSha: request.head,
+          counts: { resolved: staleNoticesResolved }
+        });
+      }
+    } catch {
     }
   }
 }

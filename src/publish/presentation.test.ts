@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { commitSha, versionTag } from "../core/brands.js";
+import { commitSha, repoPath, versionTag } from "../core/brands.js";
 import type { ReasonCode } from "../diagnostics/reason-codes.js";
 import {
   composeFindingBody,
   composeIncompleteNotice,
   composeSummaryBody,
+  isIncompleteNoticeBody,
   splitTitle,
   type SummaryCounts,
   type SummaryReport,
@@ -143,6 +144,52 @@ describe("composeIncompleteNotice", () => {
 
   it("ends with the marker", () => {
     expect(notice.trimEnd().endsWith(`<!-- ${MARKER} -->`)).toBe(true);
+  });
+});
+
+describe("isIncompleteNoticeBody", () => {
+  it("recognises a body this module's own composer produced", () => {
+    const notice = composeIncompleteNotice("settlement.incomplete.budget_exceeded", MARKER);
+    expect(isIncompleteNoticeBody(notice)).toBe(true);
+  });
+
+  it.each([
+    "settlement.incomplete.coverage_gap",
+    "settlement.incomplete.schema_rejected",
+    "settlement.incomplete.engine_status_not_success",
+  ])("recognises a notice regardless of which reason code it carries (%s)", (reason) => {
+    expect(isIncompleteNoticeBody(composeIncompleteNotice(reason, MARKER))).toBe(true);
+  });
+
+  /**
+   * The property `resolveSupersededOwnNotices` (`github/client.ts`) depends on entirely: a finding
+   * this reviewer published — real model prose, any category, any severity — must never satisfy this
+   * predicate, or the cleanup feature would resolve an open question a human still has to act on
+   * instead of a stale, superseded statement.
+   */
+  it.each(["bug", "security", "performance", "maintainability", "test", "documentation", "other"])(
+    "never recognises a finding body, category %s",
+    (category) => {
+      const finding = composeFindingBody(
+        "The retry loop never resets its attempt counter.",
+        MARKER,
+        {
+          path: repoPath("src/retry.ts"),
+          line: 12,
+          severity: "high",
+          category,
+        },
+      );
+      expect(isIncompleteNoticeBody(finding)).toBe(false);
+    },
+  );
+
+  it("does not recognise arbitrary prose that happens to mention the product name", () => {
+    expect(isIncompleteNoticeBody("Keiko for Quality found a real defect here.")).toBe(false);
+  });
+
+  it("does not recognise the empty string", () => {
+    expect(isIncompleteNoticeBody("")).toBe(false);
   });
 });
 
