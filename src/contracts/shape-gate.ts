@@ -341,22 +341,28 @@ type MemberOutcome =
   | { readonly kind: "member"; readonly member: FlatMember };
 
 /**
- * The type-text group is `(\S[\s\S]*)?`, not the `([\s\S]*)` it used to be. `[\s\S]` includes
- * whitespace, so it and the `\s*` in front of it could divide the blanks after the colon in as many
- * ways as there are blanks — the ambiguity Sonar S8786 flags. Unlike `ANOTHER_MEMBER_START` above,
- * this one could never actually cost anything: the only thing following it is `$`, and a `[\s\S]*`
- * that has consumed the rest of the string always satisfies `$`, so no division was ever retried.
- * The rewrite closes the ambiguity, not a denial of service.
+ * The type-text group ends the pattern: `([\s\S]*)`, with no `$` after it.
  *
- * It captures the identical text. Greedy `\s*` already took every blank after the colon, so the
- * group could only ever start at a non-blank; requiring `\S` there states that instead of leaving it
- * implied. `analyzeTypeText` is handed this group RAW, un-trimmed, and its ASI-ambiguity check turns
- * on where the newlines fall in it, so byte-identical capture is the whole point. Type text that is
- * empty or blank-only now leaves the group unset rather than `""`, which `classifyMemberText`'s
- * `match[3] ?? ""` already collapses to the same empty string it rejected before.
+ * The trailing anchor was redundant, and removing it is what keeps this pattern simple. `[\s\S]`
+ * includes whitespace, so it and the `\s*` in front of it can divide the blanks after the colon in
+ * as many ways as there are blanks — the ambiguity Sonar S8786 flags. But the division was never
+ * retried, because the only thing that followed was `$`, and a greedy `[\s\S]*` that has consumed
+ * the rest of the string always satisfies it. An anchor a greedy tail can never fail states
+ * nothing; deleting it removes the failure point the ambiguity would have needed in order to cost
+ * anything, and leaves no quantifier here for an analyser to weigh.
+ *
+ * The alternative — keeping `$` and requiring a non-blank first character, `(\S[\s\S]*)?` — was
+ * tried and reverted. It closes the same ambiguity, but the optional group around a quantifier
+ * pushed this pattern's complexity from inside the budget to 22 against an allowance of 20
+ * (Sonar S5843), trading a theoretical division for a real one in the reader's head.
+ *
+ * Capture is byte-identical to the form that shipped: greedy `\s*` already took every blank after
+ * the colon, and greedy `[\s\S]*` already ran to the end of the string. `analyzeTypeText` is handed
+ * this group RAW, un-trimmed, and its ASI-ambiguity check turns on where the newlines fall in it,
+ * so identical capture is the whole point.
  */
 const PROPERTY_SIGNATURE =
-  /^(?:readonly\s+)?([A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')(\??)\s*:\s*(\S[\s\S]*)?$/;
+  /^(?:readonly\s+)?([A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')(\??)\s*:\s*([\s\S]*)/;
 const NEW_SIGNATURE = /^new\b/;
 
 function unquote(raw: string): string {

@@ -3400,7 +3400,7 @@ function analyzeTypeText(text3) {
   }
   return { maxDepth: peak, ambiguous };
 }
-var PROPERTY_SIGNATURE = /^(?:readonly\s+)?([A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')(\??)\s*:\s*(\S[\s\S]*)?$/;
+var PROPERTY_SIGNATURE = /^(?:readonly\s+)?([A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')(\??)\s*:\s*([\s\S]*)/;
 var NEW_SIGNATURE = /^new\b/;
 function unquote(raw) {
   const first = raw.charAt(0);

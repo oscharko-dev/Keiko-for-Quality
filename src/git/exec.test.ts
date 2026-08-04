@@ -140,15 +140,19 @@ describe("run — output", () => {
   it("rejects an over-cap child rather than resolving with a truncated prefix", async () => {
     // The bound is the denial-of-service defence: a candidate chooses how large a blob or diff is.
     // Truncating instead of failing would be worse than either — a caller would parse a prefix as
-    // though it were the whole file. Only the rejection is pinned: node reports this one with a
-    // *string* `code` that `run`'s numeric fallback maps to 1, and freezing that incidental 1 as a
-    // contract would pin an implementation detail rather than the bound.
-    await rejection(
+    // though it were the whole file.
+    const failure = await rejection(
       run(NODE, ["-e", "process.stdout.write('x'.repeat(200_000))"], {
         ...OPTIONS,
         maxBuffer: 1024,
       }),
     );
+    // `timedOut` is the half worth pinning, and pinning it is what tells the two bounds apart: a
+    // caller that retries a timeout must not retry an over-cap child, because the output is over
+    // the cap every time. The exit code is deliberately NOT pinned — node reports this one with a
+    // *string* `code` that `run`'s numeric fallback maps to 1, and freezing that incidental 1 as a
+    // contract would pin an implementation detail rather than the bound.
+    expect(failure.timedOut).toBe(false);
   });
 });
 
