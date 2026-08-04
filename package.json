@@ -39,7 +39,8 @@
     "check:qualification": "node scripts/check-qualification.mjs",
     "corpus:real": "node corpus/real-diffs.mjs",
     "arena": "node corpus/arena.mjs",
-    "arena:trend": "node corpus/arena-trend.mjs"
+    "arena:trend": "node corpus/arena-trend.mjs",
+    "live:telemetry": "node corpus/live-telemetry.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",

@@ -17,9 +17,22 @@ import { CASES } from "./cases.mjs";
 import { generateRuleDocument, registerTsExtensionHooks } from "./rule-source.mjs";
 
 registerTsExtensionHooks();
-const { sanitizeFindingBody } = await import("../src/publish/sanitize.ts");
 const { repairClassification, auditClassification } = await import("../src/engine/classify.ts");
 const { startModelProxy } = await import("../src/engine/model-proxy.ts");
+// The deterministic contract gate (issue #80 technique D) the main loop below merges in, mirrored
+// from `collectGateFindings` / `compareAgainstCounterparts` in src/review.ts — the same import
+// mechanism as `planPublication` below, so the corpus measures the shipped comparison and the
+// shipped profile compiler, never a copy of either.
+const { compareContracts, describeMismatch } = await import("../src/contracts/shape-gate.ts");
+const { loadReviewProfile } = await import("../src/config/profile.ts");
+// The publisher stage: everything the gate merge (below) produces — engine plus classification
+// plus the deterministic gate — is run through the real, shipped `planPublication` before scoring,
+// never a restatement of sanitization or deduplication. Same import mechanism as everything above.
+// See `planCaseFindings`'s own doc comment for the empty-prefetch argument and the synthetic
+// `PublishContext` it builds.
+const { planPublication } = await import("../src/publish/publisher.ts");
+const { commitSha, repoPath } = await import("../src/core/brands.ts");
+const { createSilentDiagnostics } = await import("../src/diagnostics/sink.ts");
 
 const execFileAsync = promisify(execFile);
 
@@ -36,11 +49,32 @@ const execFileAsync = promisify(execFile);
  * - **recall** — a finding landed in the file that carries the seeded defect;
  * - **classification** — that finding carries the category and severity the rule text asks for;
  * - **precision** — a clean change produced no finding at all;
- * - **publishability** — every emitted body survives the production sanitizer.
+ * - **publishability** — every finding the production publisher would still consider survives its
+ *   sanitizer.
  *
- * Publishability is scored with `sanitizeFindingBody` itself rather than a copy of its rules. A
- * corpus that restated those rules would keep passing after the real ones moved, which is the exact
- * failure mode the repository's fixture rule exists to prevent.
+ * Publishability, `noise`, and the suppression counts below are all scored against the output of
+ * the real, shipped `planPublication` (`src/publish/publisher.ts`) — never a copy of its rules, and
+ * never the raw, pre-publisher findings. A corpus that restated those rules would keep passing
+ * after the real ones moved, which is the exact failure mode the repository's fixture rule exists
+ * to prevent (see `AGENTS.md`'s "The rule text and the sanitizer must move together").
+ *
+ * This closes a gap the same shape as the deterministic-gate one above it: before the publisher
+ * stage existed here, the corpus measured the engine, classification, and the gate, but never the
+ * publisher, so intra-run deduplication and sanitizer neutralization were invisible to every
+ * qualification number — measured, not hypothesized: one qualification run had a case emit the same
+ * finding three times, and the corpus scored that as three units of noise, when production would
+ * have collapsed the three into the one finding a pull request actually receives before ever
+ * posting it. `planCaseFindings`, below, runs every case's engine-plus-gate findings through the
+ * shipped plan with an EMPTY existing-conversation prefetch: a corpus case is always a first review
+ * of a synthetic pull request, so cross-run dedup (marker, similarity, dispositioned) has nothing to
+ * compare against, and only sanitization and intra-run clustering — the two stages this harness
+ * could not see before — ever act. `suppressedIntraRun` and `rejectedSanitization`
+ * (`plan.counters`) are reported per case and in the scoreboard for the same reason tokens are: a
+ * number that only ever appears summed hides which case moved it. A per-finding *neutralization*
+ * count is deliberately NOT reported: `PublicationPlan`/`PlannedFinding`/`PlanCounters` never
+ * surface how many bodies the sanitizer rewrote, only whether each one ultimately passed, and
+ * inventing that number by some other means would be exactly the restatement this file exists to
+ * avoid.
  *
  * `noise` is reported but does not fail a case: a finding outside the seeded file may be a genuine
  * second observation. It is tracked because a rising count is how a reviewer's standing erodes.
@@ -78,6 +112,17 @@ async function generateRuleFile() {
 // removing it would delete an experiment's input out from under them.
 const generated = process.env.OCR_RULE === undefined ? await generateRuleFile() : null;
 const RULE = generated?.path ?? process.env.OCR_RULE;
+
+/**
+ * The declared contract pairs the deterministic gate (below) reads, through the same production
+ * loader `generateRuleDocument` calls internally — never a second, hand-rolled `JSON.parse` that
+ * could silently drift from validation/defaulting (see rule-source.mjs's own doc comment for
+ * exactly that failure mode, #44). Read from `corpus/profile.json` on disk unconditionally,
+ * independent of `OCR_RULE`: that override only ever replaces the rule TEXT the model sees, never
+ * which contract pairs this repository declares for the model-independent gate.
+ */
+const CONTRACT_PAIRS =
+  loadReviewProfile(readFileSync(join(HERE, "profile.json"), "utf8")).contractPairs ?? [];
 
 const onlyIndex = process.argv.indexOf("--only");
 const only = onlyIndex === -1 ? null : process.argv[onlyIndex + 1];
@@ -121,6 +166,169 @@ function buildRepo(testCase) {
   git(["add", "-A"], dir);
   git(["commit", "-q", "-m", "head", "--no-gpg-sign"], dir);
   return dir;
+}
+
+/**
+ * Reads one path's blob content at the case's HEAD commit, or `undefined` when the path is absent
+ * there — the same undefined-on-absence contract `readTextAtCommit` (src/git/plumbing.ts) carries,
+ * built from this file's own `git()` helper above rather than imported: the corpus already
+ * hand-rolls its git plumbing (`buildRepo`, `writeTree`) instead of reusing production's, and this
+ * is one more line of the same kind. The gate COMPARISON below is the part that must be — and is —
+ * the real, shipped function, never a copy of it.
+ */
+function readAtHead(dir, path) {
+  try {
+    return git(["cat-file", "blob", `HEAD:${path}`], dir);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The deterministic contract gate (issue #80 technique D), mirrored from `collectGateFindings` /
+ * `compareAgainstCounterparts` in src/review.ts: for every profile-declared contract pair whose
+ * `paths` glob matches a file this CASE actually changed — `base !== head` is the corpus's own
+ * stand-in for "appears in the diff", since a byte-identical counterpart file never appears in a
+ * real diff either (see cases.mjs's own header comment on the cross-artifact cases) — read both
+ * sides at the case's head commit and compare same-named flat interfaces with the real, imported
+ * `compareContracts` / `describeMismatch`. No model call, so this never adds to the run's token
+ * total; the caller folds the result straight into `result.comments`.
+ *
+ * Findings anchor on the CHANGED file, never the counterpart, exactly as production does — see
+ * `compareAgainstCounterparts`'s own doc comment for why. `gate: true` is this harness's own
+ * marker, not a production field: it is how the per-case console output below tells a gate finding
+ * from a model finding at a glance; `scoreOne` never reads it.
+ */
+function computeGateFindings(dir, testCase) {
+  if (CONTRACT_PAIRS.length === 0) return [];
+  const changed = testCase.files.filter((file) => file.base !== file.head);
+  const findings = [];
+  for (const pair of CONTRACT_PAIRS) {
+    for (const file of changed) {
+      if (!pair.matcher.matches(file.path)) continue;
+      const left = readAtHead(dir, file.path);
+      if (left === undefined) continue;
+      for (const counterpart of pair.counterparts) {
+        const right = readAtHead(dir, counterpart);
+        if (right === undefined) continue;
+        for (const mismatch of compareContracts(left, right)) {
+          findings.push({
+            path: file.path,
+            content: describeMismatch(mismatch, file.path, counterpart),
+            startLine: 0,
+            endLine: 0,
+            category: "bug",
+            severity: "high",
+            gate: true,
+          });
+        }
+      }
+    }
+  }
+  return findings;
+}
+
+/**
+ * The synthetic identity every case's plan run shares.
+ *
+ * `planPublication` fingerprints a finding on `ref`/`pullNumber`/`path`/`category`/`body` (never on
+ * `headSha`, which only ever rides on a diagnostic record and on the separate incomplete-notice
+ * marker this harness never constructs) and reads `identity` only to decide which EXISTING
+ * conversation is this reviewer's own — moot here, since `EMPTY_PREFETCH` below hands it zero
+ * existing conversations to own. A fixed synthetic value is therefore honest, not a shortcut: two
+ * different cases never share a `PublishContext`, or compare against each other's markers, so
+ * nothing depends on these values beyond internal self-consistency within one case's own plan call.
+ */
+const PLAN_IDENTITY = "keiko-for-quality[bot]";
+const PLAN_REF = { owner: "keiko-for-quality", repo: "corpus" };
+const PLAN_PULL_NUMBER = 1;
+const PLAN_HEAD_SHA = commitSha("c".repeat(40));
+
+/**
+ * `planPublication`'s `prefetch` argument, fixed to empty for every case.
+ *
+ * A corpus case is a single synthetic pull request nothing has ever commented on, so cross-run
+ * dedup — the marker, similarity, and dispositioned stages, all of which compare a candidate against
+ * an ALREADY-PUBLISHED conversation — has nothing to compare against and can never suppress
+ * anything here. Only sanitization and intra-run clustering (`clusterIntraRunDuplicates`,
+ * `src/publish/publisher.ts`) can act on a corpus run, which is exactly the part of the pipeline
+ * this harness did not measure before the publisher stage existed. Passing this explicitly (rather
+ * than omitting the argument) also means `planPublication` never calls
+ * `prefetchExistingConversations`, so `context.client.listReviewComments` is never reached —
+ * `unreachableClient`, below, turns a silent, wrong dependency on that not being true into a loud
+ * failure instead of a fake pass.
+ */
+const EMPTY_PREFETCH = { markers: new Set(), threads: [] };
+
+/**
+ * A `ReviewCommentApi` whose every method rejects, so a call this harness did not anticipate is a
+ * loud test/run failure rather than a silently-wrong result. `planPublication` never reaches any of
+ * these three when handed `EMPTY_PREFETCH` directly (see that constant's own doc comment above), and
+ * this harness never calls `executePublication`/`publishFindings` — the functions that would
+ * otherwise reach `createReviewComment`/`getReviewComment` — at all.
+ */
+function unreachableClient() {
+  const unreachable = (method) => () =>
+    Promise.reject(
+      new Error(`corpus harness: ReviewCommentApi.${method} must not be called by planPublication`),
+    );
+  return {
+    listReviewComments: unreachable("listReviewComments"),
+    createReviewComment: unreachable("createReviewComment"),
+    getReviewComment: unreachable("getReviewComment"),
+  };
+}
+
+/**
+ * `PublishContext.items`, built from the case's own changed paths.
+ *
+ * `planPublication` never reads `.items` today — only `executePublication`'s placement ladder does
+ * (`placementLadder`, `src/publish/publisher.ts`), and this harness never calls that function — so
+ * this is supplied for honesty rather than necessity: a future `planPublication` that starts
+ * depending on it finds a representative map here instead of an empty one that would silently paper
+ * over the gap. `status`/`classification`/`changedLines` are plausible fixed values rather than ones
+ * derived from the case, because `cases.mjs` does not track add/delete/rename status at all — see
+ * that file's own header comment — and nothing downstream reads them regardless.
+ */
+function planItems(testCase) {
+  const items = new Map();
+  for (const file of testCase.files) {
+    if (file.base === file.head) continue;
+    items.set(file.path, {
+      path: repoPath(file.path),
+      status: "M",
+      classification: { kind: "reviewed" },
+      modeChanged: false,
+      reviewable: true,
+      changedLines: 0,
+    });
+  }
+  return items;
+}
+
+/**
+ * Runs one case's engine-plus-gate findings through the real, shipped `planPublication` — the
+ * publisher stage this file's header comment names. Called after the gate merge and before scoring,
+ * mirroring where production itself merges `collectGateFindings`'s output before calling
+ * `planPublication` (`publishSettledFindings`, `src/review.ts`: `merged = [...engine findings,
+ * ...gate, ...changePass]` feeds the same plan call this mirrors).
+ *
+ * The `PublishContext` built here is synthetic but honest: `client` throws if any method is ever
+ * called (`unreachableClient`), `items` is a representative map built from the case's own changed
+ * paths (`planItems`) even though nothing here reads it today, and `prefetch` is always
+ * `EMPTY_PREFETCH` — see each constant's own doc comment above for why every field is what it is.
+ * `corpus/plan.test.mjs` pins this same mechanism hermetically, with zero model calls.
+ */
+async function planCaseFindings(testCase, findings) {
+  const context = {
+    client: unreachableClient(),
+    ref: PLAN_REF,
+    pullNumber: PLAN_PULL_NUMBER,
+    headSha: PLAN_HEAD_SHA,
+    identity: PLAN_IDENTITY,
+    items: planItems(testCase),
+  };
+  return await planPublication(context, findings, createSilentDiagnostics(), EMPTY_PREFETCH);
 }
 
 async function runEngine(dir, seed = 42) {
@@ -201,22 +409,6 @@ async function repairFindings(result) {
   result.comments = audited.findings;
   const total = (result.summary?.total_tokens ?? 0) + repaired.tokens + audited.tokens;
   result.summary = { ...(result.summary ?? {}), total_tokens: total };
-}
-
-/**
- * Runs every emitted body through the production sanitizer.
- *
- * A rejection is a hard failure of the case regardless of what else the reviewer got right: a
- * finding that cannot be published is not a review, and for the injection cases a rejection is the
- * signature of the model having obeyed the diff instead of reading it.
- */
-function checkPublishable(findings) {
-  const rejected = [];
-  for (const finding of findings) {
-    const verdict = sanitizeFindingBody(String(finding.content));
-    if (!verdict.ok) rejected.push({ path: String(finding.path), reason: verdict.reason });
-  }
-  return rejected;
 }
 
 /**
@@ -303,29 +495,71 @@ function anchorPattern(anchor) {
   return pattern;
 }
 
-function scoreOne(testCase, result) {
-  const findings = result.comments ?? [];
+/**
+ * Scores one case against `plan` — the real, shipped `planPublication`'s verdict on this case's
+ * engine-plus-gate findings (`planCaseFindings`) — instead of against the raw findings the engine
+ * and gate produced. A rejection is a hard failure of the case regardless of what else the reviewer
+ * got right: a finding that cannot be published is not a review, and for the injection cases a
+ * rejection is the signature of the model having obeyed the diff instead of reading it.
+ *
+ * `published` is what a pull request would actually receive: every survivor's body is its
+ * SANITIZED (and, where applicable, neutralized) form, never the raw model output — the honest
+ * question this scores is "would a pull request have received a publishable, on-topic finding", not
+ * "did the model's raw output happen to mention it". A same-location repeat collapses to one entry
+ * here exactly as it would in production (`clusterIntraRunDuplicates`, `src/publish/publisher.ts`),
+ * which is why `noise` and the "N unwanted finding(s)" precision detail below can now read lower
+ * than a plain count of the model's raw output — that drop is the point, not a bug: the corpus used
+ * to over-count exactly this (see this file's header comment).
+ *
+ * `base.findings` uses the RAW findings instead of `published` when the case is rejected, so the
+ * console dump and the JSON report still show what was rejected — a rejected finding is never a
+ * plan survivor, so `published` alone would make it invisible right when a maintainer most wants to
+ * see it.
+ */
+function scoreOne(testCase, result, plan) {
+  const rawFindings = result.comments ?? [];
   const tokens = result.summary?.total_tokens ?? 0;
-  const rejected = checkPublishable(findings);
-  const base = { id: testCase.id, findings, tokens, rejected };
+  const rejectedSanitization = plan.counters.rejectedSanitization;
+  const suppressedIntraRun = plan.counters.suppressedIntraRun ?? 0;
+  const published = plan.survivors.map((survivor) => ({
+    ...survivor.finding,
+    content: survivor.sanitizedBody,
+  }));
+  const base = {
+    id: testCase.id,
+    findings: rejectedSanitization > 0 ? rawFindings : published,
+    tokens,
+    rejectedSanitization,
+    suppressedIntraRun,
+    // Kept as an array, not a bare count, so scripts/check-qualification.mjs's existing
+    // `(byId.get(c.id)?.rejected ?? [{}]).length === 0` check keeps parsing an old OR new report
+    // identically. `planPublication` surfaces only a COUNT of sanitization rejections
+    // (`PlanCounters.rejectedSanitization`), never which finding or why, so there is nothing honest
+    // to put in each element beyond a placeholder.
+    rejected: Array.from({ length: rejectedSanitization }, () => ({})),
+  };
 
-  if (rejected.length > 0) {
-    const reasons = rejected.map((r) => r.reason).join(", ");
-    return { ...base, kind: "publishability", pass: false, detail: `UNPUBLISHABLE: ${reasons}` };
+  if (rejectedSanitization > 0) {
+    return {
+      ...base,
+      kind: "publishability",
+      pass: false,
+      detail: `UNPUBLISHABLE: ${String(rejectedSanitization)} finding(s) rejected by sanitization`,
+    };
   }
 
   if (testCase.defect === null) {
     return {
       ...base,
       kind: "precision",
-      pass: findings.length === 0,
-      detail: findings.length === 0 ? "silent" : `${String(findings.length)} unwanted finding(s)`,
+      pass: published.length === 0,
+      detail: published.length === 0 ? "silent" : `${String(published.length)} unwanted finding(s)`,
     };
   }
 
-  const inFile = findings.filter((f) => String(f.path) === testCase.defect.file);
+  const inFile = published.filter((f) => String(f.path) === testCase.defect.file);
   const onDefect = inFile.filter((f) => onTopic(testCase, f));
-  const noise = findings.length - onDefect.length;
+  const noise = published.length - onDefect.length;
   if (onDefect.length === 0) {
     // Separating these two is the point. `workflow-unpinned-action` is why: one run reported
     // "Add a timeout to this job" on the right file and file-level matching scored it as a find,
@@ -334,7 +568,7 @@ function scoreOne(testCase, result) {
     if (inFile.length > 0) {
       return { ...base, kind: "recall", pass: false, noise, detail: "MISSED (on file, off topic)" };
     }
-    const where = findings.length === 0 ? "MISSED" : `MISSED (${String(noise)} other finding(s))`;
+    const where = published.length === 0 ? "MISSED" : `MISSED (${String(noise)} other finding(s))`;
     return { ...base, kind: "recall", pass: false, noise, detail: where };
   }
 
@@ -363,20 +597,44 @@ for (const testCase of cases) {
     dir = buildRepo(testCase);
     const result = await runEngineWithOneResume(dir);
     await repairFindings(result);
-    const scored = scoreOne(testCase, result);
+    // Merged AFTER classification repair/audit, at the same point production's
+    // `publishSettledFindings` merges `collectGateFindings`'s output into what gets published — so a
+    // gate finding is graded exactly as production ships it: never audited or reclassified, because
+    // its category and severity are already certain (see `collectGateFindings`'s doc comment,
+    // src/review.ts). Without this the corpus measures only the engine's half of the product; with
+    // it, a case the gate alone closes shows up as a pass here too.
+    result.comments = [...(result.comments ?? []), ...computeGateFindings(dir, testCase)];
+    // The publisher stage (see this file's header comment): the same findings production would
+    // merge into one `planPublication` call are run through that real, shipped function here too,
+    // so `scoreOne` grades what a pull request would actually receive rather than the engine's raw
+    // output.
+    const plan = await planCaseFindings(testCase, result.comments);
+    const scored = scoreOne(testCase, result, plan);
     results.push(scored);
     const mark = scored.pass ? "PASS" : "FAIL";
     const cls = scored.kind === "recall" && scored.pass && !scored.classified ? " (class)" : "";
+    // Suppression rides on the verdict line the same way tokens do, and only when it moved anything
+    // — a case with nothing collapsed says so via its absence, matching how the `noise` suffix
+    // above already behaves.
+    const suppressionNote =
+      scored.suppressedIntraRun > 0
+        ? ` (suppressedIntraRun ${String(scored.suppressedIntraRun)})`
+        : "";
     // Tokens ride on the verdict line itself — cost-per-finding has no home anywhere in this
     // repository otherwise, and a reader chasing an expensive case should not have to open the
     // report JSON to find out which one it was.
     console.log(
-      `${mark}${cls}  ${scored.id.padEnd(26)} ${scored.detail} (tokens ${String(scored.tokens)})`,
+      `${mark}${cls}  ${scored.id.padEnd(26)} ${scored.detail}${suppressionNote}` +
+        ` (tokens ${String(scored.tokens)})`,
     );
     for (const f of scored.findings) {
       const first = String(f.content).split("\n")[0];
+      // `[gate] ` flags a deterministic finding `computeGateFindings` added (see its own doc
+      // comment above) — so a reader of this log can tell it from a model finding without opening
+      // the JSON report.
+      const tag = f.gate === true ? "[gate] " : "";
       console.log(
-        `        ${String(f.severity)}/${String(f.category)}  ${String(f.path)}  ${first.slice(0, 78)}`,
+        `        ${tag}${String(f.severity)}/${String(f.category)}  ${String(f.path)}  ${first.slice(0, 78)}`,
       );
     }
   } catch (error) {
@@ -392,6 +650,8 @@ for (const testCase of cases) {
       findings: [],
       rejected: [],
       tokens: 0,
+      rejectedSanitization: 0,
+      suppressedIntraRun: 0,
     });
     console.log(`ERROR  ${testCase.id}  ${String(error).slice(0, 200)}`);
   } finally {
@@ -411,6 +671,14 @@ const unpublishable = results.filter((r) => r.rejected.length > 0);
 // things is the noisiest outcome there is, and it was contributing zero.
 const noise = results.reduce((sum, r) => sum + (r.noise ?? 0), 0);
 const tokens = results.reduce((sum, r) => sum + r.tokens, 0);
+// The publisher-stage totals (see this file's header comment): summed the same way `noise` is
+// above, from every result that carries a count, error-branch results included (they carry 0 for
+// both, same as they carry 0 tokens).
+const suppressedIntraRunTotal = results.reduce((sum, r) => sum + (r.suppressedIntraRun ?? 0), 0);
+const rejectedSanitizationTotal = results.reduce(
+  (sum, r) => sum + (r.rejectedSanitization ?? 0),
+  0,
+);
 
 // From the cases this run actually attempted, not from the whole corpus. `--only` narrows the run,
 // and reading the denominator from `CASES` printed "recall 1/18" for a single-case run — a number
@@ -441,6 +709,23 @@ const severeHits = found.filter((r) => {
 // as some plausible-looking cost figure.
 const tokensPerFinding = findingsGraded > 0 ? Math.round(tokens / findingsGraded) : null;
 const tokensPerSevereHit = severeHits > 0 ? Math.round(tokens / severeHits) : null;
+
+// Written into the report ADDITIVELY, both where `measured` is true and where it is false:
+// scripts/check-qualification.mjs and corpus/measurement.mjs must keep parsing a report written
+// before this object, or any field on it, existed, so nothing above it in either write site moved
+// or renamed to make room for it. Computed once and reused at both write sites rather than repeated
+// as two literals that could drift from each other. `suppressedIntraRun`/`rejectedSanitization` are
+// the publisher-stage totals (see this file's header comment); there is no `neutralized` here for
+// the same reason `scoreOne` does not report one per case — `planPublication`'s own return shape
+// never surfaces it.
+const aggregates = {
+  findingsGraded,
+  tokensPerFinding,
+  severeHits,
+  tokensPerSevereHit,
+  suppressedIntraRun: suppressedIntraRunTotal,
+  rejectedSanitization: rejectedSanitizationTotal,
+};
 
 // An instrument must report its own failure as a failure to MEASURE, never as a result.
 //
@@ -476,6 +761,10 @@ if (measured) {
     `publishable    ${String(results.length - unpublishable.length)}/${String(results.length)} cases emitted only publishable bodies`,
   );
   console.log(`noise          ${String(noise)} finding(s) not about the seeded defect`);
+  console.log(
+    `suppressed     ${String(suppressedIntraRunTotal)} intra-run duplicate(s) collapsed before` +
+      ` publication, ${String(rejectedSanitizationTotal)} finding(s) rejected by sanitization`,
+  );
   console.log(
     `tokens         ${String(tokens)} total, ${String(Math.round(tokens / Math.max(1, results.length)))} per case`,
   );
@@ -538,10 +827,7 @@ if (!measured) {
           binding,
           results,
           tokens,
-          // Additive only: scripts/check-qualification.mjs and corpus/measurement.mjs must keep
-          // parsing a report written before this field existed, so nothing above it moved or
-          // renamed to make room for it.
-          aggregates: { findingsGraded, tokensPerFinding, severeHits, tokensPerSevereHit },
+          aggregates,
         },
         null,
         2,
@@ -564,8 +850,7 @@ if (process.env.OCR_REPORT) {
         binding,
         results,
         tokens,
-        // Additive only — see the matching comment on the not-measured branch above.
-        aggregates: { findingsGraded, tokensPerFinding, severeHits, tokensPerSevereHit },
+        aggregates,
       },
       null,
       2,

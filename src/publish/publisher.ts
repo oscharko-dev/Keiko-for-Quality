@@ -220,6 +220,7 @@ interface Counters {
   suppressedSimilar: number;
   suppressedDispositioned: number;
   rejectedSanitization: number;
+  neutralized: number;
   rejectedPlacement: number;
   readbackFailures: number;
   apiFailures: number;
@@ -365,6 +366,9 @@ export interface PlanCounters {
   readonly suppressedSimilar: number;
   readonly suppressedDispositioned: number;
   readonly rejectedSanitization: number;
+  /** Markup rewrites the sanitizer applied instead of rejecting the body. Optional for the same
+   *  backward-compatibility reason as the fields above. */
+  readonly neutralized?: number;
 }
 
 /** The output of the plan phase: which findings will publish, what the pull request already carries
@@ -384,6 +388,7 @@ function emptyCounters(): Counters {
     suppressedSimilar: 0,
     suppressedDispositioned: 0,
     rejectedSanitization: 0,
+    neutralized: 0,
     rejectedPlacement: 0,
     readbackFailures: 0,
     apiFailures: 0,
@@ -413,6 +418,11 @@ function sanitizeOne(
     diagnostics.record("publish.finding_rejected_sanitization", { headSha: context.headSha });
     return undefined;
   }
+  // A neutralized body is a finding the reviewer would have DISCARDED before v0.12.0, and
+  // discarding it also degraded the whole run. Counting the rewrites is what makes that saving
+  // visible instead of merely believed — without it, "the sanitizer stopped throwing findings
+  // away" is a claim no measurement can check.
+  counters.neutralized += sanitized.neutralized ?? 0;
   return { finding, sanitizedBody: sanitized.body };
 }
 
@@ -646,6 +656,7 @@ export async function planPublication(
       suppressedSimilar: counters.suppressedSimilar,
       suppressedDispositioned: counters.suppressedDispositioned,
       rejectedSanitization: counters.rejectedSanitization,
+      neutralized: counters.neutralized,
     },
   };
 }

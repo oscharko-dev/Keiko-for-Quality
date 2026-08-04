@@ -1090,6 +1090,7 @@ describe("planPublication and executePublication", () => {
       suppressedSimilar: 0,
       suppressedDispositioned: 0,
       rejectedSanitization: 1,
+      neutralized: 0,
     });
     // The property the split depends on being behavior-identical: the plan phase alone reproduces
     // exactly the suppression/rejection half of what a full publishFindings run reports.
@@ -1100,6 +1101,9 @@ describe("planPublication and executePublication", () => {
       suppressedSimilar: baselineOutcome.suppressedSimilar,
       suppressedDispositioned: baselineOutcome.suppressedDispositioned,
       rejectedSanitization: baselineOutcome.rejectedSanitization,
+      // Not on `PublishOutcome` — the neutralization count is a plan-phase measurement of what the
+      // sanitizer SAVED, and the run-level outcome has no field for it.
+      neutralized: 0,
     });
     expect(planDiagnostics.drain()).toStrictEqual(baselineDiagnostics.drain());
 

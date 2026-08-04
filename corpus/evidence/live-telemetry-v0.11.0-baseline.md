@@ -9,16 +9,16 @@ than described because a baseline nobody can re-read is not a baseline.
 
 Nothing.
 
-| field | v0.11.0 |
-| --- | --- |
-| engine tokens | `n/a` |
-| classify tokens | `n/a` |
-| total tokens | `n/a` |
-| requests / prompt / completion tokens | `n/a` |
-| cached tokens, cached share | `n/a` |
-| published findings, suppression counters | `n/a` |
-| duration | reported |
-| cache hits / misses | reported |
+| field                                    | v0.11.0  |
+| ---------------------------------------- | -------- |
+| engine tokens                            | `n/a`    |
+| classify tokens                          | `n/a`    |
+| total tokens                             | `n/a`    |
+| requests / prompt / completion tokens    | `n/a`    |
+| cached tokens, cached share              | `n/a`    |
+| published findings, suppression counters | `n/a`    |
+| duration                                 | reported |
+| cache hits / misses                      | reported |
 
 `n/a` here means the diagnostic never fired, which the extractor deliberately keeps distinct from a
 reported zero — a run that measured nothing must never read as a run that measured zero. Every
@@ -28,10 +28,10 @@ v0.12.0's `run.spend` exists to close.
 
 ## What the two genuinely reviewed runs in this sample did report
 
-| run | outcome | duration | cache hits | cache misses |
-| ---: | --- | ---: | ---: | ---: |
-| 30889585349 | complete | 1,988 ms | 1 | 0 |
-| 30889033210 | complete | 90,903 ms | 0 | 6 |
+|         run | outcome  |  duration | cache hits | cache misses |
+| ----------: | -------- | --------: | ---------: | -----------: |
+| 30889585349 | complete |  1,988 ms |          1 |            0 |
+| 30889033210 | complete | 90,903 ms |          0 |            6 |
 
 Duration median 46,445 ms, p95 90,903 ms over n=2 — the first real numbers for the latency
 baseline issue (#59), and small enough that they are a starting point, not a percentile anyone
