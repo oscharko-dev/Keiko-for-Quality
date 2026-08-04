@@ -54,6 +54,17 @@ export const REASON_CODES = [
   "settlement.incomplete.warning_not_allowlisted",
   "settlement.incomplete.budget_exceeded",
   "settlement.incomplete.engine_error",
+  // A settlement's `reason` is published in the incomplete notice, so it answers "why was my
+  // change not fully reviewed" for a reader who has no access to the log. It must therefore name
+  // a SETTLEMENT outcome. The two below replace codes borrowed from other families — an engine
+  // diagnostic and a publication diagnostic — which described where the trouble was detected
+  // rather than what it meant for coverage. Those codes keep their diagnostic role unchanged.
+  // Counted mode has no manifest, so a run that fails there fails on the engine's own top-level
+  // `status` field — not on a terminal state it never reported. `terminal_state` said the wrong
+  // thing and, carrying no counts, told an operator nothing about how much went unreviewed.
+  "settlement.incomplete.engine_status_not_success",
+  "settlement.incomplete.schema_rejected",
+  "settlement.incomplete.publication_degraded",
 
   // Publication
   "publish.identity_resolved",
@@ -105,6 +116,23 @@ export const REASON_CODES = [
   // from an ordinary content miss so production can tell the two apart.
   "cache.context_invalidated",
   "cache.appended",
+
+  // Classification repair (v0.11.0). Emitted only when at least one finding arrived without a
+  // usable category/severity pair and the constrained re-ask ran. `failed` on this record is the
+  // honest residue: findings that stayed unclassified rather than being guessed at, and `tokens`
+  // is what the repair itself spent, so the extra calls never hide inside the engine's own total.
+  "classify.repaired",
+  // Classification self-audit (v0.11.0): every classified finding re-derives category/severity
+  // from its own text through the written ladder, because the measured miscalibration on
+  // open-weight models roams between cases rather than sitting still. `changed` counts adopted
+  // moves in either direction; the audit never invents and never touches unclassified findings.
+  "classify.audited",
+
+  // Bounded resume (#57, v0.11.0): the engine run ended without a usable success — a thrown run
+  // error or a non-success status — and was re-invoked exactly once. Emitted at most once per
+  // review; a second failure settles incomplete exactly as before, so "incomplete never reads
+  // as clean" survives the resume.
+  "engine.resumed_once",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];

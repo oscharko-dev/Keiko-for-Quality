@@ -18,15 +18,20 @@ import {
 } from "./cache/review-cache.js";
 import type { CompiledProfile } from "./config/profile.js";
 import type { GuidelineIndex } from "./config/guidelines.js";
-import type { RuntimeConfig } from "./config/runtime.js";
+import { readModelToken, type RuntimeConfig } from "./config/runtime.js";
 import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
 import { acquireEngine } from "./engine/acquire.js";
 import { currentPlatformDigest } from "./engine/pinned-release.js";
-import { parseEngineResult, type EngineFinding } from "./engine/result.js";
+import {
+  auditClassification,
+  repairClassification,
+  needsClassification,
+} from "./engine/classify.js";
+import { parseEngineResult, type EngineFinding, type EngineResult } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
-import { runEngine } from "./engine/run.js";
-import { settle, type Settlement } from "./engine/settle.js";
+import { EngineRunError, runEngine, type EngineRunOptions } from "./engine/run.js";
+import { settle, verdictsSurviveIncompleteness, type Settlement } from "./engine/settle.js";
 import type { GitContext } from "./git/plumbing.js";
 import type { InventoryItem } from "./inventory/classify.js";
 import {
@@ -296,6 +301,32 @@ function prepareMemoization(
 }
 
 /**
+ * What an incomplete report carries about the cache.
+ *
+ * A truncated run still earned verdicts for the files it reached, and persisting exactly those —
+ * nothing else — is what lets the next push spend its budget on the tail rather than paying for
+ * the same files again (Keiko-for-Quality#75). `covered` is supplied only for reasons whose
+ * incompleteness leaves those verdicts intact, so every other incomplete path lands here with
+ * `undefined`, writes nothing, and behaves exactly as it did before.
+ */
+function truncatedCacheFields(
+  request: ReviewRequest,
+  inventory: Inventory,
+  memo: MemoContext,
+  findings: readonly EngineFinding[],
+  covered: ReadonlySet<string> | undefined,
+): { cacheAppended: number; updatedCacheStore?: CacheStore } {
+  const finalized =
+    covered === undefined
+      ? undefined
+      : finalizeCacheStore(request, inventory, memo, findings, covered);
+  return {
+    cacheAppended: finalized?.appended ?? 0,
+    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
+  };
+}
+
+/**
  * Reports a run that fell short — and publishes whatever it managed to find.
  *
  * The notice is what blocks, and it still does. What changed is that the findings alongside it are
@@ -330,6 +361,7 @@ async function settleIncomplete(
   findings: readonly EngineFinding[] = [],
   memo: MemoContext = INERT_MEMO,
   counts?: Readonly<Record<string, number>>,
+  covered?: ReadonlySet<string>,
 ): Promise<ReviewReport> {
   diagnostics.record(reason, {
     headSha: request.head,
@@ -356,7 +388,7 @@ async function settleIncomplete(
     outcome: "incomplete",
     reason,
     ...inventoryCounts(inventory),
-    cacheAppended: 0,
+    ...truncatedCacheFields(request, inventory, memo, findings, covered),
     ...cacheCounts(memo),
     ...(publish === undefined ? {} : { publish }),
   };
@@ -379,7 +411,7 @@ async function executeEngine(
     // One unioned exclude list through the one threading point v0.8.0 built — cache hits are never
     // a second, parallel exclude channel alongside the mechanically-clean one.
     const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
-    const output = await runEngine(
+    const parsed = await runEngineWithOneResume(
       {
         binaryPath: engine.binaryPath,
         repositoryPath: request.repositoryPath,
@@ -394,11 +426,86 @@ async function executeEngine(
       },
       diagnostics,
     );
-    const parsed = parseEngineResult(output.stdout);
-    return settle(inventory, parsed, request.profile, request.config, memo.hitPaths);
+    const classified = await repairFindingClassification(parsed, request, diagnostics);
+    return settle(inventory, classified, request.profile, request.config, memo.hitPaths);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
+}
+
+/**
+ * Deterministic classification repair (v0.11.0) — `src/engine/classify.ts` carries the full why.
+ * In one sentence: not every serving stack enforces the engine's JSON schema, and a finding
+ * without `category`/`severity` cannot be triaged, so the two fields are re-asked through the
+ * smallest prompt that can carry them rather than left to prompt-compliance luck. The anthropic
+ * protocol is excluded because the repair speaks OpenAI chat completions, and that path already
+ * parses structured output strictly inside the engine.
+ */
+async function repairFindingClassification(
+  parsed: EngineResult,
+  request: ReviewRequest,
+  diagnostics: Diagnostics,
+): Promise<EngineResult> {
+  if (request.config.protocol === "anthropic") return parsed;
+  if (parsed.findings.length === 0) return parsed;
+  const token = readModelToken(request.config, request.env);
+  if (token === undefined) return parsed;
+  const deps = { endpoint: request.config.endpoint, token, model: request.config.model };
+  let findings = parsed.findings;
+  if (findings.some(needsClassification)) {
+    const outcome = await repairClassification(findings, deps);
+    diagnostics.record("classify.repaired", {
+      counts: { repaired: outcome.repaired, failed: outcome.failed, tokens: outcome.tokens },
+    });
+    findings = outcome.findings;
+  }
+  const audit = await auditClassification(findings, deps);
+  diagnostics.record("classify.audited", {
+    counts: { changed: audit.changed, tokens: audit.tokens },
+  });
+  return { ...parsed, findings: audit.findings };
+}
+
+/** The resume's seed — any value other than the primary pin does the job. */
+const RESUME_SEED = 43;
+
+/**
+ * Exactly one bounded resume (#57). A run that ends without a usable success — the process threw,
+ * or the result reports a non-success status — is re-invoked once, and the second outcome stands
+ * whatever it is. One, not N: an unbounded retry converts a provider outage into a doubled bill,
+ * and the measured failure mode this closes is a per-file subtask spiral that stops the whole
+ * run after finding nothing (production Keiko#2963 paid its 44 files twice for exactly this; the
+ * corpus reproduced the same signature four times before the session log named it). A second
+ * failure settles incomplete precisely as it did before the resume existed.
+ */
+async function runEngineWithOneResume(
+  options: EngineRunOptions,
+  diagnostics: Diagnostics,
+): Promise<EngineResult> {
+  // The allotment is a whole-review ceiling and must hold ACROSS attempts: the resume runs on
+  // what the first attempt left, floored so a near-exhausted budget still allows a minimal
+  // second opinion. A thrown run reports no token total, so the full allotment stands there —
+  // nothing measured says it was spent.
+  let remaining = options.allottedBudget;
+  try {
+    const first = await runEngine(options, diagnostics);
+    const parsed = parseEngineResult(first.stdout);
+    if (parsed.status === "success") return parsed;
+    remaining = Math.max(ALLOTMENT_FLOOR, options.allottedBudget - parsed.totalTokens);
+    diagnostics.record("engine.resumed_once", { counts: { remaining } });
+  } catch (error) {
+    if (!(error instanceof EngineRunError)) throw error;
+    diagnostics.record("engine.resumed_once", { counts: { remaining } });
+  }
+  // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
+  // would replay itself byte-for-byte — measured, not hypothesized (the seeded verification
+  // spiral failed 2/2 where the unseeded one failed ~1/4). Varying exactly one bit of entropy on
+  // the one bounded retry is what turns it into a second opinion.
+  const second = await runEngine(
+    { ...options, samplingSeed: RESUME_SEED, allottedBudget: remaining },
+    diagnostics,
+  );
+  return parseEngineResult(second.stdout);
 }
 
 /** True when publication itself failed in a way that means the change was not fully reviewed. */
@@ -439,6 +546,7 @@ function finalizeCacheStore(
   inventory: Inventory,
   memo: MemoContext,
   engineFindings: readonly EngineFinding[],
+  restrictTo?: ReadonlySet<string>,
 ): { store: CacheStore; appended: number } | undefined {
   if (request.cacheStore === undefined) return undefined;
   if (
@@ -449,9 +557,19 @@ function finalizeCacheStore(
     return undefined;
   }
 
+  // On a complete run every eligible path was reviewed, so the eligible set IS the reviewed set.
+  // On a truncated one it is not: the engine stopped dispatching partway, and folding the paths it
+  // never opened into the store would freeze them as "clean" forever — the precise laundering
+  // review-cache.ts warns about, and worse than not memoizing at all. `restrictTo` is the engine's
+  // own account of what it reached, so only those paths can be admitted.
+  const eligible =
+    restrictTo === undefined
+      ? memo.eligiblePaths
+      : new Set([...memo.eligiblePaths].filter((path) => restrictTo.has(path)));
+
   const newEntries = buildNewEntries({
     inventory,
-    eligiblePaths: memo.eligiblePaths,
+    eligiblePaths: eligible,
     hitPaths: memo.hitPaths,
     findings: engineFindings,
     ruleDigest: memo.ruleDigest,
@@ -483,11 +601,17 @@ async function publishSettledFindings(
 
   // A finding the reviewer found but could not publish is a finding the consumer never saw. The
   // engine's own verdict was "complete", so this is the only place that fact can be recorded.
+  //
+  // The reason names the SETTLEMENT outcome (Keiko-for-Quality#57). It used to carry
+  // `publish.finding_rejected_placement`, a publication diagnostic: accurate about where the
+  // failure happened, but published in the incomplete notice, where the reader needs to know what
+  // it means for their coverage rather than which internal step noticed. The diagnostic keeps its
+  // name and its per-attempt breakdown; only the settlement reason moved family.
   if (publicationDegraded(publish)) {
     const report = await settleIncomplete(
       request,
       inventory,
-      "publish.finding_rejected_placement",
+      "settlement.incomplete.publication_degraded",
       diagnostics,
       [],
       memo,
@@ -613,6 +737,8 @@ export async function performReview(
       diagnostics,
       mergeHitFindings(settlement.findings, memo.hits),
       memo,
+      undefined,
+      verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths : undefined,
     );
   }
   if (!(await headIsCurrent(request))) {

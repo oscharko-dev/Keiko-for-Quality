@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  composeBody,
   extractMarker,
   fingerprint,
-  hasMarker,
+  markerComment,
   renderMarker,
   summaryMarker,
 } from "./marker.js";
+import { composeFindingBody } from "./presentation.js";
 
 const BASE = {
   repository: "acme/widget",
@@ -85,25 +85,43 @@ describe("marker rendering", () => {
     expect(extractMarker(renderMarker(value))).toBe(value);
   });
 
-  it("finds a marker appended to a body", () => {
-    const body = composeBody("Some finding text.", fingerprint(BASE));
-    expect(hasMarker(body)).toBe(true);
-    expect(extractMarker(body)).toBe(fingerprint(BASE));
+  /**
+   * The round-trip that deduplication actually depends on, pinned against the body a publication
+   * really carries.
+   *
+   * This used to run against `composeBody`, a helper no production path called. That is the
+   * fixture trap in miniature: published findings go through `composeFindingBody`, so the pin
+   * proved a property of code nobody ships, while the shipped composer could have stopped
+   * emitting a recoverable marker without one test turning red. Suppression would then have
+   * failed silently and every re-run would have republished every finding.
+   *
+   * Writing the replacement caught the drift immediately, which is the point. The first attempt
+   * passed the already-rendered `renderMarker(...)` where production passes the bare
+   * `markerComment(...)`; the body would have been doubly wrapped, `extractMarker` would still
+   * have found the inner pattern, and the pin would have gone green over a body no run produces.
+   */
+  it("recovers its marker from a body composed for publication", () => {
+    const marker = fingerprint(BASE);
+    const document = composeFindingBody(
+      "Validate the token in full, not by prefix.",
+      markerComment(marker),
+      {
+        path: "src/auth.ts",
+        line: 2,
+        severity: "critical",
+        category: "security",
+      },
+    );
+    expect(extractMarker(document)).toBe(marker);
   });
 
   it("reports no marker for an ordinary human comment", () => {
     expect(extractMarker("Looks good to me")).toBeUndefined();
-    expect(hasMarker("Looks good to me")).toBe(false);
   });
 
   it("ignores a malformed lookalike", () => {
     expect(extractMarker("<!-- keiko-for-quality:v1:not-hex -->")).toBeUndefined();
     expect(extractMarker("<!-- keiko-for-quality:v2:" + "a".repeat(32) + " -->")).toBeUndefined();
-  });
-
-  it("keeps the marker as the only HTML in the composed body", () => {
-    const body = composeBody("Plain prose finding.", fingerprint(BASE));
-    expect(body.match(/</g)).toHaveLength(1);
   });
 });
 

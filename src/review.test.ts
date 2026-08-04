@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   computeKey,
@@ -17,6 +17,7 @@ import type { RuntimeConfig } from "./config/runtime.js";
 import { blobId, commitSha, sha256 } from "./core/brands.js";
 import { createSilentDiagnostics } from "./diagnostics/sink.js";
 import { currentPlatformDigest } from "./engine/pinned-release.js";
+import { SUPPORTED_MANIFEST_SCHEMA } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
 import { GitHubApiError, GitHubClient } from "./github/client.js";
 import type { ReviewRequest } from "./review.js";
@@ -25,9 +26,13 @@ const acquireEngineMock = vi.fn();
 vi.mock("./engine/acquire.js", () => ({ acquireEngine: acquireEngineMock }));
 
 const runEngineMock = vi.fn();
-vi.mock("./engine/run.js", () => ({ runEngine: runEngineMock }));
+vi.mock("./engine/run.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  runEngine: runEngineMock,
+}));
 
 const { computeAllottedBudget, performReview } = await import("./review.js");
+const { EngineRunError } = await import("./engine/run.js");
 
 describe("computeAllottedBudget", () => {
   it("matches the worked example: 87 files, 3,175 changed lines", () => {
@@ -356,15 +361,20 @@ describe("performReview: review-cache memoization end to end", () => {
     const report = await performReview(request, diagnostics);
 
     expect(report.outcome).toBe("incomplete");
-    expect(report.reason).toBe("publish.finding_rejected_placement");
+    // The settlement reason moved family for Keiko-for-Quality#57 — from the publication
+    // diagnostic naming WHERE the failure was noticed to the settlement code saying what it means
+    // for coverage, which is what the published incomplete notice has to answer for a reader with
+    // no log access. The #63 invariant this test exists for is untouched: the run-level event
+    // still carries the full breakdown rather than a bare code. The per-finding diagnostic keeps
+    // its own name, and publisher.test.ts still pins it one layer down.
+    expect(report.reason).toBe("settlement.incomplete.publication_degraded");
     expect(report.publish).toMatchObject({ published: 0, rejectedPlacement: 1 });
 
-    // The run-level record — the last one with this code, since `publishFindings`' own per-finding
-    // record for the same code is written first — carries the full outcome breakdown redactedly:
-    // counts and codes only, never the finding's content or the rejection's own message.
+    // The run-level record carries the full outcome breakdown redactedly: counts and codes only,
+    // never the finding's content or the rejection's own message.
     const runLevel = diagnostics
       .drain()
-      .filter((record) => record.code === "publish.finding_rejected_placement")
+      .filter((record) => record.code === "settlement.incomplete.publication_degraded")
       .at(-1);
     expect(runLevel?.counts).toStrictEqual({
       published: 0,
@@ -475,6 +485,149 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("abandoned");
       expect(createSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * The safety half of Keiko-for-Quality#75, and the reason that change is narrow.
+   *
+   * A budget-truncated run keeps the verdicts for files it reached, so a large pull request stops
+   * re-pricing everything on every push. The danger in doing that is worse than the cost it fixes:
+   * if the store also absorbed the files the engine never opened, they would be frozen as "clean"
+   * and replayed with confidence nobody earned — a review that silently stops reviewing.
+   *
+   * So this drives a real budget overrun whose manifest covers `src/a.ts` and NOT `src/b.ts`, and
+   * pins both halves: the reached file is persisted, the unreached one is not, at any price.
+   */
+  it("persists only what a budget-truncated run actually reviewed", async () => {
+    // Placed last on purpose: an earlier engine call would shift `mock.calls[0]` under the test
+    // that reads the first call to prove the exclude list reached the engine.
+    runEngineMock.mockClear();
+    const engineDigest = currentPlatformDigest();
+    expect(engineDigest).toBeDefined();
+    if (engineDigest === undefined) return;
+
+    const truncated = JSON.stringify({
+      status: "success",
+      summary: { files_reviewed: 1, total_tokens: 9_000_000, budget_exceeded: true },
+      comments: [],
+      manifest: {
+        schema_version: SUPPORTED_MANIFEST_SCHEMA,
+        terminal_state: "complete",
+        // The engine reached src/a.ts and stopped before src/b.ts.
+        coverage: {
+          selected: [{ path: "src/a.ts" }, { path: "src/b.ts" }],
+          completed: [{ path: "src/a.ts" }],
+          reused: [],
+          failed: [],
+          waived: [],
+        },
+      },
+    });
+
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+    runEngineMock.mockResolvedValue({ stdout: truncated, ruleDigest: engineDigest });
+
+    const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+    const report = await performReview(baseRequest(empty), createSilentDiagnostics());
+
+    expect(report.outcome).toBe("incomplete");
+    // A budget truncation surfaces as a COVERAGE GAP, not as `budget_exceeded`: the files the
+    // engine never reached are the gap, and `settleReconciled` asks that question before the
+    // budget one. That ordering is why both reasons have to be in the survivor set — pinning only
+    // `budget_exceeded` would have left the realistic case unmemoized and the fix inert.
+    expect(report.reason).toBe("settlement.incomplete.coverage_gap");
+
+    const persisted = report.updatedCacheStore;
+    expect(persisted).toBeDefined();
+    // Entries are keyed by blob, not by path, so identify them the way a replay would: by the head
+    // blob of the file in question. Asserting on a `path` field the entry does not carry would
+    // have compared undefined to undefined and passed over any behaviour at all.
+    const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+    const blobs = (persisted?.entries ?? []).map((e) => String(e.headBlob));
+    // Safety first, literally: the file the engine never opened must never be replayable as
+    // reviewed. This assertion leads so that a regression fails on the property that matters
+    // rather than on a count that merely correlates with it.
+    expect(blobs).not.toContain(headBlobB);
+    // And the file it did reach earned its verdict, which is the whole point of persisting at all.
+    expect(blobs).toContain(headBlobA);
+    expect(report.cacheAppended).toBe(1);
+  });
+
+  describe("performReview: bounded single resume (#57)", () => {
+    beforeEach(() => {
+      // The harness mocks are shared across this whole file and deliberately never auto-reset;
+      // these tests count invocations, so they start from a clean call history and a clean
+      // implementation queue — otherwise a leftover default from an earlier test would answer
+      // the call after the queued failures and turn "settles incomplete" into a false complete.
+      runEngineMock.mockReset();
+      acquireEngineMock.mockReset();
+    });
+
+    function nonSuccessStdout(): string {
+      return JSON.stringify({
+        status: "failed",
+        summary: { files_reviewed: 0, total_tokens: 0, budget_exceeded: false },
+        comments: [],
+      });
+    }
+
+    it("re-invokes once when the first run reports a non-success status, and the second stands", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: nonSuccessStdout(), ruleDigest: engineDigest })
+        .mockResolvedValueOnce({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      const codes = diagnostics.drain().map((record) => record.code);
+      expect(codes.filter((code) => code === "engine.resumed_once")).toHaveLength(1);
+    });
+
+    it("re-invokes once when the first run throws an EngineRunError", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit"))
+        .mockResolvedValueOnce({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const report = await performReview(baseRequest(undefined), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      // The retry must not replay the failure: pinned sampling makes a deterministic failure
+      // reproduce itself, so the second attempt carries a different seed.
+      const firstOptions = runEngineMock.mock.calls[0]?.[0] as { samplingSeed?: number };
+      const secondOptions = runEngineMock.mock.calls[1]?.[0] as { samplingSeed?: number };
+      expect(firstOptions.samplingSeed).toBeUndefined();
+      expect(secondOptions.samplingSeed).toBe(43);
+      // The allotment is a whole-review ceiling across attempts: the second invocation runs on
+      // what the first left, floored — for this tiny repository the floor IS the remainder.
+      const firstBudget = (runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number })
+        .allottedBudget;
+      const secondBudget = (runEngineMock.mock.calls[1]?.[0] as { allottedBudget: number })
+        .allottedBudget;
+      expect(secondBudget).toBeLessThanOrEqual(firstBudget);
+    });
+
+    it("settles incomplete after the second failure — one resume, never two", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: nonSuccessStdout(), ruleDigest: engineDigest })
+        .mockResolvedValueOnce({ stdout: nonSuccessStdout(), ruleDigest: engineDigest });
+
+      const report = await performReview(baseRequest(undefined), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("incomplete");
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
     });
   });
 });
