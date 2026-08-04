@@ -191,6 +191,20 @@ describe("buildRuleFile", () => {
     expect(
       sanitizeFindingBody("Fix the bound.\n\nThe guard `i < items.length` became `i <= n`.").ok,
     ).toBe(true);
+    // The Source line, in the exact shape the rule prescribes after its consolidation: a
+    // backticked path publishes, the angle-bracketed anti-shape the parenthetical forbids dies as
+    // html. This is the one prescribed output form no earlier example carried through the real
+    // sanitizer.
+    expect(
+      sanitizeFindingBody(
+        "Cite the rule.\n\nThe guideline names this exact case.\n\nSource: `AGENTS.md`",
+      ).ok,
+    ).toBe(true);
+    expect(
+      sanitizeFindingBody(
+        "Cite the rule.\n\nThe guideline names this exact case.\n\nSource: <AGENTS.md>",
+      ),
+    ).toEqual({ ok: false, reason: "html" });
   });
 
   /**
