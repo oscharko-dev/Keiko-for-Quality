@@ -367,7 +367,12 @@ for (const testCase of cases) {
     results.push(scored);
     const mark = scored.pass ? "PASS" : "FAIL";
     const cls = scored.kind === "recall" && scored.pass && !scored.classified ? " (class)" : "";
-    console.log(`${mark}${cls}  ${scored.id.padEnd(26)} ${scored.detail}`);
+    // Tokens ride on the verdict line itself — cost-per-finding has no home anywhere in this
+    // repository otherwise, and a reader chasing an expensive case should not have to open the
+    // report JSON to find out which one it was.
+    console.log(
+      `${mark}${cls}  ${scored.id.padEnd(26)} ${scored.detail} (tokens ${String(scored.tokens)})`,
+    );
     for (const f of scored.findings) {
       const first = String(f.content).split("\n")[0];
       console.log(
@@ -413,6 +418,30 @@ const tokens = results.reduce((sum, r) => sum + r.tokens, 0);
 const seeded = cases.filter((c) => c.defect !== null).length;
 const clean = cases.length - seeded;
 
+// Cost-per-finding has no home anywhere in this repository otherwise. `isSevere` mirrors
+// scripts/check-qualification.mjs's own selector exactly — the two must agree on what "severe"
+// means, or a token cost measured here and a qualification verdict measured there would silently
+// be talking about different sets of cases.
+const isSevere = (c) => c.defect !== null && ["critical", "high"].includes(c.defect.severity);
+const casesById = new Map(cases.map((c) => [c.id, c]));
+// Every finding reported on a case that carried a seeded defect, on-topic or not: noise is still a
+// real model output that cost real tokens, and excluding it would understate what a finding
+// actually costs. A clean case's findings are excluded — those are scored as precision failures,
+// never graded against a defect.
+const findingsGraded = results.reduce((sum, r) => {
+  const testCase = casesById.get(r.id);
+  return testCase !== undefined && testCase.defect !== null ? sum + r.findings.length : sum;
+}, 0);
+const severeHits = found.filter((r) => {
+  const testCase = casesById.get(r.id);
+  return testCase !== undefined && isSevere(testCase);
+}).length;
+// `null`, not a number silently computed against a zero denominator: a reviewer that finds no
+// severe defect at all — or none of the graded cases carries a finding — should read as "n/a", not
+// as some plausible-looking cost figure.
+const tokensPerFinding = findingsGraded > 0 ? Math.round(tokens / findingsGraded) : null;
+const tokensPerSevereHit = severeHits > 0 ? Math.round(tokens / severeHits) : null;
+
 // An instrument must report its own failure as a failure to MEASURE, never as a result.
 //
 // A misconfigured endpoint makes every case throw before the model is reached. Each one lands in
@@ -449,6 +478,20 @@ if (measured) {
   console.log(`noise          ${String(noise)} finding(s) not about the seeded defect`);
   console.log(
     `tokens         ${String(tokens)} total, ${String(Math.round(tokens / Math.max(1, results.length)))} per case`,
+  );
+  // Cost-per-finding, added alongside the scoreboard above rather than in place of any of it — see
+  // the aggregate computation earlier in this file for why each ratio is guarded against a zero
+  // denominator instead of rounding a plausible-looking number out of one.
+  console.log(
+    `${"findings".padEnd(14)} ${String(findingsGraded)} finding(s) graded across seeded cases`,
+  );
+  console.log(
+    `${"tokens/finding".padEnd(14)} ` +
+      (tokensPerFinding === null ? "n/a (no findings graded)" : String(tokensPerFinding)),
+  );
+  console.log(
+    `${"tokens/severe-hit".padEnd(14)} ` +
+      (tokensPerSevereHit === null ? "n/a (no severe defects found)" : String(tokensPerSevereHit)),
   );
 }
 
@@ -488,7 +531,21 @@ if (!measured) {
   if (process.env.OCR_REPORT) {
     writeFileSync(
       process.env.OCR_REPORT,
-      JSON.stringify({ measured: false, reason, binding, results, tokens }, null, 2),
+      JSON.stringify(
+        {
+          measured: false,
+          reason,
+          binding,
+          results,
+          tokens,
+          // Additive only: scripts/check-qualification.mjs and corpus/measurement.mjs must keep
+          // parsing a report written before this field existed, so nothing above it moved or
+          // renamed to make room for it.
+          aggregates: { findingsGraded, tokensPerFinding, severeHits, tokensPerSevereHit },
+        },
+        null,
+        2,
+      ),
     );
     console.error(`  report    ${process.env.OCR_REPORT}`);
   }
@@ -501,7 +558,18 @@ if (process.env.OCR_REPORT) {
   // re-deriving the rule, and the not-measured branch above writes a report too.
   writeFileSync(
     process.env.OCR_REPORT,
-    JSON.stringify({ measured: true, binding, results, tokens }, null, 2),
+    JSON.stringify(
+      {
+        measured: true,
+        binding,
+        results,
+        tokens,
+        // Additive only — see the matching comment on the not-measured branch above.
+        aggregates: { findingsGraded, tokensPerFinding, severeHits, tokensPerSevereHit },
+      },
+      null,
+      2,
+    ),
   );
   console.log(`report         ${process.env.OCR_REPORT}`);
 }

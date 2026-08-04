@@ -99,4 +99,52 @@ if (binding !== undefined) {
   );
 }
 
+// --- Reported-only trend lines -----------------------------------------------------------------
+//
+// Cost-per-finding has no home anywhere else in this repository — corpus/run.mjs computes these
+// same numbers first, per run. They ride along on every qualification report for that reason, but
+// they are deliberately NOT folded into the pass/fail verdict above: this file already treats
+// severity the same way (presentation-only, gates nothing — see the file's own doc comment), and a
+// token or noise count moving is a trend worth a maintainer's attention, not a release blocker.
+//
+// A report written before corpus/run.mjs grew an `aggregates` block carries no such field at all —
+// every number below is computed straight from `report.results` (and `CASES`, the same denominator
+// source the thresholds above use) whenever `aggregates`, or the specific field read from it, is
+// absent, so this file reads an old report exactly as it always could.
+console.log("");
+console.log("trend (reported only — does not gate promotion):");
+
+const reportResults = report.results ?? [];
+const totalTokens =
+  typeof report.tokens === "number"
+    ? report.tokens
+    : reportResults.reduce((sum, r) => sum + (typeof r.tokens === "number" ? r.tokens : 0), 0);
+const totalNoise = reportResults.reduce(
+  (sum, r) => sum + (typeof r.noise === "number" ? r.noise : 0),
+  0,
+);
+// Recomputed from CASES + byId rather than read from `report.aggregates.severeHits`, so this
+// fallback can never disagree with the severeRecall verdict printed above over the very same
+// report — both walk the identical `isSevere` selection.
+const severeHitsFallback = CASES.filter(isSevere).filter(
+  (c) => byId.get(c.id)?.pass === true,
+).length;
+const tokensPerSevereHit =
+  report.aggregates !== undefined
+    ? report.aggregates.tokensPerSevereHit
+    : severeHitsFallback > 0
+      ? Math.round(totalTokens / severeHitsFallback)
+      : null;
+
+console.log(`     ${"tokens".padEnd(18)} ${String(totalTokens)} total`);
+console.log(
+  `     ${"tokens/severe-hit".padEnd(18)} ` +
+    (tokensPerSevereHit === null || tokensPerSevereHit === undefined
+      ? "n/a"
+      : String(tokensPerSevereHit)),
+);
+console.log(
+  `     ${"noise".padEnd(18)} ${String(totalNoise)} finding(s) not about the seeded defect`,
+);
+
 process.exitCode = failures.length === 0 ? 0 : 1;

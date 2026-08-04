@@ -80,11 +80,17 @@ oscharko-dev/Keiko#2931, where a finding answered in a reasoned reply and then r
 why a thread was resolved). A marker or a similar-looking body inside anyone else's comment is
 spoofing and never suppresses publication under any of the three.
 
-The resolved-conversation rule differs by stage, deliberately. Stages one and two ignore resolved
-and outdated conversations, so a defect that genuinely recurs after its conversation was resolved is
-republished rather than silenced permanently. Stage three exists precisely to read them — but only
-where a human wrote a considered answer, which is what separates "this was decided" from "this was
-clicked away."
+The resolved-conversation rule differs by stage, deliberately — and no longer treats resolved and
+outdated alike everywhere. Stage one, the exact marker, ignores only a conversation that is
+genuinely resolved: it matches on a finding's content, never on a line, so a conversation that is
+merely outdated — its hunk moved under a later push, nobody has answered it — still suppresses a
+repost. An outdated thread is still an open question; only an answered one may allow recurrence.
+Stage two still ignores both resolved and outdated conversations, because its own match depends on a
+line anchor, and an outdated conversation's anchor is a stale coordinate from before the push —
+matching against it would be noise, not signal. Either way, a defect that genuinely recurs after its
+conversation was resolved is republished rather than silenced permanently. Stage three exists
+precisely to read resolved conversations — but only where a human wrote a considered answer, which is
+what separates "this was decided" from "this was clicked away."
 
 **Incomplete never reads as clean.** Partial, skipped, failed, unknown, unlisted-warning-bearing,
 budget-exhausted, timed-out, and malformed results all settle as incomplete.

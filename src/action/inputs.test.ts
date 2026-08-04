@@ -140,6 +140,32 @@ describe("action inputs", () => {
     expect(JSON.stringify(config)).not.toContain("super-secret-value");
   });
 
+  // Dark-shipped prototype (issue #80 technique C, contracts/change-pass.ts): defaults off, and
+  // an explicit `true` flows through exactly like every other boolean input's `true`.
+  describe("crossArtifactPass", () => {
+    const BASE = {
+      INPUT_MODEL_PROTOCOL: "anthropic",
+      INPUT_MODEL_ENDPOINT: "https://api.example.test/v1",
+      INPUT_MODEL_ID: "test-model",
+      INPUT_MODEL_TOKEN_ENV: "KFQ_MODEL_TOKEN",
+    };
+
+    it("defaults to false when the input is absent", () => {
+      expect(runtimeConfigFromInputs(BASE).crossArtifactPass).toBe(false);
+    });
+
+    it("is true when the input is explicitly set to true", () => {
+      const config = runtimeConfigFromInputs({ ...BASE, INPUT_CROSS_ARTIFACT_PASS: "true" });
+      expect(config.crossArtifactPass).toBe(true);
+    });
+
+    it("rejects a value that is not the literal true or false, like its sibling boolean inputs", () => {
+      expect(() => runtimeConfigFromInputs({ ...BASE, INPUT_CROSS_ARTIFACT_PASS: "yes" })).toThrow(
+        ValidationError,
+      );
+    });
+  });
+
   it("rejects a configuration that names the repository token as the model credential", () => {
     expect(() =>
       runtimeConfigFromInputs({

@@ -484,6 +484,38 @@ describe("runAction: run-summary comment", () => {
     });
   });
 
+  /**
+   * Issue #59: `runAction` measures wall-clock around its own `performReview` call and threads the
+   * result into the summary comment — `presentation.test.ts` already pins the rounding rule itself,
+   * so this only has to prove the number reaching the published body is the one `runAction` actually
+   * measured, not a default or a hardcoded zero. `Date.now` is stubbed to jump forward by exactly
+   * five real seconds the instant the mocked `performReview` call starts, which isolates the
+   * measured window to that call the same way `runAction`'s own code brackets it — identity
+   * resolution's own `Date.now()` read happens before the jump and is unaffected.
+   */
+  it("threads the measured wall-clock duration into the summary comment", async () => {
+    let reviewStarted = false;
+    const BASE_MS = 1_700_000_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => (reviewStarted ? BASE_MS + 5_000 : BASE_MS));
+    performReviewMock.mockImplementation(() => {
+      reviewStarted = true;
+      return Promise.resolve(report());
+    });
+    vi.spyOn(IDENTITY_CLIENT, "listIssueComments").mockResolvedValue([]);
+    const createSpy = vi
+      .spyOn(IDENTITY_CLIENT, "createIssueComment")
+      .mockResolvedValue(issueComment());
+    const env = await baseEnv();
+
+    await runAction(
+      env,
+      createDiagnostics(() => undefined),
+    );
+
+    const body = createSpy.mock.calls[0]?.[2];
+    expect(body).toContain("| Duration (s) | 5 |");
+  });
+
   it("makes zero comment-client calls when run_summary is disabled", async () => {
     performReviewMock.mockResolvedValue(report());
     const listSpy = vi.spyOn(IDENTITY_CLIENT, "listIssueComments");

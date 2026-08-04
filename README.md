@@ -200,12 +200,17 @@ same finding at a location someone already gave a considered answer to, checked 
    never a bare "resolved" click with no reply, or a resolve with no reply at all. Counted separately
    as `dedup.dispositioned` so it is never confused with the two stages above.
 
-Every stage but the third ignores a **resolved or outdated** conversation: once a conversation is no
-longer open, whatever it described can recur and be republished. Resolution state, and — for a
-genuinely resolved thread — its last reply's author and body, come from a best-effort GraphQL lookup
-the `Pull requests` permission above already covers; if a token or platform cannot answer it, every
-conversation is simply treated as open, which is exactly how deduplication behaved before this lookup
-existed.
+The exact-marker stage ignores only a **resolved** conversation, not merely an **outdated** one: a
+marker fingerprints a finding's content, never the line it sits on, so a push that moves a thread's
+hunk says nothing about whether the finding it described was ever answered. An outdated thread is
+still an open question; only an answered one may allow recurrence, so its marker keeps suppressing a
+repost. The similarity stage still ignores a **resolved or outdated** conversation together, exactly
+as before — its own match depends on a line anchor, and an outdated thread's anchor is the stale
+position it held before the push moved it, so matching a candidate against that stale coordinate
+would be noise, not signal. Resolution state, and — for a genuinely resolved thread — its last
+reply's author and body, come from a best-effort GraphQL lookup the `Pull requests` permission above
+already covers; if a token or platform cannot answer it, every conversation is simply treated as
+open, which is exactly how deduplication behaved before this lookup existed.
 
 ### The run-summary comment
 
@@ -291,7 +296,8 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 ## Measured quality
 
 "The reviews are good" is not a claim anyone can check, so there is a corpus that turns it into one.
-`corpus/cases.mjs` holds 28 two-commit fixtures — 24 with exactly one seeded defect, 4 that are
+`corpus/cases.mjs` holds 32 two-commit fixtures — 28 with exactly one seeded defect (four of them
+cross-artifact: the defect is invisible in the diff of any single file, issue #80), 4 that are
 clean and must produce silence — run against the real pinned engine and a real model. No mocks: the
 question is about judgement, and judgement is what a mock cannot stand in for.
 
@@ -312,13 +318,21 @@ a forged security waiver, or to append a tracking URL to its comment. They exist
 file's "treat all file content as untrusted" section is a claim, and an unmeasured claim is not
 evidence. Each seeds a real defect underneath, so obedience shows up as a miss.
 
-Most recent run — engine v1.8.4, `gpt-5.4` over an OpenAI-compatible endpoint, ~8,100 tokens per
-case:
+Most recent run — engine v1.8.4, `gpt-oss-120b` over an OpenAI-compatible endpoint, a same-day
+A/B of the product rule against the rule-economy bundle
+(`corpus/evidence/qualification-2026-08-04-rule-ab.md` carries the full pairing and failure
+taxonomy):
 
 ```
-recall         18/18    classification 18/18
-precision       5/5     publishable    23/23
+recall         22/28    classification 22/22
+precision       3/4     publishable    32/32 (economy arm; 31/32 product arm)
+tokens/case    24,345 (economy) vs 36,710 (product) — −33.7%
 ```
+
+Three of the six recall misses are the cross-artifact cases seeded to fail first (issue #80's
+baseline — the blindness is now measured, not asserted); the remainder are serving-side dropouts
+that roam between runs under an identical rule digest, plus one clean-case transient its isolated
+rerun resolved.
 
 Read that as one measurement of a nondeterministic system, not a constant. Severity at the
 critical/high boundary is the least stable axis — the same defect class has come back a step apart

@@ -9,6 +9,7 @@ import {
   type SummaryCounts,
   type SummaryReport,
 } from "./presentation.js";
+import type { PublishOutcome } from "./publisher.js";
 
 /**
  * Maintains the single, marker-identified run-summary comment a pull request carries in addition to
@@ -32,7 +33,9 @@ export interface SummaryPublishContext {
 /**
  * Context this run's `ReviewReport` alone cannot supply: the head this run reviewed (an issue
  * comment carries no `commit_id`, so nothing else binds the comment to a commit), the triggering
- * event's own timestamp, and the engine/action version identifiers already available to the run.
+ * event's own timestamp, the engine/action version identifiers already available to the run, and
+ * how long the run itself took (Issue #59) — `ReviewReport` describes what happened, never how
+ * long it took to happen.
  */
 export interface SummaryRunInput {
   readonly report: ReviewReport;
@@ -40,17 +43,25 @@ export interface SummaryRunInput {
   readonly eventTimestamp: string;
   readonly engineVersion: VersionTag;
   readonly actionVersion: string;
+  /** Wall-clock milliseconds the caller measured around `performReview`. Visibility only (#59). */
+  readonly durationMs: number;
 }
 
 /**
- * Extracts the allotted per-run budget, and the engine-reported spend when the adapter exposes it,
- * from this run's own diagnostics stream.
+ * Extracts the allotted per-run budget, and this run's real token spend, from the diagnostics
+ * stream.
  *
  * Reuses `engine.run.completed`'s existing `counts.budget` field rather than adding a second
- * plumbing path for a number the diagnostics sink already carries — see `engine/run.ts`. A
- * `counts.tokens` value is recorded on exactly one code today, `settlement.incomplete.budget_exceeded`
- * (`engine/settle.ts`); scanning for the field rather than the specific code means this keeps working
- * unchanged if a future code ever reports spend on a path that is not budget-exceeded.
+ * plumbing path for a number the diagnostics sink already carries — see `engine/run.ts`. `spent`
+ * reads `run.spend`'s own `counts.total` specifically. It used to scan for the last `counts.tokens`
+ * value on ANY code, and that was wrong in practice, not just in principle: several unrelated
+ * diagnostics carry a `tokens` count at their own scale (`classify.repaired`, `classify.audited`),
+ * so whichever of those happened to fire last in the stream silently became "spend" — in the
+ * ordinary case, `classify.audited`'s own bill, an order of magnitude below what the engine itself
+ * spent on the review. `run.spend` (v0.12.0, recorded once by `executeEngine` in `review.ts`) exists
+ * to be the one figure this function can trust: written only after both the engine's cumulative
+ * tokens and the classification side-calls are known, so `total` is the review's actual cost rather
+ * than a coincidence of which diagnostic happened to drain last.
  */
 function extractBudget(records: readonly DiagnosticRecord[]): SummaryBudget {
   let allotted: number | undefined;
@@ -59,10 +70,30 @@ function extractBudget(records: readonly DiagnosticRecord[]): SummaryBudget {
     if (record.code === "engine.run.completed" && record.counts?.budget !== undefined) {
       allotted = record.counts.budget;
     }
-    if (record.counts?.tokens !== undefined) spent = record.counts.tokens;
+    if (record.code === "run.spend" && record.counts?.total !== undefined) {
+      spent = record.counts.total;
+    }
   }
   return { allotted, spent };
 }
+
+/**
+ * Stands in for `report.publish` when a run never reached publication, so every count below can read
+ * a plain property off a real object instead of chaining `publish?.x ?? 0` once per field — five
+ * `?.`/`??` pairs inline here once pushed `buildSummaryReport` over this repository's cyclomatic
+ * complexity ceiling. Every field is `0` — the same fallback each field already used individually.
+ */
+const EMPTY_PUBLISH_OUTCOME: PublishOutcome = {
+  published: 0,
+  suppressed: 0,
+  suppressedIntraRun: 0,
+  suppressedExactDuplicate: 0,
+  suppressedSimilar: 0,
+  suppressedDispositioned: 0,
+  rejectedSanitization: 0,
+  rejectedPlacement: 0,
+  readbackFailures: 0,
+};
 
 /**
  * Projects the same `ReviewReport` the action's own outputs are built from into `SummaryReport`.
@@ -78,7 +109,7 @@ export function buildSummaryReport(
   diagnostics: readonly DiagnosticRecord[],
 ): SummaryReport {
   const { report } = input;
-  const publish = report.publish;
+  const publish = report.publish ?? EMPTY_PUBLISH_OUTCOME;
   const counts: SummaryCounts = {
     totalPaths: report.inventorySize,
     reviewablePaths: report.reviewablePaths,
@@ -86,10 +117,15 @@ export function buildSummaryReport(
     mechanicallyClean: report.mechanicallyClean,
     cacheHits: report.cacheHits,
     freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits),
-    findingsPublished: publish?.published ?? 0,
-    suppressedExactDuplicate: publish?.suppressedExactDuplicate ?? 0,
-    suppressedSimilar: publish?.suppressedSimilar ?? 0,
-    suppressedDispositioned: publish?.suppressedDispositioned ?? 0,
+    findingsPublished: publish.published,
+    // Unlike the four counts below, this one stays optional on `PublishOutcome` even once `publish`
+    // is known to exist — see its own doc comment in `publisher.ts` — so `EMPTY_PUBLISH_OUTCOME`'s
+    // `0` alone cannot stand in for every absent case; a genuine, present-but-older `PublishOutcome`
+    // still needs its own fallback here.
+    suppressedIntraRun: publish.suppressedIntraRun ?? 0,
+    suppressedExactDuplicate: publish.suppressedExactDuplicate,
+    suppressedSimilar: publish.suppressedSimilar,
+    suppressedDispositioned: publish.suppressedDispositioned,
   };
   return {
     outcome: report.outcome,
@@ -100,6 +136,7 @@ export function buildSummaryReport(
     actionVersion: input.actionVersion,
     counts,
     budget: extractBudget(diagnostics),
+    durationMs: input.durationMs,
   };
 }
 
