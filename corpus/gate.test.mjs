@@ -24,7 +24,16 @@ import { registerTsExtensionHooks } from "./rule-source.mjs";
  * uses for `sanitizeFindingBody` — never a re-implementation of `compareContracts`, `describeMismatch`,
  * or `loadReviewProfile`.
  *
- * ## The reality check
+ * ## The reality check (updated with the v0.13.0 qualification)
+ *
+ * The paragraphs below pinned the W5-era gate's reach honestly — and the v0.13.0 qualification
+ * run measured the cost of this file testing REACH while run.mjs's merge stayed on the older
+ * call set: all three cross-artifact fixtures MISSED in the main run while the product's own
+ * wiring (`compareAgainstCounterparts` + `collectPinDesyncFindings`, src/review.ts) would have
+ * published every one. Both `computeGateFindings` copies (run.mjs's and this file's) now carry
+ * the product's full chain — `compareDeclaredContracts`, `findUncoveredUnionMembers`,
+ * `detectPinDesync` — and the three tests below assert the FIRING side. The original limits of
+ * `compareContracts` alone remain true and remain pinned by shape-gate.test.ts.
  *
  * `compareContracts` pairs interfaces SOLELY by identical name (see its own doc comment and
  * shape-gate.test.ts's "never pairs across different interface names, even with identical member
@@ -55,7 +64,9 @@ import { registerTsExtensionHooks } from "./rule-source.mjs";
  */
 
 registerTsExtensionHooks();
-const { compareContracts, describeMismatch } = await import("../src/contracts/shape-gate.ts");
+const { compareDeclaredContracts, describeMismatch, findUncoveredUnionMembers, describeUnionGap } =
+  await import("../src/contracts/shape-gate.ts");
+const { detectPinDesync, describePinDesync } = await import("../src/contracts/pin-desync.ts");
 const { loadReviewProfile } = await import("../src/config/profile.ts");
 const { sanitizeFindingBody } = await import("../src/publish/sanitize.ts");
 const { GlobSet } = await import("../src/core/glob.ts");
@@ -124,6 +135,16 @@ function readAtHead(dir, path) {
 function computeGateFindings(dir, testCase, pairs) {
   const changed = testCase.files.filter((file) => file.base !== file.head);
   const findings = [];
+  const push = (file, content) => {
+    findings.push({
+      path: file.path,
+      content,
+      startLine: 0,
+      endLine: 0,
+      category: "bug",
+      severity: "high",
+    });
+  };
   for (const pair of pairs) {
     for (const file of changed) {
       if (!pair.matcher.matches(file.path)) continue;
@@ -132,17 +153,20 @@ function computeGateFindings(dir, testCase, pairs) {
       for (const counterpart of pair.counterparts) {
         const right = readAtHead(dir, counterpart);
         if (right === undefined) continue;
-        for (const mismatch of compareContracts(left, right)) {
-          findings.push({
-            path: file.path,
-            content: describeMismatch(mismatch, file.path, counterpart),
-            startLine: 0,
-            endLine: 0,
-            category: "bug",
-            severity: "high",
-          });
+        for (const mismatch of compareDeclaredContracts(left, right)) {
+          push(file, describeMismatch(mismatch, file.path, counterpart));
+        }
+        for (const gap of findUncoveredUnionMembers(file.base, left, right)) {
+          push(file, describeUnionGap(gap, file.path, counterpart));
         }
       }
+    }
+  }
+  for (const file of changed) {
+    const head = readAtHead(dir, file.path);
+    if (head === undefined) continue;
+    for (const desync of detectPinDesync(file.base, head)) {
+      push(file, describePinDesync(desync, file.path));
     }
   }
   return findings;
@@ -235,8 +259,12 @@ test("gate produces zero findings for a case with no declared pair", () => {
  * though the declared pair in `corpus/profile.json` correctly routes the changed file to its
  * counterpart.
  */
-test("gate does not fire on contract-response-field-dropped (ImportResult vs ImportResponse: different names)", () => {
-  assert.deepEqual(runGate("contract-response-field-dropped"), []);
+test("declared-pair fallback fires on contract-response-field-dropped (ImportResult vs ImportResponse)", () => {
+  const findings = runGate("contract-response-field-dropped");
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].path, "src/import-response.ts");
+  assert.match(findings[0].content, /skippedCount/);
+  assert.equal(sanitizeFindingBody(findings[0].content).ok, true);
 });
 
 /**
@@ -253,8 +281,12 @@ test("gate does not fire on audit-validator-drift (neither side declares an inte
  * ...`, a string-literal union, not an `interface`. `extractFlatInterfaces` matches only `export
  * interface`, so this is outside the gate's syntax by construction.
  */
-test("gate does not fire on status-union-widened-consumer-missed (a type union, not an interface)", () => {
-  assert.deepEqual(runGate("status-union-widened-consumer-missed"), []);
+test("union coverage fires on status-union-widened-consumer-missed (the added member is unmentioned)", () => {
+  const findings = runGate("status-union-widened-consumer-missed");
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].path, "src/candidate-status.ts");
+  assert.match(findings[0].content, /rejected/);
+  assert.equal(sanitizeFindingBody(findings[0].content).ok, true);
 });
 
 /**
@@ -264,6 +296,10 @@ test("gate does not fire on status-union-widened-consumer-missed (a type union, 
  * completeness: the gate's file-pair mechanism has no way to reach a same-file drift at all, with or
  * without a declared pair.
  */
-test("gate produces zero findings for the same-file cross-artifact case (no counterpart file to declare)", () => {
-  assert.deepEqual(runGate("pinned-reference-duplicate-desync"), []);
+test("pin-desync fires on the same-file cross-artifact case, pair-independent", () => {
+  const findings = runGate("pinned-reference-duplicate-desync");
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].path, ".github/workflows/review-store.yml");
+  assert.match(findings[0].content, /left behind/);
+  assert.equal(sanitizeFindingBody(findings[0].content).ok, true);
 });
