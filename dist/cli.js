@@ -856,6 +856,25 @@ function coveredPaths(result) {
   for (const entry of result.coverage.reused) covered.add(entry.path);
   return covered;
 }
+function memoizablePaths(result) {
+  const covered = new Set(coveredPaths(result));
+  const failed = new Set(result.coverage.failed.map((entry) => entry.path));
+  for (const finding of result.findings) {
+    const path = finding.path;
+    if (!failed.has(path)) covered.add(path);
+  }
+  return covered;
+}
+function budgetDisqualifier(mode, result, config) {
+  if (!result.budgetExceeded && result.totalTokens <= config.tokenBudget) return void 0;
+  return incomplete(
+    mode,
+    "settlement.incomplete.budget_exceeded",
+    result.findings,
+    { tokens: result.totalTokens },
+    memoizablePaths(result)
+  );
+}
 var NO_MEMOIZED_PATHS = /* @__PURE__ */ new Set();
 function findCoverageGap(inventory, result, memoizedPaths) {
   const covered = coveredPaths(result);
@@ -879,15 +898,8 @@ function commonDisqualifier(mode, result, profile, config) {
       unlisted
     });
   }
-  if (result.budgetExceeded || result.totalTokens > config.tokenBudget) {
-    return incomplete(
-      mode,
-      "settlement.incomplete.budget_exceeded",
-      result.findings,
-      { tokens: result.totalTokens },
-      coveredPaths(result)
-    );
-  }
+  const overBudget = budgetDisqualifier(mode, result, config);
+  if (overBudget !== void 0) return overBudget;
   if (result.findings.length > config.maxFindings) {
     return incomplete(mode, "settlement.incomplete.engine_error", [], {
       findings: result.findings.length
@@ -899,6 +911,8 @@ function settleReconciled(inventory, result, profile, config, memoizedPaths) {
   if (result.schemaVersion !== SUPPORTED_MANIFEST_SCHEMA) {
     return incomplete("reconciled", "settlement.incomplete.schema_rejected", []);
   }
+  const overBudget = budgetDisqualifier("reconciled", result, config);
+  if (overBudget !== void 0) return overBudget;
   if (result.terminalState !== "complete") {
     return incomplete("reconciled", "settlement.incomplete.terminal_state", result.findings);
   }
@@ -914,7 +928,7 @@ function settleReconciled(inventory, result, profile, config, memoizedPaths) {
       "settlement.incomplete.coverage_gap",
       result.findings,
       { gap, reviewable: inventory.reviewablePaths.size },
-      coveredPaths(result)
+      memoizablePaths(result)
     );
   }
   return commonDisqualifier("reconciled", result, profile, config) ?? {
@@ -928,6 +942,8 @@ function unreviewedByEngine(inventory, memoizedPaths) {
 }
 function settleCounted(inventory, result, profile, config, memoizedPaths) {
   const expected = unreviewedByEngine(inventory, memoizedPaths);
+  const overBudget = budgetDisqualifier("counted", result, config);
+  if (overBudget !== void 0) return overBudget;
   if (result.status !== "success") {
     return incomplete(
       "counted",
@@ -1250,6 +1266,14 @@ var REASON_CODES = [
   // above so an operator can tell "the model repeats itself within a run" from "a later run
   // repeated an earlier one": they call for different remedies.
   "publish.finding_suppressed_intra_run",
+  // Suppressed as a restatement of a still-open conversation a push marked OUTDATED — the one
+  // shape no other stage here can see, because an outdated thread's line anchor is stale and every
+  // sibling stage matches on location. Its own code rather than reusing `_similar` because it is
+  // the code that answers a specific operator question — "how much of this pull request's comment
+  // volume is one defect re-filed across pushes" — and because it is the only cross-run stage that
+  // decided without a location, which is exactly what someone auditing a false suppression needs to
+  // know first.
+  "publish.finding_suppressed_outdated_recurrence",
   "publish.finding_rejected_sanitization",
   "publish.finding_rejected_placement",
   "publish.readback_failed",
@@ -3623,6 +3647,8 @@ function extractMarker(body) {
 var LINE_TOLERANCE = 2;
 var SIMILARITY_THRESHOLD = 0.5;
 var MIN_SHARED_TOKENS = 4;
+var RECURRENCE_THRESHOLD = 0.7;
+var MIN_RECURRENCE_SHARED_TOKENS = 8;
 var MIN_SHARED_SNIPPET_CHARS = 24;
 var MAX_INPUT_CHARS = 2e4;
 var STOPWORDS = /* @__PURE__ */ new Set([
@@ -3722,6 +3748,18 @@ function findsDispositionedConversation(candidate, existing, identity) {
     (thread) => thread.resolved && thread.dispositioned && isSameFindingAtSameLocation(candidate, thread, identity)
   );
 }
+function findsOutdatedRecurrence(candidate, existing, identity) {
+  return existing.some(
+    (thread) => thread.outdatedOnly === true && thread.authorLogin === identity && thread.path === candidate.path && recurrenceBodiesMatch(candidate.body, thread.body)
+  );
+}
+function recurrenceBodiesMatch(candidateBody, existingBody) {
+  const { score, shared } = tokenOverlap(
+    tokenize(candidateBody),
+    tokenize(stripComposedArtifacts(existingBody))
+  );
+  return shared >= MIN_RECURRENCE_SHARED_TOKENS && score >= RECURRENCE_THRESHOLD;
+}
 function areIntraRunDuplicates(a, b) {
   return a.path === b.path && linesOverlap(a, b) && similarByContent(a.body, b.body);
 }
@@ -3747,6 +3785,11 @@ function toExistingConversation(comment, identity) {
     path: comment.path,
     authorLogin: comment.authorLogin,
     resolved: comment.resolved === true || comment.outdated === true,
+    // The fold above is kept, and this is the fact it destroys, carried alongside rather than
+    // recovered from it: a thread a push moved but nobody answered. `findsOutdatedRecurrence` is
+    // its only reader — see that function for why an outdated-only thread must suppress a repeat
+    // while a genuinely resolved one still must not.
+    outdatedOnly: comment.outdated === true && comment.resolved !== true,
     dispositioned: isSubstantiveDisposition(comment.lastReply, identity),
     body: comment.body,
     startLine: comment.startLine ?? comment.line,
@@ -3770,6 +3813,7 @@ function classifySuppression(finding, sanitizedBody, marker, existingMarkers, ex
   };
   if (findsSimilarOpenConversation(candidate, existingThreads, identity)) return "similar";
   if (findsDispositionedConversation(candidate, existingThreads, identity)) return "dispositioned";
+  if (findsOutdatedRecurrence(candidate, existingThreads, identity)) return "recurrence";
   return void 0;
 }
 function suppressionCode(suppression) {
@@ -3780,6 +3824,8 @@ function suppressionCode(suppression) {
       return "publish.finding_suppressed_similar";
     case "dispositioned":
       return "dedup.dispositioned";
+    case "recurrence":
+      return "publish.finding_suppressed_outdated_recurrence";
   }
 }
 function findingMarker(context, finding, sanitizedBody) {
@@ -3799,6 +3845,7 @@ function emptyCounters() {
     suppressedExactDuplicate: 0,
     suppressedSimilar: 0,
     suppressedDispositioned: 0,
+    suppressedRecurrence: 0,
     rejectedSanitization: 0,
     neutralized: 0,
     rejectedPlacement: 0,
@@ -3875,9 +3922,20 @@ function planCrossRun(context, candidate, prefetch, counters, diagnostics) {
   );
   if (suppression !== void 0) {
     counters.suppressed += 1;
-    if (suppression === "exact") counters.suppressedExactDuplicate += 1;
-    else if (suppression === "similar") counters.suppressedSimilar += 1;
-    else counters.suppressedDispositioned += 1;
+    switch (suppression) {
+      case "exact":
+        counters.suppressedExactDuplicate += 1;
+        break;
+      case "similar":
+        counters.suppressedSimilar += 1;
+        break;
+      case "dispositioned":
+        counters.suppressedDispositioned += 1;
+        break;
+      case "recurrence":
+        counters.suppressedRecurrence += 1;
+        break;
+    }
     diagnostics.record(suppressionCode(suppression), { headSha: context.headSha });
     return void 0;
   }
@@ -3911,6 +3969,7 @@ async function planPublication(context, findings, diagnostics, prefetch) {
       suppressedExactDuplicate: counters.suppressedExactDuplicate,
       suppressedSimilar: counters.suppressedSimilar,
       suppressedDispositioned: counters.suppressedDispositioned,
+      suppressedRecurrence: counters.suppressedRecurrence,
       rejectedSanitization: counters.rejectedSanitization,
       neutralized: counters.neutralized
     }
@@ -3918,7 +3977,7 @@ async function planPublication(context, findings, diagnostics, prefetch) {
 }
 
 // src/review.ts
-var PER_FILE_TOKENS = 64e3;
+var PER_FILE_TOKENS = 1e5;
 var PER_LINE_TOKENS = 60;
 var ALLOTMENT_MARGIN = 1.3;
 var ALLOTMENT_FLOOR = 15e4;

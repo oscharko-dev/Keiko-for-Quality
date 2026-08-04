@@ -79,6 +79,14 @@ export const REASON_CODES = [
   // above so an operator can tell "the model repeats itself within a run" from "a later run
   // repeated an earlier one": they call for different remedies.
   "publish.finding_suppressed_intra_run",
+  // Suppressed as a restatement of a still-open conversation a push marked OUTDATED — the one
+  // shape no other stage here can see, because an outdated thread's line anchor is stale and every
+  // sibling stage matches on location. Its own code rather than reusing `_similar` because it is
+  // the code that answers a specific operator question — "how much of this pull request's comment
+  // volume is one defect re-filed across pushes" — and because it is the only cross-run stage that
+  // decided without a location, which is exactly what someone auditing a false suppression needs to
+  // know first.
+  "publish.finding_suppressed_outdated_recurrence",
   "publish.finding_rejected_sanitization",
   "publish.finding_rejected_placement",
   "publish.readback_failed",

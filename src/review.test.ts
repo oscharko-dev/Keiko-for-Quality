@@ -61,11 +61,18 @@ function requireEngineDigest(): Sha256 {
 }
 
 describe("computeAllottedBudget", () => {
-  it("matches the worked example: the measured 55-file live run (Keiko#2981)", () => {
-    // 1.3 * (55 * 64_000 + 1_374 * 60) = 1.3 * (3_520_000 + 82_440) = 1.3 * 3_602_440 = 4_683_172 —
-    // comfortably above that run's real 3.56M spend, which the previous constants priced at 2.97M
-    // and thereby truncated into an incomplete settlement.
-    expect(computeAllottedBudget(6_000_000, 55, 1_374)).toBe(4_683_172);
+  it("matches the worked example: the measured 37-file live run (Keiko#2970)", () => {
+    // 1.3 * (37 * 100_000 + 4_594 * 60) = 1.3 * (3_700_000 + 275_640) = 1.3 * 3_975_640 =
+    // 5_168_332 — above that run's real 3,843,796-token spend, which the previous 64k constant
+    // priced at 3,436,732 and thereby truncated into an incomplete settlement four pushes running.
+    expect(computeAllottedBudget(6_000_000, 37, 4_594)).toBe(5_168_332);
+  });
+
+  it("hands a change past the ceiling the consumer's whole budget rather than a fraction of it", () => {
+    // 1.3 * (55 * 100_000 + 1_374 * 60) = 7_257_172, past ALLOTMENT_CEILING — so the clamp, and
+    // then the consumer's own 6M ceiling, decide. Past ~46 files the size term stops discriminating
+    // and every change is held to the configured budget, which is the consumer's call to make.
+    expect(computeAllottedBudget(6_000_000, 55, 1_374)).toBe(6_000_000);
   });
 
   it("never exceeds the consumer's configured ceiling, however large the change", () => {
@@ -73,7 +80,7 @@ describe("computeAllottedBudget", () => {
   });
 
   it("floors a tiny change rather than starving it", () => {
-    // 1.3 * (1 * 64_000 + 5 * 60) = 1.3 * 64_300 = 83_590, below the 150_000 floor.
+    // 1.3 * (1 * 100_000 + 5 * 60) = 1.3 * 100_300 = 130_390, below the 150_000 floor.
     expect(computeAllottedBudget(2_000_000, 1, 5)).toBe(150_000);
   });
 
@@ -82,7 +89,7 @@ describe("computeAllottedBudget", () => {
   });
 
   it("caps a huge change at the ceiling rather than the raw estimate", () => {
-    // 1.3 * (1000 * 64_000) = 83_200_000, far past the 6_000_000 ceiling.
+    // 1.3 * (1000 * 100_000) = 130_000_000, far past the 6_000_000 ceiling.
     expect(computeAllottedBudget(100_000_000, 1000, 0)).toBe(6_000_000);
   });
 
@@ -107,7 +114,7 @@ describe("computeAllottedBudget", () => {
   it("scales with line count, but only as the weak secondary term the constant implies", () => {
     const withoutLines = computeAllottedBudget(6_000_000, 10, 0);
     const withLines = computeAllottedBudget(6_000_000, 10, 1000);
-    // 60 tokens/line * 1000 lines * 1.3 margin = 78_000 — a small delta next to the 64_000/file term.
+    // 60 tokens/line * 1000 lines * 1.3 margin = 78_000 — a small delta next to the 100_000/file term.
     expect(withLines - withoutLines).toBe(78_000);
   });
 });
@@ -733,11 +740,13 @@ describe("performReview: review-cache memoization end to end", () => {
     const report = await performReview(baseRequest(empty), createSilentDiagnostics());
 
     expect(report.outcome).toBe("incomplete");
-    // A budget truncation surfaces as a COVERAGE GAP, not as `budget_exceeded`: the files the
-    // engine never reached are the gap, and `settleReconciled` asks that question before the
-    // budget one. That ordering is why both reasons have to be in the survivor set — pinning only
-    // `budget_exceeded` would have left the realistic case unmemoized and the fix inert.
-    expect(report.reason).toBe("settlement.incomplete.coverage_gap");
+    // A budget truncation surfaces AS a budget stop. This result reports a complete terminal state
+    // and no failed coverage entry, so the only thing that kept the engine away from `src/b.ts` is
+    // the ceiling — and `settleReconciled` now asks that question before the terminal-state and
+    // gap ones, precisely so the reason names the cause the consumer can act on instead of the
+    // shortfall it produced. Both reasons still have to be in `verdictsSurviveIncompleteness`'
+    // survivor set: `coverage_gap` remains the reason for a gap with no overrun behind it.
+    expect(report.reason).toBe("settlement.incomplete.budget_exceeded");
 
     const persisted = report.updatedCacheStore;
     expect(persisted).toBeDefined();
@@ -752,6 +761,55 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(blobs).not.toContain(headBlobB);
     // And the file it did reach earned its verdict, which is the whole point of persisting at all.
     expect(blobs).toContain(headBlobA);
+    expect(report.cacheAppended).toBe(1);
+  });
+
+  /**
+   * The same rule on the engine this product actually pins — and the shape that made the rule above
+   * inert in production for its whole life.
+   *
+   * No published engine release emits a run manifest (`settle.ts`'s own header says so), so a live
+   * truncated run reaches settlement with `coverage.completed` empty, and the covered set the test
+   * above pins is therefore always empty on the real binary: thirteen consecutive truncated runs on
+   * oscharko-dev/Keiko#2981 stored nothing at all, and each following push re-priced all 37 files
+   * from zero. `memoizablePaths` (`settle.ts`) supplies the one identity a manifest-less result
+   * still proves — the engine cannot report a defect in a file it never opened — and this pins that
+   * the identity survives all the way into the store.
+   */
+  it("persists a manifest-less truncated run's finding paths, the shape the released engine emits", async () => {
+    runEngineMock.mockClear();
+    const engineDigest = requireEngineDigest();
+
+    // No `manifest` key at all — exactly what v1.8.4 answers — plus the two facts a budget stop
+    // arrives with together: a non-success status and `budget_exceeded`.
+    const truncated = JSON.stringify({
+      status: "failed",
+      summary: { files_reviewed: 1, total_tokens: 9_000_000, budget_exceeded: true },
+      comments: [
+        {
+          path: "src/a.ts",
+          start_line: 1,
+          end_line: 1,
+          category: "bug",
+          severity: "high",
+          content: "The retry loop never resets its attempt counter.",
+        },
+      ],
+    });
+
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+    runEngineMock.mockResolvedValue({ stdout: truncated, ruleDigest: engineDigest });
+
+    const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+    const report = await performReview(baseRequest(empty), createSilentDiagnostics());
+
+    expect(report.outcome).toBe("incomplete");
+    expect(report.reason).toBe("settlement.incomplete.budget_exceeded");
+
+    const blobs = (report.updatedCacheStore?.entries ?? []).map((e) => String(e.headBlob));
+    // The file the engine demonstrably opened is now replayable; the one it never reached is not.
+    expect(blobs).toContain(headBlobA);
+    expect(blobs).not.toContain(git(["rev-parse", `${headSha}:src/b.ts`]).trim());
     expect(report.cacheAppended).toBe(1);
   });
 
@@ -987,12 +1045,14 @@ describe("performReview: review-cache memoization end to end", () => {
       // left, and the first attempt already reports nothing left.
       expect(runEngineMock).toHaveBeenCalledTimes(1);
 
-      // `settleCounted` (settle.ts) decides on `status` before it ever looks at `budgetExceeded`,
-      // so a non-success counted-mode result settles for the same reason whether or not a resume
-      // was ever attempted — this is exactly today's behaviour for this engine output, not a new
-      // outcome the skip introduces.
+      // The whole shape of the production failure in one fixture: `--max-tokens-budget` makes the
+      // engine stop dispatching and exit non-`success`, so this result carries a failed status AND
+      // `budget_exceeded` together. `settleCounted` asks about the budget first, so the pull
+      // request is told the cause it can act on — and the reason it is told is the one
+      // `verdictsSurviveIncompleteness` admits, so the verdicts this run already paid for survive
+      // into the store instead of being discarded with it.
       expect(report.outcome).toBe("incomplete");
-      expect(report.reason).toBe("settlement.incomplete.engine_status_not_success");
+      expect(report.reason).toBe("settlement.incomplete.budget_exceeded");
 
       // Skipped, not resumed: the resume-only diagnostic must not fire for a resume that never ran.
       const codes = diagnostics.drain().map((record) => record.code);

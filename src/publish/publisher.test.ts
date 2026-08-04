@@ -526,18 +526,57 @@ describe("publishFindings", () => {
     });
 
     /**
-     * Precision choice, not an oversight — pinned separately from the exact-marker stage's own
-     * eligibility (see "resolved/outdated eligibility" above, where the same `outdated: true` shape
-     * suppresses instead). An outdated thread's line anchor is GitHub's `original_line`/
-     * `original_start_line` fallback (`client.ts`'s `toReviewComment`): a stale coordinate from
-     * before the push moved the hunk. This stage's whole job is judging a candidate's line overlap
-     * plus body similarity against an existing conversation, so matching against a stale coordinate
-     * would be noise, not signal — this stage deliberately keeps treating an outdated thread as
-     * ineligible even though the marker stage no longer does, for its own, unrelated reason (a
-     * marker does not depend on a coordinate at all).
+     * The outdated thread stays ineligible for THIS stage — precision choice, not an oversight, and
+     * pinned separately from the exact-marker stage's own eligibility (see "resolved/outdated
+     * eligibility" above, where the same `outdated: true` shape suppresses instead). An outdated
+     * thread's line anchor is GitHub's `original_line`/`original_start_line` fallback (`client.ts`'s
+     * `toReviewComment`): a stale coordinate from before the push moved the hunk, and this stage's
+     * whole job is judging line overlap plus body similarity, so matching against it would be noise.
+     *
+     * What changed is that the repost no longer publishes anyway: the recurrence stage
+     * (`findsOutdatedRecurrence`) claims it instead, on a body match alone at a deliberately higher
+     * bar, with no coordinate involved. The two counts stay distinguishable precisely so this
+     * distinction survives — `suppressedSimilar` is still 0 here.
      */
-    it("does not suppress a rephrased repost against a thread that is outdated but not resolved", async () => {
+    it("routes a rephrased repost against an outdated, unresolved thread to the recurrence stage", async () => {
       api.existing = [openComment(REPHRASED_SAME_DEFECT, { outdated: true })];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({
+        published: 0,
+        suppressed: 1,
+        suppressedSimilar: 0,
+        suppressedRecurrence: 1,
+      });
+      expect(api.created).toHaveLength(0);
+    });
+
+    /**
+     * The #38 contract the recurrence stage must not erode: someone looked at this thread and
+     * resolved it, so a defect that comes back has to be able to speak again. `outdated` alongside
+     * `resolved` changes nothing — resolution wins, and `outdatedOnly` is false by construction.
+     */
+    it("still publishes a recurrence against a thread that is both resolved and outdated", async () => {
+      api.existing = [openComment(REPHRASED_SAME_DEFECT, { outdated: true, resolved: true })];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+
+    /**
+     * And the precision half: without a line anchor to narrow on, the body carries the whole
+     * decision, so a genuinely different defect in the same file must still publish. This is the
+     * shape that would fail first if `RECURRENCE_THRESHOLD` were relaxed toward the ordinary
+     * similarity threshold.
+     */
+    it("still publishes a different defect in the same file against an outdated thread", async () => {
+      api.existing = [openComment(UNRELATED_DEFECT, { outdated: true })];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+
+    it("does not suppress a recurrence against an outdated thread someone else authored", async () => {
+      api.existing = [
+        openComment(REPHRASED_SAME_DEFECT, { outdated: true, authorLogin: "contributor" }),
+      ];
       const outcome = await publishFindings(context, [finding()], diagnostics);
       expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
     });
@@ -1089,6 +1128,7 @@ describe("planPublication and executePublication", () => {
       suppressedExactDuplicate: 1,
       suppressedSimilar: 0,
       suppressedDispositioned: 0,
+      suppressedRecurrence: 0,
       rejectedSanitization: 1,
       neutralized: 0,
     });
@@ -1100,6 +1140,7 @@ describe("planPublication and executePublication", () => {
       suppressedExactDuplicate: baselineOutcome.suppressedExactDuplicate,
       suppressedSimilar: baselineOutcome.suppressedSimilar,
       suppressedDispositioned: baselineOutcome.suppressedDispositioned,
+      suppressedRecurrence: baselineOutcome.suppressedRecurrence ?? 0,
       rejectedSanitization: baselineOutcome.rejectedSanitization,
       // Not on `PublishOutcome` — the neutralization count is a plan-phase measurement of what the
       // sanitizer SAVED, and the run-level outcome has no field for it.

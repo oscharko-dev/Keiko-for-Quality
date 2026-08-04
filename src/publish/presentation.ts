@@ -214,6 +214,10 @@ export interface SummaryCounts {
   readonly suppressedSimilar: number;
   /** Suppressed against a resolved thread with a substantive disposition reply (Keiko-for-Quality#64). */
   readonly suppressedDispositioned: number;
+  /** Suppressed as a restatement of a still-open, push-outdated conversation — see `similarity.ts`'s
+   *  `findsOutdatedRecurrence`. Always a plain number here, for the same reason
+   *  `suppressedIntraRun` above is. */
+  readonly suppressedRecurrence: number;
 }
 
 /**
@@ -308,6 +312,7 @@ function countRows(counts: SummaryCounts): readonly string[] {
     ["Suppressed (exact duplicate)", counts.suppressedExactDuplicate],
     ["Suppressed (similar)", counts.suppressedSimilar],
     ["Suppressed (dispositioned)", counts.suppressedDispositioned],
+    ["Suppressed (outdated recurrence)", counts.suppressedRecurrence],
   ];
   return rows.map(([label, value]) => `| ${label} | ${String(value)} |`);
 }

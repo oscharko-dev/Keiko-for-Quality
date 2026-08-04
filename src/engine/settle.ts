@@ -117,6 +117,82 @@ function coveredPaths(result: EngineResult): ReadonlySet<string> {
   return covered;
 }
 
+/**
+ * The paths a truncated run's verdicts may be memoized for — `coveredPaths` widened by the one
+ * coverage fact a manifest-less engine still proves.
+ *
+ * `coveredPaths` reads the run manifest and nothing else, and no published engine release emits a
+ * manifest (this module's own header says so). So on the engine this product actually pins, that
+ * set is ALWAYS empty, and the truncation persistence built for Keiko-for-Quality#75 — "a
+ * budget-truncated run keeps the verdicts it earned so the next push pays only for the tail" — has
+ * never once written an entry in production. Measured on oscharko-dev/Keiko#2981: thirteen
+ * consecutive runs, every one truncated, every one storing nothing, every one re-pricing all 37
+ * files from zero. The mechanism was not wrong; it was unreachable.
+ *
+ * A finding is the missing evidence. The engine cannot report a defect at `path` without having
+ * opened `path`, so every path named by a surviving finding was demonstrably reviewed — an
+ * identity, not a count, which is exactly what `coveredPaths` could not supply here. A path the
+ * manifest explicitly `failed` is excluded even when it carries a finding: a file whose review
+ * fell over partway may have produced one finding and missed three, and freezing that as its
+ * verdict is the laundering `review-cache.ts` warns about. When there is no manifest there is no
+ * failed list either, so nothing is subtracted and the finding paths stand alone.
+ *
+ * Deliberately NOT used by `findCoverageGap`, which asks a different question: whether the engine
+ * covered everything the inventory says changed. A finding proves one file was opened; it proves
+ * nothing about the files that produced none, and crediting it there would shrink the gap this
+ * adapter exists to detect.
+ */
+function memoizablePaths(result: EngineResult): ReadonlySet<string> {
+  const covered = new Set(coveredPaths(result));
+  const failed = new Set(result.coverage.failed.map((entry) => entry.path));
+  for (const finding of result.findings) {
+    const path = finding.path as string;
+    if (!failed.has(path)) covered.add(path);
+  }
+  return covered;
+}
+
+/**
+ * The engine's own budget stop, checked ahead of every terminal-state and status check on both
+ * settlement paths.
+ *
+ * A budget stop does not present as a budget stop. `--max-tokens-budget` makes the engine stop
+ * dispatching new files and then exit non-`success` with `summary.budget_exceeded: true`, so a run
+ * that hit its ceiling reports BOTH facts at once — and whichever check runs first is the reason
+ * the pull request is told. That ordering used to put the generic one first, and the cost was not
+ * cosmetic:
+ *
+ * - The published notice named `settlement.incomplete.engine_status_not_success`, which says only
+ *   "the engine did not say success". Every incomplete run on oscharko-dev/Keiko#2970 and #2981 —
+ *   twenty in one day, not one clean settlement between them — carried that code, and it told
+ *   nobody the runs were dying against a ceiling the consumer could simply raise.
+ * - `verdictsSurviveIncompleteness` denies memoization for that code, and rightly: a bad terminal
+ *   state means the manifest is not to be believed. But a budget stop is the one incompleteness
+ *   whose verdicts DO survive, so the misclassification also discarded every verdict the run had
+ *   already paid for — turning each truncated run into a total loss, and each following push into
+ *   a full re-payment that truncated in the same place.
+ *
+ * Checked before the status and terminal-state branches because it explains them; checked after
+ * `settleReconciled`'s schema branch because an unrecognised manifest schema means the coverage
+ * this carries is not readable either. It leaves `commonDisqualifier`'s own ordering untouched:
+ * an unlisted warning and a finding flood are not caused by a budget stop, so their precedence on
+ * the success path is unchanged.
+ */
+function budgetDisqualifier(
+  mode: SettlementMode,
+  result: EngineResult,
+  config: RuntimeConfig,
+): Settlement | undefined {
+  if (!result.budgetExceeded && result.totalTokens <= config.tokenBudget) return undefined;
+  return incomplete(
+    mode,
+    "settlement.incomplete.budget_exceeded",
+    result.findings,
+    { tokens: result.totalTokens },
+    memoizablePaths(result),
+  );
+}
+
 /** No memoization: every existing caller that does not pass one gets today's exact behaviour. */
 const NO_MEMOIZED_PATHS: ReadonlySet<string> = new Set();
 
@@ -166,15 +242,8 @@ function commonDisqualifier(
       unlisted,
     });
   }
-  if (result.budgetExceeded || result.totalTokens > config.tokenBudget) {
-    return incomplete(
-      mode,
-      "settlement.incomplete.budget_exceeded",
-      result.findings,
-      { tokens: result.totalTokens },
-      coveredPaths(result),
-    );
-  }
+  const overBudget = budgetDisqualifier(mode, result, config);
+  if (overBudget !== undefined) return overBudget;
   // A result carrying more findings than the consumer believes plausible is more likely a
   // misconfigured model or a prompt-injection success than a genuinely terrible change.
   if (result.findings.length > config.maxFindings) {
@@ -214,6 +283,11 @@ function settleReconciled(
     // one family over.
     return incomplete("reconciled", "settlement.incomplete.schema_rejected", []);
   }
+  // Before the terminal-state branch below, which a budget stop is a cause of — see
+  // `budgetDisqualifier`. After the schema branch above, which decides whether the coverage this
+  // would carry is readable at all.
+  const overBudget = budgetDisqualifier("reconciled", result, config);
+  if (overBudget !== undefined) return overBudget;
   if (result.terminalState !== "complete") {
     return incomplete("reconciled", "settlement.incomplete.terminal_state", result.findings);
   }
@@ -229,7 +303,7 @@ function settleReconciled(
       "settlement.incomplete.coverage_gap",
       result.findings,
       { gap, reviewable: inventory.reviewablePaths.size },
-      coveredPaths(result),
+      memoizablePaths(result),
     );
   }
   return (
@@ -267,6 +341,12 @@ function settleCounted(
   memoizedPaths: ReadonlySet<string>,
 ): Settlement {
   const expected = unreviewedByEngine(inventory, memoizedPaths);
+  // Before the status branch below rather than after it: `--max-tokens-budget` makes the engine
+  // exit non-success, so the status check would otherwise claim every budget stop as its own and
+  // report the symptom instead of the cause. See `budgetDisqualifier` for what that cost in
+  // production.
+  const overBudget = budgetDisqualifier("counted", result, config);
+  if (overBudget !== undefined) return overBudget;
   if (result.status !== "success") {
     // Named for the field that actually failed: counted mode has no manifest, so there is no
     // terminal state to report and the old code said something the run never claimed. The counts

@@ -5,6 +5,7 @@ import { composeFindingBody } from "./presentation.js";
 import {
   areIntraRunDuplicates,
   findsDispositionedConversation,
+  findsOutdatedRecurrence,
   findsSimilarOpenConversation,
   type CandidateForDedup,
   type ExistingConversation,
@@ -566,5 +567,117 @@ describe("areIntraRunDuplicates: Unicode-adversarial pairs agree (freeze-backlog
     const a = pairCandidate("Restore the fallback connector when the endpoint is unset.");
     const b = pairCandidate("An unrelated defect about a locking bug entirely elsewhere.");
     expect(areIntraRunDuplicates(a, b)).toBe(false);
+  });
+});
+
+/**
+ * The stage that exists because the three above cannot see an outdated thread at all — see
+ * `findsOutdatedRecurrence`. Every fixture here is drawn from the production repeats on
+ * oscharko-dev/Keiko#2981, where one unfixed regression-guard objection became three separate
+ * blocking conversations across three pushes.
+ */
+describe("findsOutdatedRecurrence", () => {
+  const ORIGINAL =
+    "Do not lower the expected number of commit preview calls; this weakens a regression guard " +
+    "and may hide unintended duplicate requests.";
+  const RESTATED =
+    "Do not reduce the expected number of commit preview calls; this weakens the regression guard " +
+    "and may let missing requests through.";
+
+  function outdated(overrides: Partial<ExistingConversation> = {}): ExistingConversation {
+    return thread({ body: ORIGINAL, outdatedOnly: true, resolved: true, ...overrides });
+  }
+
+  it("returns false for an empty existing-thread list", () => {
+    expect(findsOutdatedRecurrence(candidate({ body: RESTATED }), [], IDENTITY)).toBe(false);
+  });
+
+  it("suppresses the same objection re-filed after a push moved the hunk", () => {
+    expect(findsOutdatedRecurrence(candidate({ body: RESTATED }), [outdated()], IDENTITY)).toBe(
+      true,
+    );
+  });
+
+  /**
+   * The point of the stage: it decides without a coordinate, so a candidate whose line has drifted
+   * far past `LINE_TOLERANCE` — or lost its anchor entirely — is still recognised. Every other
+   * stage in this file returns false for both of these.
+   */
+  it.each([
+    ["a line far from the original anchor", { startLine: 902, endLine: 902 }],
+    ["no usable anchor at all", { startLine: 0, endLine: 0 }],
+    ["a stale anchor on the existing side", { startLine: 236, endLine: 236 }],
+  ])("matches regardless of %s", (_label, anchor) => {
+    const found = findsOutdatedRecurrence(
+      candidate({ body: RESTATED, ...anchor }),
+      [outdated({ startLine: undefined, endLine: undefined })],
+      IDENTITY,
+    );
+    expect(found).toBe(true);
+  });
+
+  it("ignores a thread that is not outdated — the anchored stages own that case", () => {
+    const found = findsOutdatedRecurrence(
+      candidate({ body: RESTATED }),
+      [outdated({ outdatedOnly: false })],
+      IDENTITY,
+    );
+    expect(found).toBe(false);
+  });
+
+  it("ignores a thread with no outdated fact recorded at all", () => {
+    // `outdatedOnly` absent, not false: a caller that predates the field must not gain suppression
+    // it never asked for.
+    const bare = thread({ body: ORIGINAL, resolved: true });
+    expect(findsOutdatedRecurrence(candidate({ body: RESTATED }), [bare], IDENTITY)).toBe(false);
+  });
+
+  it("ignores a thread on a different path", () => {
+    const found = findsOutdatedRecurrence(
+      candidate({ body: RESTATED }),
+      [outdated({ path: "src/other.ts" })],
+      IDENTITY,
+    );
+    expect(found).toBe(false);
+  });
+
+  it("ignores a thread this reviewer did not author", () => {
+    const found = findsOutdatedRecurrence(
+      candidate({ body: RESTATED }),
+      [outdated({ authorLogin: "contributor" })],
+      IDENTITY,
+    );
+    expect(found).toBe(false);
+  });
+
+  /**
+   * The precision bar, exercised where it actually bites. Both bodies below would clear the
+   * ORDINARY similarity threshold if a line anchor were narrowing alongside them; without one they
+   * must not, which is the whole justification for `RECURRENCE_THRESHOLD` being higher.
+   */
+  it.each([
+    [
+      "a different defect that happens to share the sentence template",
+      "Do not lower the configured retry ceiling; this weakens a timeout guard and may hide " +
+        "unintended socket exhaustion.",
+    ],
+    ["an unrelated defect in the same file", "The locking order here inverts under contention."],
+  ])("does not suppress %s", (_label, body) => {
+    expect(findsOutdatedRecurrence(candidate({ body }), [outdated()], IDENTITY)).toBe(false);
+  });
+
+  /**
+   * A shared code quote is sufficient on its own for `similarByContent`, and deliberately is NOT
+   * reachable here: a snippet identifies a location, and location is exactly what this stage has
+   * agreed not to trust.
+   */
+  it("does not suppress on a shared code block alone", () => {
+    const snippet = "```\nexpect(commitPreviews).toHaveLength(1);\n```";
+    const found = findsOutdatedRecurrence(
+      candidate({ body: `Something entirely different. ${snippet}` }),
+      [outdated({ body: `A quite separate objection about naming. ${snippet}` })],
+      IDENTITY,
+    );
+    expect(found).toBe(false);
   });
 });

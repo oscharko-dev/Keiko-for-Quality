@@ -335,6 +335,25 @@ describe("buildSummaryReport", () => {
       expect(summary.budget).toEqual({ allotted: 1_200_000, spent: undefined });
     });
 
+    /**
+     * A resumed run emits `engine.run.completed` once per attempt, and the second attempt's budget
+     * is the remainder carved out of the first's. Reading the last one reported that remainder as
+     * the whole run's ceiling next to a cumulative `spent`, which is how production came to publish
+     * "80000 allotted, 3562109 reported" for a run whose real allotment was 2.97M
+     * (`corpus/evidence/live-telemetry-2026-08-04-keiko-2981-double-run.md`).
+     */
+    it("reports the first attempt's allotment, not a resume's carved-out remainder", () => {
+      const diagnostics = createDiagnostics(() => undefined);
+      diagnostics.record("engine.run.completed", { counts: { bytes: 500, budget: 2_970_000 } });
+      diagnostics.record("engine.resumed_once", { counts: { remaining: 80_000 } });
+      diagnostics.record("engine.run.completed", { counts: { bytes: 400, budget: 80_000 } });
+      diagnostics.record("run.spend", {
+        counts: { engine: 3_562_109, classify: 0, total: 3_562_109 },
+      });
+      const summary = buildSummaryReport(runInput(), diagnostics.drain());
+      expect(summary.budget).toEqual({ allotted: 2_970_000, spent: 3_562_109 });
+    });
+
     it("reads the reported spend from run.spend's own counts.total field", () => {
       const diagnostics = createDiagnostics(() => undefined);
       diagnostics.record("engine.run.completed", { counts: { bytes: 500, budget: 1_200_000 } });
