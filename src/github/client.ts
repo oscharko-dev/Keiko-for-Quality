@@ -135,6 +135,39 @@ const RETRYABLE: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
 const MAX_ATTEMPTS = 3;
 
 /**
+ * GitHub reports its secondary rate limit — tripped by rapid comment creation, exactly this
+ * client's own publish loop — as a 403, not the primary limit's 429, distinguished only by carrying
+ * a `retry-after` header and/or `x-ratelimit-remaining: 0`. A 403 with neither is an authorization
+ * failure instead: permanent by contract, where retrying would only spend three attempts repeating
+ * the same refusal before failing anyway. Throttling and authorization share a status code on this
+ * API; only the headers tell them apart, so both signals are checked rather than assuming either one
+ * is always present.
+ */
+function isSecondaryRateLimit(response: Response): boolean {
+  if (response.status !== 403) return false;
+  return (
+    response.headers.has("retry-after") || response.headers.get("x-ratelimit-remaining") === "0"
+  );
+}
+
+const MAX_RETRY_AFTER_SECONDS = 60;
+
+/**
+ * The server's own requested wait, in milliseconds, when it supplies one. Honored over the linear
+ * backoff below because guessing a shorter wait would just trip the same limit again — but capped so
+ * a large or malformed value cannot stall the job far longer than the job itself is worth; a run that
+ * would need to wait past the cap should fail and let the next trigger retry rather than block CI on
+ * someone else's outage.
+ */
+function retryAfterMs(response: Response): number | undefined {
+  const header = response.headers.get("retry-after");
+  if (header === null) return undefined;
+  const seconds = Number(header);
+  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+  return Math.min(seconds, MAX_RETRY_AFTER_SECONDS) * 1000;
+}
+
+/**
  * Walks every review thread on the pull request, each carrying whether it is resolved or outdated,
  * the database id — the same id the REST comments endpoint returns — of every comment inside it, and
  * (aliased `lastComment`) that same thread's true last comment, however many it has.
@@ -269,10 +302,13 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
       });
       if (response.ok) return response;
       lastStatus = response.status;
-      if (!RETRYABLE.has(response.status)) throw new GitHubApiError(response.status);
-      // Linear backoff is sufficient: the retryable cases are transient, and a reviewer that
-      // hammers a rate-limited API makes the consumer's situation worse, not better.
-      await delay(attempt * 1000);
+      if (!RETRYABLE.has(response.status) && !isSecondaryRateLimit(response)) {
+        throw new GitHubApiError(response.status);
+      }
+      // Linear backoff is the default: the ordinary retryable cases are transient, and a reviewer
+      // that hammers a rate-limited API makes the consumer's situation worse, not better. A response
+      // naming its own wait (the secondary rate limit's `retry-after`) overrides it instead.
+      await delay(retryAfterMs(response) ?? attempt * 1000);
     }
     throw new GitHubApiError(lastStatus);
   }

@@ -43,6 +43,7 @@ import {
 } from "./inventory/inventory.js";
 import type { GitHubClient, RepoRef } from "./github/client.js";
 import {
+  prefetchExistingConversations,
   publishFindings,
   publishIncompleteNotice,
   type PublishContext,
@@ -374,15 +375,24 @@ async function settleIncomplete(
   }
 
   const context = publishContextFor(request, inventory);
+  const anchor = noticeAnchor(inventory);
+  // One prefetch shared by both publication calls below. Without it the notice re-lists every
+  // comment and re-walks every thread `publishFindings` fetched moments earlier in this same
+  // settlement — the same data, twice, on every incomplete run.
+  const prefetch =
+    findings.length > 0 || anchor !== undefined
+      ? await prefetchExistingConversations(context)
+      : undefined;
   // Findings first. If publication is interrupted, a reader is better served by findings without
   // the caveat than by a caveat with no findings — the first is incomplete information, the second
   // is none.
   const publish =
-    findings.length === 0 ? undefined : await publishFindings(context, findings, diagnostics);
+    findings.length === 0
+      ? undefined
+      : await publishFindings(context, findings, diagnostics, prefetch);
 
-  const anchor = noticeAnchor(inventory);
   if (anchor !== undefined) {
-    await publishIncompleteNotice(context, reason, anchor, diagnostics);
+    await publishIncompleteNotice(context, reason, anchor, diagnostics, prefetch);
   }
   return {
     outcome: "incomplete",
@@ -411,7 +421,7 @@ async function executeEngine(
     // One unioned exclude list through the one threading point v0.8.0 built — cache hits are never
     // a second, parallel exclude channel alongside the mechanically-clean one.
     const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
-    const parsed = await runEngineWithOneResume(
+    const { result: parsed, engineTokens } = await runEngineWithOneResume(
       {
         binaryPath: engine.binaryPath,
         repositoryPath: request.repositoryPath,
@@ -426,7 +436,24 @@ async function executeEngine(
       },
       diagnostics,
     );
-    const classified = await repairFindingClassification(parsed, request, diagnostics);
+    const { result: classified, classifyTokens } = await repairFindingClassification(
+      parsed,
+      request,
+      diagnostics,
+    );
+    // The one authoritative run-level spend record (v0.12.0): real engine cost plus the
+    // classification side-calls, recorded once both halves are known and before `settle` decides
+    // completeness. `publish/summary.ts` reads `total` from exactly this code, never the last
+    // `counts.tokens` value anywhere in the stream — that used to be whichever classify.* record
+    // happened to fire last, an order of magnitude below what the engine itself spent.
+    diagnostics.record("run.spend", {
+      headSha: request.head,
+      counts: {
+        engine: engineTokens,
+        classify: classifyTokens,
+        total: engineTokens + classifyTokens,
+      },
+    });
     return settle(inventory, classified, request.profile, request.config, memo.hitPaths);
   } finally {
     await rm(workspace, { recursive: true, force: true });
@@ -440,30 +467,58 @@ async function executeEngine(
  * smallest prompt that can carry them rather than left to prompt-compliance luck. The anthropic
  * protocol is excluded because the repair speaks OpenAI chat completions, and that path already
  * parses structured output strictly inside the engine.
+ *
+ * Returns the classification spend alongside the (possibly reclassified) result, so the caller can
+ * fold it into `run.spend` (v0.12.0). Zero on every skip path below — an implausible finding count,
+ * the anthropic protocol, no findings to classify, no token to call with — because none of them
+ * ever placed a call.
  */
 async function repairFindingClassification(
   parsed: EngineResult,
   request: ReviewRequest,
   diagnostics: Diagnostics,
-): Promise<EngineResult> {
-  if (request.config.protocol === "anthropic") return parsed;
-  if (parsed.findings.length === 0) return parsed;
+): Promise<{ result: EngineResult; classifyTokens: number }> {
+  // `settle` (`settle.ts`'s `commonDisqualifier`) disqualifies any result over `config.maxFindings`
+  // as implausible — a misconfigured model, a runaway run, or a successful prompt injection, not a
+  // genuinely terrible change — and it does so unconditionally, after this function returns. That
+  // verdict does not depend on classification, so classifying first only spends repair-plus-audit's
+  // 2-3 model calls per finding on a result `settle` was always going to throw away: a flood of a
+  // few hundred findings turns a run `settle` disqualifies for free into one that burns millions of
+  // tokens getting there first — and because the flood can originate from candidate-controlled diff
+  // or comment content the model reads, this is a cost-amplification vector, not just a waste.
+  // Checking the identical threshold here, before the first call, is what actually avoids that spend
+  // rather than merely explaining it afterward.
+  //
+  // Deliberately NOT extended to `parsed.budgetExceeded`: a budget-truncated run's findings are
+  // still published and its covered files still memoized (`verdictsSurviveIncompleteness` in
+  // `settle.ts`), so their classification quality matters exactly as much as an ordinary run's.
+  // Only an implausible finding COUNT says "do not trust this enough to spend on it" — running out
+  // of budget says nothing of the kind, and skipping on it too would ship worse-classified findings
+  // to every reader of a large, merely expensive change.
+  if (parsed.findings.length > request.config.maxFindings) {
+    return { result: parsed, classifyTokens: 0 };
+  }
+  if (request.config.protocol === "anthropic") return { result: parsed, classifyTokens: 0 };
+  if (parsed.findings.length === 0) return { result: parsed, classifyTokens: 0 };
   const token = readModelToken(request.config, request.env);
-  if (token === undefined) return parsed;
+  if (token === undefined) return { result: parsed, classifyTokens: 0 };
   const deps = { endpoint: request.config.endpoint, token, model: request.config.model };
   let findings = parsed.findings;
+  let classifyTokens = 0;
   if (findings.some(needsClassification)) {
     const outcome = await repairClassification(findings, deps);
     diagnostics.record("classify.repaired", {
       counts: { repaired: outcome.repaired, failed: outcome.failed, tokens: outcome.tokens },
     });
     findings = outcome.findings;
+    classifyTokens += outcome.tokens;
   }
   const audit = await auditClassification(findings, deps);
   diagnostics.record("classify.audited", {
     counts: { changed: audit.changed, tokens: audit.tokens },
   });
-  return { ...parsed, findings: audit.findings };
+  classifyTokens += audit.tokens;
+  return { result: { ...parsed, findings: audit.findings }, classifyTokens };
 }
 
 /** The resume's seed — any value other than the primary pin does the job. */
@@ -477,20 +532,28 @@ const RESUME_SEED = 43;
  * run after finding nothing (production Keiko#2963 paid its 44 files twice for exactly this; the
  * corpus reproduced the same signature four times before the session log named it). A second
  * failure settles incomplete precisely as it did before the resume existed.
+ *
+ * `engineTokens` (v0.12.0) is the cumulative spend across every attempt that actually ran, not
+ * just the one whose result stands: a resumed run paid for both attempts, and `run.spend` has to
+ * say so rather than under-report by the size of the discarded first one.
  */
 async function runEngineWithOneResume(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
-): Promise<EngineResult> {
+): Promise<{ result: EngineResult; engineTokens: number }> {
   // The allotment is a whole-review ceiling and must hold ACROSS attempts: the resume runs on
   // what the first attempt left, floored so a near-exhausted budget still allows a minimal
   // second opinion. A thrown run reports no token total, so the full allotment stands there —
   // nothing measured says it was spent.
   let remaining = options.allottedBudget;
+  // Same honesty as the allotment above: a thrown first attempt leaves no parsed result behind,
+  // so it contributes nothing measured to the total rather than a guess.
+  let firstAttemptTokens = 0;
   try {
     const first = await runEngine(options, diagnostics);
     const parsed = parseEngineResult(first.stdout);
-    if (parsed.status === "success") return parsed;
+    if (parsed.status === "success") return { result: parsed, engineTokens: parsed.totalTokens };
+    firstAttemptTokens = parsed.totalTokens;
     remaining = Math.max(ALLOTMENT_FLOOR, options.allottedBudget - parsed.totalTokens);
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   } catch (error) {
@@ -505,7 +568,8 @@ async function runEngineWithOneResume(
     { ...options, samplingSeed: RESUME_SEED, allottedBudget: remaining },
     diagnostics,
   );
-  return parseEngineResult(second.stdout);
+  const parsedSecond = parseEngineResult(second.stdout);
+  return { result: parsedSecond, engineTokens: firstAttemptTokens + parsedSecond.totalTokens };
 }
 
 /** True when publication itself failed in a way that means the change was not fully reviewed. */
@@ -513,13 +577,17 @@ function publicationDegraded(outcome: PublishOutcome): boolean {
   return (
     outcome.rejectedSanitization > 0 ||
     outcome.rejectedPlacement > 0 ||
-    outcome.readbackFailures > 0
+    outcome.readbackFailures > 0 ||
+    // A finding whose publish call itself failed was contained per finding rather than allowed to
+    // abort the loop (publisher.ts), but containment does not make it published: the consumer
+    // never saw it, so the run cannot read as fully reviewed.
+    (outcome.apiFailures ?? 0) > 0
   );
 }
 
 /**
  * The redacted breakdown behind a degraded-publication settlement (Keiko-for-Quality#63): what
- * published cleanly alongside what did not, and along which of the three failure modes. Every
+ * published cleanly alongside what did not, and along which of the four failure modes. Every
  * per-finding placement rejection folded into `outcome.rejectedPlacement` already carries its own
  * finer attempt tally (`publisher.ts`'s `publish.finding_rejected_placement` record); this is the
  * run-level rollup an operator sees on the single event that decided the run as a whole.
@@ -530,6 +598,7 @@ function publicationDegradedCounts(outcome: PublishOutcome): Readonly<Record<str
     rejected_placement: outcome.rejectedPlacement,
     rejected_sanitization: outcome.rejectedSanitization,
     readback_failures: outcome.readbackFailures,
+    api_failures: outcome.apiFailures ?? 0,
   };
 }
 
@@ -664,6 +733,29 @@ function abandonedReport(inventory: Inventory, memo: MemoContext): ReviewReport 
   };
 }
 
+/**
+ * Checks the pull request against the head this run is reviewing, and reports the abandonment when
+ * it has already moved on. `undefined` means still current — the ordinary case, and the only one
+ * that lets the caller proceed.
+ *
+ * Shared by every direct staleness check in `performReview` (`settleIncomplete` applies its own
+ * copy for the paths that run through it — see its doc comment for why). A pull request's head can
+ * move at essentially any point during a review that takes minutes end to end, so this is checked
+ * repeatedly and cheaply — one `getPullRequest` call each time — rather than once at the start: each
+ * call only narrows its own slice of the race, and narrowing every slice is what keeps the whole
+ * review from ever publishing against a commit the branch has already left behind.
+ */
+async function abandonIfStale(
+  request: ReviewRequest,
+  inventory: Inventory,
+  memo: MemoContext,
+  diagnostics: Diagnostics,
+): Promise<ReviewReport | undefined> {
+  if (await headIsCurrent(request)) return undefined;
+  diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+  return abandonedReport(inventory, memo);
+}
+
 async function settleOrReport(
   request: ReviewRequest,
   inventory: Inventory,
@@ -722,6 +814,14 @@ export async function performReview(
   }
 
   const memo = prepareMemoization(request, inventory, diagnostics);
+
+  // Cheap insurance ahead of the expensive step: the engine run below is minutes long, and the head
+  // can move before that spend even starts. This does not replace the post-run check further down,
+  // or `settleIncomplete`'s own copy — the head can still move DURING the engine's own run — it only
+  // shrinks that race from "the whole engine run" down to the gap between here and publication.
+  const preflight = await abandonIfStale(request, inventory, memo, diagnostics);
+  if (preflight !== undefined) return preflight;
+
   const settlement = await settleOrReport(request, inventory, memo, diagnostics);
   if ("outcome" in settlement) return settlement;
 
@@ -741,9 +841,7 @@ export async function performReview(
       verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths : undefined,
     );
   }
-  if (!(await headIsCurrent(request))) {
-    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
-    return abandonedReport(inventory, memo);
-  }
+  const postRun = await abandonIfStale(request, inventory, memo, diagnostics);
+  if (postRun !== undefined) return postRun;
   return publishSettledFindings(request, inventory, settlement, memo, started, diagnostics);
 }

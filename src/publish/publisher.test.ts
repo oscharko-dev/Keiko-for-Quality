@@ -13,7 +13,12 @@ import {
 import type { InventoryItem } from "../inventory/classify.js";
 import { fingerprint, markerComment } from "./marker.js";
 import { composeFindingBody } from "./presentation.js";
-import { publishFindings, publishIncompleteNotice, type PublishContext } from "./publisher.js";
+import {
+  prefetchExistingConversations,
+  publishFindings,
+  publishIncompleteNotice,
+  type PublishContext,
+} from "./publisher.js";
 
 const HEAD = commitSha("b".repeat(40));
 const REF: RepoRef = { owner: "acme", repo: "widget" };
@@ -38,10 +43,24 @@ class FakeApi implements ReviewCommentApi {
    * `rejectWith` alone cannot express since it rejects by anchor kind across every finding).
    */
   public rejectPaths = new Set<string>();
+  /**
+   * Path → arbitrary status: like `rejectPaths`, but not fixed at 422 — lets a test make exactly one
+   * finding's create call throw a real failure (a 403 that outlasted the client's own retries, say)
+   * while a different finding in the same run publishes normally, which is what per-finding API
+   * failure containment needs to exercise and `rejectWith` (shared by anchor kind across every
+   * finding) cannot express alone.
+   */
+  public rejectPathWith = new Map<string, number>();
+  /** Forces every `getReviewComment` call to throw, regardless of whether the id exists — a
+   *  transient read-after-write failure on an otherwise-successful POST. */
+  public failReadBack = false;
   public readBackOverride: Partial<ReviewComment> | undefined;
+  /** Counts `listReviewComments` calls so a test can assert a supplied prefetch avoided one. */
+  public listCalls = 0;
   private nextId = 100;
 
   public listReviewComments(): Promise<ReviewComment[]> {
+    this.listCalls += 1;
     return Promise.resolve(this.existing);
   }
 
@@ -51,6 +70,8 @@ class FakeApi implements ReviewCommentApi {
     input: ReviewCommentInput,
   ): Promise<ReviewComment> {
     if (this.rejectPaths.has(input.path)) return Promise.reject(new GitHubApiError(422));
+    const pathStatus = this.rejectPathWith.get(input.path);
+    if (pathStatus !== undefined) return Promise.reject(new GitHubApiError(pathStatus));
     const key = input.line === undefined ? "file" : (input.side ?? "RIGHT");
     const status = this.rejectWith.get(key);
     if (status !== undefined) return Promise.reject(new GitHubApiError(status));
@@ -68,6 +89,7 @@ class FakeApi implements ReviewCommentApi {
   }
 
   public getReviewComment(_ref: RepoRef, id: number): Promise<ReviewComment> {
+    if (this.failReadBack) return Promise.reject(new GitHubApiError(404));
     const found = this.existing.find((c) => c.id === id);
     if (found === undefined) return Promise.reject(new GitHubApiError(404));
     return Promise.resolve({ ...found, ...this.readBackOverride });
@@ -302,9 +324,12 @@ describe("publishFindings", () => {
 
     it("does not treat a non-422 failure as a reason to try a different anchor", async () => {
       api.rejectWith.set("RIGHT", 403);
-      await expect(publishFindings(context, [finding()], diagnostics)).rejects.toThrow(
-        GitHubApiError,
-      );
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      // Fix 1: contained as an API failure rather than left to reject the whole run — but the
+      // ladder still must not have treated the 403 as a reason to try LEFT or file-level next, the
+      // way it correctly does for a 422. `api.created` staying empty is what proves that: had the
+      // ladder wrongly retried, the untouched LEFT/file anchors below would have succeeded.
+      expect(outcome).toMatchObject({ published: 0, apiFailures: 1 });
       expect(api.created).toHaveLength(0);
     });
   });
@@ -591,6 +616,65 @@ describe("publishFindings", () => {
       const outcome = await publishFindings(context, [finding()], diagnostics);
       expect(outcome).toMatchObject({ published: 0, readbackFailures: 1 });
     });
+
+    // A GET that throws (a transient network fault, a 403 secondary rate limit that exhausted its
+    // own retries) must settle exactly like a GET that succeeds but reports a mismatch: the POST may
+    // have landed on GitHub even though this run could not confirm it, so it is unconfirmed, not a
+    // reason to abandon the run. Two findings prove the loop keeps going past the first one, too.
+    it("treats a thrown read-back GET as unconfirmed, not fatal, and keeps publishing later findings", async () => {
+      context = {
+        ...context,
+        items: new Map([
+          ["src/retry.ts", item()],
+          ["src/other.ts", item({ path: repoPath("src/other.ts") })],
+        ]),
+      };
+      api.failReadBack = true;
+      const outcome = await publishFindings(
+        context,
+        [finding(), finding({ path: repoPath("src/other.ts"), startLine: 40, endLine: 42 })],
+        diagnostics,
+      );
+      expect(outcome).toMatchObject({ published: 0, readbackFailures: 2, apiFailures: 0 });
+      // Both creates were attempted — only the read-back after each one failed.
+      expect(api.created).toHaveLength(2);
+    });
+  });
+
+  describe("per-finding API failure containment (Fix 1)", () => {
+    it("contains a thrown non-422 create failure to the one finding and still attempts the rest", async () => {
+      context = {
+        ...context,
+        items: new Map([
+          ["src/retry.ts", item()],
+          ["src/second.ts", item({ path: repoPath("src/second.ts") })],
+          ["src/third.ts", item({ path: repoPath("src/third.ts") })],
+        ]),
+      };
+      // Every attempt on src/second.ts's ladder throws a 403 — the shape of a secondary rate limit
+      // that has already exhausted the client's own retries — while the other two findings' paths
+      // are untouched by it.
+      api.rejectPathWith.set("src/second.ts", 403);
+      const localDiagnostics = createSilentDiagnostics();
+      const outcome = await publishFindings(
+        context,
+        [
+          finding(),
+          finding({ path: repoPath("src/second.ts"), startLine: 20, endLine: 22 }),
+          finding({ path: repoPath("src/third.ts"), startLine: 30, endLine: 32 }),
+        ],
+        localDiagnostics,
+      );
+
+      // The run resolved instead of rejecting (awaiting it above would itself have thrown
+      // otherwise), the doomed finding counted as an API failure rather than a placement rejection,
+      // and the finding queued behind it was still attempted and published.
+      expect(outcome).toMatchObject({ published: 2, rejectedPlacement: 0, apiFailures: 1 });
+      expect(api.created.map((c) => c.path)).toEqual(["src/retry.ts", "src/third.ts"]);
+      expect(
+        localDiagnostics.drain().filter((record) => record.code === "publish.api_failed"),
+      ).toHaveLength(1);
+    });
   });
 });
 
@@ -634,5 +718,57 @@ describe("publishIncompleteNotice", () => {
 
     await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
     expect(api.created).toHaveLength(2);
+  });
+
+  /**
+   * A prefetch a caller already ran moments ago in the same settlement path (`publishFindings` did,
+   * immediately before this, in production) must let this function skip its own list call entirely
+   * — otherwise the two functions still pay for the same list-and-walk twice, the exact duplication
+   * this parameter exists to remove. Absent, behaviour must stay byte-for-byte what every existing
+   * caller above already exercises.
+   */
+  describe("prefetch parameter", () => {
+    it("performs zero list calls when given a prefetched value", async () => {
+      const prefetch = await prefetchExistingConversations(context);
+      const callsBeforePrefetchedNotice = api.listCalls;
+
+      const verified = await publishIncompleteNotice(
+        context,
+        REASON,
+        ANCHOR,
+        diagnostics,
+        prefetch,
+      );
+
+      expect(api.listCalls).toBe(callsBeforePrefetchedNotice);
+      expect(verified).toBe(true);
+      expect(api.created).toHaveLength(1);
+    });
+
+    it("fetches its own conversations, exactly as before, when no prefetch is supplied", async () => {
+      const verified = await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
+
+      expect(api.listCalls).toBe(1);
+      expect(verified).toBe(true);
+      expect(api.created).toHaveLength(1);
+    });
+
+    it("still suppresses a repost of the identical (anchor, reason, head) via a supplied prefetch", async () => {
+      await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
+      const prefetch = await prefetchExistingConversations(context);
+      const callsBeforePrefetchedNotice = api.listCalls;
+
+      const verified = await publishIncompleteNotice(
+        context,
+        REASON,
+        ANCHOR,
+        diagnostics,
+        prefetch,
+      );
+
+      expect(api.listCalls).toBe(callsBeforePrefetchedNotice);
+      expect(verified).toBe(true);
+      expect(api.created).toHaveLength(1);
+    });
   });
 });

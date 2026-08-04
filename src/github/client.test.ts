@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { GitHubClient } from "./client.js";
+import { GitHubApiError, GitHubClient } from "./client.js";
 
 /**
  * `GitHubClient`'s issue-comment surface (Keiko-for-Quality#31): `listIssueComments`,
@@ -8,7 +8,29 @@ import { GitHubClient } from "./client.js";
  * review-comment surface `client.approval.test.ts` and `client.resolved.test.ts` already cover —
  * `/issues/{number}/comments`, not `/pulls/{number}/comments`, and never `/reviews`. That
  * distinction is the acceptance criterion this file exists to pin.
+ *
+ * The retry/backoff suite at the bottom of this file is unrelated to that split — it exercises
+ * `requestUrl`, shared machinery underneath every endpoint above and in the sibling client test
+ * files — and lives here only because this is this worker's one writable client test file.
  */
+
+const { sleepCalls, sleepStub } = vi.hoisted(() => {
+  const sleepCalls: number[] = [];
+  return {
+    sleepCalls,
+    // Records the requested wait instead of actually waiting it out, so a test can assert exactly
+    // which backoff (linear, or an honored `retry-after`) a given response provoked without paying
+    // for it in wall-clock time.
+    sleepStub: (ms: number): Promise<void> => {
+      sleepCalls.push(ms);
+      return Promise.resolve();
+    },
+  };
+});
+
+// `client.ts` imports `node:timers/promises`' `setTimeout` as `delay`; replacing the module's own
+// export is what reaches that binding, since `vi.spyOn` cannot intercept a plain function import.
+vi.mock("node:timers/promises", () => ({ setTimeout: sleepStub }));
 
 const REF = { owner: "acme", repo: "widget" };
 
@@ -164,5 +186,118 @@ describe("GitHubClient issue comments", () => {
       const client = new GitHubClient("https://api.github.test", "token");
       expect(await client.listIssueComments(REF, 7)).toEqual([]);
     });
+  });
+});
+
+/**
+ * GitHub's secondary rate limit — tripped by rapid comment creation, exactly this reviewer's own
+ * publish loop — arrives as a 403 carrying `retry-after` and/or `x-ratelimit-remaining: 0`, not the
+ * primary limit's 429. Before this suite, `requestUrl`'s retry path (`RETRYABLE`, backoff) had no
+ * test at all: the sibling files' one 403 case (`client.resolved.test.ts`) deliberately uses a bare,
+ * headerless 403 to *avoid* paying a retryable status's backoff delay, which coincidentally also
+ * means it stays exactly as this suite's own "bare 403" case still requires — a 403 with neither
+ * signal must fail immediately, not retry.
+ */
+describe("GitHubClient retry and backoff (secondary rate limit)", () => {
+  const original = globalThis.fetch;
+
+  afterEach(() => {
+    globalThis.fetch = original;
+  });
+
+  beforeEach(() => {
+    sleepCalls.length = 0;
+  });
+
+  function statusResponse(status: number, headers: Record<string, string> = {}): Response {
+    return new Response("", { status, headers });
+  }
+
+  /** Replays `responses` in order, holding on the last one — enough to script "fails N times, then
+   *  succeeds" without a test having to know exactly how many attempts it will take. */
+  function sequencedFetch(responses: readonly Response[]): {
+    fetch: typeof fetch;
+    callCount: () => number;
+  } {
+    let calls = 0;
+    const handler = (() => {
+      const response = responses[Math.min(calls, responses.length - 1)]!;
+      calls += 1;
+      return Promise.resolve(response);
+    }) as typeof fetch;
+    return { fetch: handler, callCount: () => calls };
+  }
+
+  it("retries a 403 carrying retry-after and then succeeds", async () => {
+    const { fetch: stub, callCount } = sequencedFetch([
+      statusResponse(403, { "retry-after": "1" }),
+      jsonResponse({ id: 1, user: { login: "keiko-for-quality[bot]" } }),
+    ]);
+    globalThis.fetch = stub;
+    const client = new GitHubClient("https://api.github.test", "token");
+
+    const comment = await client.getReviewComment(REF, 1);
+
+    expect(comment.id).toBe(1);
+    expect(callCount()).toBe(2);
+    // The header's own wait is honored instead of the linear backoff's attempt-1 second.
+    expect(sleepCalls).toEqual([1000]);
+  });
+
+  it("retries a 403 carrying x-ratelimit-remaining: 0 even without a retry-after header", async () => {
+    const { fetch: stub, callCount } = sequencedFetch([
+      statusResponse(403, { "x-ratelimit-remaining": "0" }),
+      jsonResponse({ id: 2, user: { login: "keiko-for-quality[bot]" } }),
+    ]);
+    globalThis.fetch = stub;
+    const client = new GitHubClient("https://api.github.test", "token");
+
+    const comment = await client.getReviewComment(REF, 2);
+
+    expect(comment.id).toBe(2);
+    expect(callCount()).toBe(2);
+    // No `retry-after` to honor here, so this falls back to the same linear backoff as any other
+    // retryable status.
+    expect(sleepCalls).toEqual([1000]);
+  });
+
+  it("fails immediately on a bare 403 carrying neither signal, never retrying", async () => {
+    const { fetch: stub, callCount } = sequencedFetch([statusResponse(403)]);
+    globalThis.fetch = stub;
+    const client = new GitHubClient("https://api.github.test", "token");
+
+    await expect(client.getReviewComment(REF, 3)).rejects.toThrow(GitHubApiError);
+    expect(callCount()).toBe(1);
+    expect(sleepCalls).toEqual([]);
+  });
+
+  it("caps a retry-after wait at 60 seconds", async () => {
+    const { fetch: stub, callCount } = sequencedFetch([
+      statusResponse(403, { "retry-after": "600" }),
+      jsonResponse({ id: 4, user: { login: "keiko-for-quality[bot]" } }),
+    ]);
+    globalThis.fetch = stub;
+    const client = new GitHubClient("https://api.github.test", "token");
+
+    await client.getReviewComment(REF, 4);
+
+    expect(callCount()).toBe(2);
+    expect(sleepCalls).toEqual([60_000]);
+  });
+
+  // Not this fix's own scenario, but the shared code path it touches had no coverage at all before
+  // this suite — a guard against the 403 changes above silently swallowing the pre-existing 5xx path.
+  it("still retries an ordinary 5xx with the unchanged linear backoff", async () => {
+    const { fetch: stub, callCount } = sequencedFetch([
+      statusResponse(503),
+      jsonResponse({ id: 5, user: { login: "keiko-for-quality[bot]" } }),
+    ]);
+    globalThis.fetch = stub;
+    const client = new GitHubClient("https://api.github.test", "token");
+
+    await client.getReviewComment(REF, 5);
+
+    expect(callCount()).toBe(2);
+    expect(sleepCalls).toEqual([1000]);
   });
 });

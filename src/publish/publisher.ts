@@ -44,6 +44,14 @@ export interface PublishOutcome {
   readonly rejectedSanitization: number;
   readonly rejectedPlacement: number;
   readonly readbackFailures: number;
+  /**
+   * A finding whose composition→ladder→read-back tail threw an error not already covered by one of
+   * the counters above — a non-422 create failure that outlasted the client's own retries, a
+   * transient network fault — and was contained there rather than left to abort the rest of the run.
+   * Optional so a `PublishOutcome` literal written before this field existed still satisfies the
+   * interface under `exactOptionalPropertyTypes`.
+   */
+  readonly apiFailures?: number;
 }
 
 /**
@@ -90,6 +98,34 @@ function toExistingConversation(comment: ReviewComment, identity: string): Exist
     body: comment.body,
     startLine: comment.startLine ?? comment.line,
     endLine: comment.line,
+  };
+}
+
+/** Everything a caller needs from the pull request's existing conversations before it can publish
+ *  or suppress anything — see `prefetchExistingConversations`. */
+export interface ExistingConversationsPrefetch {
+  readonly markers: ReadonlySet<string>;
+  readonly threads: readonly ExistingConversation[];
+}
+
+/**
+ * Fetches and shapes everything the dedup stages need to know about conversations already on the
+ * pull request: this reviewer's own open markers (`ownMarkers`) and every comment projected into
+ * the shape the similarity/disposition stages compare against (`toExistingConversation`). Both come
+ * from the one `listReviewComments` call — which itself folds in the GraphQL thread-resolution walk
+ * — so they are fetched together rather than as two separate round trips.
+ *
+ * Exported so a caller that already ran this moments ago in the same settlement path can hand the
+ * result to a second call instead of paying for the same list-and-walk twice — see
+ * `publishIncompleteNotice`'s `prefetch` parameter, the case this exists for today.
+ */
+export async function prefetchExistingConversations(
+  context: PublishContext,
+): Promise<ExistingConversationsPrefetch> {
+  const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
+  return {
+    markers: ownMarkers(comments, context.identity),
+    threads: comments.map((comment) => toExistingConversation(comment, context.identity)),
   };
 }
 
@@ -145,6 +181,7 @@ interface Counters {
   rejectedSanitization: number;
   rejectedPlacement: number;
   readbackFailures: number;
+  apiFailures: number;
 }
 
 /**
@@ -209,7 +246,19 @@ async function publishComposedFinding(
     return;
   }
 
-  if (!(await verifyPublication(context, result.comment, marker))) {
+  let verified: boolean;
+  try {
+    verified = await verifyPublication(context, result.comment, marker);
+  } catch {
+    // The POST above already succeeded — the comment may exist on GitHub even though confirming it
+    // does not. That is exactly what a returned mismatch already means below, so a GET that throws
+    // instead (a transient network fault, a 403 secondary rate limit that exhausted its own retries)
+    // settles the same way: unconfirmed, not fatal. `publishOne`'s own wrap around this whole
+    // function exists to contain the kind of error that has no more specific home than "the API
+    // failed" — this one already has a home, and must not be bumped up to that coarser counter.
+    verified = false;
+  }
+  if (!verified) {
     counters.readbackFailures += 1;
     diagnostics.record("publish.readback_failed", { headSha: context.headSha });
     return;
@@ -268,19 +317,32 @@ async function publishOne(
     return;
   }
 
-  await publishComposedFinding(context, finding, marker, sanitized.body, counters, diagnostics);
+  try {
+    await publishComposedFinding(context, finding, marker, sanitized.body, counters, diagnostics);
+  } catch {
+    // A non-422 failure anywhere left in this tail — composition cannot throw, but the ladder's own
+    // CREATE call can (a 403 secondary rate limit that outlasted the client's own retries, a
+    // transient fault) — must not propagate. `publishFindings` calls this once per finding in a
+    // loop; letting one finding's API trouble escape as a rejected promise would abandon every
+    // finding still waiting behind it, and the whole run with them, over a cause that has nothing to
+    // do with those findings' own content. Contained here, the loop moves on and the operator still
+    // sees the failure as a count instead of losing the rest of the run to it.
+    counters.apiFailures += 1;
+    diagnostics.record("publish.api_failed", { headSha: context.headSha });
+  }
 }
 
 export async function publishFindings(
   context: PublishContext,
   findings: readonly EngineFinding[],
   diagnostics: Diagnostics,
+  prefetch?: ExistingConversationsPrefetch,
 ): Promise<PublishOutcome> {
-  const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
-  const existing = ownMarkers(comments, context.identity);
-  const existingThreads = comments.map((comment) =>
-    toExistingConversation(comment, context.identity),
-  );
+  // Optional for the same reason `publishIncompleteNotice` accepts one: `settleIncomplete` calls
+  // both functions back to back, and without a shared prefetch the second call re-lists every
+  // comment and re-walks every thread the first one fetched moments earlier.
+  const { markers: existing, threads: existingThreads } =
+    prefetch ?? (await prefetchExistingConversations(context));
   const counters: Counters = {
     published: 0,
     suppressed: 0,
@@ -290,6 +352,7 @@ export async function publishFindings(
     rejectedSanitization: 0,
     rejectedPlacement: 0,
     readbackFailures: 0,
+    apiFailures: 0,
   };
   for (const finding of findings) {
     await publishOne(context, finding, existing, existingThreads, counters, diagnostics);
@@ -309,6 +372,11 @@ export async function publishIncompleteNotice(
   reasonCode: string,
   anchorPath: string,
   diagnostics: Diagnostics,
+  // A caller that already ran `prefetchExistingConversations` moments ago in the same settlement
+  // path (`publishFindings`, immediately before this, is the case that motivated it) can hand the
+  // result here instead of paying for the same list-and-walk twice. Absent, this fetches its own —
+  // every caller that passes nothing keeps behaving exactly as it did before this parameter existed.
+  prefetch?: ExistingConversationsPrefetch,
 ): Promise<boolean> {
   const marker = fingerprint({
     repository: `${context.ref.owner}/${context.ref.repo}`,
@@ -321,8 +389,8 @@ export async function publishIncompleteNotice(
     // the current head still needs to publish.
     head: context.headSha,
   });
-  const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
-  if (ownMarkers(comments, context.identity).has(marker)) return true;
+  const { markers: existing } = prefetch ?? (await prefetchExistingConversations(context));
+  if (existing.has(marker)) return true;
 
   try {
     const created = await context.client.createReviewComment(context.ref, context.pullNumber, {

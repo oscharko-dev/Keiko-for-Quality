@@ -238,6 +238,12 @@ export interface SummaryReport {
   readonly actionVersion: string;
   readonly counts: SummaryCounts;
   readonly budget: SummaryBudget;
+  /**
+   * Wall-clock milliseconds `main.ts` measured around `performReview` — unlike `eventTimestamp`
+   * above, this one IS a wall clock, deliberately. Issue #59 is visibility only: nothing here reads
+   * this number back to gate or speed anything up.
+   */
+  readonly durationMs: number;
 }
 
 function shortSha(sha: CommitSha): string {
@@ -301,6 +307,28 @@ function budgetLine(budget: SummaryBudget): string | undefined {
 }
 
 /**
+ * Whole seconds (Issue #59): this table is an operator's coarse overview, not a profiler, and
+ * sub-second precision would not change any decision a reader makes from it. Always rendered —
+ * `durationMs` is measured on every run, never conditionally, so there is no "unknown" case to omit
+ * the way there is for `spent` below.
+ */
+function durationRow(durationMs: number): string {
+  return `| Duration (s) | ${String(Math.round(durationMs / 1000))} |`;
+}
+
+/**
+ * Rounded up, never down: a reader gauging whether spend is proportionate to output should never
+ * see a number that understates real cost. Omitted rather than shown as a misleading zero when
+ * spend was never measured this run (`budget.spent === undefined`), or when nothing published yet
+ * exists to divide it by.
+ */
+function tokensPerFindingRow(budget: SummaryBudget, counts: SummaryCounts): string | undefined {
+  if (budget.spent === undefined || counts.findingsPublished <= 0) return undefined;
+  const perFinding = Math.ceil(budget.spent / counts.findingsPublished);
+  return `| Tokens per published finding | ${String(perFinding)} |`;
+}
+
+/**
  * Composes the maintained run-summary comment (Keiko-for-Quality#31).
  *
  * `SummaryReport`'s own shape — see its doc comment — is what makes this function safe to call on
@@ -320,6 +348,7 @@ export function composeSummaryBody(report: SummaryReport, marker: string): strin
     ...(action === undefined ? [] : [`action \`${action}\``]),
   ].join(" · ");
 
+  const tokensPerFinding = tokensPerFindingRow(report.budget, report.counts);
   const parts = [
     "**Keiko for Quality — run summary**",
     "",
@@ -328,6 +357,8 @@ export function composeSummaryBody(report: SummaryReport, marker: string): strin
     "| Metric | Count |",
     "| --- | ---: |",
     ...countRows(report.counts),
+    durationRow(report.durationMs),
+    ...(tokensPerFinding === undefined ? [] : [tokensPerFinding]),
   ];
   const budget = budgetLine(report.budget);
   if (budget !== undefined) parts.push("", budget);

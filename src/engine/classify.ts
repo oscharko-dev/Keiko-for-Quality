@@ -97,17 +97,36 @@ function buildPrompt(finding: ClassifiableFinding, stern: boolean): string {
   ].join("\n");
 }
 
-/** First balanced `{...}` in the text — tolerates channel prefixes like `final` before the JSON. */
+/**
+ * The model's answer is the LAST JSON object in the text, not the first. Anchoring on the first
+ * `{` — the previous approach — meant a reasoning model that opened with any `{` at all (quoting
+ * the input, thinking out loud, anything) could never be parsed: every candidate built from that
+ * first brace also had to swallow the real answer and everything between, which never parses as a
+ * single JSON value, so the search exhausted itself and reported failure even though a perfectly
+ * valid object was sitting at the end of the reply. Trying start positions from the LAST `{`
+ * backwards fixes that without changing the common case: a clean reply has exactly one `{`, so the
+ * first (and only) start position tried is the same one the old code anchored on, and the first
+ * candidate still parses on the first attempt. `max_completion_tokens` on the request already
+ * bounds how much text this ever runs over.
+ */
 function extractObject(text: string): { category?: unknown; severity?: unknown } | undefined {
-  const start = text.indexOf("{");
-  if (start === -1) return undefined;
-  for (let end = text.indexOf("}", start); end !== -1; end = text.indexOf("}", end + 1)) {
-    const candidate = text.slice(start, end + 1);
-    try {
-      return JSON.parse(candidate) as { category?: unknown; severity?: unknown };
-    } catch {
-      // keep widening until the braces balance; a prefix like `final{"a":1}` parses on pass one
+  let start = text.lastIndexOf("{");
+  while (start !== -1) {
+    for (let end = text.indexOf("}", start); end !== -1; end = text.indexOf("}", end + 1)) {
+      const candidate = text.slice(start, end + 1);
+      try {
+        return JSON.parse(candidate) as { category?: unknown; severity?: unknown };
+      } catch {
+        // keep widening `end` until the braces balance; keep retreating `start` past a false start
+        // like `{not json}` that never yields a parseable candidate no matter how far it widens
+      }
     }
+    // `lastIndexOf`'s `fromIndex` clamps a negative argument to 0 rather than signalling "nothing
+    // left before here" — searching again from `start - 1` once `start` is already 0 would just
+    // find position 0 again and loop forever, so position 0 (already tried, just above) is where
+    // this stops instead of recursing into that clamp.
+    if (start === 0) break;
+    start = text.lastIndexOf("{", start - 1);
   }
   return undefined;
 }
@@ -126,6 +145,14 @@ function validPair(
 interface AttemptResult {
   readonly pair: { category: string; severity: string } | undefined;
   readonly tokens: number;
+  /**
+   * False for a thrown fetch or a non-OK response — a lost attempt that said nothing about the
+   * finding. True whenever a response came back and was read, even if its content did not parse to
+   * a valid pair: that is the model's actual (wrong or malformed) answer, not a dropped call.
+   * `collectAuditVotes` uses this to decide what is worth retrying; `repairClassification`'s stern
+   * retry is unconditional either way and does not need it.
+   */
+  readonly transportOk: boolean;
 }
 
 async function requestPair(
@@ -155,18 +182,22 @@ async function requestPair(
         max_completion_tokens: 4000,
       }),
     });
-    if (!response.ok) return { pair: undefined, tokens: 0 };
+    if (!response.ok) return { pair: undefined, tokens: 0, transportOk: false };
     const body = (await response.json()) as {
       choices?: readonly { message?: { content?: string } }[];
       usage?: { total_tokens?: number };
     };
     const content = body.choices?.[0]?.message?.content ?? "";
-    return { pair: validPair(extractObject(content)), tokens: body.usage?.total_tokens ?? 0 };
+    return {
+      pair: validPair(extractObject(content)),
+      tokens: body.usage?.total_tokens ?? 0,
+      transportOk: true,
+    };
   } catch {
     // A transport failure is a failed attempt, not a crash: the finding keeps what it had and
     // the caller sees the miss in its counters. Swallowing the error VALUE is deliberate — this
     // path must never take down a review that already has its findings in hand.
-    return { pair: undefined, tokens: 0 };
+    return { pair: undefined, tokens: 0, transportOk: false };
   }
 }
 
@@ -299,6 +330,29 @@ function buildAuditPrompt(finding: ClassifiableFinding): string {
 }
 
 /**
+ * One seeded audit vote, retried exactly once on a TRANSPORT failure — a thrown fetch or a non-OK
+ * response — and never on a content failure. A dropped connection or a 5xx says nothing about the
+ * finding; the vote simply never happened, and paying for three calls to adopt zero information
+ * because one of them hit a blip is the failure this closes. A reply that came back but did not
+ * parse to a valid pair is different: that IS the model's answer, wrong or malformed, and retrying
+ * that is `repairClassification`'s stern-retry job on the missing-classification path, not this
+ * one's — auditing already-classified findings must not silently double-spend on a bad-but-real
+ * reply. The seed stays fixed across the retry: this recovers the SAME vote, it does not cast a
+ * second one under a different draw.
+ */
+async function requestAuditVote(
+  finding: ClassifiableFinding,
+  deps: ClassifyEndpoint,
+  seed: number,
+): Promise<AttemptResult> {
+  const prompt = buildAuditPrompt(finding);
+  const first = await requestPair(prompt, deps, seed);
+  if (first.transportOk) return first;
+  const retry = await requestPair(prompt, deps, seed);
+  return { pair: retry.pair, tokens: first.tokens + retry.tokens, transportOk: retry.transportOk };
+}
+
+/**
  * Majority of three: prompt work moves the mean, only sampling moves the variance. Two agreeing
  * votes adopt (the third call is never spent); a 2-1 split adopts the pair two votes named; three
  * distinct answers decide nothing — that spread IS the close call the anti-churn clause protects.
@@ -313,7 +367,7 @@ async function collectAuditVotes(
   // single pinned seed made all three votes byte-identical clones (review catch on #84).
   const VOTE_SEEDS = [42, 43, 44] as const;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const result = await requestPair(buildAuditPrompt(finding), deps, VOTE_SEEDS[attempt] ?? 42);
+    const result = await requestAuditVote(finding, deps, VOTE_SEEDS[attempt] ?? 42);
     tokens += result.tokens;
     if (result.pair !== undefined) votes.push(result.pair);
     if (votes.length === 2 && pairKey(votes[0]) === pairKey(votes[1])) break;

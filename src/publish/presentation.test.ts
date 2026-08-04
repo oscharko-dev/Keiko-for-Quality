@@ -173,6 +173,7 @@ describe("composeSummaryBody", () => {
       actionVersion: "a1b2c3d4",
       counts: COUNTS,
       budget: { allotted: 1_200_000, spent: undefined },
+      durationMs: 45_000,
       ...overrides,
     };
   }
@@ -312,6 +313,59 @@ describe("composeSummaryBody", () => {
         MARKER,
       );
       expect(body).not.toContain("Budget:");
+    });
+  });
+
+  describe("duration row (Issue #59)", () => {
+    it("renders the measured wall-clock duration in whole seconds", () => {
+      const body = composeSummaryBody(summaryReport({ durationMs: 42_000 }), MARKER);
+      expect(body).toContain("| Duration (s) | 42 |");
+    });
+
+    it("rounds to the nearest whole second rather than truncating", () => {
+      const body = composeSummaryBody(summaryReport({ durationMs: 42_600 }), MARKER);
+      expect(body).toContain("| Duration (s) | 43 |");
+    });
+
+    it("renders even a zero duration rather than omitting the row", () => {
+      const body = composeSummaryBody(summaryReport({ durationMs: 0 }), MARKER);
+      expect(body).toContain("| Duration (s) | 0 |");
+    });
+  });
+
+  describe("tokens-per-published-finding row", () => {
+    it("renders the ceiling of spend divided by findings published, when both are known", () => {
+      const body = composeSummaryBody(
+        summaryReport({
+          budget: { allotted: 1_200_000, spent: 100_001 },
+          counts: { ...COUNTS, findingsPublished: 3 },
+        }),
+        MARKER,
+      );
+      // 100_001 / 3 = 33_333.67 — asserting the ceiling, not a value floor/round would also produce.
+      expect(body).toContain("| Tokens per published finding | 33334 |");
+    });
+
+    it("omits the row when spend was never recorded this run", () => {
+      const body = composeSummaryBody(
+        summaryReport({
+          budget: { allotted: 1_200_000, spent: undefined },
+          counts: { ...COUNTS, findingsPublished: 3 },
+        }),
+        MARKER,
+      );
+      expect(body).not.toContain("Tokens per published finding");
+    });
+
+    it("omits the row when nothing was published, rather than dividing by zero", () => {
+      const body = composeSummaryBody(
+        summaryReport({
+          budget: { allotted: 1_200_000, spent: 100_000 },
+          counts: { ...COUNTS, findingsPublished: 0 },
+        }),
+        MARKER,
+      );
+      expect(body).not.toContain("Tokens per published finding");
     });
   });
 

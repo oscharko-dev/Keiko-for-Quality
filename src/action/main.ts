@@ -6,14 +6,15 @@ import {
   serializeStore,
   type CacheStore,
 } from "../cache/review-cache.js";
-import { parseGuidelinePaths } from "../config/guidelines.js";
-import { loadReviewProfile } from "../config/profile.js";
+import { parseGuidelinePaths, type GuidelineIndex } from "../config/guidelines.js";
+import { loadReviewProfile, type CompiledProfile } from "../config/profile.js";
+import type { RuntimeConfig } from "../config/runtime.js";
 import { createDiagnostics, type Diagnostics } from "../diagnostics/sink.js";
 import { parseJson } from "../core/validate.js";
 import { ENGINE_PIN } from "../engine/pinned-release.js";
 import { verdictsSurviveIncompleteness } from "../engine/settle.js";
 import { maintainRunSummary } from "../publish/summary.js";
-import { performReview, type ReviewReport } from "../review.js";
+import { performReview, type ReviewReport, type ReviewRequest } from "../review.js";
 import { evaluateEligibility } from "./eligibility.js";
 import { resolveIdentity, type ResolvedIdentity } from "./identity.js";
 import {
@@ -188,6 +189,7 @@ async function maybeMaintainSummary(
   event: EventContext,
   identity: ResolvedIdentity,
   report: ReviewReport,
+  durationMs: number,
   diagnostics: Diagnostics,
 ): Promise<string | undefined> {
   if (!readBooleanInput(env, "run_summary", true)) {
@@ -209,9 +211,42 @@ async function maybeMaintainSummary(
       // Set by Actions for a step that `uses:` a JS action — the exact ref/SHA the consumer's own
       // workflow pinned this run to. Empty outside Actions (a local invocation, a test).
       actionVersion: env.GITHUB_ACTION_REF ?? "",
+      durationMs,
     },
     diagnostics,
   );
+}
+
+/**
+ * Assembles the one `ReviewRequest` `performReview` needs, from everything `runAction` has already
+ * resolved. Pulled out on its own so `runAction` stays a readable sequence of steps rather than one
+ * function carrying both that assembly and the orchestration around it — the object itself is
+ * unchanged by the split.
+ */
+function buildReviewRequest(
+  event: EventContext,
+  identity: ResolvedIdentity,
+  config: RuntimeConfig,
+  profile: CompiledProfile,
+  guidelines: GuidelineIndex,
+  env: NodeJS.ProcessEnv,
+  cacheStore: CacheStore | undefined,
+): ReviewRequest {
+  return {
+    client: identity.client,
+    ref: { owner: event.owner, repo: event.repo },
+    pullNumber: event.pullNumber,
+    base: event.base,
+    head: event.head,
+    repositoryPath: env.GITHUB_WORKSPACE ?? process.cwd(),
+    config,
+    profile,
+    guidelines,
+    identity: identity.login,
+    env,
+    pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    ...(cacheStore === undefined ? {} : { cacheStore }),
+  };
 }
 
 /**
@@ -276,27 +311,23 @@ export async function runAction(
   const storePath = readInput(env, "review_store_path");
   const cacheStore = storePath === "" ? undefined : await loadCacheStore(storePath, diagnostics);
 
-  const report = await performReview(
-    {
-      client: identity.client,
-      ref: { owner: event.owner, repo: event.repo },
-      pullNumber: event.pullNumber,
-      base: event.base,
-      head: event.head,
-      repositoryPath: env.GITHUB_WORKSPACE ?? process.cwd(),
-      config,
-      profile,
-      guidelines,
-      identity: identity.login,
-      env,
-      pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-      ...(cacheStore === undefined ? {} : { cacheStore }),
-    },
-    diagnostics,
-  );
+  // Measured around the call itself, not the whole action: identity resolution, config/profile
+  // loading, and the cache read above are this action's own overhead, not the review's cost.
+  // Issue #59 is visibility only — nothing here reads the number back to gate or speed up anything.
+  const request = buildReviewRequest(event, identity, config, profile, guidelines, env, cacheStore);
+  const reviewStartedAt = Date.now();
+  const report = await performReview(request, diagnostics);
+  const durationMs = Date.now() - reviewStartedAt;
 
   const storeWritten = await maybeSaveCacheStore(storePath, report, diagnostics);
-  const summaryCommentUrl = await maybeMaintainSummary(env, event, identity, report, diagnostics);
+  const summaryCommentUrl = await maybeMaintainSummary(
+    env,
+    event,
+    identity,
+    report,
+    durationMs,
+    diagnostics,
+  );
 
   writeOutputs(env, reportOutputs(report, summaryCommentUrl, storeWritten));
   return report;

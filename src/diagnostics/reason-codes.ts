@@ -133,6 +133,20 @@ export const REASON_CODES = [
   // review; a second failure settles incomplete exactly as before, so "incomplete never reads
   // as clean" survives the resume.
   "engine.resumed_once",
+
+  // Run-level spend accounting (v0.12.0): one record per engine execution naming what the review
+  // actually cost — the engine's own reported total plus the classification side-calls. The parts
+  // stay separate because they answer different questions (engine behaviour vs. adapter-added
+  // calls), and `total` exists so the summary comment can state real spend instead of whichever
+  // `counts.tokens` record happened to drain last — the defect that made the published "reported"
+  // figure the classification audit's bill rather than the review's.
+  "run.spend",
+
+  // Loopback-proxy usage telemetry (v0.12.0): request and token counts as observed on the wire,
+  // independent of the engine's self-report. `cached` carries the provider-reported cached prompt
+  // tokens — the number that decides whether prefix caching is working at all, which no other
+  // layer can see. Counts only, like every other record: the proxy never quotes what it forwards.
+  "model.usage",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
@@ -161,4 +175,9 @@ export const REASON_CODE_GUIDANCE: Readonly<Record<string, string>> = {
   run: "Run lifecycle marker.",
   cache:
     "The review store could not be read or written, or a save was skipped. Coverage is unaffected; only re-review cost is.",
+  model:
+    "Usage telemetry observed by the loopback proxy. No action; it exists so spend and cache " +
+    "behaviour are measured rather than assumed.",
+  classify:
+    "Classification repair or audit telemetry. No action; findings stay publishable either way.",
 };

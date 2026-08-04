@@ -169,6 +169,30 @@ const REVIEW_TEMPERATURE = 0;
  */
 const REVIEW_SEED = 42;
 
+/**
+ * Wire-level usage telemetry (v0.12.0), recorded once per invocation regardless of outcome — a run
+ * that ultimately throws or times out may still have made real, billable requests through the
+ * proxy, and that spend is real even though the run did not succeed. `proxy` is `undefined` on the
+ * anthropic path, which never speaks OpenAI chat completions, so nothing is recorded there.
+ */
+function recordModelUsage(
+  diagnostics: Diagnostics,
+  proxy: ModelProxy | undefined,
+  options: EngineRunOptions,
+): void {
+  if (proxy === undefined) return;
+  const usage = proxy.usage();
+  diagnostics.record("model.usage", {
+    headSha: options.pair.head,
+    counts: {
+      requests: usage.requests,
+      prompt: usage.prompt,
+      completion: usage.completion,
+      cached: usage.cached,
+    },
+  });
+}
+
 export async function runEngine(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
@@ -218,6 +242,9 @@ export async function runEngine(
     });
     throw new EngineRunError(reason);
   } finally {
+    // Ordered before the close below on purpose, so the count is read while the proxy is still
+    // the authority on its own totals rather than relying on `close()` leaving them readable.
+    recordModelUsage(diagnostics, proxy, options);
     // The proxy dies with the invocation on every path — an orphaned listener would outlive the
     // credentials' purpose even though it never holds them.
     await proxy?.close();

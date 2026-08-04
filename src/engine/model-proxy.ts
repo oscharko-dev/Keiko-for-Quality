@@ -19,14 +19,38 @@
  * Why it is import-free apart from node builtins: `corpus/run.mjs` loads this module directly
  * under Node's type stripping, so the corpus measures the identical pipeline the action ships —
  * the fixture-derives-from-the-producer rule, applied to ourselves.
+ *
+ * Also accumulates wire-level usage telemetry across every request it forwards: a count of
+ * chat-completions requests, plus prompt/completion/cached token totals read from each JSON
+ * response. This exists because the engine's own self-report is not proof of what the wire
+ * actually carried, and provider prompt-cache behaviour (the `cached` figure) is not visible
+ * anywhere else in this pipeline. The accounting reads only the body already buffered for
+ * forwarding, so it costs no extra I/O, and — unlike the reject-on-mismatch posture the rest of
+ * this product takes at a trust boundary — a shape it does not recognise contributes zero rather
+ * than interrupting the forward: this is observational telemetry, never a gate.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+
+/** Wire-observed totals. Counts only — see the module doc for why this exists. */
+export interface ModelUsage {
+  /** Forwarded requests whose normalized path ended `/chat/completions`. */
+  readonly requests: number;
+  readonly prompt: number;
+  readonly completion: number;
+  /** Provider-reported `usage.prompt_tokens_details.cached_tokens`, summed. */
+  readonly cached: number;
+}
 
 export interface ModelProxy {
   /** `http://127.0.0.1:<port>` — hand this to the engine as its model endpoint. */
   readonly url: string;
   close(): Promise<void>;
+  /**
+   * A snapshot of usage across every request forwarded so far — not a live view, so a caller that
+   * holds on to the returned object is unaffected by requests the proxy handles afterward.
+   */
+  usage(): ModelUsage;
 }
 
 export interface ModelProxyOptions {
@@ -67,15 +91,22 @@ function readBody(request: IncomingMessage): Promise<Buffer> {
 }
 
 /**
+ * Pathname only: Azure-style deployments append query strings (`?api-version=...`), and a
+ * query-carrying URL must not silently disable the determinism pin — or, for the same reason,
+ * silently drop a request from the usage count below, which relies on this identical check.
+ */
+function isChatCompletionsPath(path: string): boolean {
+  const pathname = path.split("?")[0] ?? path;
+  return pathname.endsWith("/chat/completions");
+}
+
+/**
  * Overwrites the sampling parameters when the body is a chat-completions JSON object; anything
  * else — other endpoints, malformed bodies — passes through byte-identical. Overwrite, not
  * default: the point is that the pinned value wins over whatever the engine chose.
  */
 function pinSampling(path: string, body: Buffer, options: ModelProxyOptions): Buffer {
-  // Pathname only: Azure-style deployments append query strings (`?api-version=...`), and a
-  // query-carrying URL must not silently disable the determinism pin.
-  const pathname = path.split("?")[0] ?? path;
-  if (!pathname.endsWith("/chat/completions")) return body;
+  if (!isChatCompletionsPath(path)) return body;
   try {
     const parsed: unknown = JSON.parse(body.toString("utf8"));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return body;
@@ -88,10 +119,83 @@ function pinSampling(path: string, body: Buffer, options: ModelProxyOptions): Bu
   }
 }
 
+/** Mutated in place as requests are forwarded; every external view is the readonly snapshot above. */
+interface MutableUsage {
+  requests: number;
+  prompt: number;
+  completion: number;
+  cached: number;
+}
+
+function isJsonContentType(contentType: string | null): boolean {
+  return contentType?.toLowerCase().includes("application/json") ?? false;
+}
+
+/**
+ * A finite number at `container[key]`, or 0.
+ *
+ * Never throws: this is telemetry, not a trust boundary, and one malformed field must not cost the
+ * others their count. `Array.isArray` is excluded the same way `asObject` excludes it elsewhere in
+ * this product — an array has typeof "object" but no field of this name worth reading.
+ */
+function numericField(container: unknown, key: string): number {
+  if (typeof container !== "object" || container === null || Array.isArray(container)) return 0;
+  const value = (container as Record<string, unknown>)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** The object at `container[key]`, or `undefined`. Same non-throwing contract as `numericField`. */
+function objectField(container: unknown, key: string): unknown {
+  if (typeof container !== "object" || container === null || Array.isArray(container)) {
+    return undefined;
+  }
+  return (container as Record<string, unknown>)[key];
+}
+
+/**
+ * Adds one upstream JSON response's token usage into the running total.
+ *
+ * Each field is read independently so a response carrying `usage` but no `prompt_tokens_details`
+ * (no cache reporting) still contributes its prompt/completion counts instead of losing all three
+ * to one missing nested object — "each absent/malformed field contributes 0" is a per-field
+ * contract, not an all-or-nothing one.
+ */
+function accumulateUsage(usage: MutableUsage, body: Buffer): void {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.toString("utf8"));
+  } catch {
+    return;
+  }
+  const usageField = objectField(parsed, "usage");
+  usage.prompt += numericField(usageField, "prompt_tokens");
+  usage.completion += numericField(usageField, "completion_tokens");
+  usage.cached += numericField(objectField(usageField, "prompt_tokens_details"), "cached_tokens");
+}
+
+/**
+ * The two usage-counting call sites, split out of `forward` itself so its own branching stays
+ * readable rather than tripping the file's complexity ceiling — the decisions here are simple
+ * enough that moving them costs nothing but the function-call indirection.
+ */
+function countRequest(usage: MutableUsage, isChatCompletions: boolean): void {
+  if (isChatCompletions) usage.requests += 1;
+}
+
+function countResponse(
+  usage: MutableUsage,
+  isChatCompletions: boolean,
+  contentType: string | null,
+  body: Buffer,
+): void {
+  if (isChatCompletions && isJsonContentType(contentType)) accumulateUsage(usage, body);
+}
+
 async function forward(
   options: ModelProxyOptions,
   request: IncomingMessage,
   response: ServerResponse,
+  usage: MutableUsage,
 ): Promise<void> {
   const doFetch = options.fetchImpl ?? fetch;
   try {
@@ -99,15 +203,24 @@ async function forward(
     const path = request.url ?? "/";
     const method = request.method ?? "POST";
     const withBody = method !== "GET" && method !== "HEAD";
+    // Counted at forward time, independent of what the upstream does with it: this is "did the
+    // engine make the call", not "did the call succeed" — the 502 branch below still means the
+    // engine paid for the round trip in wall-clock time even though no tokens come back.
+    const isChatCompletions = isChatCompletionsPath(path);
+    countRequest(usage, isChatCompletions);
     const upstream = await doFetch(`${options.upstreamUrl.replace(/\/+$/, "")}${path}`, {
       method,
       headers: upstreamHeaders(request),
       ...(withBody ? { body: new Uint8Array(pinSampling(path, body, options)) } : {}),
     });
-    response.writeHead(upstream.status, {
-      "content-type": upstream.headers.get("content-type") ?? "application/json",
-    });
-    response.end(Buffer.from(await upstream.arrayBuffer()));
+    const contentType = upstream.headers.get("content-type");
+    response.writeHead(upstream.status, { "content-type": contentType ?? "application/json" });
+    const responseBody = Buffer.from(await upstream.arrayBuffer());
+    // Reads the body already buffered for the forward above — no extra I/O, and nothing here can
+    // delay or fail the response: an SSE or other non-JSON body still counted as a request above,
+    // it just carries no token fields to add.
+    countResponse(usage, isChatCompletions, contentType, responseBody);
+    response.end(responseBody);
   } catch {
     // A transport failure becomes an upstream-shaped error the engine already knows how to
     // handle and retry; the error VALUE is dropped so nothing about the upstream leaks into
@@ -127,8 +240,9 @@ async function forward(
 }
 
 export function startModelProxy(options: ModelProxyOptions): Promise<ModelProxy> {
+  const usage: MutableUsage = { requests: 0, prompt: 0, completion: 0, cached: 0 };
   const server: Server = createServer((request, response) => {
-    void forward(options, request, response);
+    void forward(options, request, response, usage);
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -149,6 +263,7 @@ export function startModelProxy(options: ModelProxyOptions): Promise<ModelProxy>
               done();
             });
           }),
+        usage: () => ({ ...usage }),
       });
     });
   });

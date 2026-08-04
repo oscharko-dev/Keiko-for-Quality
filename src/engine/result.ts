@@ -136,17 +136,31 @@ function parseFindings(value: unknown, field: string): EngineFinding[] {
       content: asString(object.content, `${scope}.content`, LIMITS.maxBodyChars),
       startLine: start,
       endLine: end,
-      severity: optionalToken(object.severity, `${scope}.severity`),
-      category: optionalToken(object.category, `${scope}.category`),
+      severity: optionalToken(object.severity),
+      category: optionalToken(object.category),
     };
   });
 }
 
-function optionalToken(value: unknown, field: string): string | undefined {
-  if (value === undefined || value === null || value === "") return undefined;
-  const token = asString(value, field, 64);
-  if (!/^[a-z][a-z0-9_-]*$/i.test(token)) throw new ValidationError(field);
-  return token;
+/**
+ * `category` and `severity` are vocabulary, not structure. A malformed value here used to throw
+ * exactly like a malformed path or an inverted line range — but `parseFindings` builds its list
+ * with one `.map()`, so one finding's bad token discarded every OTHER finding in the same result
+ * too. A model answering `"category": "bug (logic)"` destroyed an otherwise-complete review over a
+ * formatting slip, and the caller could not tell "the model wrote nonsense" from "this run did not
+ * finish" — both surfaced as the same thrown `ValidationError`. A malformed value degrades to
+ * `undefined` instead, exactly like an absent one, so the finding still reaches
+ * `needsClassification` → `repairClassification` (classify.ts) — the machinery that already exists
+ * to re-ask the model for these two fields specifically, in a prompt small enough that compliance
+ * is not a coin flip. This is not the reject-rather-than-repair rule bending: nothing here invents
+ * or rewrites a classification, it only stops a vocabulary slip from taking a structurally sound
+ * finding down with it. Structural fields — path, content, the line range, above — are untouched and
+ * still throw: a bad path or an inverted range is not something a retry can repair, so there is
+ * nothing to gain by being lenient there.
+ */
+function optionalToken(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || value.length > 64) return undefined;
+  return /^[a-z][a-z0-9_-]*$/i.test(value) ? value : undefined;
 }
 
 function parseWarnings(value: unknown, field: string): EngineWarning[] {

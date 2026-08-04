@@ -268,16 +268,6 @@ function lastOccurrenceIndexes(entries) {
   entries.forEach((entry, index) => lastIndexByKey.set(entry.key, index));
   return new Set(lastIndexByKey.values());
 }
-function appendEntries(store, entries, limits) {
-  const admissible = entries.filter((entry) => entry.findings.length <= limits.maxFindingsPerEntry);
-  const keep = lastOccurrenceIndexes(admissible);
-  const deduped = admissible.filter((_entry, index) => keep.has(index));
-  const touchedKeys = new Set(deduped.map((entry) => entry.key));
-  const retained = store.entries.filter((entry) => !touchedKeys.has(entry.key));
-  const merged = [...retained, ...deduped];
-  const bounded = merged.length > limits.maxEntries ? merged.slice(merged.length - limits.maxEntries) : merged;
-  return { schemaVersion: store.schemaVersion, entries: bounded };
-}
 function canonicalFinding(finding) {
   return {
     path: finding.path,
@@ -302,6 +292,36 @@ function canonicalEntry(entry) {
     protocol: entry.protocol,
     findings: entry.findings.map(canonicalFinding)
   };
+}
+function serializedEntryLength(entry) {
+  return JSON.stringify(canonicalEntry(entry)).length + 1;
+}
+function evictToFitByteBudget(schemaVersion, entries, maxBytes) {
+  const envelope = JSON.stringify({ schemaVersion, entries: [] }).length;
+  const lengths = entries.map(serializedEntryLength);
+  let total = envelope + lengths.reduce((sum, length) => sum + length, 0);
+  if (entries.length > 0) total -= 1;
+  let start = 0;
+  while (total > maxBytes && start < entries.length) {
+    total -= lengths[start] ?? 0;
+    start += 1;
+  }
+  let survivors = entries.slice(start);
+  while (survivors.length > 0 && JSON.stringify({ schemaVersion, entries: survivors.map(canonicalEntry) }).length > maxBytes) {
+    survivors = survivors.slice(1);
+  }
+  return survivors;
+}
+function appendEntries(store, entries, limits) {
+  const admissible = entries.filter((entry) => entry.findings.length <= limits.maxFindingsPerEntry);
+  const keep = lastOccurrenceIndexes(admissible);
+  const deduped = admissible.filter((_entry, index) => keep.has(index));
+  const touchedKeys = new Set(deduped.map((entry) => entry.key));
+  const retained = store.entries.filter((entry) => !touchedKeys.has(entry.key));
+  const merged = [...retained, ...deduped];
+  const bounded = merged.length > limits.maxEntries ? merged.slice(merged.length - limits.maxEntries) : merged;
+  const fitted = evictToFitByteBudget(store.schemaVersion, bounded, PARSE_LIMITS.maxStoreBytes);
+  return { schemaVersion: store.schemaVersion, entries: fitted };
 }
 function serializeStore(store) {
   return JSON.stringify({
@@ -642,16 +662,14 @@ function parseFindings2(value, field) {
       content: asString(object.content, `${scope}.content`, LIMITS.maxBodyChars),
       startLine: start,
       endLine: end,
-      severity: optionalToken2(object.severity, `${scope}.severity`),
-      category: optionalToken2(object.category, `${scope}.category`)
+      severity: optionalToken2(object.severity),
+      category: optionalToken2(object.category)
     };
   });
 }
-function optionalToken2(value, field) {
-  if (value === void 0 || value === null || value === "") return void 0;
-  const token = asString(value, field, 64);
-  if (!/^[a-z][a-z0-9_-]*$/i.test(token)) throw new ValidationError(field);
-  return token;
+function optionalToken2(value) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 64) return void 0;
+  return /^[a-z][a-z0-9_-]*$/i.test(value) ? value : void 0;
 }
 function parseWarnings(value, field) {
   if (value === void 0 || value === null) return [];
@@ -979,7 +997,19 @@ var REASON_CODES = [
   // error or a non-success status — and was re-invoked exactly once. Emitted at most once per
   // review; a second failure settles incomplete exactly as before, so "incomplete never reads
   // as clean" survives the resume.
-  "engine.resumed_once"
+  "engine.resumed_once",
+  // Run-level spend accounting (v0.12.0): one record per engine execution naming what the review
+  // actually cost — the engine's own reported total plus the classification side-calls. The parts
+  // stay separate because they answer different questions (engine behaviour vs. adapter-added
+  // calls), and `total` exists so the summary comment can state real spend instead of whichever
+  // `counts.tokens` record happened to drain last — the defect that made the published "reported"
+  // figure the classification audit's bill rather than the review's.
+  "run.spend",
+  // Loopback-proxy usage telemetry (v0.12.0): request and token counts as observed on the wire,
+  // independent of the engine's self-report. `cached` carries the provider-reported cached prompt
+  // tokens — the number that decides whether prefix caching is working at all, which no other
+  // layer can see. Counts only, like every other record: the proxy never quotes what it forwards.
+  "model.usage"
 ];
 var REASON_CODE_SET = new Set(REASON_CODES);
 function isReasonCode(value) {
@@ -1207,6 +1237,14 @@ function budgetLine(budget) {
   if (budget.allotted === void 0) return void 0;
   return budget.spent === void 0 ? `Budget: ${String(budget.allotted)} tokens allotted` : `Budget: ${String(budget.allotted)} tokens allotted, ${String(budget.spent)} reported`;
 }
+function durationRow(durationMs) {
+  return `| Duration (s) | ${String(Math.round(durationMs / 1e3))} |`;
+}
+function tokensPerFindingRow(budget, counts) {
+  if (budget.spent === void 0 || counts.findingsPublished <= 0) return void 0;
+  const perFinding = Math.ceil(budget.spent / counts.findingsPublished);
+  return `| Tokens per published finding | ${String(perFinding)} |`;
+}
 function composeSummaryBody(report, marker) {
   const timestamp = report.eventTimestamp === "" ? void 0 : escapeInline(report.eventTimestamp);
   const action = report.actionVersion === "" ? void 0 : escapeInline(report.actionVersion);
@@ -1217,6 +1255,7 @@ function composeSummaryBody(report, marker) {
     `engine \`${escapeInline(report.engineVersion)}\``,
     ...action === void 0 ? [] : [`action \`${action}\``]
   ].join(" \xB7 ");
+  const tokensPerFinding = tokensPerFindingRow(report.budget, report.counts);
   const parts = [
     "**Keiko for Quality \u2014 run summary**",
     "",
@@ -1224,7 +1263,9 @@ function composeSummaryBody(report, marker) {
     "",
     "| Metric | Count |",
     "| --- | ---: |",
-    ...countRows(report.counts)
+    ...countRows(report.counts),
+    durationRow(report.durationMs),
+    ...tokensPerFinding === void 0 ? [] : [tokensPerFinding]
   ];
   const budget = budgetLine(report.budget);
   if (budget !== void 0) parts.push("", budget);
@@ -1240,7 +1281,9 @@ function extractBudget(records) {
     if (record.code === "engine.run.completed" && record.counts?.budget !== void 0) {
       allotted = record.counts.budget;
     }
-    if (record.counts?.tokens !== void 0) spent = record.counts.tokens;
+    if (record.code === "run.spend" && record.counts?.total !== void 0) {
+      spent = record.counts.total;
+    }
   }
   return { allotted, spent };
 }
@@ -1267,7 +1310,8 @@ function buildSummaryReport(input, diagnostics) {
     engineVersion: input.engineVersion,
     actionVersion: input.actionVersion,
     counts,
-    budget: extractBudget(diagnostics)
+    budget: extractBudget(diagnostics),
+    durationMs: input.durationMs
   };
 }
 function newestOwnSummary(comments) {
@@ -1576,14 +1620,17 @@ function buildPrompt(finding, stern) {
   ].join("\n");
 }
 function extractObject(text3) {
-  const start = text3.indexOf("{");
-  if (start === -1) return void 0;
-  for (let end = text3.indexOf("}", start); end !== -1; end = text3.indexOf("}", end + 1)) {
-    const candidate = text3.slice(start, end + 1);
-    try {
-      return JSON.parse(candidate);
-    } catch {
+  let start = text3.lastIndexOf("{");
+  while (start !== -1) {
+    for (let end = text3.indexOf("}", start); end !== -1; end = text3.indexOf("}", end + 1)) {
+      const candidate = text3.slice(start, end + 1);
+      try {
+        return JSON.parse(candidate);
+      } catch {
+      }
     }
+    if (start === 0) break;
+    start = text3.lastIndexOf("{", start - 1);
   }
   return void 0;
 }
@@ -1618,12 +1665,16 @@ async function requestPair(prompt, deps, seed) {
         max_completion_tokens: 4e3
       })
     });
-    if (!response.ok) return { pair: void 0, tokens: 0 };
+    if (!response.ok) return { pair: void 0, tokens: 0, transportOk: false };
     const body = await response.json();
     const content = body.choices?.[0]?.message?.content ?? "";
-    return { pair: validPair(extractObject(content)), tokens: body.usage?.total_tokens ?? 0 };
+    return {
+      pair: validPair(extractObject(content)),
+      tokens: body.usage?.total_tokens ?? 0,
+      transportOk: true
+    };
   } catch {
-    return { pair: void 0, tokens: 0 };
+    return { pair: void 0, tokens: 0, transportOk: false };
   }
 }
 function classifyOnce(finding, deps, stern) {
@@ -1713,12 +1764,19 @@ function buildAuditPrompt(finding) {
     `Finding: ${finding.content}`
   ].join("\n");
 }
+async function requestAuditVote(finding, deps, seed) {
+  const prompt = buildAuditPrompt(finding);
+  const first = await requestPair(prompt, deps, seed);
+  if (first.transportOk) return first;
+  const retry = await requestPair(prompt, deps, seed);
+  return { pair: retry.pair, tokens: first.tokens + retry.tokens, transportOk: retry.transportOk };
+}
 async function collectAuditVotes(finding, deps) {
   const votes = [];
   let tokens = 0;
   const VOTE_SEEDS = [42, 43, 44];
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const result = await requestPair(buildAuditPrompt(finding), deps, VOTE_SEEDS[attempt] ?? 42);
+    const result = await requestAuditVote(finding, deps, VOTE_SEEDS[attempt] ?? 42);
     tokens += result.tokens;
     if (result.pair !== void 0) votes.push(result.pair);
     if (votes.length === 2 && pairKey(votes[0]) === pairKey(votes[1])) break;
@@ -2129,9 +2187,12 @@ function readBody(request) {
     request.on("error", reject);
   });
 }
-function pinSampling(path, body, options2) {
+function isChatCompletionsPath(path) {
   const pathname = path.split("?")[0] ?? path;
-  if (!pathname.endsWith("/chat/completions")) return body;
+  return pathname.endsWith("/chat/completions");
+}
+function pinSampling(path, body, options2) {
+  if (!isChatCompletionsPath(path)) return body;
   try {
     const parsed = JSON.parse(body.toString("utf8"));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return body;
@@ -2143,22 +2204,57 @@ function pinSampling(path, body, options2) {
     return body;
   }
 }
-async function forward(options2, request, response) {
+function isJsonContentType(contentType) {
+  return contentType?.toLowerCase().includes("application/json") ?? false;
+}
+function numericField(container, key) {
+  if (typeof container !== "object" || container === null || Array.isArray(container)) return 0;
+  const value = container[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+function objectField(container, key) {
+  if (typeof container !== "object" || container === null || Array.isArray(container)) {
+    return void 0;
+  }
+  return container[key];
+}
+function accumulateUsage(usage, body) {
+  let parsed;
+  try {
+    parsed = JSON.parse(body.toString("utf8"));
+  } catch {
+    return;
+  }
+  const usageField = objectField(parsed, "usage");
+  usage.prompt += numericField(usageField, "prompt_tokens");
+  usage.completion += numericField(usageField, "completion_tokens");
+  usage.cached += numericField(objectField(usageField, "prompt_tokens_details"), "cached_tokens");
+}
+function countRequest(usage, isChatCompletions) {
+  if (isChatCompletions) usage.requests += 1;
+}
+function countResponse(usage, isChatCompletions, contentType, body) {
+  if (isChatCompletions && isJsonContentType(contentType)) accumulateUsage(usage, body);
+}
+async function forward(options2, request, response, usage) {
   const doFetch = options2.fetchImpl ?? fetch;
   try {
     const body = await readBody(request);
     const path = request.url ?? "/";
     const method = request.method ?? "POST";
     const withBody = method !== "GET" && method !== "HEAD";
+    const isChatCompletions = isChatCompletionsPath(path);
+    countRequest(usage, isChatCompletions);
     const upstream = await doFetch(`${options2.upstreamUrl.replace(/\/+$/, "")}${path}`, {
       method,
       headers: upstreamHeaders(request),
       ...withBody ? { body: new Uint8Array(pinSampling(path, body, options2)) } : {}
     });
-    response.writeHead(upstream.status, {
-      "content-type": upstream.headers.get("content-type") ?? "application/json"
-    });
-    response.end(Buffer.from(await upstream.arrayBuffer()));
+    const contentType = upstream.headers.get("content-type");
+    response.writeHead(upstream.status, { "content-type": contentType ?? "application/json" });
+    const responseBody = Buffer.from(await upstream.arrayBuffer());
+    countResponse(usage, isChatCompletions, contentType, responseBody);
+    response.end(responseBody);
   } catch {
     try {
       if (!response.headersSent) {
@@ -2170,8 +2266,9 @@ async function forward(options2, request, response) {
   }
 }
 function startModelProxy(options2) {
+  const usage = { requests: 0, prompt: 0, completion: 0, cached: 0 };
   const server = createServer((request, response) => {
-    void forward(options2, request, response);
+    void forward(options2, request, response, usage);
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -2188,7 +2285,8 @@ function startModelProxy(options2) {
           server.close(() => {
             done();
           });
-        })
+        }),
+        usage: () => ({ ...usage })
       });
     });
   });
@@ -2310,6 +2408,19 @@ function reviewArguments(options2, rulePath) {
 }
 var REVIEW_TEMPERATURE = 0;
 var REVIEW_SEED = 42;
+function recordModelUsage(diagnostics, proxy, options2) {
+  if (proxy === void 0) return;
+  const usage = proxy.usage();
+  diagnostics.record("model.usage", {
+    headSha: options2.pair.head,
+    counts: {
+      requests: usage.requests,
+      prompt: usage.prompt,
+      completion: usage.completion,
+      cached: usage.cached
+    }
+  });
+}
 async function runEngine(options2, diagnostics) {
   const token = readModelToken(options2.config, options2.env);
   if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
@@ -2348,6 +2459,7 @@ async function runEngine(options2, diagnostics) {
     });
     throw new EngineRunError(reason);
   } finally {
+    recordModelUsage(diagnostics, proxy, options2);
     await proxy?.close();
     await rm(home, { recursive: true, force: true });
   }
@@ -2622,6 +2734,18 @@ var GitHubApiError = class extends Error {
 };
 var RETRYABLE = /* @__PURE__ */ new Set([429, 500, 502, 503, 504]);
 var MAX_ATTEMPTS = 3;
+function isSecondaryRateLimit(response) {
+  if (response.status !== 403) return false;
+  return response.headers.has("retry-after") || response.headers.get("x-ratelimit-remaining") === "0";
+}
+var MAX_RETRY_AFTER_SECONDS = 60;
+function retryAfterMs(response) {
+  const header = response.headers.get("retry-after");
+  if (header === null) return void 0;
+  const seconds = Number(header);
+  if (!Number.isFinite(seconds) || seconds < 0) return void 0;
+  return Math.min(seconds, MAX_RETRY_AFTER_SECONDS) * 1e3;
+}
 var RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
@@ -2688,8 +2812,10 @@ var GitHubClient = class {
       });
       if (response.ok) return response;
       lastStatus = response.status;
-      if (!RETRYABLE.has(response.status)) throw new GitHubApiError(response.status);
-      await delay(attempt * 1e3);
+      if (!RETRYABLE.has(response.status) && !isSecondaryRateLimit(response)) {
+        throw new GitHubApiError(response.status);
+      }
+      await delay(retryAfterMs(response) ?? attempt * 1e3);
     }
     throw new GitHubApiError(lastStatus);
   }
@@ -3045,6 +3171,13 @@ function toExistingConversation(comment, identity) {
     endLine: comment.line
   };
 }
+async function prefetchExistingConversations(context) {
+  const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
+  return {
+    markers: ownMarkers(comments, context.identity),
+    threads: comments.map((comment) => toExistingConversation(comment, context.identity))
+  };
+}
 async function publishWithLadder(context, ladder, body) {
   for (const attempt of ladder) {
     try {
@@ -3093,7 +3226,13 @@ async function publishComposedFinding(context, finding, marker, sanitizedBody, c
     });
     return;
   }
-  if (!await verifyPublication(context, result.comment, marker)) {
+  let verified;
+  try {
+    verified = await verifyPublication(context, result.comment, marker);
+  } catch {
+    verified = false;
+  }
+  if (!verified) {
     counters.readbackFailures += 1;
     diagnostics.record("publish.readback_failed", { headSha: context.headSha });
     return;
@@ -3135,14 +3274,15 @@ async function publishOne(context, finding, existing, existingThreads, counters,
     diagnostics.record(code, { headSha: context.headSha });
     return;
   }
-  await publishComposedFinding(context, finding, marker, sanitized.body, counters, diagnostics);
+  try {
+    await publishComposedFinding(context, finding, marker, sanitized.body, counters, diagnostics);
+  } catch {
+    counters.apiFailures += 1;
+    diagnostics.record("publish.api_failed", { headSha: context.headSha });
+  }
 }
-async function publishFindings(context, findings, diagnostics) {
-  const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
-  const existing = ownMarkers(comments, context.identity);
-  const existingThreads = comments.map(
-    (comment) => toExistingConversation(comment, context.identity)
-  );
+async function publishFindings(context, findings, diagnostics, prefetch) {
+  const { markers: existing, threads: existingThreads } = prefetch ?? await prefetchExistingConversations(context);
   const counters = {
     published: 0,
     suppressed: 0,
@@ -3151,14 +3291,15 @@ async function publishFindings(context, findings, diagnostics) {
     suppressedDispositioned: 0,
     rejectedSanitization: 0,
     rejectedPlacement: 0,
-    readbackFailures: 0
+    readbackFailures: 0,
+    apiFailures: 0
   };
   for (const finding of findings) {
     await publishOne(context, finding, existing, existingThreads, counters, diagnostics);
   }
   return { ...counters };
 }
-async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnostics) {
+async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnostics, prefetch) {
   const marker = fingerprint({
     repository: `${context.ref.owner}/${context.ref.repo}`,
     pullNumber: context.pullNumber,
@@ -3170,8 +3311,8 @@ async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnost
     // the current head still needs to publish.
     head: context.headSha
   });
-  const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
-  if (ownMarkers(comments, context.identity).has(marker)) return true;
+  const { markers: existing } = prefetch ?? await prefetchExistingConversations(context);
+  if (existing.has(marker)) return true;
   try {
     const created = await context.client.createReviewComment(context.ref, context.pullNumber, {
       body: composeIncompleteNotice(reasonCode, markerComment(marker)),
@@ -3309,10 +3450,11 @@ async function settleIncomplete(request, inventory, reason, diagnostics, finding
     return abandonedReport(inventory, memo);
   }
   const context = publishContextFor(request, inventory);
-  const publish = findings.length === 0 ? void 0 : await publishFindings(context, findings, diagnostics);
   const anchor = noticeAnchor(inventory);
+  const prefetch = findings.length > 0 || anchor !== void 0 ? await prefetchExistingConversations(context) : void 0;
+  const publish = findings.length === 0 ? void 0 : await publishFindings(context, findings, diagnostics, prefetch);
   if (anchor !== void 0) {
-    await publishIncompleteNotice(context, reason, anchor, diagnostics);
+    await publishIncompleteNotice(context, reason, anchor, diagnostics, prefetch);
   }
   return {
     outcome: "incomplete",
@@ -3333,7 +3475,7 @@ async function executeEngine(request, inventory, memo, diagnostics) {
       reviewableChangedLines(inventory)
     );
     const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
-    const parsed = await runEngineWithOneResume(
+    const { result: parsed, engineTokens } = await runEngineWithOneResume(
       {
         binaryPath: engine.binaryPath,
         repositoryPath: request.repositoryPath,
@@ -3348,39 +3490,59 @@ async function executeEngine(request, inventory, memo, diagnostics) {
       },
       diagnostics
     );
-    const classified = await repairFindingClassification(parsed, request, diagnostics);
+    const { result: classified, classifyTokens } = await repairFindingClassification(
+      parsed,
+      request,
+      diagnostics
+    );
+    diagnostics.record("run.spend", {
+      headSha: request.head,
+      counts: {
+        engine: engineTokens,
+        classify: classifyTokens,
+        total: engineTokens + classifyTokens
+      }
+    });
     return settle(inventory, classified, request.profile, request.config, memo.hitPaths);
   } finally {
     await rm2(workspace, { recursive: true, force: true });
   }
 }
 async function repairFindingClassification(parsed, request, diagnostics) {
-  if (request.config.protocol === "anthropic") return parsed;
-  if (parsed.findings.length === 0) return parsed;
+  if (parsed.findings.length > request.config.maxFindings) {
+    return { result: parsed, classifyTokens: 0 };
+  }
+  if (request.config.protocol === "anthropic") return { result: parsed, classifyTokens: 0 };
+  if (parsed.findings.length === 0) return { result: parsed, classifyTokens: 0 };
   const token = readModelToken(request.config, request.env);
-  if (token === void 0) return parsed;
+  if (token === void 0) return { result: parsed, classifyTokens: 0 };
   const deps = { endpoint: request.config.endpoint, token, model: request.config.model };
   let findings = parsed.findings;
+  let classifyTokens = 0;
   if (findings.some(needsClassification)) {
     const outcome = await repairClassification(findings, deps);
     diagnostics.record("classify.repaired", {
       counts: { repaired: outcome.repaired, failed: outcome.failed, tokens: outcome.tokens }
     });
     findings = outcome.findings;
+    classifyTokens += outcome.tokens;
   }
   const audit = await auditClassification(findings, deps);
   diagnostics.record("classify.audited", {
     counts: { changed: audit.changed, tokens: audit.tokens }
   });
-  return { ...parsed, findings: audit.findings };
+  classifyTokens += audit.tokens;
+  return { result: { ...parsed, findings: audit.findings }, classifyTokens };
 }
 var RESUME_SEED = 43;
 async function runEngineWithOneResume(options2, diagnostics) {
   let remaining = options2.allottedBudget;
+  let firstAttemptTokens = 0;
   try {
     const first = await runEngine(options2, diagnostics);
     const parsed = parseEngineResult(first.stdout);
-    if (parsed.status === "success") return parsed;
+    if (parsed.status === "success") return { result: parsed, engineTokens: parsed.totalTokens };
+    firstAttemptTokens = parsed.totalTokens;
     remaining = Math.max(ALLOTMENT_FLOOR, options2.allottedBudget - parsed.totalTokens);
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   } catch (error) {
@@ -3391,17 +3553,22 @@ async function runEngineWithOneResume(options2, diagnostics) {
     { ...options2, samplingSeed: RESUME_SEED, allottedBudget: remaining },
     diagnostics
   );
-  return parseEngineResult(second.stdout);
+  const parsedSecond = parseEngineResult(second.stdout);
+  return { result: parsedSecond, engineTokens: firstAttemptTokens + parsedSecond.totalTokens };
 }
 function publicationDegraded(outcome) {
-  return outcome.rejectedSanitization > 0 || outcome.rejectedPlacement > 0 || outcome.readbackFailures > 0;
+  return outcome.rejectedSanitization > 0 || outcome.rejectedPlacement > 0 || outcome.readbackFailures > 0 || // A finding whose publish call itself failed was contained per finding rather than allowed to
+  // abort the loop (publisher.ts), but containment does not make it published: the consumer
+  // never saw it, so the run cannot read as fully reviewed.
+  (outcome.apiFailures ?? 0) > 0;
 }
 function publicationDegradedCounts(outcome) {
   return {
     published: outcome.published,
     rejected_placement: outcome.rejectedPlacement,
     rejected_sanitization: outcome.rejectedSanitization,
-    readback_failures: outcome.readbackFailures
+    readback_failures: outcome.readbackFailures,
+    api_failures: outcome.apiFailures ?? 0
   };
 }
 function finalizeCacheStore(request, inventory, memo, engineFindings, restrictTo) {
@@ -3477,6 +3644,11 @@ function abandonedReport(inventory, memo) {
     cacheAppended: 0
   };
 }
+async function abandonIfStale(request, inventory, memo, diagnostics) {
+  if (await headIsCurrent(request)) return void 0;
+  diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+  return abandonedReport(inventory, memo);
+}
 async function settleOrReport(request, inventory, memo, diagnostics) {
   try {
     const settlement = await executeEngine(request, inventory, memo, diagnostics);
@@ -3520,6 +3692,8 @@ async function performReview(request, diagnostics) {
     return emptyReviewReport(inventory);
   }
   const memo = prepareMemoization(request, inventory, diagnostics);
+  const preflight = await abandonIfStale(request, inventory, memo, diagnostics);
+  if (preflight !== void 0) return preflight;
   const settlement = await settleOrReport(request, inventory, memo, diagnostics);
   if ("outcome" in settlement) return settlement;
   if (settlement.status === "incomplete") {
@@ -3534,10 +3708,8 @@ async function performReview(request, diagnostics) {
       verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths : void 0
     );
   }
-  if (!await headIsCurrent(request)) {
-    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
-    return abandonedReport(inventory, memo);
-  }
+  const postRun = await abandonIfStale(request, inventory, memo, diagnostics);
+  if (postRun !== void 0) return postRun;
   return publishSettledFindings(request, inventory, settlement, memo, started, diagnostics);
 }
 
@@ -3807,7 +3979,7 @@ async function maybeSaveCacheStore(storePath, report, diagnostics) {
     diagnostics
   );
 }
-async function maybeMaintainSummary(env, event, identity, report, diagnostics) {
+async function maybeMaintainSummary(env, event, identity, report, durationMs, diagnostics) {
   if (!readBooleanInput(env, "run_summary", true)) {
     diagnostics.record("publish.summary_disabled");
     return void 0;
@@ -3826,10 +3998,28 @@ async function maybeMaintainSummary(env, event, identity, report, diagnostics) {
       engineVersion: ENGINE_PIN.version,
       // Set by Actions for a step that `uses:` a JS action — the exact ref/SHA the consumer's own
       // workflow pinned this run to. Empty outside Actions (a local invocation, a test).
-      actionVersion: env.GITHUB_ACTION_REF ?? ""
+      actionVersion: env.GITHUB_ACTION_REF ?? "",
+      durationMs
     },
     diagnostics
   );
+}
+function buildReviewRequest(event, identity, config, profile, guidelines, env, cacheStore) {
+  return {
+    client: identity.client,
+    ref: { owner: event.owner, repo: event.repo },
+    pullNumber: event.pullNumber,
+    base: event.base,
+    head: event.head,
+    repositoryPath: env.GITHUB_WORKSPACE ?? process.cwd(),
+    config,
+    profile,
+    guidelines,
+    identity: identity.login,
+    env,
+    pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    ...cacheStore === void 0 ? {} : { cacheStore }
+  };
 }
 function admit(env, event, diagnostics) {
   const eligibility = evaluateEligibility(
@@ -3872,26 +4062,19 @@ async function runAction(env, diagnostics) {
   diagnostics.record("config.loaded", { headSha: event.head });
   const storePath = readInput(env, "review_store_path");
   const cacheStore = storePath === "" ? void 0 : await loadCacheStore(storePath, diagnostics);
-  const report = await performReview(
-    {
-      client: identity.client,
-      ref: { owner: event.owner, repo: event.repo },
-      pullNumber: event.pullNumber,
-      base: event.base,
-      head: event.head,
-      repositoryPath: env.GITHUB_WORKSPACE ?? process.cwd(),
-      config,
-      profile,
-      guidelines,
-      identity: identity.login,
-      env,
-      pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-      ...cacheStore === void 0 ? {} : { cacheStore }
-    },
+  const request = buildReviewRequest(event, identity, config, profile, guidelines, env, cacheStore);
+  const reviewStartedAt = Date.now();
+  const report = await performReview(request, diagnostics);
+  const durationMs = Date.now() - reviewStartedAt;
+  const storeWritten = await maybeSaveCacheStore(storePath, report, diagnostics);
+  const summaryCommentUrl = await maybeMaintainSummary(
+    env,
+    event,
+    identity,
+    report,
+    durationMs,
     diagnostics
   );
-  const storeWritten = await maybeSaveCacheStore(storePath, report, diagnostics);
-  const summaryCommentUrl = await maybeMaintainSummary(env, event, identity, report, diagnostics);
   writeOutputs(env, reportOutputs(report, summaryCommentUrl, storeWritten));
   return report;
 }

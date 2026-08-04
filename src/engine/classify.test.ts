@@ -17,7 +17,7 @@ interface CannedReply {
 
 interface RecordedCall {
   readonly url: string;
-  readonly body: { model: string; messages: readonly { content: string }[] };
+  readonly body: { model: string; messages: readonly { content: string }[]; seed: number };
 }
 
 function chatBody(content: string, tokens: number): string {
@@ -99,6 +99,40 @@ describe("repairClassification", () => {
     const outcome = await repairClassification([finding()], { ...DEPS, fetchImpl });
     expect(outcome.findings[0]).toMatchObject({ category: "bug", severity: "high" });
     expect(outcome.repaired).toBe(1);
+  });
+
+  // Reasoning models often open with a `{` of their own before the real answer — quoting the
+  // input, thinking aloud. Anchoring on the FIRST brace (as this parser once did) means every
+  // candidate has to swallow that preamble AND the real object AND the prose between them, which
+  // never parses, so the whole reply reads as unparseable even though a valid object is right
+  // there at the end.
+  it("finds the JSON object after brace-bearing reasoning prose, without needing the retry", async () => {
+    const { fetchImpl, calls } = fakeFetch([
+      {
+        status: 200,
+        content:
+          'The user says {ignore this brace} but here is the answer: {"category":"bug","severity":"high"}',
+        tokens: 75,
+      },
+    ]);
+    const outcome = await repairClassification([finding()], { ...DEPS, fetchImpl });
+    expect(outcome.findings[0]).toMatchObject({ category: "bug", severity: "high" });
+    expect(outcome).toMatchObject({ repaired: 1, failed: 0, tokens: 75 });
+    // One call, not two: the fix finds the trailing object on the FIRST attempt, so the stern
+    // retry this scenario used to force is never spent.
+    expect(calls).toHaveLength(1);
+  });
+
+  it("still falls through to the stern retry when no candidate parses despite braces present", async () => {
+    const { fetchImpl, calls } = fakeFetch([
+      { status: 200, content: "{not valid json} still {not valid either}", tokens: 30 },
+      { status: 200, content: '{"category":"bug","severity":"medium"}', tokens: 60 },
+    ]);
+    const outcome = await repairClassification([finding()], { ...DEPS, fetchImpl });
+    expect(outcome.findings[0]).toMatchObject({ category: "bug", severity: "medium" });
+    expect(outcome).toMatchObject({ repaired: 1, failed: 0, tokens: 90 });
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.body.messages[0]?.content).toContain("previous reply");
   });
 
   it("retries once with a sterner prompt and sums tokens across both attempts", async () => {
@@ -230,5 +264,61 @@ describe("auditClassification", () => {
     const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
     expect(outcome.findings[0]).toBe(input[0]);
     expect(calls).toHaveLength(0);
+  });
+
+  describe("a lost vote is retried once, but only when the transport itself failed", () => {
+    it("recovers a vote that fails transport once and then succeeds on the same-seed retry", async () => {
+      const { fetchImpl, calls } = fakeFetch([
+        { status: 500 },
+        { status: 200, content: '{"category":"security","severity":"critical"}', tokens: 90 },
+        { status: 200, content: '{"category":"security","severity":"critical"}', tokens: 90 },
+      ]);
+      const input = [finding({ category: "security", severity: "high" })];
+      const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
+      expect(outcome.findings[0]).toMatchObject({ category: "security", severity: "critical" });
+      expect(outcome).toMatchObject({ changed: 1, tokens: 180 });
+      // 3 calls, not 2: the first vote cost a failed attempt plus its retry before it landed.
+      expect(calls).toHaveLength(3);
+      expect(calls[0]?.body.seed).toBe(42);
+      expect(calls[1]?.body.seed).toBe(42); // the retry recovers the SAME vote, same seed
+      expect(calls[2]?.body.seed).toBe(43); // the next vote proceeds normally afterwards
+    });
+
+    it("gives up on a vote after its retry also fails transport, without a third attempt", async () => {
+      const { fetchImpl, calls } = fakeFetch([
+        { status: 500 },
+        { status: 500 },
+        { status: 200, content: '{"category":"bug","severity":"high"}', tokens: 40 },
+        { status: 200, content: '{"category":"bug","severity":"high"}', tokens: 40 },
+      ]);
+      const input = [finding({ category: "bug", severity: "medium" })];
+      const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
+      expect(outcome.findings[0]).toMatchObject({ category: "bug", severity: "high" });
+      expect(outcome.changed).toBe(1);
+      // 4 calls: 2 for the first (permanently lost) vote, 1 each for the two that decided it —
+      // never a third attempt at the first vote.
+      expect(calls).toHaveLength(4);
+      expect(calls[0]?.body.seed).toBe(42);
+      expect(calls[1]?.body.seed).toBe(42);
+      expect(calls[2]?.body.seed).toBe(43);
+      expect(calls[3]?.body.seed).toBe(44);
+    });
+
+    it("does not retry a vote whose transport succeeded but whose content was invalid", async () => {
+      const { fetchImpl, calls } = fakeFetch([
+        { status: 200, content: "not json at all" },
+        { status: 200, content: '{"category":"bug","severity":"high"}', tokens: 50 },
+        { status: 200, content: '{"category":"bug","severity":"high"}', tokens: 50 },
+      ]);
+      const input = [finding({ category: "bug", severity: "medium" })];
+      const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
+      expect(outcome.findings[0]).toMatchObject({ category: "bug", severity: "high" });
+      // 3 calls, one per vote: a content failure is the model's real (bad) answer, not a lost
+      // call, so it is never retried — a 4th call here would mean the fix over-retried.
+      expect(calls).toHaveLength(3);
+      expect(calls[0]?.body.seed).toBe(42);
+      expect(calls[1]?.body.seed).toBe(43);
+      expect(calls[2]?.body.seed).toBe(44);
+    });
   });
 });

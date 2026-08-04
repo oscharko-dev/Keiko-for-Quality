@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   computeKey,
@@ -381,6 +381,7 @@ describe("performReview: review-cache memoization end to end", () => {
       rejected_placement: 1,
       rejected_sanitization: 0,
       readback_failures: 0,
+      api_failures: 0,
     });
   });
 
@@ -451,12 +452,36 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("abandons an engine-failure settlement once the head has moved on", async () => {
+      runEngineMock.mockClear();
+      acquireEngineMock.mockClear();
       acquireEngineMock.mockResolvedValue({
         binaryPath: "/fake/engine",
         digest: currentPlatformDigest(),
       });
       runEngineMock.mockRejectedValue(new Error("engine spawn failed"));
-      const client = staleClient();
+
+      // Fresh on the FIRST call, stale from then on — the pre-flight check (`performReview`, right
+      // after `prepareMemoization`) would otherwise find the head already stale and return before
+      // the engine ever runs, the same way the new "pre-flight head check" tests exercise it. That
+      // would leave this test unable to fail if the guard THIS block is named for — the one inside
+      // `settleIncomplete`, reached only after a real engine failure — ever regressed: it would still
+      // read "abandoned" for the wrong reason. Fresh-then-stale reproduces the actual race instead:
+      // the head was current when the engine started and moved only while it ran.
+      const client = new GitHubClient("https://api.example.test", "unused");
+      vi.spyOn(client, "getPullRequest")
+        .mockResolvedValueOnce({
+          headSha: commitSha(headSha),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        })
+        .mockResolvedValue({
+          headSha: commitSha("f".repeat(40)),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
       const createSpy = vi.spyOn(client, "createReviewComment").mockResolvedValue({
         id: 1,
         body: "",
@@ -483,8 +508,123 @@ describe("performReview: review-cache memoization end to end", () => {
 
       const report = await performReview(request, createSilentDiagnostics());
 
+      // The pre-flight check passed (fresh), so the engine genuinely ran and failed — proof this
+      // run reached the post-run guard rather than being short-circuited before it.
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
       expect(report.outcome).toBe("abandoned");
       expect(createSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * A pull request can move its head during the engine's own minutes-long run, so the post-run
+   * checks above stay necessary — but they only fire AFTER that spend already happened. This is the
+   * cheaper half: the same `headIsCurrent` check, run once more immediately after `prepareMemoization`
+   * and before the engine is even acquired, so a head that is ALREADY stale never pays for a review
+   * whose findings would be abandoned anyway. One extra `getPullRequest` call is the price.
+   */
+  describe("performReview: pre-flight head check", () => {
+    it("abandons before the engine runs when the head is already stale, keeping the memo's cache counts", async () => {
+      const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+      const engineDigest = currentPlatformDigest();
+      expect(engineDigest).toBeDefined();
+      if (engineDigest === undefined) return;
+
+      const model = modelId(CONFIG.model);
+      const proto = protocol(CONFIG.protocol);
+      const base = blobId(baseBlobA);
+      const head = blobId(headBlobA);
+      const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+      const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+      // One hit (src/a.ts), one miss (src/b.ts) — the same shape as the very first test in this
+      // file, reused here so `report.cacheHits`/`cacheMisses` prove the abandoned report carries the
+      // real `MemoContext` `prepareMemoization` computed, not an empty/inert placeholder.
+      const store: CacheStore = {
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
+        entries: [
+          {
+            key,
+            baseBlob: base,
+            headBlob: head,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            modelId: model,
+            protocol: proto,
+            findings: [],
+          },
+        ],
+      };
+
+      const client = new GitHubClient("https://api.example.test", "unused");
+      // Stale from the very first call — unlike the fresh-then-stale race reproduced above, the
+      // pre-flight check is meant to catch exactly this: a head that never needed the engine's run
+      // to already be superseded.
+      vi.spyOn(client, "getPullRequest").mockResolvedValue({
+        headSha: commitSha("f".repeat(40)),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
+      const createSpy = vi.spyOn(client, "createReviewComment").mockResolvedValue({
+        id: 1,
+        body: "",
+        path: "src/a.ts",
+        authorLogin: "keiko-for-quality[bot]",
+        commitId: headSha,
+        url: "https://example.test/c",
+      });
+
+      acquireEngineMock.mockClear();
+      runEngineMock.mockClear();
+
+      const request: ReviewRequest = {
+        client,
+        ref: { owner: "acme", repo: "widget" },
+        pullNumber: 1,
+        base: commitSha(baseSha),
+        head: commitSha(headSha),
+        repositoryPath: repo,
+        config: CONFIG,
+        profile: PROFILE,
+        guidelines: { paths: [] },
+        identity: "keiko-for-quality[bot]",
+        env: {},
+        pathValue: process.env.PATH ?? "/usr/bin:/bin",
+        cacheStore: store,
+      };
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(request, diagnostics);
+
+      expect(report.outcome).toBe("abandoned");
+      // The memo's own counts survive into the abandoned report exactly as `prepareMemoization`
+      // computed them — proof this returns `abandonedReport(inventory, memo)` rather than discarding
+      // the lookup it just paid for.
+      expect(report.cacheHits).toBe(1);
+      expect(report.cacheMisses).toBe(1);
+
+      // The expensive half of the run never started: no binary acquired, no engine spawned.
+      expect(acquireEngineMock).not.toHaveBeenCalled();
+      expect(runEngineMock).not.toHaveBeenCalled();
+      expect(createSpy).not.toHaveBeenCalled();
+
+      const codes = diagnostics.drain().map((record) => record.code);
+      expect(codes).toContain("publish.abandoned_stale_head");
+    });
+
+    it("still runs the engine when the head is current at the pre-flight check", async () => {
+      runEngineMock.mockClear();
+      acquireEngineMock.mockClear();
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const report = await performReview(baseRequest(undefined), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -628,6 +768,219 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("incomplete");
       expect(runEngineMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  /**
+   * Run-level spend accounting (v0.12.0). `executeEngine` records exactly one `run.spend` per run,
+   * naming what the review actually cost — the defect this closes is `publish/summary.ts` reading
+   * whichever `counts.tokens` record happened to fire last, which in practice was the
+   * classification audit's own bill, an order of magnitude below the engine's real spend.
+   */
+  describe("performReview: run.spend accounting (v0.12.0)", () => {
+    beforeEach(() => {
+      // Same reasoning as the resume block above: a clean call history and implementation queue,
+      // not a default left over from a previous test in this file.
+      runEngineMock.mockReset();
+      acquireEngineMock.mockReset();
+    });
+
+    /** `files_reviewed` fixed at 2 — this block asserts on token accounting, not coverage. */
+    function statusStdout(status: "success" | "failed", totalTokens: number): string {
+      return JSON.stringify({
+        status,
+        summary: { files_reviewed: 2, total_tokens: totalTokens, budget_exceeded: false },
+        comments: [],
+      });
+    }
+
+    it("records engine, classify, and total on the plain single-attempt path", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: statusStdout("success", 250),
+        ruleDigest: engineDigest,
+      });
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      // CONFIG.protocol is "anthropic" throughout this file, so classification repair never calls
+      // out — the whole spend is exactly the engine's own reported total.
+      const spend = diagnostics.drain().find((record) => record.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 250, classify: 0, total: 250 });
+    });
+
+    it("sums both attempts' engine tokens across a parsed non-success plus its resume", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: statusStdout("failed", 30), ruleDigest: engineDigest })
+        .mockResolvedValueOnce({ stdout: statusStdout("success", 100), ruleDigest: engineDigest });
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      // 30 from the discarded first attempt plus 100 from the resume that actually stands — the
+      // first attempt's spend was real and must not vanish just because its result was discarded.
+      const spend = diagnostics.drain().find((record) => record.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 130, classify: 0, total: 130 });
+    });
+
+    it("contributes exactly zero for a thrown first attempt, never a guess", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit"))
+        .mockResolvedValueOnce({ stdout: statusStdout("success", 100), ruleDigest: engineDigest });
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      // Nothing measured says what the thrown attempt spent, so it contributes 0 — the total is
+      // exactly the resume's own tokens, neither inflated nor reduced by the failure.
+      const spend = diagnostics.drain().find((record) => record.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 0, total: 100 });
+    });
+
+    it("records classify: 0 on the anthropic protocol path even when findings are present", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: engineStdoutWithFinding(2),
+        ruleDigest: engineDigest,
+      });
+
+      const request = baseRequest(undefined);
+      // Rejected rather than left to hit the real (unreachable) example.test host: this test is
+      // about the spend record `executeEngine` writes well before publication runs, not about
+      // publication itself, so how that later step resolves is irrelevant here — 422 is the same
+      // "no anchor on the diff" ladder-exhaustion path `publisher.test.ts` covers on its own terms.
+      vi.spyOn(request.client, "createReviewComment").mockRejectedValue(new GitHubApiError(422));
+
+      const diagnostics = createSilentDiagnostics();
+      await performReview(request, diagnostics);
+
+      // The finding arrives already validly classified, but that is not why classify is 0 here:
+      // `repairFindingClassification`'s anthropic check returns before it ever looks at the
+      // findings at all, so classify stays 0 regardless of how many arrived.
+      const spend = diagnostics.drain().find((record) => record.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 0, total: 100 });
+    });
+  });
+
+  /**
+   * The classification cost bomb (order guard): `repairFindingClassification` runs BEFORE `settle`,
+   * and the engine's own result parser accepts up to 1,000 findings while `config.maxFindings`
+   * (50 here) is only enforced inside `settle`'s `commonDisqualifier`. Left unchecked, a runaway or
+   * prompt-injected result with hundreds of findings would pay repair-plus-audit's 2-3 model calls
+   * per finding for a run `settle` disqualifies as implausible either way. These use the openai
+   * protocol (unlike this file's shared `CONFIG`, which is anthropic and would skip classification
+   * for an unrelated reason) so a fetch call would genuinely happen if the guard did not intervene.
+   */
+  describe("performReview: classification flood guard (order guard)", () => {
+    const OPENAI_CONFIG: RuntimeConfig = { ...CONFIG, protocol: "openai", model: "gpt-oss-test" };
+    const originalFetch = globalThis.fetch;
+
+    beforeEach(() => {
+      runEngineMock.mockReset();
+      acquireEngineMock.mockReset();
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    /** `count` synthetic findings, none pre-classified, split across both fixture files. */
+    function manyFindingsStdout(count: number, filesReviewed: number): string {
+      const comments = Array.from({ length: count }, (_unused, i) => ({
+        path: i % 2 === 0 ? "src/a.ts" : "src/b.ts",
+        content: `Synthetic finding ${String(i)} describing a distinct hypothetical defect for this test.`,
+        start_line: 1,
+        end_line: 1,
+      }));
+      return JSON.stringify({
+        status: "success",
+        summary: { files_reviewed: filesReviewed, total_tokens: 100, budget_exceeded: false },
+        comments,
+      });
+    }
+
+    /** A request that would genuinely reach the classify endpoint if the flood guard let it through. */
+    function openaiRequest(): ReviewRequest {
+      const request = baseRequest(undefined);
+      // Rejected deterministically — same trick as `run.spend accounting`'s anthropic-path test
+      // above: these tests are about whether the CLASSIFY call happens, not about publication.
+      vi.spyOn(request.client, "createReviewComment").mockRejectedValue(new GitHubApiError(422));
+      return { ...request, config: OPENAI_CONFIG, env: { MODEL_TOKEN: "fake-token" } };
+    }
+
+    it("never calls the classify endpoint over maxFindings, and settle still disqualifies the run", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // maxFindings + 1 — one past the threshold `settle.ts`'s own `commonDisqualifier` enforces.
+      runEngineMock.mockResolvedValue({
+        stdout: manyFindingsStdout(OPENAI_CONFIG.maxFindings + 1, 2),
+        ruleDigest: engineDigest,
+      });
+
+      let classifyCalls = 0;
+      globalThis.fetch = (() => {
+        classifyCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(openaiRequest(), diagnostics);
+
+      // `settle` disqualifies a >maxFindings result as implausible regardless of this guard — the
+      // guard changes only WHETHER it is classified first, never whether `settle` accepts it.
+      expect(report.outcome).toBe("incomplete");
+      expect(report.reason).toBe("settlement.incomplete.engine_error");
+      expect(classifyCalls).toBe(0);
+
+      const spend = diagnostics.drain().find((record) => record.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 0, total: 100 });
+    });
+
+    it("still classifies at exactly maxFindings — the guard's threshold is '>', matching settle's own", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: manyFindingsStdout(OPENAI_CONFIG.maxFindings, 2),
+        ruleDigest: engineDigest,
+      });
+
+      let classifyCalls = 0;
+      globalThis.fetch = (() => {
+        classifyCalls += 1;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              choices: [{ message: { content: '{"category":"bug","severity":"medium"}' } }],
+              usage: { total_tokens: 10 },
+            }),
+            { status: 200 },
+          ),
+        );
+      }) as typeof fetch;
+
+      const diagnostics = createSilentDiagnostics();
+      await performReview(openaiRequest(), diagnostics);
+
+      // Exact call/token counts belong to `classify.test.ts`, which already pins repair's and
+      // audit's own retry and voting behaviour; what THIS guard controls is only whether any of it
+      // runs at all, so a non-zero count is the whole claim being tested.
+      expect(classifyCalls).toBeGreaterThan(0);
+      const spend = diagnostics.drain().find((record) => record.code === "run.spend");
+      expect(spend?.counts?.classify).toBeGreaterThan(0);
     });
   });
 });

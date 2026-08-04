@@ -32,7 +32,9 @@ export interface SummaryPublishContext {
 /**
  * Context this run's `ReviewReport` alone cannot supply: the head this run reviewed (an issue
  * comment carries no `commit_id`, so nothing else binds the comment to a commit), the triggering
- * event's own timestamp, and the engine/action version identifiers already available to the run.
+ * event's own timestamp, the engine/action version identifiers already available to the run, and
+ * how long the run itself took (Issue #59) — `ReviewReport` describes what happened, never how
+ * long it took to happen.
  */
 export interface SummaryRunInput {
   readonly report: ReviewReport;
@@ -40,17 +42,25 @@ export interface SummaryRunInput {
   readonly eventTimestamp: string;
   readonly engineVersion: VersionTag;
   readonly actionVersion: string;
+  /** Wall-clock milliseconds the caller measured around `performReview`. Visibility only (#59). */
+  readonly durationMs: number;
 }
 
 /**
- * Extracts the allotted per-run budget, and the engine-reported spend when the adapter exposes it,
- * from this run's own diagnostics stream.
+ * Extracts the allotted per-run budget, and this run's real token spend, from the diagnostics
+ * stream.
  *
  * Reuses `engine.run.completed`'s existing `counts.budget` field rather than adding a second
- * plumbing path for a number the diagnostics sink already carries — see `engine/run.ts`. A
- * `counts.tokens` value is recorded on exactly one code today, `settlement.incomplete.budget_exceeded`
- * (`engine/settle.ts`); scanning for the field rather than the specific code means this keeps working
- * unchanged if a future code ever reports spend on a path that is not budget-exceeded.
+ * plumbing path for a number the diagnostics sink already carries — see `engine/run.ts`. `spent`
+ * reads `run.spend`'s own `counts.total` specifically. It used to scan for the last `counts.tokens`
+ * value on ANY code, and that was wrong in practice, not just in principle: several unrelated
+ * diagnostics carry a `tokens` count at their own scale (`classify.repaired`, `classify.audited`),
+ * so whichever of those happened to fire last in the stream silently became "spend" — in the
+ * ordinary case, `classify.audited`'s own bill, an order of magnitude below what the engine itself
+ * spent on the review. `run.spend` (v0.12.0, recorded once by `executeEngine` in `review.ts`) exists
+ * to be the one figure this function can trust: written only after both the engine's cumulative
+ * tokens and the classification side-calls are known, so `total` is the review's actual cost rather
+ * than a coincidence of which diagnostic happened to drain last.
  */
 function extractBudget(records: readonly DiagnosticRecord[]): SummaryBudget {
   let allotted: number | undefined;
@@ -59,7 +69,9 @@ function extractBudget(records: readonly DiagnosticRecord[]): SummaryBudget {
     if (record.code === "engine.run.completed" && record.counts?.budget !== undefined) {
       allotted = record.counts.budget;
     }
-    if (record.counts?.tokens !== undefined) spent = record.counts.tokens;
+    if (record.code === "run.spend" && record.counts?.total !== undefined) {
+      spent = record.counts.total;
+    }
   }
   return { allotted, spent };
 }
@@ -100,6 +112,7 @@ export function buildSummaryReport(
     actionVersion: input.actionVersion,
     counts,
     budget: extractBudget(diagnostics),
+    durationMs: input.durationMs,
   };
 }
 
