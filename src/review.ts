@@ -30,7 +30,7 @@ import {
 } from "./engine/classify.js";
 import { parseEngineResult, type EngineFinding, type EngineResult } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
-import { runEngine } from "./engine/run.js";
+import { EngineRunError, runEngine, type EngineRunOptions } from "./engine/run.js";
 import { settle, verdictsSurviveIncompleteness, type Settlement } from "./engine/settle.js";
 import type { GitContext } from "./git/plumbing.js";
 import type { InventoryItem } from "./inventory/classify.js";
@@ -411,7 +411,7 @@ async function executeEngine(
     // One unioned exclude list through the one threading point v0.8.0 built — cache hits are never
     // a second, parallel exclude channel alongside the mechanically-clean one.
     const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
-    const output = await runEngine(
+    const parsed = await runEngineWithOneResume(
       {
         binaryPath: engine.binaryPath,
         repositoryPath: request.repositoryPath,
@@ -426,7 +426,6 @@ async function executeEngine(
       },
       diagnostics,
     );
-    const parsed = parseEngineResult(output.stdout);
     const classified = await repairFindingClassification(parsed, request, diagnostics);
     return settle(inventory, classified, request.profile, request.config, memo.hitPaths);
   } finally {
@@ -465,6 +464,48 @@ async function repairFindingClassification(
     counts: { changed: audit.changed, tokens: audit.tokens },
   });
   return { ...parsed, findings: audit.findings };
+}
+
+/** The resume's seed — any value other than the primary pin does the job. */
+const RESUME_SEED = 43;
+
+/**
+ * Exactly one bounded resume (#57). A run that ends without a usable success — the process threw,
+ * or the result reports a non-success status — is re-invoked once, and the second outcome stands
+ * whatever it is. One, not N: an unbounded retry converts a provider outage into a doubled bill,
+ * and the measured failure mode this closes is a per-file subtask spiral that stops the whole
+ * run after finding nothing (production Keiko#2963 paid its 44 files twice for exactly this; the
+ * corpus reproduced the same signature four times before the session log named it). A second
+ * failure settles incomplete precisely as it did before the resume existed.
+ */
+async function runEngineWithOneResume(
+  options: EngineRunOptions,
+  diagnostics: Diagnostics,
+): Promise<EngineResult> {
+  // The allotment is a whole-review ceiling and must hold ACROSS attempts: the resume runs on
+  // what the first attempt left, floored so a near-exhausted budget still allows a minimal
+  // second opinion. A thrown run reports no token total, so the full allotment stands there —
+  // nothing measured says it was spent.
+  let remaining = options.allottedBudget;
+  try {
+    const first = await runEngine(options, diagnostics);
+    const parsed = parseEngineResult(first.stdout);
+    if (parsed.status === "success") return parsed;
+    remaining = Math.max(ALLOTMENT_FLOOR, options.allottedBudget - parsed.totalTokens);
+    diagnostics.record("engine.resumed_once", { counts: { remaining } });
+  } catch (error) {
+    if (!(error instanceof EngineRunError)) throw error;
+    diagnostics.record("engine.resumed_once", { counts: { remaining } });
+  }
+  // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
+  // would replay itself byte-for-byte — measured, not hypothesized (the seeded verification
+  // spiral failed 2/2 where the unseeded one failed ~1/4). Varying exactly one bit of entropy on
+  // the one bounded retry is what turns it into a second opinion.
+  const second = await runEngine(
+    { ...options, samplingSeed: RESUME_SEED, allottedBudget: remaining },
+    diagnostics,
+  );
+  return parseEngineResult(second.stdout);
 }
 
 /** True when publication itself failed in a way that means the change was not fully reviewed. */

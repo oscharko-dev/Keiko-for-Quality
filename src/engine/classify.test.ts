@@ -162,29 +162,62 @@ describe("repairClassification", () => {
 });
 
 describe("auditClassification", () => {
-  it("adopts a moved classification in either direction and counts it", async () => {
+  it("adopts when two votes agree, without spending the third call", async () => {
     const { fetchImpl, calls } = fakeFetch([
       { status: 200, content: '{"category":"security","severity":"critical"}', tokens: 120 },
+      { status: 200, content: '{"category":"security","severity":"critical"}', tokens: 110 },
     ]);
     const input = [finding({ category: "security", severity: "high" })];
     const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
     expect(outcome.findings[0]).toMatchObject({ category: "security", severity: "critical" });
-    expect(outcome).toMatchObject({ changed: 1, tokens: 120 });
+    expect(outcome).toMatchObject({ changed: 1, tokens: 230 });
+    expect(calls).toHaveLength(2);
     expect(calls[0]?.body.messages[0]?.content).toContain("Audit the classification");
   });
 
-  it("keeps the original untouched when the audit confirms it — a true high stays high", async () => {
-    const { fetchImpl } = fakeFetch([
+  it("keeps the original untouched when the votes confirm it — a true high stays high", async () => {
+    const { fetchImpl, calls } = fakeFetch([
       { status: 200, content: '{"category":"test","severity":"high"}', tokens: 80 },
+      { status: 200, content: '{"category":"test","severity":"high"}', tokens: 70 },
     ]);
     const input = [finding({ category: "test", severity: "high" })];
     const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
     expect(outcome.findings[0]).toBe(input[0]);
-    expect(outcome).toMatchObject({ changed: 0, tokens: 80 });
+    expect(outcome).toMatchObject({ changed: 0, tokens: 150 });
+    expect(calls).toHaveLength(2);
   });
 
-  it("keeps the original when the audit reply is invalid — the audit never destroys", async () => {
-    const { fetchImpl } = fakeFetch([{ status: 200, content: "not json at all" }]);
+  it("adopts the pair two of three votes named on a 2-1 split", async () => {
+    const { fetchImpl, calls } = fakeFetch([
+      { status: 200, content: '{"category":"bug","severity":"high"}', tokens: 50 },
+      { status: 200, content: '{"category":"bug","severity":"critical"}', tokens: 50 },
+      { status: 200, content: '{"category":"bug","severity":"high"}', tokens: 50 },
+    ]);
+    const input = [finding({ category: "bug", severity: "medium" })];
+    const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
+    expect(outcome.findings[0]).toMatchObject({ category: "bug", severity: "high" });
+    expect(outcome).toMatchObject({ changed: 1, tokens: 150 });
+    expect(calls).toHaveLength(3);
+  });
+
+  it("keeps the original when three votes disagree — that spread is a genuine close call", async () => {
+    const { fetchImpl } = fakeFetch([
+      { status: 200, content: '{"category":"bug","severity":"high"}' },
+      { status: 200, content: '{"category":"bug","severity":"medium"}' },
+      { status: 200, content: '{"category":"maintainability","severity":"low"}' },
+    ]);
+    const input = [finding({ category: "bug", severity: "low" })];
+    const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
+    expect(outcome.findings[0]).toBe(input[0]);
+    expect(outcome.changed).toBe(0);
+  });
+
+  it("keeps the original when the replies are invalid — the audit never destroys", async () => {
+    const { fetchImpl } = fakeFetch([
+      { status: 200, content: "not json at all" },
+      { status: 500 },
+      { status: 200, content: "still nothing" },
+    ]);
     const input = [finding({ category: "bug", severity: "medium" })];
     const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
     expect(outcome.findings[0]).toBe(input[0]);
