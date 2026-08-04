@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildBinding } from "./binding.mjs";
+import { classifyMeasurement } from "./measurement.mjs";
 import { FIXED_PATH } from "./fixed-path.mjs";
 import { CASES } from "./cases.mjs";
 // Rule generation and the .js→.ts resolve hook live in rule-source.mjs so node --test can cover
@@ -16,6 +18,10 @@ import { generateRuleDocument, registerTsExtensionHooks } from "./rule-source.mj
 
 registerTsExtensionHooks();
 const { sanitizeFindingBody } = await import("../src/publish/sanitize.ts");
+const { repairClassification, auditClassification } = await import("../src/engine/classify.ts");
+const { startModelProxy } = await import("../src/engine/model-proxy.ts");
+
+const execFileAsync = promisify(execFile);
 
 /**
  * Measures the reviewer against the seeded-defect corpus.
@@ -117,12 +123,19 @@ function buildRepo(testCase) {
   return dir;
 }
 
-function runEngine(dir) {
+async function runEngine(dir, seed = 42) {
   const home = mkdtempSync(join(tmpdir(), "kfq-home-"));
+  // The production sampling pin (src/engine/model-proxy.ts, temperature 0) — the corpus measures
+  // the pipeline that ships, and the pin is precisely what makes "twice in a row" meaningful.
+  const proxy = await startModelProxy({
+    upstreamUrl: process.env.OCR_LLM_URL ?? "",
+    temperature: 0,
+    seed,
+  });
   try {
     const args = ["review", "--from", "HEAD~1", "--to", "HEAD", "--format", "json"];
     args.push("--rule", RULE);
-    const stdout = execFileSync(BINARY, args, {
+    const { stdout } = await execFileAsync(BINARY, args, {
       cwd: dir,
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
@@ -130,7 +143,7 @@ function runEngine(dir) {
         PATH: FIXED_PATH,
         HOME: home,
         LC_ALL: "C",
-        OCR_LLM_URL: process.env.OCR_LLM_URL ?? "",
+        OCR_LLM_URL: proxy.url,
         OCR_LLM_TOKEN: process.env.OCR_LLM_TOKEN ?? "",
         OCR_LLM_MODEL: process.env.OCR_LLM_MODEL ?? "",
         OCR_USE_ANTHROPIC: process.env.OCR_USE_ANTHROPIC ?? "false",
@@ -141,8 +154,53 @@ function runEngine(dir) {
     });
     return JSON.parse(stdout);
   } finally {
+    await proxy.close();
     rmSync(home, { recursive: true, force: true });
   }
+}
+
+/**
+ * Mirror of the shipped single resume (#57, `runEngineWithOneResume` in src/review.ts): the
+ * corpus must measure the pipeline production runs, and production re-invokes a failed engine
+ * run exactly once. The measured failure this absorbs is a per-file subtask spiral ("main_task
+ * did not complete before stopping" after ~30 LLM rounds) that hits roughly a quarter of runs on
+ * two specific cases; a second failure scores as the error it is.
+ */
+async function runEngineWithOneResume(dir) {
+  let result;
+  try {
+    result = await runEngine(dir);
+  } catch {
+    // Seed 43, mirroring the shipped resume: pinned sampling replays a deterministic failure
+    // byte-for-byte, so the one retry varies exactly that one bit of entropy.
+    return await runEngine(dir, 43);
+  }
+  // Production's second trigger, mirrored: the engine reports a failed run as
+  // {"status":"failed"} on EXIT CODE ZERO, which resolves here — without this check the corpus
+  // measured one attempt where production makes two. (The budget half of the shipped resume has
+  // no corpus analogue: corpus runs are deliberately unbudgeted.)
+  if (result?.status !== "success") return await runEngine(dir, 43);
+  return result;
+}
+
+/**
+ * The same repair the shipped action applies (`src/engine/classify.ts`), because this harness must
+ * measure the pipeline production runs — a repair that existed only in the action would let the
+ * corpus score a different reviewer than the one that ships, and one that existed only here would
+ * qualify a reviewer nobody gets. Tokens the repair spends are folded into the case total so the
+ * report never hides them.
+ */
+async function repairFindings(result) {
+  const deps = {
+    endpoint: process.env.OCR_LLM_URL ?? "",
+    token: process.env.OCR_LLM_TOKEN ?? "",
+    model: process.env.OCR_LLM_MODEL ?? "",
+  };
+  const repaired = await repairClassification(result.comments ?? [], deps);
+  const audited = await auditClassification(repaired.findings, deps);
+  result.comments = audited.findings;
+  const total = (result.summary?.total_tokens ?? 0) + repaired.tokens + audited.tokens;
+  result.summary = { ...(result.summary ?? {}), total_tokens: total };
 }
 
 /**
@@ -303,7 +361,8 @@ for (const testCase of cases) {
     // in any of the four git calls, and a throw outside would abort the whole run and leak the
     // directory it had already created.
     dir = buildRepo(testCase);
-    const result = runEngine(dir);
+    const result = await runEngineWithOneResume(dir);
+    await repairFindings(result);
     const scored = scoreOne(testCase, result);
     results.push(scored);
     const mark = scored.pass ? "PASS" : "FAIL";
@@ -354,20 +413,44 @@ const tokens = results.reduce((sum, r) => sum + r.tokens, 0);
 const seeded = cases.filter((c) => c.defect !== null).length;
 const clean = cases.length - seeded;
 
-console.log("");
-console.log(`recall         ${String(found.length)}/${String(seeded)} seeded defects found`);
-console.log(
-  `classified     ${String(classified.length)}/${String(found.length)} with the expected category and severity` +
-    (adjacent.length > 0 ? ` (${String(adjacent.length)} off by one severity step)` : ""),
-);
-console.log(`precision      ${String(silent.length)}/${String(clean)} clean changes left silent`);
-console.log(
-  `publishable    ${String(results.length - unpublishable.length)}/${String(results.length)} cases emitted only publishable bodies`,
-);
-console.log(`noise          ${String(noise)} finding(s) not about the seeded defect`);
-console.log(
-  `tokens         ${String(tokens)} total, ${String(Math.round(tokens / Math.max(1, results.length)))} per case`,
-);
+// An instrument must report its own failure as a failure to MEASURE, never as a result.
+//
+// A misconfigured endpoint makes every case throw before the model is reached. Each one lands in
+// the error branch above with zero tokens, and the scoreboard then prints "recall 0/19,
+// precision 0/4" — a number that reads as total collapse of review quality and is nothing of the
+// kind. That exact output cost a night of debugging: the endpoint wanted a different path shape,
+// and this harness answered "how good is the reviewer" when the honest answer was "I did not
+// measure it". Same failure as the `--only` denominator note above, one layer up and far more
+// expensive, because a plausible catastrophe invites a hunt for a regression that never existed.
+//
+// So: refuse to score a run that reached the model for no case at all, and say so when cases were
+// lost to errors rather than to the reviewer. `measured` in the report is what a release gate
+// reads — a run that is not measured can never be evidence for anything.
+const { measured, reason, errored } = classifyMeasurement(results, tokens);
+if (errored > 0 && measured) {
+  console.log("");
+  console.log(
+    `WARNING        ${String(errored)} case(s) threw before reaching the model — harness or` +
+      " connection failures, not review misses; the scores below cover the rest",
+  );
+}
+
+if (measured) {
+  console.log("");
+  console.log(`recall         ${String(found.length)}/${String(seeded)} seeded defects found`);
+  console.log(
+    `classified     ${String(classified.length)}/${String(found.length)} with the expected category and severity` +
+      (adjacent.length > 0 ? ` (${String(adjacent.length)} off by one severity step)` : ""),
+  );
+  console.log(`precision      ${String(silent.length)}/${String(clean)} clean changes left silent`);
+  console.log(
+    `publishable    ${String(results.length - unpublishable.length)}/${String(results.length)} cases emitted only publishable bodies`,
+  );
+  console.log(`noise          ${String(noise)} finding(s) not about the seeded defect`);
+  console.log(
+    `tokens         ${String(tokens)} total, ${String(Math.round(tokens / Math.max(1, results.length)))} per case`,
+  );
+}
 
 const binding = buildBinding({
   binary: BINARY,
@@ -383,8 +466,43 @@ console.log(
     ` · model ${binding.model.id}`,
 );
 
+// The binding above is printed for every run, measured or not: it is pure, free, and the evidence
+// that startup, rule generation, and digest derivation all worked — which is what
+// src/engine/corpus-harness.test.ts pins. What follows is the honest verdict on whether anything
+// was actually measured, and it never dresses a broken instrument as a result.
+if (!measured) {
+  console.error("");
+  if (reason === "no_cases") {
+    console.error("NO CASES SELECTED — nothing was run, so there is nothing to report.");
+    console.error("  a --only value that matches no case id lands here; check the spelling");
+  } else {
+    console.error("NOT MEASURED — no case reached the model, so these results describe the");
+    console.error("connection, not the reviewer. No scoreboard is printed for them.");
+    console.error(
+      `  attempted ${String(results.length)}, errored ${String(errored)}, tokens ${String(tokens)}`,
+    );
+    console.error(
+      "  check OCR_LLM_URL, OCR_LLM_TOKEN, OCR_LLM_MODEL, and that the deployment answers",
+    );
+  }
+  if (process.env.OCR_REPORT) {
+    writeFileSync(
+      process.env.OCR_REPORT,
+      JSON.stringify({ measured: false, reason, binding, results, tokens }, null, 2),
+    );
+    console.error(`  report    ${process.env.OCR_REPORT}`);
+  }
+  process.exit(2);
+}
+
 if (process.env.OCR_REPORT) {
-  writeFileSync(process.env.OCR_REPORT, JSON.stringify({ binding, results, tokens }, null, 2));
+  // `measured: true` is carried explicitly rather than implied by the file existing: a release
+  // gate that reads a report must be able to tell a measurement from a connection failure without
+  // re-deriving the rule, and the not-measured branch above writes a report too.
+  writeFileSync(
+    process.env.OCR_REPORT,
+    JSON.stringify({ measured: true, binding, results, tokens }, null, 2),
+  );
   console.log(`report         ${process.env.OCR_REPORT}`);
 }
 

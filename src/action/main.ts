@@ -11,6 +11,7 @@ import { loadReviewProfile } from "../config/profile.js";
 import { createDiagnostics, type Diagnostics } from "../diagnostics/sink.js";
 import { parseJson } from "../core/validate.js";
 import { ENGINE_PIN } from "../engine/pinned-release.js";
+import { verdictsSurviveIncompleteness } from "../engine/settle.js";
 import { maintainRunSummary } from "../publish/summary.js";
 import { performReview, type ReviewReport } from "../review.js";
 import { evaluateEligibility } from "./eligibility.js";
@@ -47,6 +48,7 @@ async function loadEvent(env: NodeJS.ProcessEnv): Promise<EventContext> {
 function reportOutputs(
   report: ReviewReport,
   summaryCommentUrl: string | undefined,
+  storeWritten: boolean,
 ): Record<string, string> {
   return {
     outcome: report.outcome,
@@ -56,6 +58,12 @@ function reportOutputs(
     findings_suppressed: String(report.publish?.suppressed ?? 0),
     cache_hits: String(report.cacheHits),
     cache_misses: String(report.cacheMisses),
+    // Whether this run left a store behind, decided by the same rule that governs the write
+    // rather than restated by the caller. A consumer needs it because "did you persist" is not
+    // "did you settle complete": since #75 a budget-truncated run persists the verdicts it
+    // earned, and a consumer gating its hand-off on the outcome alone would strand exactly that
+    // store on the runner — which is the whole cost the fix exists to remove.
+    store_written: storeWritten ? "true" : "false",
     summary_comment_url: summaryCommentUrl ?? "",
   };
 }
@@ -113,30 +121,55 @@ async function saveCacheStore(
   store: CacheStore,
   appended: number,
   diagnostics: Diagnostics,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await writeFile(path, serializeStore(store), "utf8");
     diagnostics.record("cache.appended", { counts: { entries: appended } });
+    return true;
   } catch {
+    // Swallowing the error is right — a store this run cannot write is a lost optimization, not a
+    // reason to fail a review that already published. Swallowing the OUTCOME is not: the caller
+    // reports `store_written`, and a consumer that believes it will try to hand off a file that
+    // is not there.
     diagnostics.record("cache.store_write_failed");
+    return false;
   }
 }
 
 /**
- * Only a `complete` settlement may write back — checked here too, independent of whatever
- * `performReview` itself guarantees, because a store write is irreversible in a way a diagnostic is
- * not: writing a cache entry for a run this repository does not consider fully reviewed would let a
- * later, unrelated run replay it with confidence it never earned.
+ * Which runs may write back — checked here too, independent of whatever `performReview` itself
+ * guarantees, because a store write is irreversible in a way a diagnostic is not: a cache entry
+ * for a file this repository never actually reviewed would be replayed later with confidence it
+ * never earned.
+ *
+ * A complete settlement always may. An incomplete one may only when its reason leaves the
+ * reviewed files' verdicts intact — a budget overrun or a coverage gap, where the engine simply
+ * did not reach every file — and never for a rejected schema, a bad terminal state, or an
+ * implausible finding count, where the manifest itself is not to be believed. `performReview`
+ * enforces the same rule one layer up by supplying a store only in those cases, and restricts its
+ * entries to the paths the engine reports it reached; this check is the independent second one.
+ *
+ * Without it a large pull request could never converge: every push exceeded the budget, settled
+ * incomplete, persisted nothing, and re-priced every file from scratch (Keiko-for-Quality#75).
  */
 async function maybeSaveCacheStore(
   storePath: string,
   report: ReviewReport,
   diagnostics: Diagnostics,
-): Promise<void> {
-  if (storePath === "" || report.outcome !== "complete" || report.updatedCacheStore === undefined) {
-    return;
+): Promise<boolean> {
+  if (storePath === "" || report.updatedCacheStore === undefined) return false;
+  if (report.outcome === "incomplete") {
+    // An incomplete report without a reason cannot be argued into the allowed set, so it is not.
+    if (report.reason === undefined || !verdictsSurviveIncompleteness(report.reason)) return false;
+  } else if (report.outcome !== "complete") {
+    return false;
   }
-  await saveCacheStore(storePath, report.updatedCacheStore, report.cacheAppended, diagnostics);
+  return await saveCacheStore(
+    storePath,
+    report.updatedCacheStore,
+    report.cacheAppended,
+    diagnostics,
+  );
 }
 
 /**
@@ -262,10 +295,10 @@ export async function runAction(
     diagnostics,
   );
 
-  await maybeSaveCacheStore(storePath, report, diagnostics);
+  const storeWritten = await maybeSaveCacheStore(storePath, report, diagnostics);
   const summaryCommentUrl = await maybeMaintainSummary(env, event, identity, report, diagnostics);
 
-  writeOutputs(env, reportOutputs(report, summaryCommentUrl));
+  writeOutputs(env, reportOutputs(report, summaryCommentUrl, storeWritten));
   return report;
 }
 

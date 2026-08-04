@@ -1,6 +1,6 @@
 {
   "name": "@oscharko-dev/keiko-for-quality",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Hardened, evidence-disciplined pull-request reviewer bot built on the Open Code Review engine.",
   "license": "Apache-2.0",
   "private": true,
@@ -42,12 +42,12 @@
   "devDependencies": {
     "@eslint/js": "9.39.1",
     "@types/node": "24.10.2",
-    "@vitest/coverage-v8": "3.2.4",
+    "@vitest/coverage-v8": "^3.2.7",
     "esbuild": "0.25.12",
     "eslint": "9.39.1",
     "prettier": "3.6.2",
     "typescript": "5.9.3",
     "typescript-eslint": "8.46.4",
-    "vitest": "3.2.4"
+    "vitest": "^3.2.7"
   }
 }

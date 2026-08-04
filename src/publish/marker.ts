@@ -74,21 +74,6 @@ export function extractMarker(body: string): string | undefined {
   return MARKER_PATTERN.exec(body)?.[1];
 }
 
-export function hasMarker(body: string): boolean {
-  return MARKER_PATTERN.test(body);
-}
-
-/**
- * Composes a minimal body: prose plus the marker.
- *
- * Retained for the plain case and for tests. Published findings go through
- * `composeFindingBody` in presentation.ts, which adds the classification line and the repair block;
- * both append the marker last so it remains the only product-authored HTML the model cannot reach.
- */
-export function composeBody(sanitizedBody: string, marker: string): string {
-  return `${sanitizedBody}\n\n${renderMarker(marker)}`;
-}
-
 /** The marker's inner form, for callers that compose the surrounding document themselves. */
 export function markerComment(value: string): string {
   return `${MARKER_PREFIX}:v1:${value}`;

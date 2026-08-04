@@ -260,18 +260,34 @@ describe("runAction: writing the store back", () => {
     expect(appended?.counts?.entries).toBe(1);
   });
 
-  it("never writes when the outcome is incomplete, even if a store were attached", async () => {
+  /**
+   * The original pin read "never writes when the outcome is incomplete". Keiko-for-Quality#75
+   * narrowed that deliberately, and the narrowing is what this pair now holds.
+   *
+   * Two different facts wore the same label. A budget overrun means the engine did not reach every
+   * file, while judging properly the ones it did — and discarding those verdicts made a large pull
+   * request re-price every file on every push, never converging, which is how a single day cost
+   * roughly twenty full reviews of the same change. A rejected schema or a bad terminal state
+   * means the manifest is not to be believed at all, and nothing it says may ever be replayed.
+   *
+   * So the refusal is kept in full for the second class and lifted only for the first — and even
+   * then `performReview` restricts the store's entries to the paths the engine reports it reached,
+   * so a file that was never opened can still never be replayed as reviewed.
+   */
+  it.each([
+    ["a rejected manifest schema", "settlement.incomplete.schema_rejected"],
+    ["an unexpected terminal state", "settlement.incomplete.terminal_state"],
+    ["a failed coverage entry", "settlement.incomplete.coverage_failed"],
+    ["an implausible finding count", "settlement.incomplete.engine_error"],
+    ["an unlisted warning", "settlement.incomplete.warning_not_allowlisted"],
+    ["a degraded publication", "settlement.incomplete.publication_degraded"],
+  ] as const)("never writes when the manifest is not to be believed: %s", async (_name, reason) => {
     const updated: CacheStore = {
       schemaVersion: SUPPORTED_STORE_SCHEMA,
       entries: [entry("src/a.ts")],
     };
     performReviewMock.mockResolvedValue(
-      report({
-        outcome: "incomplete",
-        reason: "settlement.incomplete.coverage_gap",
-        cacheAppended: 1,
-        updatedCacheStore: updated,
-      }),
+      report({ outcome: "incomplete", reason, cacheAppended: 1, updatedCacheStore: updated }),
     );
     const storePath = join(dir, "store.json");
     const env = await baseEnv({ reviewStorePath: storePath });
@@ -281,6 +297,128 @@ describe("runAction: writing the store back", () => {
 
     await expect(readFile(storePath, "utf8")).rejects.toThrow();
     expect(diagnostics.drain().map((r) => r.code)).not.toContain("cache.appended");
+  });
+
+  it("never writes when an incomplete report carries no reason at all", async () => {
+    const updated: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [entry("src/a.ts")],
+    };
+    performReviewMock.mockResolvedValue(
+      report({ outcome: "incomplete", cacheAppended: 1, updatedCacheStore: updated }),
+    );
+    const storePath = join(dir, "store.json");
+    const env = await baseEnv({ reviewStorePath: storePath });
+
+    await runAction(
+      env,
+      createDiagnostics(() => undefined),
+    );
+
+    await expect(readFile(storePath, "utf8")).rejects.toThrow();
+  });
+
+  /**
+   * `store_written` exists because a consumer cannot ask the right question from `outcome` alone.
+   *
+   * Found in review of the adopting workflow (Codex, oscharko-dev/Keiko#2962): the consumer gates
+   * its store hand-off on `outcome == 'complete'`, so a budget-truncated run's store — the whole
+   * point of #75 — would have been written on the runner and then stranded there, and a large
+   * pull request would have kept re-pricing every file on every push. The output carries the
+   * write decision itself rather than a proxy a caller has to re-derive.
+   */
+  /**
+   * A write that fails must not be reported as a write.
+   *
+   * `saveCacheStore` deliberately swallows the error — a store this run cannot write is a lost
+   * optimization, not a reason to fail a review that already published — but swallowing the
+   * OUTCOME too made `store_written` say `true` with nothing at the path. A consumer gating its
+   * hand-off on that output would then upload a file that does not exist, turning a silent lost
+   * optimization into a red job (CodeRabbit, #78).
+   */
+  it("reports store_written false when the write itself failed", async () => {
+    performReviewMock.mockResolvedValue(
+      report({
+        outcome: "complete",
+        cacheAppended: 1,
+        updatedCacheStore: { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [entry("src/a.ts")] },
+      }),
+    );
+    // A path whose parent does not exist: writeFile fails with ENOENT.
+    const env = await baseEnv({ reviewStorePath: join(dir, "no-such-dir", "store.json") });
+    const diagnostics = createDiagnostics(() => undefined);
+
+    await runAction(env, diagnostics);
+
+    expect((await readOutputs(env)).store_written).toBe("false");
+    expect(diagnostics.drain().map((r) => r.code)).toContain("cache.store_write_failed");
+  });
+
+  it("reports store_written true for a truncated run that persisted", async () => {
+    const updated: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [entry("src/a.ts")],
+    };
+    performReviewMock.mockResolvedValue(
+      report({
+        outcome: "incomplete",
+        reason: "settlement.incomplete.budget_exceeded",
+        cacheAppended: 1,
+        updatedCacheStore: updated,
+      }),
+    );
+    const env = await baseEnv({ reviewStorePath: join(dir, "store.json") });
+
+    await runAction(
+      env,
+      createDiagnostics(() => undefined),
+    );
+
+    expect((await readOutputs(env)).store_written).toBe("true");
+  });
+
+  it.each([
+    ["an untrustworthy manifest", "settlement.incomplete.schema_rejected"],
+    ["a degraded publication", "settlement.incomplete.publication_degraded"],
+  ] as const)("reports store_written false when nothing was persisted: %s", async (_n, reason) => {
+    performReviewMock.mockResolvedValue(
+      report({
+        outcome: "incomplete",
+        reason,
+        cacheAppended: 1,
+        updatedCacheStore: { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [entry("src/a.ts")] },
+      }),
+    );
+    const env = await baseEnv({ reviewStorePath: join(dir, "store.json") });
+
+    await runAction(
+      env,
+      createDiagnostics(() => undefined),
+    );
+
+    expect((await readOutputs(env)).store_written).toBe("false");
+  });
+
+  it.each([
+    ["a budget overrun", "settlement.incomplete.budget_exceeded"],
+    ["a coverage gap", "settlement.incomplete.coverage_gap"],
+  ] as const)("writes the verdicts a truncated run did earn: %s", async (_name, reason) => {
+    const updated: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [entry("src/a.ts")],
+    };
+    performReviewMock.mockResolvedValue(
+      report({ outcome: "incomplete", reason, cacheAppended: 1, updatedCacheStore: updated }),
+    );
+    const storePath = join(dir, "store.json");
+    const env = await baseEnv({ reviewStorePath: storePath });
+    const diagnostics = createDiagnostics(() => undefined);
+
+    await runAction(env, diagnostics);
+
+    expect(await readFile(storePath, "utf8")).toBe(serializeStore(updated));
+    const appended = diagnostics.drain().find((r) => r.code === "cache.appended");
+    expect(appended?.counts?.entries).toBe(1);
   });
 
   it("never writes when the outcome is abandoned", async () => {
