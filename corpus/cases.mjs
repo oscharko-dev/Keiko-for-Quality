@@ -798,7 +798,10 @@ export function digestBatches(
     // the one function that reads it are untouched by this diff. Nothing in the changed file says
     // a client exists, so the loss is invisible unless the reviewer goes looking for the other side
     // of the contract it just changed.
-    defect: { file: "src/import-client.ts", category: "bug", severity: "high" },
+    // The defect anchors on the CHANGED file: a review comment can only anchor inside the pull
+    // request's own diff, and that is where the product's contract gate reports it (see
+    // `compareAgainstCounterparts` in src/review.ts). The client file names the CONSEQUENCE side.
+    defect: { file: "src/import-response.ts", category: "bug", severity: "high" },
     about:
       "client declares a response type without the server's new skipped-items field, so a partial import silently reads as complete",
     anchors: ["skipped*", "skippedcount", "drop*", "omit*", "silent*", "incomplete"],
@@ -914,7 +917,9 @@ export function isValidMetadata(candidate) {
     // The status module adds "rejected" to its union; the deliverability predicate still excludes
     // only "needs-review", so a rejected candidate now counts as deliverable. The predicate is
     // untouched by this diff — the widened union looks like a self-contained type change.
-    defect: { file: "src/candidate-deliverability.ts", category: "bug", severity: "high" },
+    // Anchored on the CHANGED file for the same diff-anchoring reason as
+    // contract-response-field-dropped above; the predicate file is the consequence side.
+    defect: { file: "src/candidate-status.ts", category: "bug", severity: "high" },
     about:
       "status union gains a rejected member; the deliverability predicate still excludes only needs-review, so rejected candidates count as deliverable",
     anchors: ["rejected", "deliverab*", "exclud*", "predicate", "widen*", "consumer*"],
@@ -955,7 +960,20 @@ export function isDeliverable(status: CandidateStatus): boolean {
     defect: { file: ".github/workflows/review-store.yml", category: "bug", severity: "high" },
     about:
       "checkout pin advances but ACTION_PIN, declared to move with it, does not, so the consistency check finds a mismatch and disables the review store",
-    anchors: ["both", "together", "desync*", "mismatch*", "second", "action_pin"],
+    // "left behind"/"drift*" are the deterministic pin-desync gate's own phrasing
+    // (`describePinDesync`, src/contracts/pin-desync.ts) — the gate cannot know a stale site is
+    // an env var named ACTION_PIN, so it names the defect generically; the grader's doctrine is
+    // "any one of several ways a reviewer might name the defect", and the gate is one of them.
+    anchors: [
+      "both",
+      "together",
+      "desync*",
+      "mismatch*",
+      "second",
+      "action_pin",
+      "left behind",
+      "drift*",
+    ],
     files: [
       {
         path: ".github/workflows/review-store.yml",

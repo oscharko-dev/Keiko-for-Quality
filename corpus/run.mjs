@@ -23,7 +23,9 @@ const { startModelProxy } = await import("../src/engine/model-proxy.ts");
 // from `collectGateFindings` / `compareAgainstCounterparts` in src/review.ts — the same import
 // mechanism as `planPublication` below, so the corpus measures the shipped comparison and the
 // shipped profile compiler, never a copy of either.
-const { compareContracts, describeMismatch } = await import("../src/contracts/shape-gate.ts");
+const { compareDeclaredContracts, describeMismatch, findUncoveredUnionMembers, describeUnionGap } =
+  await import("../src/contracts/shape-gate.ts");
+const { detectPinDesync, describePinDesync } = await import("../src/contracts/pin-desync.ts");
 const { loadReviewProfile } = await import("../src/config/profile.ts");
 // The publisher stage: everything the gate merge (below) produces — engine plus classification
 // plus the deterministic gate — is run through the real, shipped `planPublication` before scoring,
@@ -200,9 +202,26 @@ function readAtHead(dir, path) {
  * from a model finding at a glance; `scoreOne` never reads it.
  */
 function computeGateFindings(dir, testCase) {
-  if (CONTRACT_PAIRS.length === 0) return [];
   const changed = testCase.files.filter((file) => file.base !== file.head);
   const findings = [];
+  const push = (file, content) => {
+    findings.push({
+      path: file.path,
+      content,
+      startLine: 0,
+      endLine: 0,
+      category: "bug",
+      severity: "high",
+      gate: true,
+    });
+  };
+  // Pair-declared checks — `compareDeclaredContracts` (not `compareContracts`: the profile named
+  // the two files counterparts, so the positional fallback is the declaration's own meaning) plus
+  // the union-coverage check, exactly as `compareAgainstCounterparts` runs them in src/review.ts.
+  // This harness ran only the older same-name comparison until the v0.13.0 qualification measured
+  // the gap: all three cross-artifact fixtures MISSED here while the product's own wiring would
+  // have published every one of them. The scorer digest recorded in each binding is what separates
+  // measurements taken before and after this alignment.
   for (const pair of CONTRACT_PAIRS) {
     for (const file of changed) {
       if (!pair.matcher.matches(file.path)) continue;
@@ -211,18 +230,21 @@ function computeGateFindings(dir, testCase) {
       for (const counterpart of pair.counterparts) {
         const right = readAtHead(dir, counterpart);
         if (right === undefined) continue;
-        for (const mismatch of compareContracts(left, right)) {
-          findings.push({
-            path: file.path,
-            content: describeMismatch(mismatch, file.path, counterpart),
-            startLine: 0,
-            endLine: 0,
-            category: "bug",
-            severity: "high",
-            gate: true,
-          });
+        for (const mismatch of compareDeclaredContracts(left, right)) {
+          push(file, describeMismatch(mismatch, file.path, counterpart));
+        }
+        for (const gap of findUncoveredUnionMembers(file.base, left, right)) {
+          push(file, describeUnionGap(gap, file.path, counterpart));
         }
       }
+    }
+  }
+  // Pin-desync — pair-independent, modified files only, mirroring `collectPinDesyncFindings`.
+  for (const file of changed) {
+    const head = readAtHead(dir, file.path);
+    if (head === undefined) continue;
+    for (const desync of detectPinDesync(file.base, head)) {
+      push(file, describePinDesync(desync, file.path));
     }
   }
   return findings;
