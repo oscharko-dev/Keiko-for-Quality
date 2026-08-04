@@ -1,0 +1,267 @@
+{
+  "runs": [
+    {
+      "runId": 30895421641,
+      "runNumber": 277,
+      "headSha": "aecd70ac6fcbf4eea01228eb18dffb4ecccd4a3a",
+      "createdAt": "2026-08-04T09:14:06Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30895421641"
+    },
+    {
+      "runId": 30894184694,
+      "runNumber": 276,
+      "headSha": "aecd70ac6fcbf4eea01228eb18dffb4ecccd4a3a",
+      "createdAt": "2026-08-04T08:57:37Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30894184694",
+      "outcome": "complete",
+      "engineTokens": 998192,
+      "classifyTokens": 0,
+      "totalTokens": 998192,
+      "requests": 89,
+      "promptTokens": 974102,
+      "completionTokens": 24090,
+      "cachedTokens": 0,
+      "cachedShare": 0,
+      "durationMs": 129951,
+      "cacheHits": 0,
+      "cacheMisses": 5
+    },
+    {
+      "runId": 30890860029,
+      "runNumber": 275,
+      "headSha": "098a3a0bd910676b8ee7b1b0269bd0070f243a5b",
+      "createdAt": "2026-08-04T08:10:46Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30890860029"
+    },
+    {
+      "runId": 30890199827,
+      "runNumber": 274,
+      "headSha": "629d42f40927eeadf5336543919609b9ce9bb18d",
+      "createdAt": "2026-08-04T08:01:37Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30890199827"
+    },
+    {
+      "runId": 30890199342,
+      "runNumber": 273,
+      "headSha": "52b4190ba2855197688b0fd72fecfc9958290364",
+      "createdAt": "2026-08-04T08:01:36Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30890199342"
+    },
+    {
+      "runId": 30890198725,
+      "runNumber": 272,
+      "headSha": "b55f5a07639ec8ea4b7c6eca6ff6193587e6873f",
+      "createdAt": "2026-08-04T08:01:36Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30890198725"
+    },
+    {
+      "runId": 30889585349,
+      "runNumber": 271,
+      "headSha": "098a3a0bd910676b8ee7b1b0269bd0070f243a5b",
+      "createdAt": "2026-08-04T07:52:49Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30889585349",
+      "outcome": "complete",
+      "durationMs": 1988,
+      "cacheHits": 1,
+      "cacheMisses": 0
+    },
+    {
+      "runId": 30889033210,
+      "runNumber": 270,
+      "headSha": "0ef6d57c1e6d97a1729566695c3949d4cc5cf8dd",
+      "createdAt": "2026-08-04T07:44:37Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30889033210",
+      "outcome": "complete",
+      "durationMs": 90903,
+      "cacheHits": 0,
+      "cacheMisses": 6
+    },
+    {
+      "runId": 30888254310,
+      "runNumber": 269,
+      "headSha": "6c040e7bf54dc6854f43d1f4a77c793dfbed57b0",
+      "createdAt": "2026-08-04T07:32:56Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30888254310",
+      "outcome": "complete",
+      "durationMs": 4476,
+      "cacheHits": 0,
+      "cacheMisses": 1
+    },
+    {
+      "runId": 30887515460,
+      "runNumber": 268,
+      "headSha": "a4d143d59fe6d12504b5552baf14bb1aa52e8297",
+      "createdAt": "2026-08-04T07:21:59Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30887515460",
+      "outcome": "complete",
+      "durationMs": 4571,
+      "cacheHits": 0,
+      "cacheMisses": 1
+    },
+    {
+      "runId": 30885409975,
+      "runNumber": 267,
+      "headSha": "258a0080589a46b7564921c6fdd28bb7406eedbd",
+      "createdAt": "2026-08-04T06:50:03Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30885409975"
+    },
+    {
+      "runId": 30883768413,
+      "runNumber": 266,
+      "headSha": "258a0080589a46b7564921c6fdd28bb7406eedbd",
+      "createdAt": "2026-08-04T06:22:23Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30883768413"
+    },
+    {
+      "runId": 30883390766,
+      "runNumber": 265,
+      "headSha": "258a0080589a46b7564921c6fdd28bb7406eedbd",
+      "createdAt": "2026-08-04T06:15:41Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30883390766",
+      "outcome": "incomplete",
+      "reason": "settlement.incomplete.engine_status_not_success",
+      "cacheHits": 0,
+      "cacheMisses": 58,
+      "published": 1
+    },
+    {
+      "runId": 30881010057,
+      "runNumber": 264,
+      "headSha": "c84bf3f250384a3a92a6041c454d709afbca28b0",
+      "createdAt": "2026-08-04T05:32:33Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30881010057",
+      "outcome": "incomplete",
+      "reason": "settlement.incomplete.engine_status_not_success",
+      "cacheHits": 0,
+      "cacheMisses": 56,
+      "published": 1
+    },
+    {
+      "runId": 30880387832,
+      "runNumber": 263,
+      "headSha": "b33b097adaf2e9bb4a1c65cc6c2f7957378d7a9e",
+      "createdAt": "2026-08-04T05:20:31Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30880387832"
+    },
+    {
+      "runId": 30880334890,
+      "runNumber": 262,
+      "headSha": "b33b097adaf2e9bb4a1c65cc6c2f7957378d7a9e",
+      "createdAt": "2026-08-04T05:19:29Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30880334890",
+      "outcome": "incomplete",
+      "reason": "settlement.incomplete.engine_status_not_success",
+      "cacheHits": 0,
+      "cacheMisses": 56,
+      "published": 2
+    },
+    {
+      "runId": 30876656721,
+      "runNumber": 261,
+      "headSha": "610923b5432750051b158a20c708cb9a1a369a69",
+      "createdAt": "2026-08-04T04:06:09Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30876656721"
+    },
+    {
+      "runId": 30875700843,
+      "runNumber": 260,
+      "headSha": "610923b5432750051b158a20c708cb9a1a369a69",
+      "createdAt": "2026-08-04T03:46:19Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30875700843"
+    },
+    {
+      "runId": 30875457411,
+      "runNumber": 259,
+      "headSha": "610923b5432750051b158a20c708cb9a1a369a69",
+      "createdAt": "2026-08-04T03:41:10Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30875457411",
+      "outcome": "complete",
+      "durationMs": 4665,
+      "cacheHits": 0,
+      "cacheMisses": 1
+    },
+    {
+      "runId": 30874950812,
+      "runNumber": 258,
+      "headSha": "819b4f1adaf1e9a6e7ff7a6fa00b91381a040979",
+      "createdAt": "2026-08-04T03:30:31Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30874950812",
+      "outcome": "complete",
+      "durationMs": 4491,
+      "cacheHits": 0,
+      "cacheMisses": 1
+    }
+  ],
+  "aggregate": {
+    "runCount": 20,
+    "completeCount": 7,
+    "incompleteCount": 3,
+    "unknownCount": 10,
+    "totals": {
+      "engineTokens": 998192,
+      "classifyTokens": 0,
+      "totalTokens": 998192,
+      "requests": 89,
+      "promptTokens": 974102,
+      "completionTokens": 24090,
+      "cachedTokens": 0,
+      "cacheHits": 1,
+      "cacheMisses": 185,
+      "published": 4
+    },
+    "stats": {
+      "durationMs": {
+        "n": 7,
+        "median": 4571,
+        "p95": 129951
+      },
+      "totalTokens": {
+        "n": 1,
+        "median": 998192,
+        "p95": 998192
+      }
+    },
+    "tokensPerPublishedFinding": 249548,
+    "cachedShare": 0
+  }
+}
