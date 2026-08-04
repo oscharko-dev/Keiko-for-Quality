@@ -80,6 +80,22 @@ export async function verifyCommit(ctx: GitContext, sha: CommitSha): Promise<voi
 }
 
 /**
+ * Resolves an arbitrary ref expression — a branch name, a remote-tracking ref, `HEAD`, or an
+ * explicit object id — to the full commit id it currently names.
+ *
+ * `verifyCommit` above answers "is this id a commit" once a caller already holds a `CommitSha`;
+ * this is what a caller uses to get one in the first place from an operator-supplied name, which
+ * is the local CLI's whole `--base`/`--head`/`--target-branch` surface (`cli.ts`). The ref comes
+ * from the operator's own invocation, never from candidate diff content, so — like every other
+ * function in this file — it is passed to git as its own argv element, never interpolated into a
+ * shell string.
+ */
+export async function resolveRef(ctx: GitContext, ref: string, field = "ref"): Promise<CommitSha> {
+  const output = await git(ctx, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], 4096);
+  return commitSha(output.trim(), field);
+}
+
+/**
  * The size past which `readTextAtCommit` stops pretending a file is reviewable text. Declared
  * contract counterparts are source files; anything this large is generated output or an asset,
  * and the deterministic shape gate reading through here must skip it rather than parse it.
@@ -119,6 +135,24 @@ export async function mergeBase(
 ): Promise<CommitSha> {
   const output = await git(ctx, ["merge-base", base, head], 4096);
   return commitSha(output.trim(), "mergeBase");
+}
+
+/**
+ * Resolves a target branch's tip, trying the local branch `name` first and its `origin` remote-
+ * tracking ref second.
+ *
+ * The fallback exists because a shallow or partial clone — the common shape of a CI checkout, and
+ * an unremarkable one for a developer's local clone too — often carries `origin/<name>` without
+ * ever having created a local branch by that name. Local-first, not the reverse: a local branch a
+ * developer actually checked out and is comparing against is the more specific, more current
+ * answer whenever both exist.
+ */
+export async function resolveTargetBranchTip(ctx: GitContext, name: string): Promise<CommitSha> {
+  try {
+    return await resolveRef(ctx, name, "targetBranch");
+  } catch {
+    return await resolveRef(ctx, `origin/${name}`, "targetBranch");
+  }
 }
 
 /** Parses one `:<oldmode> <newmode> <oldoid> <newoid> <status>` record. */

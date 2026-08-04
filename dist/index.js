@@ -4323,6 +4323,12 @@ function areIntraRunDuplicates(a, b) {
 }
 
 // src/publish/publisher.ts
+function requireClient(context) {
+  if (context.client === void 0) {
+    throw new Error("PublishContext.client is required for this operation");
+  }
+  return context.client;
+}
 function ownMarkers(comments, identity) {
   const markers = /* @__PURE__ */ new Set();
   for (const comment of comments) {
@@ -4344,7 +4350,7 @@ function toExistingConversation(comment, identity) {
   };
 }
 async function prefetchExistingConversations(context) {
-  const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
+  const comments = await requireClient(context).listReviewComments(context.ref, context.pullNumber);
   return {
     markers: ownMarkers(comments, context.identity),
     threads: comments.map((comment) => toExistingConversation(comment, context.identity))
@@ -4353,10 +4359,14 @@ async function prefetchExistingConversations(context) {
 async function publishWithLadder(context, ladder, body) {
   for (const attempt of ladder) {
     try {
-      const created = await context.client.createReviewComment(context.ref, context.pullNumber, {
-        ...attempt,
-        body
-      });
+      const created = await requireClient(context).createReviewComment(
+        context.ref,
+        context.pullNumber,
+        {
+          ...attempt,
+          body
+        }
+      );
       return { comment: created, placement: describePlacement(attempt) };
     } catch (error) {
       if (error instanceof GitHubApiError && error.status === 422) continue;
@@ -4366,7 +4376,7 @@ async function publishWithLadder(context, ladder, body) {
   return void 0;
 }
 async function verifyPublication(context, created, expectedMarker) {
-  const readBack = await context.client.getReviewComment(context.ref, created.id);
+  const readBack = await requireClient(context).getReviewComment(context.ref, created.id);
   return readBack.id === created.id && readBack.authorLogin === context.identity && readBack.commitId === context.headSha && extractMarker(readBack.body) === expectedMarker;
 }
 function classifySuppression(finding, sanitizedBody, marker, existingMarkers, existingThreads, identity) {
@@ -4609,11 +4619,15 @@ async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnost
   const { markers: existing } = prefetch ?? await prefetchExistingConversations(context);
   if (existing.has(marker)) return true;
   try {
-    const created = await context.client.createReviewComment(context.ref, context.pullNumber, {
-      body: composeIncompleteNotice(reasonCode, markerComment(marker)),
-      commitId: context.headSha,
-      path: anchorPath
-    });
+    const created = await requireClient(context).createReviewComment(
+      context.ref,
+      context.pullNumber,
+      {
+        body: composeIncompleteNotice(reasonCode, markerComment(marker)),
+        commitId: context.headSha,
+        path: anchorPath
+      }
+    );
     const verified = await verifyPublication(context, created, marker);
     diagnostics.record("publish.incomplete_notice_published", { headSha: context.headSha });
     return verified;
@@ -5055,18 +5069,33 @@ async function auditFreshSurvivors(request, fresh, ledger, diagnostics) {
   });
   return byOriginal;
 }
-async function publishAudited(request, context, findings, freshEngineFindings, ledger, diagnostics, prefetch) {
-  const plan = await planPublication(context, findings, diagnostics, prefetch);
-  const fresh = plan.survivors.filter((survivor) => freshEngineFindings.has(survivor.finding));
-  const auditedByOriginal = await auditFreshSurvivors(request, fresh, ledger, diagnostics);
-  if (auditedByOriginal.size === 0) {
-    const outcome2 = await executePublication(context, plan, diagnostics);
-    return { outcome: outcome2, auditedByOriginal };
-  }
-  const survivors = plan.survivors.map((survivor) => {
+function substituteAudited(survivors, auditedByOriginal) {
+  if (auditedByOriginal.size === 0) return survivors;
+  return survivors.map((survivor) => {
     const audited = auditedByOriginal.get(survivor.finding);
     return audited === void 0 ? survivor : { ...survivor, finding: audited };
   });
+}
+async function planAndAudit(request, context, findings, freshEngineFindings, ledger, diagnostics, prefetch) {
+  const plan = await planPublication(context, findings, diagnostics, prefetch);
+  const fresh = plan.survivors.filter((survivor) => freshEngineFindings.has(survivor.finding));
+  const auditedByOriginal = await auditFreshSurvivors(request, fresh, ledger, diagnostics);
+  return {
+    plan,
+    survivors: substituteAudited(plan.survivors, auditedByOriginal),
+    auditedByOriginal
+  };
+}
+async function publishAudited(request, context, findings, freshEngineFindings, ledger, diagnostics, prefetch) {
+  const { plan, survivors, auditedByOriginal } = await planAndAudit(
+    request,
+    context,
+    findings,
+    freshEngineFindings,
+    ledger,
+    diagnostics,
+    prefetch
+  );
   const outcome = await executePublication(context, { ...plan, survivors }, diagnostics);
   return { outcome, auditedByOriginal };
 }

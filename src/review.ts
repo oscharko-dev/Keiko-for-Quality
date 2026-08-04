@@ -22,7 +22,7 @@ import { readModelToken, type RuntimeConfig } from "./config/runtime.js";
 import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
 import { acquireEngine } from "./engine/acquire.js";
-import { currentPlatformDigest } from "./engine/pinned-release.js";
+import { currentPlatformDigest, ENGINE_PIN } from "./engine/pinned-release.js";
 import {
   auditClassification,
   repairClassification,
@@ -59,6 +59,7 @@ import {
   publishIncompleteNotice,
   type ExistingConversationsPrefetch,
   type PlannedFinding,
+  type PublicationPlan,
   type PublishContext,
   type PublishOutcome,
 } from "./publish/publisher.js";
@@ -85,6 +86,57 @@ export interface ReviewRequest {
   readonly cacheStore?: CacheStore;
 }
 
+/**
+ * The GitHub-independent slice of a review request: everything the shared pipeline — inventory,
+ * engine acquisition and execution, classification repair and audit, the review-cache lookup —
+ * needs to run, and nothing that presupposes a pull request exists to publish findings to.
+ *
+ * `request.client` is referenced at exactly two points in this file: `headIsCurrent` (head
+ * currency) and `publishContextFor` (publish context) — the epic's own framing (#94) — and
+ * `ref`/`pullNumber`/`identity` never travel anywhere without `client` alongside them. This type is
+ * `ReviewRequest` minus exactly those four fields.
+ *
+ * `ReviewRequest` is deliberately NOT declared with an explicit `extends` of this interface: every
+ * field below already appears in `ReviewRequest` with an identical type, so TypeScript's structural
+ * typing accepts a `ReviewRequest` value anywhere this narrower shape is expected without one. That
+ * is what lets every pipeline-only helper below be retyped to this interface without moving or
+ * duplicating a single line of `ReviewRequest`'s own declaration, and without touching its shape at
+ * all — see `LocalReviewRequest`, further down, which is exactly this shape under its own exported
+ * name.
+ */
+interface PipelineRequest {
+  readonly base: CommitSha;
+  readonly head: CommitSha;
+  /** The trusted base checkout the engine runs against. */
+  readonly repositoryPath: string;
+  readonly config: RuntimeConfig;
+  readonly profile: CompiledProfile;
+  readonly guidelines: GuidelineIndex;
+  readonly env: NodeJS.ProcessEnv;
+  readonly pathValue: string;
+  /**
+   * The parsed review-cache store, already read by the caller (v0.9.0). `undefined` — not an empty
+   * store — is what disables the feature entirely: every code path below only branches on this
+   * being present, so an absent store costs this run nothing beyond the check itself.
+   */
+  readonly cacheStore?: CacheStore;
+}
+
+/**
+ * `performLocalReview`'s request (issue #95): everything `ReviewRequest` carries except the four
+ * GitHub-only fields (`client`, `ref`, `pullNumber`, `identity`) — no client, no pull request, no
+ * reviewer identity to author comments as, because a local run never publishes anything.
+ *
+ * A type alias of `PipelineRequest` rather than its own `interface … extends … {}` declaration: an
+ * interface that adds no members over its supertype is flagged by this repository's
+ * `@typescript-eslint/no-empty-object-type` lint rule (verified empirically — the equivalent
+ * `interface LocalReviewRequest extends PipelineRequest {}` fails `npm run lint`), and the two forms
+ * are consumption-identical for every caller. `PipelineRequest` stays unexported and is used
+ * directly as the parameter type for the pipeline-only helpers below; `LocalReviewRequest` is the
+ * one public name issue #95's contract establishes.
+ */
+export type LocalReviewRequest = PipelineRequest;
+
 export type ReviewOutcome = "complete" | "incomplete" | "abandoned";
 
 export interface ReviewReport {
@@ -106,6 +158,81 @@ export interface ReviewReport {
   /** How many new-or-refreshed entries `updatedCacheStore` carries over what was read in. */
   readonly cacheAppended: number;
   /** Present only for a `complete` outcome with the feature enabled — the store to write back. */
+  readonly updatedCacheStore?: CacheStore;
+}
+
+/**
+ * One finding as `performLocalReview` reports it: the same anchor, classification, and sanitized
+ * body a published review comment would carry, without any of the publication metadata (marker,
+ * placement, thread) that only makes sense once a pull request exists to attach it to.
+ */
+export interface LocalReviewFinding {
+  /** Repository-relative, matching the reviewed head — never an absolute or base-relative path. */
+  readonly path: string;
+  /** 1-based, inclusive. */
+  readonly startLine: number;
+  /** 1-based, inclusive; equal to `startLine` for a single-line finding. */
+  readonly endLine: number;
+  /**
+   * Optional keys, not `string | undefined` (`EngineFinding`'s own convention): a finding that
+   * stayed unclassified after repair is still reported — reject-rather-than-repair forbids
+   * fabricating a category nobody assigned — and an absent key is what stays assignable to a
+   * consumer's own narrower contract under `exactOptionalPropertyTypes`, the way `src/cli.ts`'s
+   * (issue #96) own placeholder `LocalReviewFinding` already declares these two fields.
+   */
+  readonly category?: string;
+  readonly severity?: string;
+  /** Sanitized Markdown — `sanitizeFindingBody`'s output, the same body a published comment would carry. */
+  readonly body: string;
+}
+
+/**
+ * `performLocalReview`'s result (issue #95): the same settlement outcome, spend, and finding
+ * quality (post-repair, post-audit) a pull request review would produce for the identical base/head
+ * pair, as data rather than as GitHub side effects.
+ *
+ * Deliberately narrower than `ReviewReport`: there is no `publish` outcome (nothing was published),
+ * no cache-hit/miss/appended counts or `updatedCacheStore` (the review-cache is read for cost
+ * savings but never written back — epic #94's local-runs-never-feed-CI invariant), and no
+ * `abandoned`-specific bookkeeping. `outcome` reuses `ReviewOutcome` verbatim per the binding
+ * contract, though `performLocalReview` itself never produces `"abandoned"`: that outcome exists
+ * only for a pull request head that moved during the run, and a local run has no pull request head
+ * to move.
+ */
+export interface LocalReviewReport {
+  readonly outcome: ReviewOutcome;
+  readonly reason?: ReasonCode;
+  readonly findings: readonly LocalReviewFinding[];
+  /** This run's real spend, mirroring the `run.spend` diagnostic the action path records. */
+  readonly spend: {
+    readonly engine: number;
+    readonly classify: number;
+    readonly total: number;
+    readonly allotted: number;
+  };
+  readonly inventory: {
+    /** Total changed paths classified, whatever the classification. */
+    readonly total: number;
+    /** Paths the engine must account for — `Inventory.reviewablePaths.size`. */
+    readonly reviewable: number;
+    /** Reviewable paths this run holds a trustworthy verdict for, fresh or replayed from the cache. */
+    readonly reviewed: number;
+  };
+  /** `promptIdentityDigest` — identifies the guidance this run reviewed under. */
+  readonly ruleDigest: string;
+  /** The pinned engine's version tag (`ENGINE_PIN.version`) this run executed under. */
+  readonly engineVersion: string;
+  /** Cache-eligible paths a stored entry answered instead of the engine. 0 when no store was given. */
+  readonly cacheHits: number;
+  /** Cache-eligible paths that were sent to the engine anyway. 0 when no store was given. */
+  readonly cacheMisses: number;
+  /**
+   * The store to write back — mirrors `ReviewReport.updatedCacheStore`, under the identical
+   * admission rule (`finalizeCacheStore`): present only for a `complete` outcome with a store
+   * supplied, and it carries the AUDITED form of every stored finding. A local store never crosses
+   * into CI (epic #94's trust boundary); this field exists so a local caller can keep its own
+   * repeat runs cheap.
+   */
   readonly updatedCacheStore?: CacheStore;
 }
 
@@ -240,7 +367,7 @@ function dispatchedPathCount(inventory: Inventory, excluded: ReadonlySet<string>
   return count;
 }
 
-function gitContext(request: ReviewRequest): GitContext {
+function gitContext(request: PipelineRequest): GitContext {
   return {
     cwd: request.repositoryPath,
     timeoutMs: 120_000,
@@ -341,7 +468,7 @@ function cacheCounts(memo: MemoContext): { cacheHits: number; cacheMisses: numbe
  * than merely unused when the consumer never configures `review_store_path`.
  */
 function prepareMemoization(
-  request: ReviewRequest,
+  request: PipelineRequest,
   inventory: Inventory,
   diagnostics: Diagnostics,
 ): MemoContext {
@@ -533,7 +660,7 @@ async function settleIncomplete(
 }
 
 async function executeEngine(
-  request: ReviewRequest,
+  request: PipelineRequest,
   inventory: Inventory,
   memo: MemoContext,
   ledger: SpendLedger,
@@ -590,7 +717,7 @@ async function executeEngine(
  * the engine), and a configured-but-unset token means a dry run. Neither caller treats the two
  * reasons differently, so extracting the check once is what keeps them from drifting apart.
  */
-function classifyDeps(request: ReviewRequest): ClassifyEndpoint | undefined {
+function classifyDeps(request: PipelineRequest): ClassifyEndpoint | undefined {
   if (request.config.protocol === "anthropic") return undefined;
   const token = readModelToken(request.config, request.env);
   if (token === undefined) return undefined;
@@ -617,7 +744,7 @@ const MAX_GATE_FINDINGS = 8;
  * review-cache store — they derive from two files, and a store entry must re-derive from one.
  */
 async function collectGateFindings(
-  request: ReviewRequest,
+  request: PipelineRequest,
   inventory: Inventory,
   diagnostics: Diagnostics,
 ): Promise<readonly EngineFinding[]> {
@@ -668,7 +795,7 @@ async function collectGateFindings(
  */
 async function collectPinDesyncFindings(
   ctx: GitContext,
-  request: ReviewRequest,
+  request: PipelineRequest,
   inventory: Inventory,
   findings: EngineFinding[],
 ): Promise<number> {
@@ -771,7 +898,7 @@ const CHANGE_PASS_RESERVE_TOKENS = 10_000;
  * change-level finding derives from the whole changed set.
  */
 async function collectChangePassFindings(
-  request: ReviewRequest,
+  request: PipelineRequest,
   inventory: Inventory,
   ledger: SpendLedger,
   diagnostics: Diagnostics,
@@ -832,7 +959,7 @@ async function collectChangePassFindings(
  */
 async function repairEngineFindings(
   parsed: EngineResult,
-  request: ReviewRequest,
+  request: PipelineRequest,
   diagnostics: Diagnostics,
 ): Promise<{ result: EngineResult; classifyTokens: number }> {
   // `settle` (`settle.ts`'s `commonDisqualifier`) disqualifies any result over `config.maxFindings`
@@ -1015,7 +1142,7 @@ const NO_AUDITED: ReadonlyMap<EngineFinding, EngineFinding> = new Map();
  * can possibly benefit from it.
  */
 async function auditFreshSurvivors(
-  request: ReviewRequest,
+  request: PipelineRequest,
   fresh: readonly PlannedFinding[],
   ledger: SpendLedger,
   diagnostics: Diagnostics,
@@ -1084,6 +1211,59 @@ interface AuditedPublication {
  * array that holds it — so the objects a plan survivor carries are exactly the ones a caller-built
  * `Set` can be tested against.
  */
+/**
+ * Substitutes each plan survivor with its audited classification wherever the audit actually
+ * reclassified it, leaving every other survivor exactly as `planPublication` produced it. Returns
+ * `survivors` unchanged (the same array reference) when nothing was audited, so a caller that
+ * spreads the result back over `plan` (`{ ...plan, survivors }`) always produces a plan equivalent
+ * to the original.
+ */
+function substituteAudited(
+  survivors: readonly PlannedFinding[],
+  auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>,
+): readonly PlannedFinding[] {
+  if (auditedByOriginal.size === 0) return survivors;
+  return survivors.map((survivor) => {
+    const audited = auditedByOriginal.get(survivor.finding);
+    return audited === undefined ? survivor : { ...survivor, finding: audited };
+  });
+}
+
+/**
+ * Plans publication and runs the classification audit on the plan's fresh survivors — everything
+ * both consumers of a settled finding list need before they diverge. `publishAudited` (below) goes
+ * on to execute the result against a real pull request; `performLocalReview`'s own local
+ * counterpart (further down) stops here and reports the audited survivors directly as data. Extracted
+ * so the two cannot drift on what "the audited plan" means — this is the one place a plan's
+ * survivors are ever combined with the audit's verdict.
+ *
+ * Takes the `PipelineRequest` slice `auditFreshSurvivors` actually needs, not the full
+ * `ReviewRequest`: `publishAudited`'s own `ReviewRequest` argument satisfies it structurally, and a
+ * client-less local request satisfies it exactly as well.
+ */
+async function planAndAudit(
+  request: PipelineRequest,
+  context: PublishContext,
+  findings: readonly EngineFinding[],
+  freshEngineFindings: ReadonlySet<EngineFinding>,
+  ledger: SpendLedger,
+  diagnostics: Diagnostics,
+  prefetch?: ExistingConversationsPrefetch,
+): Promise<{
+  readonly plan: PublicationPlan;
+  readonly survivors: readonly PlannedFinding[];
+  readonly auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
+}> {
+  const plan = await planPublication(context, findings, diagnostics, prefetch);
+  const fresh = plan.survivors.filter((survivor) => freshEngineFindings.has(survivor.finding));
+  const auditedByOriginal = await auditFreshSurvivors(request, fresh, ledger, diagnostics);
+  return {
+    plan,
+    survivors: substituteAudited(plan.survivors, auditedByOriginal),
+    auditedByOriginal,
+  };
+}
+
 async function publishAudited(
   request: ReviewRequest,
   context: PublishContext,
@@ -1093,19 +1273,15 @@ async function publishAudited(
   diagnostics: Diagnostics,
   prefetch?: ExistingConversationsPrefetch,
 ): Promise<AuditedPublication> {
-  const plan = await planPublication(context, findings, diagnostics, prefetch);
-  const fresh = plan.survivors.filter((survivor) => freshEngineFindings.has(survivor.finding));
-
-  const auditedByOriginal = await auditFreshSurvivors(request, fresh, ledger, diagnostics);
-  if (auditedByOriginal.size === 0) {
-    const outcome = await executePublication(context, plan, diagnostics);
-    return { outcome, auditedByOriginal };
-  }
-
-  const survivors: PlannedFinding[] = plan.survivors.map((survivor) => {
-    const audited = auditedByOriginal.get(survivor.finding);
-    return audited === undefined ? survivor : { ...survivor, finding: audited };
-  });
+  const { plan, survivors, auditedByOriginal } = await planAndAudit(
+    request,
+    context,
+    findings,
+    freshEngineFindings,
+    ledger,
+    diagnostics,
+    prefetch,
+  );
   const outcome = await executePublication(context, { ...plan, survivors }, diagnostics);
   return { outcome, auditedByOriginal };
 }
@@ -1144,7 +1320,7 @@ function findingsForStorage(
  * confidently-replayed answer.
  */
 function finalizeCacheStore(
-  request: ReviewRequest,
+  request: PipelineRequest,
   inventory: Inventory,
   memo: MemoContext,
   engineFindings: readonly EngineFinding[],
@@ -1401,7 +1577,7 @@ export async function performReview(
  */
 async function resolvePairOrReport(
   ctx: GitContext,
-  request: ReviewRequest,
+  request: PipelineRequest,
   diagnostics: Diagnostics,
 ): Promise<ReviewPair> {
   try {
@@ -1478,4 +1654,467 @@ async function performReviewInner(
   const postRun = await abandonIfStale(request, inventory, memo, diagnostics);
   if (postRun !== undefined) return postRun;
   return publishSettledFindings(request, inventory, settlement, memo, ledger, started, diagnostics);
+}
+
+/* ---------------------------------------------------------------------------------------------
+ * performLocalReview (issue #95): the publication-free decomposition of the pipeline above.
+ *
+ * Every stage through the classification audit is a call into a function this file already uses
+ * for `performReview` — inventory, the review-cache lookup, the engine (allotment, proxy, resume),
+ * classification repair, `settle`, the deterministic contract gate, the change-level pass, and
+ * `planPublication`/`auditFreshSurvivors` (by way of `planAndAudit`, above) for dedup, sanitization,
+ * and the classification audit. What stops here, and only here, is the publish EXECUTE step: no
+ * `executePublication`, no `publishIncompleteNotice`, no review-cache write-back, and no
+ * `headIsCurrent` call — none of which a local run can make, because none of it holds a pull
+ * request to check, publish to, or memoize against. There is no second pipeline: every difference
+ * from `performReview` below is the absence of a GitHub-specific step, never a reimplementation of
+ * one this file already has.
+ * ------------------------------------------------------------------------------------------- */
+
+/**
+ * Inert placeholders for the three `PublishContext` fields a local run has no real value for
+ * (`client` itself is simply omitted — see `publisher.ts`'s now-optional field). All three ever do
+ * downstream is feed the exact-marker fingerprint `planCrossRun` (`publisher.ts`) computes per
+ * candidate and checks against `EMPTY_PREFETCH` below — an always-empty existing-conversation set no
+ * fingerprint can ever match — so their exact values never surface in a `LocalReviewReport`.
+ */
+const LOCAL_REF: RepoRef = { owner: "local", repo: "local" };
+const LOCAL_PULL_NUMBER = 0;
+const LOCAL_IDENTITY = "local-review";
+
+/**
+ * The existing-thread-based dedup input a real pull request would supply, made an explicit empty
+ * value instead of a stubbed client (per issue #95's own framing): no thread exists to fetch,
+ * because no pull request exists. Passed to `planPublication` on every local call so its own
+ * default-fetch fallback (`prefetch ?? prefetchExistingConversations(context)`) never runs, and
+ * `context.client` is therefore never dereferenced at all.
+ */
+const EMPTY_PREFETCH: ExistingConversationsPrefetch = { markers: new Set(), threads: [] };
+
+/** The one `PublishContext` shape a local run needs for `planAndAudit` — client-less, built from
+ *  the same `items` derivation `publishContextFor` (above) uses for the action path. */
+function localPublishContext(request: PipelineRequest, inventory: Inventory): PublishContext {
+  return {
+    ref: LOCAL_REF,
+    pullNumber: LOCAL_PULL_NUMBER,
+    headSha: request.head,
+    identity: LOCAL_IDENTITY,
+    items: itemIndex(inventory),
+  };
+}
+
+/** One post-audit `PlannedFinding` as `LocalReviewReport.findings` reports it. `category`/`severity`
+ *  are omitted, never set to `undefined`, when the finding stayed unclassified — see
+ *  `LocalReviewFinding`'s own doc comment for why the key's presence, not just its value, matters
+ *  under `exactOptionalPropertyTypes`. */
+function toLocalFinding(survivor: PlannedFinding): LocalReviewFinding {
+  const { category, severity } = survivor.finding;
+  return {
+    path: survivor.finding.path as string,
+    startLine: survivor.finding.startLine,
+    endLine: survivor.finding.endLine,
+    ...(category === undefined ? {} : { category }),
+    ...(severity === undefined ? {} : { severity }),
+    body: survivor.sanitizedBody,
+  };
+}
+
+function localSpend(ledger: SpendLedger): LocalReviewReport["spend"] {
+  return {
+    engine: ledger.engine,
+    classify: ledger.classify,
+    total: ledger.engine + ledger.classify,
+    allotted: ledger.allotted,
+  };
+}
+
+/**
+ * Plans and audits `findings` exactly like the action path's `publishAudited`, but stops before a
+ * single comment is composed, placed, or posted. A no-op when there is nothing to plan, so an
+ * incomplete settlement with no findings costs nothing beyond its own bookkeeping.
+ */
+async function localFindings(
+  request: PipelineRequest,
+  inventory: Inventory,
+  findings: readonly EngineFinding[],
+  freshEngineFindings: ReadonlySet<EngineFinding>,
+  ledger: SpendLedger,
+  diagnostics: Diagnostics,
+): Promise<{
+  readonly findings: readonly LocalReviewFinding[];
+  readonly auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
+}> {
+  if (findings.length === 0) return { findings: [], auditedByOriginal: NO_AUDITED };
+  const context = localPublishContext(request, inventory);
+  const { survivors, auditedByOriginal } = await planAndAudit(
+    request,
+    context,
+    findings,
+    freshEngineFindings,
+    ledger,
+    diagnostics,
+    EMPTY_PREFETCH,
+  );
+  return { findings: survivors.map(toLocalFinding), auditedByOriginal };
+}
+
+/** The zero-reviewable-paths shortcut, mirroring `emptyReviewReport` above. */
+function emptyLocalReport(
+  inventory: Inventory,
+  ruleDigest: string,
+  engineVersion: string,
+): LocalReviewReport {
+  return {
+    outcome: "complete",
+    findings: [],
+    spend: { engine: 0, classify: 0, total: 0, allotted: 0 },
+    inventory: { total: inventory.items.length, reviewable: 0, reviewed: 0 },
+    ruleDigest,
+    engineVersion,
+    cacheHits: 0,
+    cacheMisses: 0,
+  };
+}
+
+/**
+ * Local counterpart to `settleIncomplete`: reports an incomplete outcome as data, with none of that
+ * function's publish-side effects — no staleness check (there is no pull request to go stale), no
+ * incomplete-notice comment, no findings comment. What a pull request review would have published is
+ * still planned and audited through `localFindings`, so a caller sees the same finding quality a
+ * reader would have, never a raw, unaudited engine dump.
+ *
+ * @param reviewed Reviewable paths this run holds a trustworthy verdict for. Every call site
+ *   computes it from the same facts `verdictsSurviveIncompleteness` and the review-cache hits
+ *   already carry — never guessed here.
+ */
+async function localIncompleteReport(
+  request: PipelineRequest,
+  inventory: Inventory,
+  reason: ReasonCode,
+  ledger: SpendLedger,
+  diagnostics: Diagnostics,
+  findings: readonly EngineFinding[],
+  freshEngineFindings: ReadonlySet<EngineFinding>,
+  reviewed: number,
+  ruleDigest: string,
+  engineVersion: string,
+  memo?: MemoContext,
+): Promise<LocalReviewReport> {
+  diagnostics.record(reason, { headSha: request.head });
+  const reported = await localFindings(
+    request,
+    inventory,
+    findings,
+    freshEngineFindings,
+    ledger,
+    diagnostics,
+  );
+  return {
+    outcome: "incomplete",
+    reason,
+    findings: reported.findings,
+    spend: localSpend(ledger),
+    inventory: {
+      total: inventory.items.length,
+      reviewable: inventory.reviewablePaths.size,
+      reviewed,
+    },
+    ruleDigest,
+    engineVersion,
+    // An incomplete outcome never writes a store back (`finalizeCacheStore`'s admission rule), but
+    // the hit/miss counts are facts about what was attempted, memo or not.
+    ...(memo === undefined ? { cacheHits: 0, cacheMisses: 0 } : cacheCounts(memo)),
+  };
+}
+
+/**
+ * Local counterpart to `settleOrReport`: runs the engine and returns the settlement, or reports the
+ * failure as an incomplete `LocalReviewReport` directly — never through `settleIncomplete`, which
+ * publishes. Same reason code as the action path for the identical failure: `executeEngine` itself
+ * is untouched, so a spawn failure, a timeout, or an exhausted resume all fail the same way here as
+ * they do there.
+ */
+async function localSettleOrReport(
+  request: LocalReviewRequest,
+  inventory: Inventory,
+  memo: MemoContext,
+  ledger: SpendLedger,
+  diagnostics: Diagnostics,
+  ruleDigest: string,
+  engineVersion: string,
+): Promise<Settlement | LocalReviewReport> {
+  try {
+    const settlement = await executeEngine(request, inventory, memo, ledger, diagnostics);
+    diagnostics.record(
+      settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
+      { headSha: request.head },
+    );
+    return settlement;
+  } catch {
+    return localIncompleteReport(
+      request,
+      inventory,
+      "settlement.incomplete.engine_error",
+      ledger,
+      diagnostics,
+      [],
+      EMPTY_FRESH,
+      memo.hitPaths.size,
+      ruleDigest,
+      engineVersion,
+      memo,
+    );
+  }
+}
+
+/**
+ * Local counterpart to `publishSettledFindings`: assembles the identical merged finding list —
+ * engine settlement plus cache hits, the deterministic contract gate, and the change-level pass —
+ * and plans and audits it exactly like the action path, but returns the result as data instead of
+ * publishing it.
+ */
+async function completeLocalReport(
+  request: LocalReviewRequest,
+  inventory: Inventory,
+  settlement: Extract<Settlement, { status: "complete" }>,
+  memo: MemoContext,
+  ledger: SpendLedger,
+  diagnostics: Diagnostics,
+  ruleDigest: string,
+  engineVersion: string,
+): Promise<LocalReviewReport> {
+  const gate = await collectGateFindings(request, inventory, diagnostics);
+  const changePass = await collectChangePassFindings(request, inventory, ledger, diagnostics);
+  const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
+  const freshEngineFindings: ReadonlySet<EngineFinding> = new Set([
+    ...settlement.findings,
+    ...changePass,
+  ]);
+
+  const reported = await localFindings(
+    request,
+    inventory,
+    merged,
+    freshEngineFindings,
+    ledger,
+    diagnostics,
+  );
+  // Identical admission call to the action path's: only a complete outcome reaches this function,
+  // and what is stored is the AUDITED form of the engine's own findings (never a gate or
+  // change-pass finding — `finalizeCacheStore` receives the settlement's findings only, exactly as
+  // `publishSettledFindings` passes them).
+  const finalized = finalizeCacheStore(
+    request,
+    inventory,
+    memo,
+    findingsForStorage(settlement.findings, reported.auditedByOriginal),
+  );
+  return {
+    outcome: "complete",
+    findings: reported.findings,
+    spend: localSpend(ledger),
+    inventory: {
+      total: inventory.items.length,
+      reviewable: inventory.reviewablePaths.size,
+      reviewed: inventory.reviewablePaths.size,
+    },
+    ruleDigest,
+    engineVersion,
+    ...cacheCounts(memo),
+    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
+  };
+}
+
+/** The pre-engine short-circuits `performLocalReviewInner` shares with `performReviewInner`: an
+ *  undescribed path fails the run, an empty reviewable set needs no engine at all. `undefined` means
+ *  neither fired and the caller should proceed to memoization and the engine. */
+async function localPreEngineReport(
+  request: LocalReviewRequest,
+  inventory: Inventory,
+  ledger: SpendLedger,
+  diagnostics: Diagnostics,
+  started: number,
+  ruleDigest: string,
+  engineVersion: string,
+): Promise<LocalReviewReport | undefined> {
+  if (inventory.unclassified.length > 0) {
+    return localIncompleteReport(
+      request,
+      inventory,
+      "inventory.unclassified_path",
+      ledger,
+      diagnostics,
+      [],
+      EMPTY_FRESH,
+      0,
+      ruleDigest,
+      engineVersion,
+    );
+  }
+  if (inventory.reviewablePaths.size === 0) {
+    diagnostics.record("settlement.complete", {
+      headSha: request.head,
+      durationMs: Date.now() - started,
+    });
+    return emptyLocalReport(inventory, ruleDigest, engineVersion);
+  }
+  return undefined;
+}
+
+/** `run.started` through `buildInventory` — identical to `performReviewInner`'s own opening, split
+ *  out so `performLocalReviewInner` stays within this file's per-function line budget. */
+async function localResolveInventory(
+  request: LocalReviewRequest,
+  diagnostics: Diagnostics,
+): Promise<Inventory> {
+  diagnostics.record("run.started", { headSha: request.head });
+  const ctx = gitContext(request);
+  const pair = await resolvePairOrReport(ctx, request, diagnostics);
+  diagnostics.record("review_pair.resolved", { headSha: request.head });
+  return buildInventory(
+    ctx,
+    request.profile,
+    pair,
+    request.config.renameDetectionPercent,
+    diagnostics,
+  );
+}
+
+/**
+ * Everything after a settlement is in hand: routes an incomplete settlement to
+ * `localIncompleteReport` with the right `reviewed` count, or a complete one to
+ * `completeLocalReport` followed by the same `settlement.complete` diagnostic the empty-inventory
+ * shortcut records. Split out of `performLocalReviewInner` for the same line-budget reason as
+ * `localResolveInventory` above.
+ */
+async function localSettleReport(
+  request: LocalReviewRequest,
+  inventory: Inventory,
+  settlement: Settlement,
+  memo: MemoContext,
+  ledger: SpendLedger,
+  diagnostics: Diagnostics,
+  started: number,
+  ruleDigest: string,
+  engineVersion: string,
+): Promise<LocalReviewReport> {
+  if (settlement.status === "incomplete") {
+    const reviewed = verdictsSurviveIncompleteness(settlement.reason)
+      ? settlement.coveredPaths.size + memo.hitPaths.size
+      : memo.hitPaths.size;
+    return localIncompleteReport(
+      request,
+      inventory,
+      settlement.reason,
+      ledger,
+      diagnostics,
+      mergeHitFindings(settlement.findings, memo.hits),
+      new Set(settlement.findings),
+      reviewed,
+      ruleDigest,
+      engineVersion,
+      memo,
+    );
+  }
+
+  const report = await completeLocalReport(
+    request,
+    inventory,
+    settlement,
+    memo,
+    ledger,
+    diagnostics,
+    ruleDigest,
+    engineVersion,
+  );
+  diagnostics.record("settlement.complete", {
+    headSha: request.head,
+    durationMs: Date.now() - started,
+  });
+  return report;
+}
+
+async function performLocalReviewInner(
+  request: LocalReviewRequest,
+  diagnostics: Diagnostics,
+  ledger: SpendLedger,
+  ruleDigest: string,
+  engineVersion: string,
+): Promise<LocalReviewReport> {
+  const started = Date.now();
+  const inventory = await localResolveInventory(request, diagnostics);
+
+  const preEngine = await localPreEngineReport(
+    request,
+    inventory,
+    ledger,
+    diagnostics,
+    started,
+    ruleDigest,
+    engineVersion,
+  );
+  if (preEngine !== undefined) return preEngine;
+
+  const memo = prepareMemoization(request, inventory, diagnostics);
+  const settlement = await localSettleOrReport(
+    request,
+    inventory,
+    memo,
+    ledger,
+    diagnostics,
+    ruleDigest,
+    engineVersion,
+  );
+  if ("outcome" in settlement) return settlement;
+
+  return localSettleReport(
+    request,
+    inventory,
+    settlement,
+    memo,
+    ledger,
+    diagnostics,
+    started,
+    ruleDigest,
+    engineVersion,
+  );
+}
+
+/**
+ * Runs the qualified review pipeline against a local repository — no `GitHubClient`, no pull
+ * request, no reviewer identity to author comments as — and returns findings as data instead of
+ * publishing them.
+ *
+ * Mirrors `performReview`'s own shape (issue #95's acceptance criteria; both share the same
+ * `diagnostics`-argument style and the same per-run `SpendLedger`, created once here and recorded to
+ * `run.spend` in `finally` under the identical "only if something was actually spent" guard
+ * `performReview` uses — see its own doc comment for why). What differs is scope, never pipeline
+ * behaviour: this function stops after the classification audit and reports the result, so it and
+ * `performReview` cannot drift on inventory, engine execution, classification, or dedup and
+ * sanitization — only on what happens with the answer once it is ready.
+ */
+export async function performLocalReview(
+  request: LocalReviewRequest,
+  diagnostics: Diagnostics,
+): Promise<LocalReviewReport> {
+  const ledger: SpendLedger = { allotted: 0, engine: 0, classify: 0 };
+  const ruleDigest: string = promptIdentityDigest(request.profile, request.guidelines);
+  const engineVersion: string = ENGINE_PIN.version;
+  try {
+    return await performLocalReviewInner(request, diagnostics, ledger, ruleDigest, engineVersion);
+  } finally {
+    // Identical guard to `performReview`'s own `finally` block: a pre-engine incomplete report or an
+    // empty-inventory run never dispatched the engine at all, and a zero-spend `run.spend` line
+    // would misreport a run that never tried to review anything as one that reviewed it for free.
+    if (ledger.engine > 0 || ledger.classify > 0) {
+      diagnostics.record("run.spend", {
+        headSha: request.head,
+        counts: {
+          engine: ledger.engine,
+          classify: ledger.classify,
+          total: ledger.engine + ledger.classify,
+        },
+      });
+    }
+  }
 }

@@ -31,7 +31,7 @@
     "test:corpus": "node --test corpus/*.test.mjs",
     "build": "node scripts/build.mjs",
     "check:bundle": "node scripts/check-bundle.mjs",
-    "review": "node --experimental-strip-types src/cli.ts",
+    "review": "node --import ./scripts/register-ts-hooks.mjs --experimental-strip-types src/cli.ts",
     "verify": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run test:corpus && npm run build && npm run check:bundle",
     "check:engine-pin": "node scripts/check-engine-pin.mjs",
     "corpus": "node corpus/run.mjs",
