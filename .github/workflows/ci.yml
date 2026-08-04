@@ -110,13 +110,15 @@ jobs:
           model_token_env: SMOKE_UNUSED_TOKEN
           target_branches: smoke-eligibility-never
 
-      # Two reasons are accepted because the runner owns this step's event payload: a DRAFT pull
-      # request settles at the draft rung before the base-branch rung is ever consulted, and
-      # draftness is a property of whichever pull request happens to run this job (found the day
-      # the repository opened its first draft pull request, which failed here on its own
-      # draftness). Both values prove the claim this step actually makes — the bundle executed and
-      # settled at ELIGIBILITY, before any credential or model call. The exact base-branch rung is
-      # pinned deterministically below, where the payload is constructed rather than inherited.
+      # Three reasons are accepted because the runner owns this step's event payload, and the
+      # eligibility ladder consults draftness, then fork ownership, then the base branch — so a
+      # draft pull request settles at the draft rung, a fork pull request at the fork rung, and
+      # only a same-repo, non-draft one ever reaches the sentinel base (the draft case failed for
+      # real the day this repository opened its first draft pull request; the fork case is the
+      # same class one rung later). All three prove the claim this step actually makes — the
+      # bundle executed and settled at ELIGIBILITY, before any credential or model call. The exact
+      # base-branch rung is pinned deterministically below, where the payload is constructed
+      # rather than inherited.
       - name: Assert it settled at eligibility with a reason
         if: github.event_name == 'pull_request'
         env:
@@ -126,7 +128,7 @@ jobs:
           echo "outcome=${OUTCOME} reason=${REASON}"
           test "${OUTCOME}" = "skipped"
           case "${REASON}" in
-            eligibility.skipped.base_branch|eligibility.skipped.draft) ;;
+            eligibility.skipped.base_branch|eligibility.skipped.draft|eligibility.skipped.fork) ;;
             *) echo "::error::settled outside the eligibility family: ${REASON}"; exit 1 ;;
           esac
 
@@ -201,8 +203,8 @@ jobs:
           GITHUB_OUTPUT="${RUNNER_TEMP}/base-branch-output.txt" \
             node dist/index.js
           cat "${RUNNER_TEMP}/base-branch-output.txt"
-          grep -qx 'outcome=skipped' "${RUNNER_TEMP}/base-branch-output.txt"
-          grep -qx 'reason=eligibility.skipped.base_branch' "${RUNNER_TEMP}/base-branch-output.txt"
+          grep -Fqx 'outcome=skipped' "${RUNNER_TEMP}/base-branch-output.txt"
+          grep -Fqx 'reason=eligibility.skipped.base_branch' "${RUNNER_TEMP}/base-branch-output.txt"
 
       # The redaction contract is a claim about what reaches a log. Assert it on real output.
       - name: Assert diagnostics carry no free-form text

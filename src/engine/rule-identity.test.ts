@@ -81,6 +81,29 @@ describe("promptIdentityDigest", () => {
   });
 
   /**
+   * Declared contract pairs (`profile.contractPairs`, rendered by `rule-file.ts`'s
+   * `contractPairsSection`) are rule identity for exactly the reason path instructions are above:
+   * they change what the model is told to read alongside a matching file, so a cached finding
+   * produced under one declared pairing must never be replayed as the answer under a different
+   * one. They reach this digest the same way, too — through nothing more than `profile` already
+   * being a parameter here.
+   */
+  it("changes when contractPairs changes, and produces equal digests for equal profiles", () => {
+    const withCounterpart = (counterpart: string): CompiledProfile =>
+      profile({ contractPairs: [{ paths: ["src/a.ts"], counterparts: [counterpart] }] });
+
+    const a = promptIdentityDigest(withCounterpart("src/b.ts"), { paths: [] });
+    const b = promptIdentityDigest(withCounterpart("src/c.ts"), { paths: [] });
+    const aAgain = promptIdentityDigest(withCounterpart("src/b.ts"), { paths: [] });
+    const baseline = promptIdentityDigest(profile(), { paths: [] });
+
+    expect(a).not.toBe(b);
+    expect(a).not.toBe(baseline);
+    expect(a).toBe(aAgain);
+    expect(a).toBe(expectedDigest(withCounterpart("src/b.ts")));
+  });
+
+  /**
    * The whole point of this function: it never receives a per-run exclude list, so nothing about
    * this run's mechanically-clean paths or cache hits can reach it. There is no dynamic-exclude
    * parameter to vary here — that absence from the signature *is* the guarantee.

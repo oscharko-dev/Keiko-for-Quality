@@ -63,11 +63,12 @@ export interface PathInstruction {
  * change to one that silently drifts from the other becomes checkable instead of invisible to a
  * reviewer that only ever sees one file at a time.
  *
- * This entry declares the pairing only. Nothing in this module, and nothing `rule-file.ts` builds
- * today, reads a matching path's counterparts into a review — the two consumers epic #80 describes (a
- * deterministic shape gate, and rule-text rendering that tells the model to read the counterpart) land
- * separately, against this already-validated, already-bounded shape, the same way this field itself
- * follows the schema-and-compilation shape `pathInstructions` established beside it.
+ * This entry declares the pairing; its two consumers from epic #80 read it. The adapter's
+ * deterministic shape gate compares flat same-named interfaces across each pair, and
+ * `rule-file.ts`'s `contractPairsSection` renders the declaration into the rule so a matching
+ * file's review is told to read the counterpart — both against this already-validated,
+ * already-bounded shape, the same way this field itself follows the schema-and-compilation shape
+ * `pathInstructions` established beside it.
  *
  * `counterparts` names FILES, deliberately never globs: a counterpart is something a consumer reads,
  * and a pattern does not name a file to open. Validation therefore follows the same repository-

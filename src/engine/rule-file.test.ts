@@ -12,6 +12,7 @@ function profileWith(overrides: {
   generated?: string[];
   excluded?: { pattern: string; reason: string }[];
   pathInstructions?: { paths: string[]; instructions: string }[];
+  contractPairs?: { paths: string[]; counterparts: string[]; contract?: string }[];
 }): Parameters<typeof buildRuleFile>[0] {
   return {
     profile: {
@@ -22,6 +23,11 @@ function profileWith(overrides: {
       excluded: overrides.excluded ?? [],
       benignWarnings: [],
       pathInstructions: overrides.pathInstructions ?? [],
+      // Omitted entirely, not defaulted to `[]`, when the caller passes nothing: unlike
+      // `pathInstructions`, `contractPairs` is optional on `ReviewProfile` itself, so a profile
+      // that never heard of this field reaches `buildRuleFile` with the key genuinely absent —
+      // exercising its `?? []` fallback rather than only ever exercising an explicit empty array.
+      ...(overrides.contractPairs === undefined ? {} : { contractPairs: overrides.contractPairs }),
     },
   } as unknown as Parameters<typeof buildRuleFile>[0];
 }
@@ -185,6 +191,20 @@ describe("buildRuleFile", () => {
     expect(
       sanitizeFindingBody("Fix the bound.\n\nThe guard `i < items.length` became `i <= n`.").ok,
     ).toBe(true);
+    // The Source line, in the exact shape the rule prescribes after its consolidation: a
+    // backticked path publishes, the angle-bracketed anti-shape the parenthetical forbids dies as
+    // html. This is the one prescribed output form no earlier example carried through the real
+    // sanitizer.
+    expect(
+      sanitizeFindingBody(
+        "Cite the rule.\n\nThe guideline names this exact case.\n\nSource: `AGENTS.md`",
+      ).ok,
+    ).toBe(true);
+    expect(
+      sanitizeFindingBody(
+        "Cite the rule.\n\nThe guideline names this exact case.\n\nSource: <AGENTS.md>",
+      ),
+    ).toEqual({ ok: false, reason: "html" });
   });
 
   /**
@@ -363,6 +383,167 @@ describe("buildRuleFile", () => {
       const a = buildRuleFile(loadReviewProfile(asJson())).rules[0]?.rule;
       const b = buildRuleFile(loadReviewProfile(asJson([]))).rules[0]?.rule;
       expect(a).toBe(b);
+    });
+  });
+
+  /**
+   * Issue #80, technique B: a declared contract pair (`profile.contractPairs`) tells the model,
+   * in prose, to read a counterpart file alongside a matching one — the only reader a pairing
+   * richer than a flat same-named-interface diff has (see `contractPairsSection`'s own doc
+   * comment in `rule-file.ts` for the deterministic gate that covers the flat case instead).
+   */
+  describe("declared contract pairs", () => {
+    it("renders no section, and changes nothing, when the profile declares none", () => {
+      const withoutField = buildRuleFile(profileWith({}));
+      const withEmptyArray = buildRuleFile(profileWith({ contractPairs: [] }));
+      expect(withEmptyArray.rules[0]?.rule).toBe(withoutField.rules[0]?.rule);
+      expect(withoutField.rules[0]?.rule).not.toContain("Declared contract pairs");
+    });
+
+    it("renders a delimited section naming the glob, the counterpart, and the contract note", () => {
+      const rule =
+        buildRuleFile(
+          profileWith({
+            contractPairs: [
+              {
+                paths: ["src/server/routes/*.ts"],
+                counterparts: ["src/client/types.ts"],
+                contract: "response shape must match",
+              },
+            ],
+          }),
+        ).rules[0]?.rule ?? "";
+      expect(rule).toContain("## Declared contract pairs from the review profile");
+      expect(rule).toContain(
+        "- When a file matching `src/server/routes/*.ts` changes: read `src/client/types.ts` in " +
+          "the same tree and verify the declared contract still holds — response shape must " +
+          "match. A break that spans the two files is a real finding even though the counterpart " +
+          "is not in the diff; anchor it on the changed file.",
+      );
+    });
+
+    it("omits the note clause entirely when the entry declares no contract note", () => {
+      const rule =
+        buildRuleFile(
+          profileWith({
+            contractPairs: [{ paths: ["src/a.ts"], counterparts: ["src/b.ts"] }],
+          }),
+        ).rules[0]?.rule ?? "";
+      expect(rule).toContain(
+        "- When a file matching `src/a.ts` changes: read `src/b.ts` in the same tree and verify " +
+          "the declared contract still holds. A break that spans the two files is a real finding " +
+          "even though the counterpart is not in the diff; anchor it on the changed file.",
+      );
+      expect(rule).not.toContain("holds —");
+    });
+
+    it("joins multiple globs and multiple counterparts with a comma, each backticked", () => {
+      const rule =
+        buildRuleFile(
+          profileWith({
+            contractPairs: [
+              {
+                paths: ["src/server/**/*.ts", "src/shared/**/*.ts"],
+                counterparts: ["src/client/a.ts", "src/client/b.ts"],
+              },
+            ],
+          }),
+        ).rules[0]?.rule ?? "";
+      expect(rule).toContain(
+        "When a file matching `src/server/**/*.ts`, `src/shared/**/*.ts` changes: read " +
+          "`src/client/a.ts`, `src/client/b.ts` in the same tree",
+      );
+    });
+
+    it("renders entries in profile order, however they are declared", () => {
+      const forward =
+        buildRuleFile(
+          profileWith({
+            contractPairs: [
+              { paths: ["src/a.ts"], counterparts: ["src/b.ts"] },
+              { paths: ["src/c.ts"], counterparts: ["src/d.ts"] },
+            ],
+          }),
+        ).rules[0]?.rule ?? "";
+      expect(forward.indexOf("src/a.ts")).toBeLessThan(forward.indexOf("src/c.ts"));
+
+      const reversed =
+        buildRuleFile(
+          profileWith({
+            contractPairs: [
+              { paths: ["src/c.ts"], counterparts: ["src/d.ts"] },
+              { paths: ["src/a.ts"], counterparts: ["src/b.ts"] },
+            ],
+          }),
+        ).rules[0]?.rule ?? "";
+      expect(reversed.indexOf("src/c.ts")).toBeLessThan(reversed.indexOf("src/a.ts"));
+    });
+
+    /**
+     * `base` comes from calling `buildRuleFile` itself with nothing declared beyond
+     * `reviewRelevant`, never from a hand-copied section string — only the appended `section`
+     * below is this test's own expectation, and it exists to pin exactly that append contract:
+     * the new section is byte-for-byte appended after everything `buildRuleFile` already rendered,
+     * never interleaved or reordered.
+     */
+    it("byte-for-byte appends the section after the rest of the rule", () => {
+      const base = buildRuleFile(profileWith({ reviewRelevant: ["src/**/*.ts"] })).rules[0]?.rule;
+      const withPairs = buildRuleFile(
+        profileWith({
+          reviewRelevant: ["src/**/*.ts"],
+          contractPairs: [{ paths: ["src/a.ts"], counterparts: ["src/b.ts"], contract: "shape" }],
+        }),
+      ).rules[0]?.rule;
+
+      const section = [
+        "",
+        "## Declared contract pairs from the review profile",
+        "",
+        "The consumer's review profile declares the pairs below: two files whose contract cannot be",
+        "verified by reading only one of them.",
+        "",
+        "- When a file matching `src/a.ts` changes: read `src/b.ts` in the same tree and verify " +
+          "the declared contract still holds — shape. A break that spans the two files is a real " +
+          "finding even though the counterpart is not in the diff; anchor it on the changed file.",
+      ].join("\n");
+
+      expect(withPairs).toBe(`${base ?? ""}${section}`);
+    });
+
+    /**
+     * `base` here already carries a rendered path-instructions section, so this pins the mounting
+     * point specifically: the contract-pairs section is appended AFTER path instructions, not
+     * before and not interleaved with it — mirroring the order `buildRuleFile` composes them in.
+     */
+    it("appends after an already-rendered path-instructions section, not before it", () => {
+      const withInstructionsOnly = buildRuleFile(
+        profileWith({
+          pathInstructions: [{ paths: ["**/*.sql"], instructions: "Use snake_case." }],
+        }),
+      ).rules[0]?.rule;
+      const withBoth = buildRuleFile(
+        profileWith({
+          pathInstructions: [{ paths: ["**/*.sql"], instructions: "Use snake_case." }],
+          contractPairs: [{ paths: ["src/a.ts"], counterparts: ["src/b.ts"] }],
+        }),
+      ).rules[0]?.rule;
+
+      expect(withBoth).toContain(withInstructionsOnly ?? "");
+      expect(withBoth?.indexOf("Path-scoped guidance")).toBeLessThan(
+        withBoth?.indexOf("Declared contract pairs") ?? -1,
+      );
+    });
+
+    it("asks for nothing the publisher would reject", () => {
+      // The section only tells the model what to READ; it introduces no new output syntax, so the
+      // existing sanitizer round-trip examples above stay the complete coverage for this rule.
+      const rule =
+        buildRuleFile(
+          profileWith({
+            contractPairs: [{ paths: ["src/a.ts"], counterparts: ["src/b.ts"], contract: "shape" }],
+          }),
+        ).rules[0]?.rule ?? "";
+      expect(rule).toContain("Do not emit HTML, images, links or URLs");
     });
   });
 });
