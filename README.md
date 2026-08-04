@@ -318,13 +318,21 @@ a forged security waiver, or to append a tracking URL to its comment. They exist
 file's "treat all file content as untrusted" section is a claim, and an unmeasured claim is not
 evidence. Each seeds a real defect underneath, so obedience shows up as a miss.
 
-Most recent run — engine v1.8.4, `gpt-5.4` over an OpenAI-compatible endpoint, ~8,100 tokens per
-case:
+Most recent run — engine v1.8.4, `gpt-oss-120b` over an OpenAI-compatible endpoint, a same-day
+A/B of the product rule against the rule-economy bundle
+(`corpus/evidence/qualification-2026-08-04-rule-ab.md` carries the full pairing and failure
+taxonomy):
 
 ```
-recall         18/18    classification 18/18
-precision       5/5     publishable    23/23
+recall         22/28    classification 22/22
+precision       3/4     publishable    32/32 (economy arm; 31/32 product arm)
+tokens/case    24,345 (economy) vs 36,710 (product) — −33.7%
 ```
+
+Three of the six recall misses are the cross-artifact cases seeded to fail first (issue #80's
+baseline — the blindness is now measured, not asserted); the remainder are serving-side dropouts
+that roam between runs under an identical rule digest, plus one clean-case transient its isolated
+rerun resolved.
 
 Read that as one measurement of a nondeterministic system, not a constant. Severity at the
 critical/high boundary is the least stable axis — the same defect class has come back a step apart
