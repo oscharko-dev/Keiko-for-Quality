@@ -26,7 +26,16 @@ export interface MarkerInput {
 }
 
 export const MARKER_PREFIX = "keiko-for-quality";
-const MARKER_PATTERN = new RegExp(`<!--\\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\\s*-->`);
+/**
+ * `String.raw`, not an ordinary template, and not a regex literal: the pattern interpolates
+ * `MARKER_PREFIX`, so it has to be built at run time. `String.raw` only changes how the escapes are
+ * written — `\s` here is the same backslash-plus-`s` that `\\s` produced in a cooked template, and
+ * the interpolated prefix carries no backslash of its own — so the compiled `.source` is
+ * byte-identical to the doubled-backslash form it replaces. It has to be: this pattern is how a
+ * later run recognises the comments an earlier one published, and a pattern that no longer matches
+ * them orphans every conversation this reviewer maintains.
+ */
+const MARKER_PATTERN = new RegExp(String.raw`<!--\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\s*-->`);
 
 /**
  * Joins fingerprint fields before hashing.

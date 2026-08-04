@@ -631,7 +631,7 @@ describe("findUncoveredUnionMembers", () => {
 
     it("finds exactly one gap: the added rejected member the consumer never mentions", () => {
       expect(findUncoveredUnionMembers(BASE_STATUS, HEAD_STATUS, CONSUMER)).toEqual([
-        { unionName: "CandidateStatus", member: "rejected", counterpartMentions: 0 },
+        { unionName: "CandidateStatus", member: "rejected" },
       ]);
     });
 
@@ -691,7 +691,7 @@ describe("findUncoveredUnionMembers", () => {
     const head = `export type CandidateStatus = "draft" | "approved" | "rejected";`;
     const counterpart = `if (status === "approved") return true;`; // mentions "approved" only
     expect(findUncoveredUnionMembers(base, head, counterpart)).toEqual([
-      { unionName: "CandidateStatus", member: "rejected", counterpartMentions: 0 },
+      { unionName: "CandidateStatus", member: "rejected" },
     ]);
   });
 });
@@ -765,7 +765,6 @@ describe("describeUnionGap", () => {
   const GAP: UnionGap = {
     unionName: "CandidateStatus",
     member: "rejected",
-    counterpartMentions: 0,
   };
   const CHANGED_PATH = "src/candidate-status.ts";
   const COUNTERPART_PATH = "src/candidate-deliverability.ts";
@@ -867,9 +866,9 @@ describe("describeUnionGap output is always publishable", () => {
   const PATHS = ["src/candidate-status.ts", "src/candidate-deliverability.ts"] as const;
 
   const CASES: readonly UnionGap[] = [
-    { unionName: "CandidateStatus", member: "rejected", counterpartMentions: 0 },
-    { unionName: "CandidateStatus", member: "needs-review", counterpartMentions: 0 },
-    { unionName: "AccountTier", member: "enterprise-trial", counterpartMentions: 0 },
+    { unionName: "CandidateStatus", member: "rejected" },
+    { unionName: "CandidateStatus", member: "needs-review" },
+    { unionName: "AccountTier", member: "enterprise-trial" },
   ];
 
   it.each(CASES.map((gap) => [gap] as const))(
@@ -902,7 +901,6 @@ describe("describeUnionGap output is always publishable", () => {
     const gap: UnionGap = {
       unionName: "Weird",
       member: "not an identifier <script>",
-      counterpartMentions: 0,
     };
     const body = describeUnionGap(gap, PATHS[0], PATHS[1]);
     expect(sanitizeFindingBody(body).ok).toBe(true);

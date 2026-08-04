@@ -32,10 +32,11 @@ export function evaluateEligibility(
   }
   // A fork head must not reach the secret-bearing execution path. Per-review token budgets bound a
   // single review; they do not bound an attacker opening many pull requests.
-  if (
-    facts.headRepoFullName === undefined ||
-    facts.headRepoFullName.toLowerCase() !== facts.baseRepoFullName.toLowerCase()
-  ) {
+  //
+  // The optional chain keeps "no head repository named" a rejection rather than a hole: it yields
+  // `undefined`, and `baseRepoFullName.toLowerCase()` is always a string, so the comparison is
+  // unequal exactly as the explicit `=== undefined` test that stood here made it.
+  if (facts.headRepoFullName?.toLowerCase() !== facts.baseRepoFullName.toLowerCase()) {
     return { eligible: false, reason: "eligibility.skipped.fork" };
   }
   if (!targetBranches.includes(facts.baseRef)) {

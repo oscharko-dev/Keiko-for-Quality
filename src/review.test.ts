@@ -14,7 +14,7 @@ import {
 } from "./cache/review-cache.js";
 import { compileProfile, type ReviewProfile } from "./config/profile.js";
 import type { RuntimeConfig } from "./config/runtime.js";
-import { blobId, commitSha, repoPath, sha256 } from "./core/brands.js";
+import { blobId, commitSha, repoPath, sha256, type Sha256 } from "./core/brands.js";
 import { createSilentDiagnostics } from "./diagnostics/sink.js";
 import { currentPlatformDigest } from "./engine/pinned-release.js";
 import { SUPPORTED_MANIFEST_SCHEMA } from "./engine/result.js";
@@ -39,6 +39,26 @@ vi.mock("./engine/run.js", async (importOriginal) => ({
 
 const { computeAllottedBudget, performReview } = await import("./review.js");
 const { EngineRunError } = await import("./engine/run.js");
+
+/**
+ * The pin covers this platform or this suite cannot run here — never a silent skip.
+ *
+ * `currentPlatformDigest()` returns `undefined` on any platform `ENGINE_PIN.platforms` does not
+ * name (`pinned-release.ts`), and every test below that needs a digest used to answer that by
+ * returning early. Vitest sets no `expect.hasAssertions`, so those returns were reported as
+ * passes with zero assertions — the exact shape CONTRIBUTING.md's "a test must be able to fail"
+ * rule forbids, and it was silently hiding the tests that cost the most to get wrong (the bounded
+ * single resume, `run.spend` accounting, the classification audit, the dispatched-only allotment).
+ * Throwing states the prerequisite instead of hiding the gap: on a pinned platform nothing changes,
+ * and on an unpinned one the suite says why it cannot run rather than reporting green.
+ */
+function requireEngineDigest(): Sha256 {
+  const digest = currentPlatformDigest();
+  if (digest === undefined) {
+    throw new Error("review.test.ts needs a pinned engine digest for this platform");
+  }
+  return digest;
+}
 
 describe("computeAllottedBudget", () => {
   it("matches the worked example: the measured 55-file live run (Keiko#2981)", () => {
@@ -107,9 +127,20 @@ describe("performReview: review-cache memoization end to end", () => {
   let baseBlobA: string;
   let headBlobA: string;
 
-  function git(args: readonly string[]): string {
+  /**
+   * `cwd` defaults to this block's own shared fixture repo, which is what all but one call site
+   * wants. The default is evaluated per call, so `repo` being assigned later in `beforeAll` is
+   * fine — and the parameter is what lets the rename block further down drive its own throwaway
+   * repository through this same helper instead of carrying a byte-identical copy of it. The
+   * environment is deliberately the test-side one (inherited `process.env` plus a fixed author
+   * identity, so a commit here never depends on the developer's own git config); it is NOT
+   * `src/git/exec.ts`'s production `gitEnvironment()`, and must not become it — these fixtures
+   * exist to hold the product to real git's behaviour, which they cannot do while sharing the
+   * very environment construction they are meant to check.
+   */
+  function git(args: readonly string[], cwd: string = repo): string {
     return execFileSync("git", args, {
-      cwd: repo,
+      cwd,
       encoding: "utf8",
       env: {
         ...process.env,
@@ -225,9 +256,7 @@ describe("performReview: review-cache memoization end to end", () => {
 
   it("threads a cache hit into the engine's own exclude list and credits it in settlement", async () => {
     const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
-    const engineDigest = currentPlatformDigest();
-    expect(engineDigest).toBeDefined();
-    if (engineDigest === undefined) return;
+    const engineDigest = requireEngineDigest();
 
     const model = modelId(CONFIG.model);
     const proto = protocol(CONFIG.protocol);
@@ -279,9 +308,7 @@ describe("performReview: review-cache memoization end to end", () => {
 
   it("treats a hit rejected by the path-set digest as an ordinary miss: the file is reviewed and never memoized (v0.10.0, issue #50)", async () => {
     const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
-    const engineDigest = currentPlatformDigest();
-    expect(engineDigest).toBeDefined();
-    if (engineDigest === undefined) return;
+    const engineDigest = requireEngineDigest();
 
     const model = modelId(CONFIG.model);
     const proto = protocol(CONFIG.protocol);
@@ -558,9 +585,7 @@ describe("performReview: review-cache memoization end to end", () => {
   describe("performReview: pre-flight head check", () => {
     it("abandons before the engine runs when the head is already stale, keeping the memo's cache counts", async () => {
       const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
-      const engineDigest = currentPlatformDigest();
-      expect(engineDigest).toBeDefined();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
 
       const model = modelId(CONFIG.model);
       const proto = protocol(CONFIG.protocol);
@@ -676,12 +701,12 @@ describe("performReview: review-cache memoization end to end", () => {
    * pins both halves: the reached file is persisted, the unreached one is not, at any price.
    */
   it("persists only what a budget-truncated run actually reviewed", async () => {
-    // Placed last on purpose: an earlier engine call would shift `mock.calls[0]` under the test
-    // that reads the first call to prove the exclude list reached the engine.
+    // Placed after every test that reads `mock.calls[0]`, on purpose: an earlier engine call would
+    // shift `mock.calls[0]` under the test that reads the first call to prove the exclude list
+    // reached the engine. (The negative-admission test below inherits the same placement and reads
+    // no call history of its own, so it cannot disturb them either.)
     runEngineMock.mockClear();
-    const engineDigest = currentPlatformDigest();
-    expect(engineDigest).toBeDefined();
-    if (engineDigest === undefined) return;
+    const engineDigest = requireEngineDigest();
 
     const truncated = JSON.stringify({
       status: "success",
@@ -730,6 +755,76 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(report.cacheAppended).toBe(1);
   });
 
+  /**
+   * The other half of the same rule, and the half that was never pinned here.
+   *
+   * `verdictsSurviveIncompleteness` (`engine/settle.ts`) admits exactly two incomplete reasons; the
+   * test above pins one of them in the direction that saves money. Nothing pinned the refusal at
+   * this layer: deleting the `verdictsSurviveIncompleteness(...) ? … : undefined` conditional in
+   * `performReviewInner` — so that every incomplete settlement handed its covered set to
+   * `truncatedCacheFields` — left the whole suite green, because the two consumer layers that DO
+   * pin the negative direction (`action/main.test.ts`, `cli.test.ts`) only ever see the store
+   * `performReview` already decided to produce.
+   *
+   * So this drives a genuinely disqualified run that still had everything it would need to launder:
+   * a live (empty) store, two cache-eligible paths, and a manifest whose coverage names BOTH files
+   * as completed. Only the reason code stands between that and a permanent, confidently-replayed
+   * "clean" verdict for a run whose output was just declared untrustworthy. A reason that reaches
+   * `settleIncomplete` carrying `NO_COVERED_PATHS` would have passed for the wrong reason.
+   */
+  it("admits nothing to the store when the incompleteness is one whose verdicts do not survive", async () => {
+    runEngineMock.mockClear();
+    acquireEngineMock.mockClear();
+    const engineDigest = requireEngineDigest();
+
+    const disqualified = JSON.stringify({
+      status: "success",
+      summary: { files_reviewed: 2, total_tokens: 100, budget_exceeded: false },
+      comments: [],
+      // The profile's `benignWarnings` is empty, so this one is unlisted and `commonDisqualifier`
+      // settles the run incomplete — a reason about whether the RUN can be believed at all, which
+      // is why `verdictsSurviveIncompleteness` refuses it.
+      warnings: [{ type: "engine.internal.retry_storm", file: "src/a.ts" }],
+      manifest: {
+        schema_version: SUPPORTED_MANIFEST_SCHEMA,
+        terminal_state: "complete",
+        // Full coverage: the engine says it reviewed both files. That is precisely what makes this
+        // test bite — there are real verdicts here that a missing gate would happily persist.
+        coverage: {
+          selected: [{ path: "src/a.ts" }, { path: "src/b.ts" }],
+          completed: [{ path: "src/a.ts" }, { path: "src/b.ts" }],
+          reused: [],
+          failed: [],
+          waived: [],
+        },
+      },
+    });
+
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+    runEngineMock.mockResolvedValue({ stdout: disqualified, ruleDigest: engineDigest });
+
+    const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+    const request = baseRequest(empty);
+    // The incomplete notice is published through the same `createReviewComment` call every other
+    // publication uses; rejecting it deterministically keeps this test off the network without
+    // changing the settlement, which `publishIncompleteNotice` decided before publication began.
+    vi.spyOn(request.client, "createReviewComment").mockRejectedValue(new GitHubApiError(422));
+
+    const report = await performReview(request, createSilentDiagnostics());
+
+    expect(report.outcome).toBe("incomplete");
+    expect(report.reason).toBe("settlement.incomplete.warning_not_allowlisted");
+    // Memoization was live, not inert: both files were looked up and neither was answered from the
+    // store. Without this the two assertions below would hold trivially for a run that never had a
+    // store at all — `finalizeCacheStore`'s first check returns `undefined` in that case too.
+    expect(report.cacheHits).toBe(0);
+    expect(report.cacheMisses).toBe(2);
+    // Nothing written back at all — not even the input store echoed with zero appended entries,
+    // which is what a run that reached `finalizeCacheStore` with an empty covered set would return.
+    expect(report.updatedCacheStore).toBeUndefined();
+    expect(report.cacheAppended).toBe(0);
+  });
+
   describe("performReview: bounded single resume (#57)", () => {
     beforeEach(() => {
       // The harness mocks are shared across this whole file and deliberately never auto-reset;
@@ -749,8 +844,7 @@ describe("performReview: review-cache memoization end to end", () => {
     }
 
     it("re-invokes once when the first run reports a non-success status, and the second stands", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock
         .mockResolvedValueOnce({ stdout: nonSuccessStdout(), ruleDigest: engineDigest })
@@ -766,8 +860,7 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("re-invokes once when the first run throws an EngineRunError", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock
         .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit"))
@@ -794,8 +887,7 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("settles incomplete after the second failure — one resume, never two", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock
         .mockResolvedValueOnce({ stdout: nonSuccessStdout(), ruleDigest: engineDigest })
@@ -817,8 +909,7 @@ describe("performReview: review-cache memoization end to end", () => {
      * the constant floor.
      */
     it("floors the resume at a quarter of this review's own allotment, never the fixed 80,000 floor", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       // Non-success, and reports spending far more than any plausible allotment for this tiny
       // fixture — `budget_exceeded` stays false, since a first attempt that itself flagged the
@@ -845,8 +936,7 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("gives the resume the real remainder when the first attempt spent only part of its allotment", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       // The mocked first response reads back `options.allottedBudget` so the fixture does not need
       // to hard-code a number this test itself does not control — 30% spent, however large the
@@ -881,8 +971,7 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("skips the resume entirely when the first attempt already reports its budget exceeded", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       const overBudget = JSON.stringify({
         status: "failed",
@@ -940,8 +1029,7 @@ describe("performReview: review-cache memoization end to end", () => {
     }
 
     it("records engine, classify, and total on the plain single-attempt path", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock.mockResolvedValue({
         stdout: statusStdout("success", 250),
@@ -959,8 +1047,7 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("sums both attempts' engine tokens across a parsed non-success plus its resume", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock
         .mockResolvedValueOnce({ stdout: statusStdout("failed", 30), ruleDigest: engineDigest })
@@ -977,8 +1064,7 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("contributes exactly zero for a thrown first attempt, never a guess", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock
         .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit"))
@@ -995,8 +1081,7 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("records classify: 0 on the anthropic protocol path even when findings are present", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock.mockResolvedValue({
         stdout: engineStdoutWithFinding(2),
@@ -1825,8 +1910,7 @@ describe("performReview: review-cache memoization end to end", () => {
 
     it("never audits a cache-replayed finding, even when it survives the plan and publishes", async () => {
       const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       const model = modelId(AUDIT_CONFIG.model);
       const proto = protocol(AUDIT_CONFIG.protocol);
       const base = blobId(baseBlobA);
@@ -2002,8 +2086,7 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("stores the audited category for a published finding and the raw category for a plan-suppressed one", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
 
       const BODY_A =
@@ -2066,8 +2149,7 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("keeps engine and classify spend correct across the bounded resume when the resumed run also triggers the audit", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
 
       const BODY = "This cache key omits the tenant id, so two tenants can collide on one entry.";
@@ -2124,8 +2206,7 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("prices a smaller allotment when a cache hit removes a file from dispatch", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
 
@@ -2170,25 +2251,14 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     it("does not change the allotment when a mechanically-clean rename sits alongside a reviewable file", async () => {
-      const engineDigest = currentPlatformDigest();
-      if (engineDigest === undefined) return;
+      const engineDigest = requireEngineDigest();
 
       const renameRepo = await mkdtemp(join(tmpdir(), "kfq-review-rename-"));
       try {
-        const renameGit = (args: readonly string[]): string =>
-          execFileSync("git", args, {
-            cwd: renameRepo,
-            encoding: "utf8",
-            env: {
-              ...process.env,
-              GIT_AUTHOR_NAME: "t",
-              GIT_AUTHOR_EMAIL: "t@example.test",
-              GIT_COMMITTER_NAME: "t",
-              GIT_COMMITTER_EMAIL: "t@example.test",
-              GIT_CONFIG_GLOBAL: "/dev/null",
-              GIT_CONFIG_SYSTEM: "/dev/null",
-            },
-          });
+        // The block-level `git` helper bound to this test's own throwaway repository — same
+        // environment, same argument handling, one definition. Keeping the `renameGit` name means
+        // every call below reads exactly as it did when this was a second copy of that helper.
+        const renameGit = (args: readonly string[]): string => git(args, renameRepo);
         renameGit(["init", "-q", "-b", "main"]);
         await mkdir(join(renameRepo, "src"), { recursive: true });
         await writeFile(join(renameRepo, "src/a.ts"), "export const a = 1;\n");

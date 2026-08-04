@@ -94,10 +94,34 @@ const SCAN_WINDOW = 400;
 // missing from the summary, never a crash or an unbounded scan.
 // ---------------------------------------------------------------------------------------------
 
+// The two patterns that capture a tail — the alias's right-hand side, the const's type text — end
+// with a group whose first character is `\S`, where they used to open that group with `.` instead.
+// `.` matches a blank, so `\s*` and a `.`-quantifier standing next to it could divide the same run
+// of blanks in as many ways as that run is long, and every division has to be retried before the
+// closing `$` can fail: quadratic in the run's length (Sonar S8786). `$` failing is not hypothetical
+// just because `extractDeclarations` hands these one line at a time. `.` excludes EVERY line
+// terminator, not only `\n`, so a file checked out with CRLF endings leaves a `\r` on each line that
+// `split("\n")` does not remove and `.` will not cross. Measured on such a line carrying 40,000
+// blanks ahead of its type text: ~700 ms in one call before this change, unmeasurable after it.
+//
+// Requiring `\S` as the tail group's first character narrows neither pattern: greedy `\s*` had
+// already consumed the whole run of blanks before that group started, so the tail could never have
+// begun with a blank in the first place.
+//
+// `CONST_START` keeps one extra branch to stay exactly equivalent. Its tail is `(.+)`, which demands
+// a character, so on a line whose type text is nothing but blanks the old pattern made `\s*` hand
+// ONE blank back for `.+` to match — `export const x:` followed only by spaces DID match, and
+// `tryExtractConst` then dropped it for collapsing to an empty type text. The second alternative is
+// that hand-back spelled out — a bare `.`, not `[^\n]`, because `.` also excludes a carriage return
+// and the two Unicode line separators, so a tail made only of those still fails to match, exactly
+// as before. `TYPE_ALIAS_START` needs no such branch, because its `(.*)` was allowed to capture
+// nothing; its tail group is now optional and so reports `undefined` instead of `""` for an empty
+// right-hand side, which no caller can see — `tryExtractTypeAlias` reads the name group and
+// re-scans for the `=` itself.
 const INTERFACE_START = /^\s*export\s+interface\s+([A-Za-z_$][\w$]*)/;
-const TYPE_ALIAS_START = /^\s*export\s+type\s+([A-Za-z_$][\w$]*)\s*=\s*(.*)$/;
+const TYPE_ALIAS_START = /^\s*export\s+type\s+([A-Za-z_$][\w$]*)\s*=\s*(\S.*)?$/;
 const FUNCTION_START = /^\s*export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/;
-const CONST_START = /^\s*export\s+const\s+([A-Za-z_$][\w$]*)\s*:\s*(.+)$/;
+const CONST_START = /^\s*export\s+const\s+([A-Za-z_$][\w$]*)\s*:\s*(\S.*|.)$/;
 
 function collapseWhitespace(text: string): string {
   return text.replace(/\s+/g, " ").trim();
@@ -360,7 +384,16 @@ async function postChangePassRequest(
 ): Promise<TransportResult> {
   const doFetch = deps.fetchImpl ?? fetch;
   try {
-    const response = await doFetch(`${deps.endpoint.replace(/\/+$/, "")}/chat/completions`, {
+    // `(?<!\/)`, not the plain `\/+$` this used to carry. Nothing anchored that pattern's start, so
+    // the engine retried it from every index inside a run of slashes, re-expanding the run before
+    // `$` could fail — quadratic in the run's length (Sonar S8786). The lookbehind admits only the
+    // index a run STARTS at, and the leftmost index from which slashes run to the end of the string
+    // IS the start of the final run, so the match, and therefore the joined URL, is unchanged for
+    // every endpoint. Same technique and same reasoning as `github/client.ts`'s `apiBase`.
+    // `classify.ts`, which this transport mirrors, spells the identical result as a tail-walk
+    // helper instead; the join is the same one either way — every trailing slash gone, exactly one
+    // separator before `/chat/completions` — so the mirror above still holds.
+    const response = await doFetch(`${deps.endpoint.replace(/(?<!\/)\/+$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",

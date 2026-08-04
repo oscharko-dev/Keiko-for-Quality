@@ -32,7 +32,6 @@ vi.mock("./identity.js", () => ({
   resolveIdentity: vi.fn(() => ({
     client: IDENTITY_CLIENT,
     login: "keiko-for-quality[bot]",
-    usedApp: true,
   })),
 }));
 
@@ -302,6 +301,7 @@ describe("runAction: writing the store back", () => {
     ["an implausible finding count", "settlement.incomplete.engine_error"],
     ["an unlisted warning", "settlement.incomplete.warning_not_allowlisted"],
     ["a degraded publication", "settlement.incomplete.publication_degraded"],
+    ["a non-success engine status", "settlement.incomplete.engine_status_not_success"],
   ] as const)("never writes when the manifest is not to be believed: %s", async (_name, reason) => {
     const updated: CacheStore = {
       schemaVersion: SUPPORTED_STORE_SCHEMA,

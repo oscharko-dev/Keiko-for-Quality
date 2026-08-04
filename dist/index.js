@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 var FULL_SHA = /^[0-9a-f]{40}$/;
 var SHA256 = /^[0-9a-f]{64}$/;
 var VERSION = /^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
-var CONTROL_CHARACTERS = new RegExp("[\\u0000-\\u001F\\u007F-\\u009F]");
+var CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F]/;
 var ValidationError = class extends Error {
   field;
   constructor(field) {
@@ -411,9 +411,6 @@ var GlobSet = class {
   matches(path) {
     return this.matchers.some((matcher) => matcher.test(path));
   }
-  get size() {
-    return this.matchers.length;
-  }
 };
 
 // src/config/profile.ts
@@ -431,7 +428,7 @@ var MAX_PATHS_PER_INSTRUCTION = 16;
 var MAX_INSTRUCTION_PATH_LENGTH = 512;
 var MAX_INSTRUCTION_TEXT_LENGTH = 1024;
 var MAX_TOTAL_INSTRUCTION_TEXT_LENGTH = 8192;
-var CONTROL_EXCEPT_NEWLINE = new RegExp("[\\u0000-\\u0009\\u000B-\\u001F\\u007F-\\u009F]");
+var CONTROL_EXCEPT_NEWLINE = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/;
 function parseExclusions(value, field) {
   return asArray(value, field, 512).map((entry, i) => {
     const scope = `${field}[${String(i)}]`;
@@ -638,7 +635,6 @@ var VERSION2 = versionTag("v1.8.4");
 var ENGINE_PIN = {
   engine: "alibaba/open-code-review",
   version: VERSION2,
-  releaseUrl: `https://github.com/alibaba/open-code-review/releases/tag/${VERSION2}`,
   platforms: {
     "linux-x64": {
       asset: "opencodereview-linux-amd64",
@@ -961,7 +957,7 @@ function settle(inventory, result, profile, config, memoizedPaths = NO_MEMOIZED_
 // src/publish/marker.ts
 import { createHash as createHash2 } from "node:crypto";
 var MARKER_PREFIX = "keiko-for-quality";
-var MARKER_PATTERN = new RegExp(`<!--\\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\\s*-->`);
+var MARKER_PATTERN = new RegExp(String.raw`<!--\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\s*-->`);
 var FIELD_SEPARATOR2 = "\0";
 function normalizeUnicodeText(input) {
   return input.normalize("NFC").replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").replace(/[\u2018\u2019\u201A\u201B]/g, "'").replace(/[\u201C\u201D\u201E\u201F]/g, '"').replace(new RegExp("\\p{Zs}", "gu"), " ").toLowerCase();
@@ -1153,21 +1149,21 @@ function isReasonCode(value) {
 }
 
 // src/publish/sanitize.ts
-var CONTROL_EXCEPT_WHITESPACE = new RegExp("[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]");
-var BIDIRECTIONAL = new RegExp("[\\u202A-\\u202E\\u2066-\\u2069\\u200E\\u200F\\u061C]");
-var ZERO_WIDTH = new RegExp("[\\u200B\\u200C\\u200D\\u2060\\uFEFF\\u180E]");
-var HTML_TAG = new RegExp("<[A-Za-z!/?]");
-var SUGGESTION_BLOCK = new RegExp("```+\\s*suggestion", "i");
-var MENTION = new RegExp("(^|[^\\w`])@[A-Za-z0-9][A-Za-z0-9-]{0,38}", "m");
-var IMAGE = new RegExp("!\\[");
-var LINK = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.|^//[A-Za-z0-9-]+\\.[A-Za-z])", "m");
+var CONTROL_EXCEPT_WHITESPACE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/;
+var BIDIRECTIONAL = /[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/;
+var ZERO_WIDTH = /[\u200B\u200C\u200D\u2060\uFEFF\u180E]/;
+var HTML_TAG = /<[A-Za-z!/?]/;
+var SUGGESTION_BLOCK = /(?<!`)```+\s*suggestion/i;
+var MENTION = /(^|[^\w`])@[A-Za-z0-9][A-Za-z0-9-]{0,38}/m;
+var IMAGE = /!\[/;
+var LINK = /([A-Za-z][A-Za-z0-9+.-]*:\/\/|\bwww\.|^\/\/[A-Za-z0-9-]+\.[A-Za-z])/m;
 var CREDENTIAL_SHAPES = [
-  new RegExp("gh[pousr]_[A-Za-z0-9]{16,}"),
-  new RegExp("github_pat_[A-Za-z0-9_]{20,}"),
-  new RegExp("sk-[A-Za-z0-9]{20,}"),
-  new RegExp("-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-  new RegExp("(?:AKIA|ASIA)[A-Z0-9]{16}"),
-  new RegExp("eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\.")
+  /gh[pousr]_[A-Za-z0-9]{16,}/,
+  /github_pat_\w{20,}/,
+  /sk-[A-Za-z0-9]{20,}/,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /(?:AKIA|ASIA)[A-Z0-9]{16}/,
+  /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./
 ];
 var MAX_BODY_CHARS = 8e3;
 var MIN_BODY_CHARS = 12;
@@ -1183,7 +1179,7 @@ var MASKED_CHECKS = [
   { pattern: LINK, reason: "link" },
   { pattern: MENTION, reason: "mention" }
 ];
-var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+var FENCE_OPEN = /^ {0,3}(`{3,}(?!`)|~{3,}(?!~))(.*)$/;
 var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 var INLINE_SPAN = /(?<!`)(`+)(?!`)([^\n]+?)\1(?!`)/g;
 function closingFenceIndex(lines, from, marker) {
@@ -1203,13 +1199,16 @@ function openingFenceMarker(line) {
 }
 function maskFencedBlocks(body) {
   const lines = body.split("\n");
-  for (let i = 0; i < lines.length; i += 1) {
+  let i = 0;
+  while (i < lines.length) {
     const marker = openingFenceMarker(lines[i] ?? "");
-    if (marker === void 0) continue;
-    const close = closingFenceIndex(lines, i + 1, marker);
-    if (close === -1) continue;
+    const close = marker === void 0 ? -1 : closingFenceIndex(lines, i + 1, marker);
+    if (close === -1) {
+      i += 1;
+      continue;
+    }
     for (let k = i + 1; k < close; k += 1) lines[k] = (lines[k] ?? "").replace(/./g, "x");
-    i = close;
+    i = close + 1;
   }
   return lines.join("\n");
 }
@@ -1222,12 +1221,9 @@ function maskCodeRegions(body) {
 function looksLikeCredential(text3) {
   return CREDENTIAL_SHAPES.some((pattern) => pattern.test(text3));
 }
-var MENTION_NEUTRALIZE = new RegExp(
-  "(^|[^\\w`])(@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:/[A-Za-z0-9][A-Za-z0-9-]{0,38})?)",
-  "gm"
-);
-var LINK_NEUTRALIZE = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.)\\S*", "g");
-var URL_TRAILING_PUNCTUATION = /[.,;:!?)\]}'"]+$/;
+var MENTION_NEUTRALIZE = /(^|[^\w`])(@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\/[A-Za-z0-9][A-Za-z0-9-]{0,38})?)/gm;
+var LINK_NEUTRALIZE = /([A-Za-z][A-Za-z0-9+.-]*:\/\/|\bwww\.)\S*/g;
+var URL_TRAILING_PUNCTUATION = /(?<![.,;:!?)\]}'"])[.,;:!?)\]}'"]+$/;
 var GENERIC_HEAD = /[A-Za-z_$][\w$]*</g;
 function mentionSpans(masked) {
   const spans = [];
@@ -1282,7 +1278,7 @@ function resolveOverlaps(spans) {
   const ordered = [...spans].sort((a, b) => a.start - b.start);
   const accepted = [];
   for (const span of ordered) {
-    const last = accepted[accepted.length - 1];
+    const last = accepted.at(-1);
     if (last !== void 0 && span.start < last.end) continue;
     accepted.push(span);
   }
@@ -1309,12 +1305,16 @@ function neutralize(body) {
 }
 function hasUnclosedFence(body) {
   const lines = body.split("\n");
-  for (let i = 0; i < lines.length; i += 1) {
+  let i = 0;
+  while (i < lines.length) {
     const marker = openingFenceMarker(lines[i] ?? "");
-    if (marker === void 0) continue;
+    if (marker === void 0) {
+      i += 1;
+      continue;
+    }
     const close = closingFenceIndex(lines, i + 1, marker);
     if (close === -1) return true;
-    i = close;
+    i = close + 1;
   }
   return false;
 }
@@ -1325,12 +1325,13 @@ function withNeutralizedCount(body, neutralized) {
   return neutralized > 0 ? { ok: true, body, neutralized } : { ok: true, body };
 }
 function sanitizeFindingBody(raw) {
-  const body = raw.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const body = raw.replaceAll("\r\n", "\n").replaceAll(/\n{3,}/g, "\n\n").trim();
   if (body.length < MIN_BODY_CHARS) return { ok: false, reason: "empty" };
   for (const check of RAW_CHECKS) {
     if (check.pattern.test(body)) return { ok: false, reason: check.reason };
   }
   if (looksLikeCredential(body)) return { ok: false, reason: "credential" };
+  if (body.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
   const { body: candidate, neutralized } = neutralizeGuardingUnclosedFence(body);
   if (candidate.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
   const masked = maskCodeRegions(candidate);
@@ -1340,7 +1341,7 @@ function sanitizeFindingBody(raw) {
   return withNeutralizedCount(candidate, neutralized);
 }
 function escapeInline(text3) {
-  return text3.replace(/[`\\]/g, "\\$&");
+  return text3.replace(/[`\\]/g, String.raw`\$&`);
 }
 
 // src/publish/presentation.ts
@@ -1383,7 +1384,8 @@ function splitTitle(prose) {
   return { title: "", body: trimmed };
 }
 function repairPrompt(context, title) {
-  const where = `${escapeInline(context.path)}${context.line > 0 ? ` around line ${String(context.line)}` : ""}`;
+  const atLine = context.line > 0 ? ` around line ${String(context.line)}` : "";
+  const where = `${escapeInline(context.path)}${atLine}`;
   return [
     "Verify this finding against the current code before acting on it.",
     "",
@@ -1400,8 +1402,9 @@ function composeFindingBody(sanitizedProse, marker, context) {
   const { title, body } = splitTitle(sanitizedProse);
   const parts = [`_${category.icon} ${category.text}_ | _${severity.icon} ${severity.text}_`, ""];
   if (title !== "") parts.push(`**${title}**`, "");
-  parts.push(body, "");
   parts.push(
+    body,
+    "",
     "<details>",
     "<summary>\u{1F916} Prompt for AI agents</summary>",
     "",
@@ -1950,10 +1953,15 @@ function validPair(parsed) {
   if (!FINDING_SEVERITIES.includes(severity)) return void 0;
   return { category, severity };
 }
+function withoutTrailingSlashes(value) {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end -= 1;
+  return value.slice(0, end);
+}
 async function requestPair(prompt, deps, seed) {
   const doFetch = deps.fetchImpl ?? fetch;
   try {
-    const response = await doFetch(`${deps.endpoint.replace(/\/+$/, "")}/chat/completions`, {
+    const response = await doFetch(`${withoutTrailingSlashes(deps.endpoint)}/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -2414,7 +2422,8 @@ function contractPairsSection(pairs) {
     ...lines
   ].join("\n");
 }
-function buildRuleFile(profile, guidelines = { paths: [] }, mechanicallyClean = []) {
+var NO_GUIDELINES = Object.freeze({ paths: Object.freeze([]) });
+function buildRuleFile(profile, guidelines = NO_GUIDELINES, mechanicallyClean = []) {
   const include = [...profile.profile.reviewRelevant];
   if (include.length === 0) {
     throw new TypeError("profile.reviewRelevant must declare at least one pattern");
@@ -2480,6 +2489,11 @@ function readBody(request) {
 function isChatCompletionsPath(path) {
   const pathname = path.split("?")[0] ?? path;
   return pathname.endsWith("/chat/completions");
+}
+function withoutTrailingSlashes2(value) {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end -= 1;
+  return value.slice(0, end);
 }
 function pinSampling(path, body, options2, includeCacheKey) {
   if (!isChatCompletionsPath(path)) return { body, cacheKeyInjected: false };
@@ -2560,7 +2574,7 @@ async function forward(options2, request, response, usage, latch) {
     const withBody = method !== "GET" && method !== "HEAD";
     const isChatCompletions = isChatCompletionsPath(path);
     countRequest(usage, isChatCompletions);
-    const url = `${options2.upstreamUrl.replace(/\/+$/, "")}${path}`;
+    const url = `${withoutTrailingSlashes2(options2.upstreamUrl)}${path}`;
     const upstream = await fetchWithCacheKeyFallback(
       doFetch,
       url,
@@ -2583,6 +2597,13 @@ async function forward(options2, request, response, usage, latch) {
     } catch {
     }
   }
+}
+function closeServer(server) {
+  return new Promise((done) => {
+    server.close(() => {
+      done();
+    });
+  });
 }
 function startModelProxy(options2) {
   const usage = {
@@ -2607,11 +2628,7 @@ function startModelProxy(options2) {
       }
       resolve({
         url: `http://127.0.0.1:${String(address.port)}`,
-        close: () => new Promise((done) => {
-          server.close(() => {
-            done();
-          });
-        }),
+        close: () => closeServer(server),
         usage: () => ({ ...usage })
       });
     });
@@ -2768,6 +2785,10 @@ function recordModelUsage(diagnostics, proxy, options2) {
     }
   });
 }
+function failureReason(error) {
+  if (!(error instanceof ExecFailure)) return "engine.run.spawn_failed";
+  return error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit";
+}
 async function runEngine(options2, diagnostics) {
   const token = readModelToken(options2.config, options2.env);
   if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
@@ -2795,7 +2816,7 @@ async function runEngine(options2, diagnostics) {
     });
     return { stdout: result.stdout.toString("utf8"), ruleDigest };
   } catch (error) {
-    const reason = error instanceof ExecFailure ? error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit" : "engine.run.spawn_failed";
+    const reason = failureReason(error);
     diagnostics.record(reason, {
       headSha: options2.pair.head,
       durationMs: Date.now() - started
@@ -2906,6 +2927,10 @@ function parseNumstatCount(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : 0;
 }
+function recordNumstatEntry(binary, changedLines, path, isBinary, lines) {
+  if (isBinary) binary.add(path);
+  changedLines.set(path, lines);
+}
 function parseNumstat(text3) {
   const parts = text3.split("\0");
   const binary = /* @__PURE__ */ new Set();
@@ -2921,14 +2946,10 @@ function parseNumstat(text3) {
     const inlinePath = fields.slice(2).join("	");
     if (inlinePath === "") {
       const target = parts[i + 2];
-      if (target !== void 0) {
-        if (isBinary) binary.add(target);
-        changedLines.set(target, lines);
-      }
+      if (target !== void 0) recordNumstatEntry(binary, changedLines, target, isBinary, lines);
       i += 3;
     } else {
-      if (isBinary) binary.add(inlinePath);
-      changedLines.set(inlinePath, lines);
+      recordNumstatEntry(binary, changedLines, inlinePath, isBinary, lines);
       i += 1;
     }
   }
@@ -2964,9 +2985,9 @@ var MAX_TYPE_ALIAS_CHARS = 200;
 var MAX_PASS_FINDINGS = 10;
 var SCAN_WINDOW = 400;
 var INTERFACE_START = /^\s*export\s+interface\s+([A-Za-z_$][\w$]*)/;
-var TYPE_ALIAS_START = /^\s*export\s+type\s+([A-Za-z_$][\w$]*)\s*=\s*(.*)$/;
+var TYPE_ALIAS_START = /^\s*export\s+type\s+([A-Za-z_$][\w$]*)\s*=\s*(\S.*)?$/;
 var FUNCTION_START = /^\s*export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/;
-var CONST_START = /^\s*export\s+const\s+([A-Za-z_$][\w$]*)\s*:\s*(.+)$/;
+var CONST_START = /^\s*export\s+const\s+([A-Za-z_$][\w$]*)\s*:\s*(\S.*|.)$/;
 function collapseWhitespace(text3) {
   return text3.replace(/\s+/g, " ").trim();
 }
@@ -3136,7 +3157,7 @@ ${summary}`;
 async function postChangePassRequest(prompt, deps) {
   const doFetch = deps.fetchImpl ?? fetch;
   try {
-    const response = await doFetch(`${deps.endpoint.replace(/\/+$/, "")}/chat/completions`, {
+    const response = await doFetch(`${deps.endpoint.replace(/(?<!\/)\/+$/, "")}/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -3357,7 +3378,7 @@ function matchingBrace(source, openIndex) {
   }
   return -1;
 }
-var ANOTHER_MEMBER_START = /[ \t]*(?:[A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')[ \t]*\??[ \t]*:/y;
+var ANOTHER_MEMBER_START = /[ \t]*(?:[A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')[ \t]*(?:\?[ \t]*)?:/y;
 function analyzeTypeText(text3) {
   let depth = 0;
   let peak = 0;
@@ -3379,7 +3400,7 @@ function analyzeTypeText(text3) {
   }
   return { maxDepth: peak, ambiguous };
 }
-var PROPERTY_SIGNATURE = /^(?:readonly\s+)?([A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')(\??)\s*:\s*([\s\S]*)$/;
+var PROPERTY_SIGNATURE = /^(?:readonly\s+)?([A-Za-z_$][\w$]*|"[^"\n]*"|'[^'\n]*')(\??)\s*:\s*(\S[\s\S]*)?$/;
 var NEW_SIGNATURE = /^new\b/;
 function unquote(raw) {
   const first = raw.charAt(0);
@@ -3591,14 +3612,15 @@ function findUncoveredUnionMembers(baseSource, headSource, counterpartSource) {
     const baseMembers = new Set(baseUnion.members);
     for (const member of headUnion.members) {
       if (baseMembers.has(member)) continue;
-      const counterpartMentions = countLiteralMentions(counterpartSource, member);
-      if (counterpartMentions === 0) gaps.push({ unionName: name, member, counterpartMentions });
+      if (countLiteralMentions(counterpartSource, member) === 0) {
+        gaps.push({ unionName: name, member });
+      }
     }
   }
   return gaps;
 }
 function escapeForCodeSpan(text3) {
-  return text3.replace(/[`\\]/g, "\\$&");
+  return text3.replace(/[`\\]/g, String.raw`\$&`);
 }
 function describeMismatch(mismatch, leftPath, rightPath) {
   const presentPath = mismatch.missingFrom === "right" ? leftPath : rightPath;
@@ -3632,7 +3654,7 @@ var MAX_PIN_SITES = 200;
 var MAX_SOURCE_CHARS2 = 2e6;
 var SHA_SOURCE = String.raw`\b[0-9a-f]{40}\b`;
 var USES_PREFIX = /\buses\s*:\s*["']?[^\s"'@]+@$/;
-var ASSIGNMENT_PREFIX = /[A-Za-z_$][\w$.-]*\s*[:=]\s*["'`]?$/;
+var ASSIGNMENT_PREFIX = /[A-Za-z_$][\d.-]*\s*[:=]\s*["'`]?$/;
 function commentMarkerIndex(prefix) {
   const hash = prefix.indexOf("#");
   let slashes = prefix.indexOf("//");
@@ -3666,7 +3688,7 @@ function collectPinSites(lines) {
   const shaPattern = new RegExp(SHA_SOURCE, "gi");
   const out = [];
   for (let i = 0; i < lines.length; i += 1) {
-    if (scanLine(shaPattern, lines[i] ?? "", i + 1, out)) return out;
+    if (scanLine(shaPattern, lines[i] ?? "", i + 1, out)) break;
   }
   return out;
 }
@@ -3732,13 +3754,13 @@ function detectPinDesync(base, head) {
   return results;
 }
 function escapeForCodeSpan2(text3) {
-  return text3.replace(/[`\\]/g, "\\$&");
+  return text3.replace(/[`\\]/g, String.raw`\$&`);
 }
 function formatLineList(sites) {
   const lines = [...new Set(sites.map((site) => site.line))].sort((a, b) => a - b);
   const label2 = lines.length === 1 ? "line" : "lines";
   if (lines.length <= 1) return `${label2} ${String(lines[0] ?? "?")}`;
-  const last = lines[lines.length - 1] ?? "?";
+  const last = lines.at(-1) ?? "?";
   return `${label2} ${lines.slice(0, -1).join(", ")} and ${String(last)}`;
 }
 function describePinDesync(desync, path) {
@@ -3838,8 +3860,8 @@ async function resolveReviewPair(ctx, base, head) {
   return { base, head, mergeBase: await mergeBase(ctx, base, head) };
 }
 function bucketKey(item) {
-  const kind = item.classification.kind.replace(/-/g, "_");
-  return item.classification.kind === "mechanically-clean" ? `${kind}_${item.classification.reason.replace(/-/g, "_")}` : kind;
+  const kind = item.classification.kind.replaceAll("-", "_");
+  return item.classification.kind === "mechanically-clean" ? `${kind}_${item.classification.reason.replaceAll("-", "_")}` : kind;
 }
 function countByKind(items) {
   const counts = {};
@@ -3947,7 +3969,7 @@ var GitHubClient = class {
   token;
   graphqlBase;
   constructor(apiBase, token, graphqlBase = DEFAULT_GRAPHQL_BASE) {
-    this.apiBase = apiBase.replace(/\/+$/, "");
+    this.apiBase = apiBase.replace(/(?<!\/)\/+$/, "");
     this.token = token;
     this.graphqlBase = graphqlBase;
   }
@@ -4391,6 +4413,16 @@ function classifySuppression(finding, sanitizedBody, marker, existingMarkers, ex
   if (findsDispositionedConversation(candidate, existingThreads, identity)) return "dispositioned";
   return void 0;
 }
+function suppressionCode(suppression) {
+  switch (suppression) {
+    case "exact":
+      return "publish.finding_suppressed_duplicate";
+    case "similar":
+      return "publish.finding_suppressed_similar";
+    case "dispositioned":
+      return "dedup.dispositioned";
+  }
+}
 async function publishComposedFinding(context, finding, marker, sanitizedBody, counters, diagnostics) {
   const ladder = placementLadder(finding, context.items.get(finding.path), context.headSha);
   const document = composeFindingBody(sanitizedBody, markerComment(marker), {
@@ -4521,8 +4553,7 @@ function planCrossRun(context, candidate, prefetch, counters, diagnostics) {
     if (suppression === "exact") counters.suppressedExactDuplicate += 1;
     else if (suppression === "similar") counters.suppressedSimilar += 1;
     else counters.suppressedDispositioned += 1;
-    const code = suppression === "exact" ? "publish.finding_suppressed_duplicate" : suppression === "similar" ? "publish.finding_suppressed_similar" : "dedup.dispositioned";
-    diagnostics.record(code, { headSha: context.headSha });
+    diagnostics.record(suppressionCode(suppression), { headSha: context.headSha });
     return void 0;
   }
   return { finding, sanitizedBody };
@@ -4655,8 +4686,7 @@ function computeAllottedBudget(tokenBudget, reviewableFileCount, reviewableChang
   const clamped = clamp(sizeScaled, ALLOTMENT_FLOOR, ALLOTMENT_CEILING);
   return Math.round(Math.min(tokenBudget, clamped));
 }
-var EMPTY_EXCLUDE = /* @__PURE__ */ new Set();
-function reviewableChangedLines(inventory, excluded = EMPTY_EXCLUDE) {
+function reviewableChangedLines(inventory, excluded) {
   let total = 0;
   for (const item of inventory.items) {
     if (item.reviewable && !excluded.has(item.path)) total += item.changedLines;
@@ -4715,7 +4745,7 @@ var INERT_MEMO = {
   pathSetDigest: void 0,
   contextInvalidated: 0
 };
-var EMPTY_FRESH = /* @__PURE__ */ new Set();
+var EMPTY_BATCH = { findings: [], fresh: /* @__PURE__ */ new Set() };
 function cacheCounts(memo) {
   return { cacheHits: memo.hits.size, cacheMisses: memo.eligiblePaths.size - memo.hits.size };
 }
@@ -4758,49 +4788,32 @@ function truncatedCacheFields(request, inventory, memo, findings, covered) {
     ...finalized === void 0 ? {} : { updatedCacheStore: finalized.store }
   };
 }
-async function publishIncompleteSettlement(request, context, reason, anchor, findings, freshEngineFindings, ledger, diagnostics) {
-  const prefetch = findings.length > 0 || anchor !== void 0 ? await prefetchExistingConversations(context) : void 0;
-  const published = findings.length === 0 ? void 0 : await publishAudited(
-    request,
-    context,
-    findings,
-    freshEngineFindings,
-    ledger,
-    diagnostics,
-    prefetch
-  );
+async function publishIncompleteSettlement(run2, context, reason, anchor, batch) {
+  const prefetch = batch.findings.length > 0 || anchor !== void 0 ? await prefetchExistingConversations(context) : void 0;
+  const published = batch.findings.length === 0 ? void 0 : await publishAudited(run2, context, batch, prefetch);
   if (anchor !== void 0) {
-    await publishIncompleteNotice(context, reason, anchor, diagnostics, prefetch);
+    await publishIncompleteNotice(context, reason, anchor, run2.diagnostics, prefetch);
   }
   return published;
 }
-async function settleIncomplete(request, inventory, reason, ledger, diagnostics, findings = [], freshEngineFindings = EMPTY_FRESH, memo = INERT_MEMO, counts, covered) {
-  diagnostics.record(reason, {
-    headSha: request.head,
-    ...counts !== void 0 ? { counts } : {}
+async function settleIncomplete(run2, inventory, cause, memo = INERT_MEMO, batch = EMPTY_BATCH, covered) {
+  run2.diagnostics.record(cause.reason, {
+    headSha: run2.request.head,
+    ...cause.counts !== void 0 ? { counts: cause.counts } : {}
   });
-  if (!await headIsCurrent(request)) {
-    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+  if (!await headIsCurrent(run2.request)) {
+    run2.diagnostics.record("publish.abandoned_stale_head", { headSha: run2.request.head });
     return abandonedReport(inventory, memo);
   }
-  const context = publishContextFor(request, inventory);
+  const context = publishContextFor(run2.request, inventory);
   const anchor = noticeAnchor(inventory);
-  const published = await publishIncompleteSettlement(
-    request,
-    context,
-    reason,
-    anchor,
-    findings,
-    freshEngineFindings,
-    ledger,
-    diagnostics
-  );
-  const storedFindings = published === void 0 ? findings : findingsForStorage(findings, published.auditedByOriginal);
+  const published = await publishIncompleteSettlement(run2, context, cause.reason, anchor, batch);
+  const storedFindings = published === void 0 ? batch.findings : findingsForStorage(batch.findings, published.auditedByOriginal);
   return {
     outcome: "incomplete",
-    reason,
+    reason: cause.reason,
     ...inventoryCounts(inventory),
-    ...truncatedCacheFields(request, inventory, memo, storedFindings, covered),
+    ...truncatedCacheFields(run2.request, inventory, memo, storedFindings, covered),
     ...cacheCounts(memo),
     ...published === void 0 ? {} : { publish: published.outcome }
   };
@@ -4906,6 +4919,20 @@ async function collectPinDesyncFindings(ctx, request, inventory, findings) {
   }
   return found;
 }
+function pushGateFindings(findings, path, items, describe) {
+  for (const item of items) {
+    if (findings.length >= MAX_GATE_FINDINGS) return true;
+    findings.push({
+      path,
+      content: describe(item),
+      startLine: 0,
+      endLine: 0,
+      category: "bug",
+      severity: "high"
+    });
+  }
+  return false;
+}
 async function compareAgainstCounterparts(ctx, base, head, item, pair, findings) {
   const path = item.path;
   const left = await readTextAtCommit(ctx, head, path);
@@ -4916,29 +4943,23 @@ async function compareAgainstCounterparts(ctx, base, head, item, pair, findings)
     const right = await readTextAtCommit(ctx, head, counterpart);
     if (right === void 0) continue;
     compared += 1;
-    for (const mismatch of compareDeclaredContracts(left, right)) {
-      if (findings.length >= MAX_GATE_FINDINGS) return compared;
-      findings.push({
-        path: item.path,
-        content: describeMismatch(mismatch, path, counterpart),
-        startLine: 0,
-        endLine: 0,
-        category: "bug",
-        severity: "high"
-      });
-    }
+    const mismatches = compareDeclaredContracts(left, right);
+    const capped = pushGateFindings(
+      findings,
+      item.path,
+      mismatches,
+      (mismatch) => describeMismatch(mismatch, path, counterpart)
+    );
+    if (capped) return compared;
     if (leftBase === void 0) continue;
-    for (const gap of findUncoveredUnionMembers(leftBase, left, right)) {
-      if (findings.length >= MAX_GATE_FINDINGS) return compared;
-      findings.push({
-        path: item.path,
-        content: describeUnionGap(gap, path, counterpart),
-        startLine: 0,
-        endLine: 0,
-        category: "bug",
-        severity: "high"
-      });
-    }
+    const gaps = findUncoveredUnionMembers(leftBase, left, right);
+    const cappedByGaps = pushGateFindings(
+      findings,
+      item.path,
+      gaps,
+      (gap) => describeUnionGap(gap, path, counterpart)
+    );
+    if (cappedByGaps) return compared;
   }
   return compared;
 }
@@ -5042,14 +5063,14 @@ function publicationDegradedCounts(outcome) {
 }
 var AUDIT_RESERVE_PER_FINDING = 2e3;
 var NO_AUDITED = /* @__PURE__ */ new Map();
-async function auditFreshSurvivors(request, fresh, ledger, diagnostics) {
+async function auditFreshSurvivors(run2, fresh) {
   if (fresh.length === 0) return NO_AUDITED;
-  const deps = classifyDeps(request);
+  const deps = classifyDeps(run2.request);
   if (deps === void 0) return NO_AUDITED;
-  const remaining = request.config.tokenBudget - ledger.engine - ledger.classify;
+  const remaining = run2.request.config.tokenBudget - run2.ledger.engine - run2.ledger.classify;
   if (remaining < AUDIT_RESERVE_PER_FINDING * fresh.length) {
-    diagnostics.record("classify.skipped_budget", {
-      headSha: request.head,
+    run2.diagnostics.record("classify.skipped_budget", {
+      headSha: run2.request.head,
       counts: { skipped: fresh.length, remaining }
     });
     return NO_AUDITED;
@@ -5058,8 +5079,8 @@ async function auditFreshSurvivors(request, fresh, ledger, diagnostics) {
     fresh.map((survivor) => survivor.finding),
     deps
   );
-  ledger.classify += audit.tokens;
-  diagnostics.record("classify.audited", {
+  run2.ledger.classify += audit.tokens;
+  run2.diagnostics.record("classify.audited", {
     counts: { changed: audit.changed, tokens: audit.tokens }
   });
   const byOriginal = /* @__PURE__ */ new Map();
@@ -5076,27 +5097,19 @@ function substituteAudited(survivors, auditedByOriginal) {
     return audited === void 0 ? survivor : { ...survivor, finding: audited };
   });
 }
-async function planAndAudit(request, context, findings, freshEngineFindings, ledger, diagnostics, prefetch) {
-  const plan = await planPublication(context, findings, diagnostics, prefetch);
-  const fresh = plan.survivors.filter((survivor) => freshEngineFindings.has(survivor.finding));
-  const auditedByOriginal = await auditFreshSurvivors(request, fresh, ledger, diagnostics);
+async function planAndAudit(run2, context, batch, prefetch) {
+  const plan = await planPublication(context, batch.findings, run2.diagnostics, prefetch);
+  const fresh = plan.survivors.filter((survivor) => batch.fresh.has(survivor.finding));
+  const auditedByOriginal = await auditFreshSurvivors(run2, fresh);
   return {
     plan,
     survivors: substituteAudited(plan.survivors, auditedByOriginal),
     auditedByOriginal
   };
 }
-async function publishAudited(request, context, findings, freshEngineFindings, ledger, diagnostics, prefetch) {
-  const { plan, survivors, auditedByOriginal } = await planAndAudit(
-    request,
-    context,
-    findings,
-    freshEngineFindings,
-    ledger,
-    diagnostics,
-    prefetch
-  );
-  const outcome = await executePublication(context, { ...plan, survivors }, diagnostics);
+async function publishAudited(run2, context, batch, prefetch) {
+  const { plan, survivors, auditedByOriginal } = await planAndAudit(run2, context, batch, prefetch);
+  const outcome = await executePublication(context, { ...plan, survivors }, run2.diagnostics);
   return { outcome, auditedByOriginal };
 }
 function findingsForStorage(findings, auditedByOriginal) {
@@ -5125,46 +5138,46 @@ function finalizeCacheStore(request, inventory, memo, engineFindings, restrictTo
     appended: newEntries.length
   };
 }
-async function reportDegradedPublication(request, inventory, memo, ledger, publish, diagnostics) {
+async function reportDegradedPublication(run2, inventory, memo, publish) {
   const report = await settleIncomplete(
-    request,
+    run2,
     inventory,
-    "settlement.incomplete.publication_degraded",
-    ledger,
-    diagnostics,
-    [],
-    EMPTY_FRESH,
-    memo,
-    publicationDegradedCounts(publish)
+    {
+      reason: "settlement.incomplete.publication_degraded",
+      counts: publicationDegradedCounts(publish)
+    },
+    memo
   );
   return { ...report, publish };
 }
-async function publishSettledFindings(request, inventory, settlement, memo, ledger, startedAt, diagnostics) {
-  const gate = await collectGateFindings(request, inventory, diagnostics);
-  const changePass = await collectChangePassFindings(request, inventory, ledger, diagnostics);
+async function publishSettledFindings(run2, inventory, settlement, memo, startedAt) {
+  const gate = await collectGateFindings(run2.request, inventory, run2.diagnostics);
+  const changePass = await collectChangePassFindings(
+    run2.request,
+    inventory,
+    run2.ledger,
+    run2.diagnostics
+  );
   const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
   const freshEngineFindings = /* @__PURE__ */ new Set([
     ...settlement.findings,
     ...changePass
   ]);
   const { outcome: publish, auditedByOriginal } = await publishAudited(
-    request,
-    publishContextFor(request, inventory),
-    merged,
-    freshEngineFindings,
-    ledger,
-    diagnostics
+    run2,
+    publishContextFor(run2.request, inventory),
+    { findings: merged, fresh: freshEngineFindings }
   );
   if (publicationDegraded(publish)) {
-    return reportDegradedPublication(request, inventory, memo, ledger, publish, diagnostics);
+    return reportDegradedPublication(run2, inventory, memo, publish);
   }
-  diagnostics.record("settlement.complete", {
-    headSha: request.head,
+  run2.diagnostics.record("settlement.complete", {
+    headSha: run2.request.head,
     durationMs: Date.now() - startedAt,
     counts: { published: publish.published, suppressed: publish.suppressed }
   });
   const finalized = finalizeCacheStore(
-    request,
+    run2.request,
     inventory,
     memo,
     findingsForStorage(settlement.findings, auditedByOriginal)
@@ -5195,30 +5208,27 @@ function abandonedReport(inventory, memo) {
     cacheAppended: 0
   };
 }
-async function abandonIfStale(request, inventory, memo, diagnostics) {
-  if (await headIsCurrent(request)) return void 0;
-  diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+async function abandonIfStale(run2, inventory, memo) {
+  if (await headIsCurrent(run2.request)) return void 0;
+  run2.diagnostics.record("publish.abandoned_stale_head", { headSha: run2.request.head });
   return abandonedReport(inventory, memo);
 }
-async function settleOrReport(request, inventory, memo, ledger, diagnostics) {
+async function settleOrReport(run2, inventory, memo) {
   try {
-    const settlement = await executeEngine(request, inventory, memo, ledger, diagnostics);
-    diagnostics.record(
+    const settlement = await executeEngine(
+      run2.request,
+      inventory,
+      memo,
+      run2.ledger,
+      run2.diagnostics
+    );
+    run2.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
-      { headSha: request.head }
+      { headSha: run2.request.head }
     );
     return settlement;
   } catch {
-    return settleIncomplete(
-      request,
-      inventory,
-      "settlement.incomplete.engine_error",
-      ledger,
-      diagnostics,
-      [],
-      EMPTY_FRESH,
-      memo
-    );
+    return settleIncomplete(run2, inventory, { reason: "settlement.incomplete.engine_error" }, memo);
   }
 }
 async function performReview(request, diagnostics) {
@@ -5248,6 +5258,7 @@ async function resolvePairOrReport(ctx, request, diagnostics) {
 }
 async function performReviewInner(request, diagnostics, ledger) {
   const started = Date.now();
+  const run2 = { request, ledger, diagnostics };
   diagnostics.record("run.started", { headSha: request.head });
   const ctx = gitContext(request);
   const pair = await resolvePairOrReport(ctx, request, diagnostics);
@@ -5260,7 +5271,7 @@ async function performReviewInner(request, diagnostics, ledger) {
     diagnostics
   );
   if (inventory.unclassified.length > 0) {
-    return settleIncomplete(request, inventory, "inventory.unclassified_path", ledger, diagnostics);
+    return settleIncomplete(run2, inventory, { reason: "inventory.unclassified_path" });
   }
   if (inventory.reviewablePaths.size === 0) {
     diagnostics.record("settlement.complete", {
@@ -5270,27 +5281,26 @@ async function performReviewInner(request, diagnostics, ledger) {
     return emptyReviewReport(inventory);
   }
   const memo = prepareMemoization(request, inventory, diagnostics);
-  const preflight = await abandonIfStale(request, inventory, memo, diagnostics);
+  const preflight = await abandonIfStale(run2, inventory, memo);
   if (preflight !== void 0) return preflight;
-  const settlement = await settleOrReport(request, inventory, memo, ledger, diagnostics);
+  const settlement = await settleOrReport(run2, inventory, memo);
   if ("outcome" in settlement) return settlement;
   if (settlement.status === "incomplete") {
     return settleIncomplete(
-      request,
+      run2,
       inventory,
-      settlement.reason,
-      ledger,
-      diagnostics,
-      mergeHitFindings(settlement.findings, memo.hits),
-      new Set(settlement.findings),
+      { reason: settlement.reason },
       memo,
-      void 0,
+      {
+        findings: mergeHitFindings(settlement.findings, memo.hits),
+        fresh: new Set(settlement.findings)
+      },
       verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths : void 0
     );
   }
-  const postRun = await abandonIfStale(request, inventory, memo, diagnostics);
+  const postRun = await abandonIfStale(run2, inventory, memo);
   if (postRun !== void 0) return postRun;
-  return publishSettledFindings(request, inventory, settlement, memo, ledger, started, diagnostics);
+  return publishSettledFindings(run2, inventory, settlement, memo, started);
 }
 
 // src/action/eligibility.ts
@@ -5298,7 +5308,7 @@ function evaluateEligibility(facts, targetBranches2) {
   if (facts.draft) {
     return { eligible: false, reason: "eligibility.skipped.draft" };
   }
-  if (facts.headRepoFullName === void 0 || facts.headRepoFullName.toLowerCase() !== facts.baseRepoFullName.toLowerCase()) {
+  if (facts.headRepoFullName?.toLowerCase() !== facts.baseRepoFullName.toLowerCase()) {
     return { eligible: false, reason: "eligibility.skipped.fork" };
   }
   if (!targetBranches2.includes(facts.baseRef)) {
@@ -5313,7 +5323,7 @@ function evaluateEligibility(facts, targetBranches2) {
 // src/github/app-token.ts
 import { createSign } from "node:crypto";
 function base64Url(input) {
-  return Buffer.from(input).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return Buffer.from(input).toString("base64").replaceAll("+", "-").replaceAll("/", "_").replace(/(?<!=)=+$/, "");
 }
 function createAppJwt(appId, privateKey, nowSeconds) {
   const header = base64Url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
@@ -5371,11 +5381,7 @@ async function resolveIdentity(apiBase, env, owner, repo, diagnostics, nowSecond
   if (appId !== "" && privateKey !== "") {
     const minted = await mintInstallationToken(apiBase, appId, privateKey, owner, repo, nowSeconds);
     diagnostics.record("publish.identity_resolved");
-    return {
-      client: buildClient(apiBase, minted.token, env),
-      login: minted.login,
-      usedApp: true
-    };
+    return { client: buildClient(apiBase, minted.token, env), login: minted.login };
   }
   const token = (env.INPUT_GITHUB_TOKEN ?? "").trim();
   if (token === "") {
@@ -5385,13 +5391,13 @@ async function resolveIdentity(apiBase, env, owner, repo, diagnostics, nowSecond
   const client = buildClient(apiBase, token, env);
   const login = await client.resolveViewerLogin() ?? "github-actions[bot]";
   diagnostics.record("publish.identity_resolved");
-  return { client, login, usedApp: false };
+  return { client, login };
 }
 
 // src/action/inputs.ts
 import { appendFileSync } from "node:fs";
 function inputKey(name) {
-  return `INPUT_${name.replace(/ /g, "_").toUpperCase()}`;
+  return `INPUT_${name.replaceAll(" ", "_").toUpperCase()}`;
 }
 function readInput(env, name) {
   return (env[inputKey(name)] ?? "").trim();

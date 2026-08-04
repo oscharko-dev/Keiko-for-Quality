@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { CommitSha, Sha256 } from "./core/brands.js";
+import type { CommitSha, RepoPath, Sha256 } from "./core/brands.js";
 import {
   buildNewEntries,
   combinedExcludes,
@@ -257,6 +257,57 @@ interface SpendLedger {
 }
 
 /**
+ * The values one run fixes before it starts and every settlement and publication step below threads
+ * verbatim: what is being reviewed, where this run's spend accumulates, and where its diagnostics go.
+ *
+ * This is the GitHub-independent slice, standing to `ReviewRun` exactly as `PipelineRequest` stands
+ * to `ReviewRequest` — and, like that pair, related to the two run shapes below by structural typing
+ * alone rather than by an explicit `extends`: `ReviewRun` and `LocalRun` each declare `request` at a
+ * type assignable to `PipelineRequest` and the same two other fields, so a value of either is
+ * accepted wherever this narrower shape is expected. That is what lets the steps both pipelines share
+ * (`planAndAudit`, `auditFreshSurvivors`) take this shape and be handed either pipeline's own run
+ * unchanged.
+ *
+ * `ledger` is `readonly` in the sense the rest of this file means it — the binding never rebinds —
+ * while `SpendLedger`'s own fields stay mutable on purpose. Threading the ledger by reference is what
+ * lets a spend that happens during publication land in the same total as the engine's own report; see
+ * `SpendLedger`'s doc comment above for why that indirection exists at all.
+ */
+interface PipelineRun {
+  readonly request: PipelineRequest;
+  readonly ledger: SpendLedger;
+  readonly diagnostics: Diagnostics;
+}
+
+/**
+ * `performReview`'s run: the action path's request — client, pull request, and reviewer identity
+ * included — alongside the one ledger and the one sink every step of that run shares.
+ */
+interface ReviewRun {
+  readonly request: ReviewRequest;
+  readonly ledger: SpendLedger;
+  readonly diagnostics: Diagnostics;
+}
+
+/**
+ * `performLocalReview`'s run: the client-less request, the same ledger and sink, plus the two
+ * identity strings every `LocalReviewReport` echoes back.
+ *
+ * Those two belong to the run rather than to any one report builder because they are computed once,
+ * from the configuration rather than from the outcome, and every local builder below needs both —
+ * they were previously threaded as a pair through six consecutive signatures for exactly that reason.
+ */
+interface LocalRun {
+  readonly request: LocalReviewRequest;
+  readonly ledger: SpendLedger;
+  readonly diagnostics: Diagnostics;
+  /** `promptIdentityDigest` — identifies the guidance this run reviewed under. */
+  readonly ruleDigest: string;
+  /** The pinned engine's version tag (`ENGINE_PIN.version`) this run executes under. */
+  readonly engineVersion: string;
+}
+
+/**
  * Measured blended cost per reviewable file, rounded up. The formula's dominant term by design.
  *
  * Recalibrated 2026-08-04 from the first three live v0.12.0 data points (32k for a one-file
@@ -351,17 +402,13 @@ export function computeAllottedBudget(
   return Math.round(Math.min(tokenBudget, clamped));
 }
 
-/** No path excluded — every call site that has no dispatch-time exclusions yet gets today's exact
- *  behaviour: every reviewable item counts. */
-const EMPTY_EXCLUDE: ReadonlySet<string> = new Set();
-
 /** `D` in `computeAllottedBudget`: added-plus-deleted lines, summed across reviewable items that are
  *  also DISPATCHED — `excluded` is the same exclude union `dispatchedPathCount` (below) narrows by,
- *  so a cache hit's changed lines do not inflate the estimate for a file the engine will never open. */
-function reviewableChangedLines(
-  inventory: Inventory,
-  excluded: ReadonlySet<string> = EMPTY_EXCLUDE,
-): number {
+ *  so a cache hit's changed lines do not inflate the estimate for a file the engine will never open.
+ *  Required, like `dispatchedPathCount`'s: omitting it would price cache-hit and mechanically-clean
+ *  paths into the allotment — the widening `computeAllottedBudget`'s contract above forbids — so a
+ *  future call site that forgets it is a compile error, not a silent overestimate. */
+function reviewableChangedLines(inventory: Inventory, excluded: ReadonlySet<string>): number {
   let total = 0;
   for (const item of inventory.items) {
     if (item.reviewable && !excluded.has(item.path as string)) total += item.changedLines;
@@ -470,8 +517,39 @@ const INERT_MEMO: MemoContext = {
   contextInvalidated: 0,
 };
 
-/** No engine output is fresh — every `settleIncomplete` caller with nothing of its own gets this. */
-const EMPTY_FRESH: ReadonlySet<EngineFinding> = new Set();
+/**
+ * A settled finding list paired with which of its members are this run's OWN fresh engine output, as
+ * opposed to a review-cache hit's replayed findings.
+ *
+ * The two are never meaningful apart, which is why they are one value rather than two adjacent
+ * parameters: every step from `settleIncomplete` down to `planAndAudit` needs both, and deriving
+ * `fresh` from `findings` alone is exactly the guess `settleIncomplete`'s doc comment forbids — a
+ * caller with no engine output at all and a caller carrying a real settlement's findings look
+ * identical once `findings` is flattened to one array.
+ */
+interface FindingBatch {
+  readonly findings: readonly EngineFinding[];
+  readonly fresh: ReadonlySet<EngineFinding>;
+}
+
+/** Nothing found, and so no engine output that could be fresh — every settlement path that reaches
+ *  publication with nothing of its own to carry gets this. */
+const EMPTY_BATCH: FindingBatch = { findings: [], fresh: new Set() };
+
+/**
+ * Why a run settled incomplete: the reason code both the published notice and the report carry, and —
+ * only where a caller has something more specific than the code itself — the redacted, bounded counts
+ * behind it.
+ */
+interface IncompleteCause {
+  readonly reason: ReasonCode;
+  /**
+   * Redacted, bounded context for *why* this settlement fired — e.g. the publication outcome's own
+   * rejection breakdown (Keiko-for-Quality#63) when the reason is a degraded publication. Omitted by
+   * every caller that has nothing more specific than the reason code itself.
+   */
+  readonly counts?: Readonly<Record<string, number>>;
+}
 
 function cacheCounts(memo: MemoContext): { cacheHits: number; cacheMisses: number } {
   return { cacheHits: memo.hits.size, cacheMisses: memo.eligiblePaths.size - memo.hits.size };
@@ -564,33 +642,20 @@ function truncatedCacheFields(
  * caveat than by a caveat with no findings — the first is incomplete information, the second is none.
  */
 async function publishIncompleteSettlement(
-  request: ReviewRequest,
+  run: ReviewRun,
   context: PublishContext,
   reason: ReasonCode,
   anchor: string | undefined,
-  findings: readonly EngineFinding[],
-  freshEngineFindings: ReadonlySet<EngineFinding>,
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
+  batch: FindingBatch,
 ): Promise<AuditedPublication | undefined> {
   const prefetch =
-    findings.length > 0 || anchor !== undefined
+    batch.findings.length > 0 || anchor !== undefined
       ? await prefetchExistingConversations(context)
       : undefined;
   const published =
-    findings.length === 0
-      ? undefined
-      : await publishAudited(
-          request,
-          context,
-          findings,
-          freshEngineFindings,
-          ledger,
-          diagnostics,
-          prefetch,
-        );
+    batch.findings.length === 0 ? undefined : await publishAudited(run, context, batch, prefetch);
   if (anchor !== undefined) {
-    await publishIncompleteNotice(context, reason, anchor, diagnostics, prefetch);
+    await publishIncompleteNotice(context, reason, anchor, run.diagnostics, prefetch);
   }
   return published;
 }
@@ -618,60 +683,48 @@ async function publishIncompleteSettlement(
  * `publishSettledFindings`, the sibling "complete" path, applies the identical check itself
  * immediately before publishing real findings, for the same reason.
  *
- * @param freshEngineFindings Which of `findings` are this run's OWN fresh engine output, as opposed
- *   to a review-cache hit's replayed findings — `publishAudited`'s classification audit runs only on
- *   these. Every caller passes its own fresh set explicitly (v0.12.0) rather than this function
+ * @param cause The reason code this settlement reports, plus the optional redacted counts behind it —
+ *   see `IncompleteCause`, whose `counts` field carries that parameter's own documentation.
+ * @param batch What this settlement still carries: the findings to publish, paired with which of them
+ *   are this run's OWN fresh engine output — `publishAudited`'s classification audit runs only on the
+ *   latter. Every caller passes its own fresh set explicitly (v0.12.0) rather than this function
  *   inferring one from `findings` alone: a caller with no engine output at all (an unclassified path,
  *   an engine failure) and a caller carrying a real settlement's findings look identical once
  *   `findings` is flattened to one array, and guessing "fresh" from that array would silently
  *   re-audit a cache hit or silently skip a finding that deserved auditing.
- * @param counts Redacted, bounded context for *why* this settlement fired — e.g. the publication
- *   outcome's own rejection breakdown (Keiko-for-Quality#63) when the reason is a degraded
- *   publication. Omitted by every caller that has nothing more specific than the reason code itself.
  */
 async function settleIncomplete(
-  request: ReviewRequest,
+  run: ReviewRun,
   inventory: Inventory,
-  reason: ReasonCode,
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
-  findings: readonly EngineFinding[] = [],
-  freshEngineFindings: ReadonlySet<EngineFinding> = EMPTY_FRESH,
+  cause: IncompleteCause,
   memo: MemoContext = INERT_MEMO,
-  counts?: Readonly<Record<string, number>>,
+  batch: FindingBatch = EMPTY_BATCH,
   covered?: ReadonlySet<string>,
 ): Promise<ReviewReport> {
-  diagnostics.record(reason, {
-    headSha: request.head,
-    ...(counts !== undefined ? { counts } : {}),
+  run.diagnostics.record(cause.reason, {
+    headSha: run.request.head,
+    ...(cause.counts !== undefined ? { counts: cause.counts } : {}),
   });
 
-  if (!(await headIsCurrent(request))) {
-    diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+  if (!(await headIsCurrent(run.request))) {
+    run.diagnostics.record("publish.abandoned_stale_head", { headSha: run.request.head });
     return abandonedReport(inventory, memo);
   }
 
-  const context = publishContextFor(request, inventory);
+  const context = publishContextFor(run.request, inventory);
   const anchor = noticeAnchor(inventory);
-  const published = await publishIncompleteSettlement(
-    request,
-    context,
-    reason,
-    anchor,
-    findings,
-    freshEngineFindings,
-    ledger,
-    diagnostics,
-  );
+  const published = await publishIncompleteSettlement(run, context, cause.reason, anchor, batch);
 
   // What the store should remember for a finding this settlement carried — see `findingsForStorage`.
   const storedFindings =
-    published === undefined ? findings : findingsForStorage(findings, published.auditedByOriginal);
+    published === undefined
+      ? batch.findings
+      : findingsForStorage(batch.findings, published.auditedByOriginal);
   return {
     outcome: "incomplete",
-    reason,
+    reason: cause.reason,
     ...inventoryCounts(inventory),
-    ...truncatedCacheFields(request, inventory, memo, storedFindings, covered),
+    ...truncatedCacheFields(run.request, inventory, memo, storedFindings, covered),
     ...cacheCounts(memo),
     ...(published === undefined ? {} : { publish: published.outcome }),
   };
@@ -843,6 +896,45 @@ async function collectPinDesyncFindings(
   return found;
 }
 
+/**
+ * Appends one file-level gate finding per item in `items`, stopping the moment `findings` has reached
+ * `MAX_GATE_FINDINGS`, and reporting whether the cap is what stopped it.
+ *
+ * Extracted from `compareAgainstCounterparts` below, which ran this identical loop twice — once for
+ * shape mismatches, once for union gaps — and paid for it in nesting depth. Each call reproduces its
+ * loop exactly, laziness included: `describe` is invoked per PUSHED item, never per candidate,
+ * because the cap is checked before it is called, so the item that would have exceeded the cap still
+ * never pays for its own rendering. That is why this takes a callback over the raw items rather than
+ * a pre-rendered array of strings — mapping first would call `describeMismatch`/`describeUnionGap`
+ * for items the cap was always going to discard.
+ *
+ * `true` means the cap stopped the loop, which is the caller's signal to stop comparing counterparts
+ * altogether: no later finding could be published anyway.
+ *
+ * `collectPinDesyncFindings` above deliberately keeps its own loop: it needs the NUMBER it pushed
+ * (its `contracts.gate` count), not merely whether the cap fired, and it continues scanning its outer
+ * file loop rather than returning.
+ */
+function pushGateFindings<T>(
+  findings: EngineFinding[],
+  path: RepoPath,
+  items: readonly T[],
+  describe: (item: T) => string,
+): boolean {
+  for (const item of items) {
+    if (findings.length >= MAX_GATE_FINDINGS) return true;
+    findings.push({
+      path,
+      content: describe(item),
+      startLine: 0,
+      endLine: 0,
+      category: "bug",
+      severity: "high",
+    });
+  }
+  return false;
+}
+
 /** One changed file against one pair's counterparts; returns how many comparisons actually ran. */
 async function compareAgainstCounterparts(
   ctx: GitContext,
@@ -867,29 +959,17 @@ async function compareAgainstCounterparts(
     // `compareDeclaredContracts`, not `compareContracts`: the profile named these two files as
     // counterparts, so when neither side offers a same-named interface but each offers exactly
     // one, comparing those two is the declaration's own meaning rather than this gate guessing.
-    for (const mismatch of compareDeclaredContracts(left, right)) {
-      if (findings.length >= MAX_GATE_FINDINGS) return compared;
-      findings.push({
-        path: item.path,
-        content: describeMismatch(mismatch, path, counterpart),
-        startLine: 0,
-        endLine: 0,
-        category: "bug",
-        severity: "high",
-      });
-    }
+    const mismatches = compareDeclaredContracts(left, right);
+    const capped = pushGateFindings(findings, item.path, mismatches, (mismatch) =>
+      describeMismatch(mismatch, path, counterpart),
+    );
+    if (capped) return compared;
     if (leftBase === undefined) continue;
-    for (const gap of findUncoveredUnionMembers(leftBase, left, right)) {
-      if (findings.length >= MAX_GATE_FINDINGS) return compared;
-      findings.push({
-        path: item.path,
-        content: describeUnionGap(gap, path, counterpart),
-        startLine: 0,
-        endLine: 0,
-        category: "bug",
-        severity: "high",
-      });
-    }
+    const gaps = findUncoveredUnionMembers(leftBase, left, right);
+    const cappedByGaps = pushGateFindings(findings, item.path, gaps, (gap) =>
+      describeUnionGap(gap, path, counterpart),
+    );
+    if (cappedByGaps) return compared;
   }
   return compared;
 }
@@ -1160,13 +1240,11 @@ const NO_AUDITED: ReadonlyMap<EngineFinding, EngineFinding> = new Map();
  * can possibly benefit from it.
  */
 async function auditFreshSurvivors(
-  request: PipelineRequest,
+  run: PipelineRun,
   fresh: readonly PlannedFinding[],
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
 ): Promise<ReadonlyMap<EngineFinding, EngineFinding>> {
   if (fresh.length === 0) return NO_AUDITED;
-  const deps = classifyDeps(request);
+  const deps = classifyDeps(run.request);
   if (deps === undefined) return NO_AUDITED;
 
   // The consumer's declared whole-run ceiling, minus whatever the engine and repair — both already
@@ -1181,10 +1259,10 @@ async function auditFreshSurvivors(
   // v0.12.0 run, 2026-08-04, evidence in corpus/evidence/). Guarding the audit on that number
   // disabled it in exactly the expensive runs where a second opinion matters most, while the
   // ceiling this guard exists to protect — the consumer's — still had millions of tokens of room.
-  const remaining = request.config.tokenBudget - ledger.engine - ledger.classify;
+  const remaining = run.request.config.tokenBudget - run.ledger.engine - run.ledger.classify;
   if (remaining < AUDIT_RESERVE_PER_FINDING * fresh.length) {
-    diagnostics.record("classify.skipped_budget", {
-      headSha: request.head,
+    run.diagnostics.record("classify.skipped_budget", {
+      headSha: run.request.head,
       counts: { skipped: fresh.length, remaining },
     });
     return NO_AUDITED;
@@ -1194,8 +1272,8 @@ async function auditFreshSurvivors(
     fresh.map((survivor) => survivor.finding),
     deps,
   );
-  ledger.classify += audit.tokens;
-  diagnostics.record("classify.audited", {
+  run.ledger.classify += audit.tokens;
+  run.diagnostics.record("classify.audited", {
     counts: { changed: audit.changed, tokens: audit.tokens },
   });
 
@@ -1217,18 +1295,6 @@ interface AuditedPublication {
   readonly auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
 }
 
-/**
- * Plans, audits, and executes publication for `findings` in one pass (v0.12.0): `planPublication`
- * decides which findings survive sanitization and dedup, `auditFreshSurvivors` (above) reclassifies
- * whichever of those survivors are fresh engine output, and `executePublication` composes, places,
- * and posts the result — substituted with its audited classification wherever one exists.
- *
- * `freshEngineFindings` is reference identity against the SAME `EngineFinding` objects this run's
- * settlement produced. That is sound because `mergeHitFindings` (`cache/memoize.ts`) and
- * `planPublication`/`planOne` (`publish/publisher.ts`) never clone a finding — only ever copy the
- * array that holds it — so the objects a plan survivor carries are exactly the ones a caller-built
- * `Set` can be tested against.
- */
 /**
  * Substitutes each plan survivor with its audited classification wherever the audit actually
  * reclassified it, leaving every other survivor exactly as `planPublication` produced it. Returns
@@ -1255,26 +1321,23 @@ function substituteAudited(
  * so the two cannot drift on what "the audited plan" means — this is the one place a plan's
  * survivors are ever combined with the audit's verdict.
  *
- * Takes the `PipelineRequest` slice `auditFreshSurvivors` actually needs, not the full
- * `ReviewRequest`: `publishAudited`'s own `ReviewRequest` argument satisfies it structurally, and a
- * client-less local request satisfies it exactly as well.
+ * Takes the `PipelineRun` slice `auditFreshSurvivors` actually needs, not the full `ReviewRun`:
+ * `publishAudited`'s own `ReviewRun` argument satisfies it structurally, and a client-less `LocalRun`
+ * satisfies it exactly as well.
  */
 async function planAndAudit(
-  request: PipelineRequest,
+  run: PipelineRun,
   context: PublishContext,
-  findings: readonly EngineFinding[],
-  freshEngineFindings: ReadonlySet<EngineFinding>,
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
+  batch: FindingBatch,
   prefetch?: ExistingConversationsPrefetch,
 ): Promise<{
   readonly plan: PublicationPlan;
   readonly survivors: readonly PlannedFinding[];
   readonly auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
 }> {
-  const plan = await planPublication(context, findings, diagnostics, prefetch);
-  const fresh = plan.survivors.filter((survivor) => freshEngineFindings.has(survivor.finding));
-  const auditedByOriginal = await auditFreshSurvivors(request, fresh, ledger, diagnostics);
+  const plan = await planPublication(context, batch.findings, run.diagnostics, prefetch);
+  const fresh = plan.survivors.filter((survivor) => batch.fresh.has(survivor.finding));
+  const auditedByOriginal = await auditFreshSurvivors(run, fresh);
   return {
     plan,
     survivors: substituteAudited(plan.survivors, auditedByOriginal),
@@ -1282,25 +1345,26 @@ async function planAndAudit(
   };
 }
 
+/**
+ * Plans, audits, and executes publication for `findings` in one pass (v0.12.0): `planPublication`
+ * decides which findings survive sanitization and dedup, `auditFreshSurvivors` (above) reclassifies
+ * whichever of those survivors are fresh engine output, and `executePublication` composes, places,
+ * and posts the result — substituted with its audited classification wherever one exists.
+ *
+ * `batch.fresh` is reference identity against the SAME `EngineFinding` objects this run's
+ * settlement produced. That is sound because `mergeHitFindings` (`cache/memoize.ts`) and
+ * `planPublication`/`planOne` (`publish/publisher.ts`) never clone a finding — only ever copy the
+ * array that holds it — so the objects a plan survivor carries are exactly the ones a caller-built
+ * `Set` can be tested against.
+ */
 async function publishAudited(
-  request: ReviewRequest,
+  run: ReviewRun,
   context: PublishContext,
-  findings: readonly EngineFinding[],
-  freshEngineFindings: ReadonlySet<EngineFinding>,
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
+  batch: FindingBatch,
   prefetch?: ExistingConversationsPrefetch,
 ): Promise<AuditedPublication> {
-  const { plan, survivors, auditedByOriginal } = await planAndAudit(
-    request,
-    context,
-    findings,
-    freshEngineFindings,
-    ledger,
-    diagnostics,
-    prefetch,
-  );
-  const outcome = await executePublication(context, { ...plan, survivors }, diagnostics);
+  const { plan, survivors, auditedByOriginal } = await planAndAudit(run, context, batch, prefetch);
+  const outcome = await executePublication(context, { ...plan, survivors }, run.diagnostics);
   return { outcome, auditedByOriginal };
 }
 
@@ -1389,38 +1453,37 @@ function finalizeCacheStore(
  * here" contract this keeps).
  */
 async function reportDegradedPublication(
-  request: ReviewRequest,
+  run: ReviewRun,
   inventory: Inventory,
   memo: MemoContext,
-  ledger: SpendLedger,
   publish: PublishOutcome,
-  diagnostics: Diagnostics,
 ): Promise<ReviewReport> {
   const report = await settleIncomplete(
-    request,
+    run,
     inventory,
-    "settlement.incomplete.publication_degraded",
-    ledger,
-    diagnostics,
-    [],
-    EMPTY_FRESH,
+    {
+      reason: "settlement.incomplete.publication_degraded",
+      counts: publicationDegradedCounts(publish),
+    },
     memo,
-    publicationDegradedCounts(publish),
   );
   return { ...report, publish };
 }
 
 async function publishSettledFindings(
-  request: ReviewRequest,
+  run: ReviewRun,
   inventory: Inventory,
   settlement: Extract<Settlement, { status: "complete" }>,
   memo: MemoContext,
-  ledger: SpendLedger,
   startedAt: number,
-  diagnostics: Diagnostics,
 ): Promise<ReviewReport> {
-  const gate = await collectGateFindings(request, inventory, diagnostics);
-  const changePass = await collectChangePassFindings(request, inventory, ledger, diagnostics);
+  const gate = await collectGateFindings(run.request, inventory, run.diagnostics);
+  const changePass = await collectChangePassFindings(
+    run.request,
+    inventory,
+    run.ledger,
+    run.diagnostics,
+  );
   const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
   // Only THIS run's model output is eligible for the audit — the engine's own findings plus the
   // change-level pass's, never a cache hit's replayed findings, which `mergeHitFindings` appended
@@ -1431,12 +1494,9 @@ async function publishSettledFindings(
     ...changePass,
   ]);
   const { outcome: publish, auditedByOriginal } = await publishAudited(
-    request,
-    publishContextFor(request, inventory),
-    merged,
-    freshEngineFindings,
-    ledger,
-    diagnostics,
+    run,
+    publishContextFor(run.request, inventory),
+    { findings: merged, fresh: freshEngineFindings },
   );
 
   // A finding the reviewer found but could not publish is a finding the consumer never saw. The
@@ -1448,16 +1508,16 @@ async function publishSettledFindings(
   // it means for their coverage rather than which internal step noticed. The diagnostic keeps its
   // name and its per-attempt breakdown; only the settlement reason moved family.
   if (publicationDegraded(publish)) {
-    return reportDegradedPublication(request, inventory, memo, ledger, publish, diagnostics);
+    return reportDegradedPublication(run, inventory, memo, publish);
   }
 
-  diagnostics.record("settlement.complete", {
-    headSha: request.head,
+  run.diagnostics.record("settlement.complete", {
+    headSha: run.request.head,
     durationMs: Date.now() - startedAt,
     counts: { published: publish.published, suppressed: publish.suppressed },
   });
   const finalized = finalizeCacheStore(
-    request,
+    run.request,
     inventory,
     memo,
     findingsForStorage(settlement.findings, auditedByOriginal),
@@ -1472,13 +1532,6 @@ async function publishSettledFindings(
   };
 }
 
-/**
- * Runs the engine and records the settlement mode, or reports the failure.
- *
- * Returns a `ReviewReport` when the engine itself could not be run — a spawn failure, a timeout, a
- * non-zero exit. There is nothing to publish in that case: no result reached the parser, so there
- * are no findings to carry forward, only the fact that the review did not happen.
- */
 /** The zero-reviewable-paths shortcut: nothing was ever eligible, so nothing was hit or missed. */
 function emptyReviewReport(inventory: Inventory): ReviewReport {
   return {
@@ -1513,41 +1566,42 @@ function abandonedReport(inventory: Inventory, memo: MemoContext): ReviewReport 
  * review from ever publishing against a commit the branch has already left behind.
  */
 async function abandonIfStale(
-  request: ReviewRequest,
+  run: ReviewRun,
   inventory: Inventory,
   memo: MemoContext,
-  diagnostics: Diagnostics,
 ): Promise<ReviewReport | undefined> {
-  if (await headIsCurrent(request)) return undefined;
-  diagnostics.record("publish.abandoned_stale_head", { headSha: request.head });
+  if (await headIsCurrent(run.request)) return undefined;
+  run.diagnostics.record("publish.abandoned_stale_head", { headSha: run.request.head });
   return abandonedReport(inventory, memo);
 }
 
+/**
+ * Runs the engine and records the settlement mode, or reports the failure.
+ *
+ * Returns a `ReviewReport` when the engine itself could not be run — a spawn failure, a timeout, a
+ * non-zero exit. There is nothing to publish in that case: no result reached the parser, so there
+ * are no findings to carry forward, only the fact that the review did not happen.
+ */
 async function settleOrReport(
-  request: ReviewRequest,
+  run: ReviewRun,
   inventory: Inventory,
   memo: MemoContext,
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
 ): Promise<Settlement | ReviewReport> {
   try {
-    const settlement = await executeEngine(request, inventory, memo, ledger, diagnostics);
-    diagnostics.record(
+    const settlement = await executeEngine(
+      run.request,
+      inventory,
+      memo,
+      run.ledger,
+      run.diagnostics,
+    );
+    run.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
-      { headSha: request.head },
+      { headSha: run.request.head },
     );
     return settlement;
   } catch {
-    return settleIncomplete(
-      request,
-      inventory,
-      "settlement.incomplete.engine_error",
-      ledger,
-      diagnostics,
-      [],
-      EMPTY_FRESH,
-      memo,
-    );
+    return settleIncomplete(run, inventory, { reason: "settlement.incomplete.engine_error" }, memo);
   }
 }
 
@@ -1612,6 +1666,7 @@ async function performReviewInner(
   ledger: SpendLedger,
 ): Promise<ReviewReport> {
   const started = Date.now();
+  const run: ReviewRun = { request, ledger, diagnostics };
   diagnostics.record("run.started", { headSha: request.head });
 
   const ctx = gitContext(request);
@@ -1629,7 +1684,7 @@ async function performReviewInner(
   // A path the consumer's profile does not describe is a gap in their coverage statement. Reviewing
   // the rest and reporting success would hide it behind an apparently clean run.
   if (inventory.unclassified.length > 0) {
-    return settleIncomplete(request, inventory, "inventory.unclassified_path", ledger, diagnostics);
+    return settleIncomplete(run, inventory, { reason: "inventory.unclassified_path" });
   }
   if (inventory.reviewablePaths.size === 0) {
     diagnostics.record("settlement.complete", {
@@ -1645,10 +1700,10 @@ async function performReviewInner(
   // can move before that spend even starts. This does not replace the post-run check further down,
   // or `settleIncomplete`'s own copy — the head can still move DURING the engine's own run — it only
   // shrinks that race from "the whole engine run" down to the gap between here and publication.
-  const preflight = await abandonIfStale(request, inventory, memo, diagnostics);
+  const preflight = await abandonIfStale(run, inventory, memo);
   if (preflight !== undefined) return preflight;
 
-  const settlement = await settleOrReport(request, inventory, memo, ledger, diagnostics);
+  const settlement = await settleOrReport(run, inventory, memo);
   if ("outcome" in settlement) return settlement;
 
   // `settleIncomplete` applies its own staleness guard (see its doc comment), so the incomplete
@@ -1657,21 +1712,20 @@ async function performReviewInner(
   // its happy path.
   if (settlement.status === "incomplete") {
     return settleIncomplete(
-      request,
+      run,
       inventory,
-      settlement.reason,
-      ledger,
-      diagnostics,
-      mergeHitFindings(settlement.findings, memo.hits),
-      new Set(settlement.findings),
+      { reason: settlement.reason },
       memo,
-      undefined,
+      {
+        findings: mergeHitFindings(settlement.findings, memo.hits),
+        fresh: new Set(settlement.findings),
+      },
       verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths : undefined,
     );
   }
-  const postRun = await abandonIfStale(request, inventory, memo, diagnostics);
+  const postRun = await abandonIfStale(run, inventory, memo);
   if (postRun !== undefined) return postRun;
-  return publishSettledFindings(request, inventory, settlement, memo, ledger, started, diagnostics);
+  return publishSettledFindings(run, inventory, settlement, memo, started);
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -1752,27 +1806,16 @@ function localSpend(ledger: SpendLedger): LocalReviewReport["spend"] {
  * incomplete settlement with no findings costs nothing beyond its own bookkeeping.
  */
 async function localFindings(
-  request: PipelineRequest,
+  run: LocalRun,
   inventory: Inventory,
-  findings: readonly EngineFinding[],
-  freshEngineFindings: ReadonlySet<EngineFinding>,
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
+  batch: FindingBatch,
 ): Promise<{
   readonly findings: readonly LocalReviewFinding[];
   readonly auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
 }> {
-  if (findings.length === 0) return { findings: [], auditedByOriginal: NO_AUDITED };
-  const context = localPublishContext(request, inventory);
-  const { survivors, auditedByOriginal } = await planAndAudit(
-    request,
-    context,
-    findings,
-    freshEngineFindings,
-    ledger,
-    diagnostics,
-    EMPTY_PREFETCH,
-  );
+  if (batch.findings.length === 0) return { findings: [], auditedByOriginal: NO_AUDITED };
+  const context = localPublishContext(run.request, inventory);
+  const { survivors, auditedByOriginal } = await planAndAudit(run, context, batch, EMPTY_PREFETCH);
   return { findings: survivors.map(toLocalFinding), auditedByOriginal };
 }
 
@@ -1806,39 +1849,27 @@ function emptyLocalReport(
  *   already carry — never guessed here.
  */
 async function localIncompleteReport(
-  request: PipelineRequest,
+  run: LocalRun,
   inventory: Inventory,
   reason: ReasonCode,
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
-  findings: readonly EngineFinding[],
-  freshEngineFindings: ReadonlySet<EngineFinding>,
+  batch: FindingBatch,
   reviewed: number,
-  ruleDigest: string,
-  engineVersion: string,
   memo?: MemoContext,
 ): Promise<LocalReviewReport> {
-  diagnostics.record(reason, { headSha: request.head });
-  const reported = await localFindings(
-    request,
-    inventory,
-    findings,
-    freshEngineFindings,
-    ledger,
-    diagnostics,
-  );
+  run.diagnostics.record(reason, { headSha: run.request.head });
+  const reported = await localFindings(run, inventory, batch);
   return {
     outcome: "incomplete",
     reason,
     findings: reported.findings,
-    spend: localSpend(ledger),
+    spend: localSpend(run.ledger),
     inventory: {
       total: inventory.items.length,
       reviewable: inventory.reviewablePaths.size,
       reviewed,
     },
-    ruleDigest,
-    engineVersion,
+    ruleDigest: run.ruleDigest,
+    engineVersion: run.engineVersion,
     // An incomplete outcome never writes a store back (`finalizeCacheStore`'s admission rule), but
     // the hit/miss counts are facts about what was attempted, memo or not.
     ...(memo === undefined ? { cacheHits: 0, cacheMisses: 0 } : cacheCounts(memo)),
@@ -1853,33 +1884,30 @@ async function localIncompleteReport(
  * they do there.
  */
 async function localSettleOrReport(
-  request: LocalReviewRequest,
+  run: LocalRun,
   inventory: Inventory,
   memo: MemoContext,
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
-  ruleDigest: string,
-  engineVersion: string,
 ): Promise<Settlement | LocalReviewReport> {
   try {
-    const settlement = await executeEngine(request, inventory, memo, ledger, diagnostics);
-    diagnostics.record(
+    const settlement = await executeEngine(
+      run.request,
+      inventory,
+      memo,
+      run.ledger,
+      run.diagnostics,
+    );
+    run.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
-      { headSha: request.head },
+      { headSha: run.request.head },
     );
     return settlement;
   } catch {
     return localIncompleteReport(
-      request,
+      run,
       inventory,
       "settlement.incomplete.engine_error",
-      ledger,
-      diagnostics,
-      [],
-      EMPTY_FRESH,
+      EMPTY_BATCH,
       memo.hitPaths.size,
-      ruleDigest,
-      engineVersion,
       memo,
     );
   }
@@ -1892,37 +1920,34 @@ async function localSettleOrReport(
  * publishing it.
  */
 async function completeLocalReport(
-  request: LocalReviewRequest,
+  run: LocalRun,
   inventory: Inventory,
   settlement: Extract<Settlement, { status: "complete" }>,
   memo: MemoContext,
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
-  ruleDigest: string,
-  engineVersion: string,
 ): Promise<LocalReviewReport> {
-  const gate = await collectGateFindings(request, inventory, diagnostics);
-  const changePass = await collectChangePassFindings(request, inventory, ledger, diagnostics);
+  const gate = await collectGateFindings(run.request, inventory, run.diagnostics);
+  const changePass = await collectChangePassFindings(
+    run.request,
+    inventory,
+    run.ledger,
+    run.diagnostics,
+  );
   const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
   const freshEngineFindings: ReadonlySet<EngineFinding> = new Set([
     ...settlement.findings,
     ...changePass,
   ]);
 
-  const reported = await localFindings(
-    request,
-    inventory,
-    merged,
-    freshEngineFindings,
-    ledger,
-    diagnostics,
-  );
+  const reported = await localFindings(run, inventory, {
+    findings: merged,
+    fresh: freshEngineFindings,
+  });
   // Identical admission call to the action path's: only a complete outcome reaches this function,
   // and what is stored is the AUDITED form of the engine's own findings (never a gate or
   // change-pass finding — `finalizeCacheStore` receives the settlement's findings only, exactly as
   // `publishSettledFindings` passes them).
   const finalized = finalizeCacheStore(
-    request,
+    run.request,
     inventory,
     memo,
     findingsForStorage(settlement.findings, reported.auditedByOriginal),
@@ -1930,14 +1955,14 @@ async function completeLocalReport(
   return {
     outcome: "complete",
     findings: reported.findings,
-    spend: localSpend(ledger),
+    spend: localSpend(run.ledger),
     inventory: {
       total: inventory.items.length,
       reviewable: inventory.reviewablePaths.size,
       reviewed: inventory.reviewablePaths.size,
     },
-    ruleDigest,
-    engineVersion,
+    ruleDigest: run.ruleDigest,
+    engineVersion: run.engineVersion,
     ...cacheCounts(memo),
     ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
   };
@@ -1947,54 +1972,36 @@ async function completeLocalReport(
  *  undescribed path fails the run, an empty reviewable set needs no engine at all. `undefined` means
  *  neither fired and the caller should proceed to memoization and the engine. */
 async function localPreEngineReport(
-  request: LocalReviewRequest,
+  run: LocalRun,
   inventory: Inventory,
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
   started: number,
-  ruleDigest: string,
-  engineVersion: string,
 ): Promise<LocalReviewReport | undefined> {
   if (inventory.unclassified.length > 0) {
-    return localIncompleteReport(
-      request,
-      inventory,
-      "inventory.unclassified_path",
-      ledger,
-      diagnostics,
-      [],
-      EMPTY_FRESH,
-      0,
-      ruleDigest,
-      engineVersion,
-    );
+    return localIncompleteReport(run, inventory, "inventory.unclassified_path", EMPTY_BATCH, 0);
   }
   if (inventory.reviewablePaths.size === 0) {
-    diagnostics.record("settlement.complete", {
-      headSha: request.head,
+    run.diagnostics.record("settlement.complete", {
+      headSha: run.request.head,
       durationMs: Date.now() - started,
     });
-    return emptyLocalReport(inventory, ruleDigest, engineVersion);
+    return emptyLocalReport(inventory, run.ruleDigest, run.engineVersion);
   }
   return undefined;
 }
 
 /** `run.started` through `buildInventory` — identical to `performReviewInner`'s own opening, split
  *  out so `performLocalReviewInner` stays within this file's per-function line budget. */
-async function localResolveInventory(
-  request: LocalReviewRequest,
-  diagnostics: Diagnostics,
-): Promise<Inventory> {
-  diagnostics.record("run.started", { headSha: request.head });
-  const ctx = gitContext(request);
-  const pair = await resolvePairOrReport(ctx, request, diagnostics);
-  diagnostics.record("review_pair.resolved", { headSha: request.head });
+async function localResolveInventory(run: LocalRun): Promise<Inventory> {
+  run.diagnostics.record("run.started", { headSha: run.request.head });
+  const ctx = gitContext(run.request);
+  const pair = await resolvePairOrReport(ctx, run.request, run.diagnostics);
+  run.diagnostics.record("review_pair.resolved", { headSha: run.request.head });
   return buildInventory(
     ctx,
-    request.profile,
+    run.request.profile,
     pair,
-    request.config.renameDetectionPercent,
-    diagnostics,
+    run.request.config.renameDetectionPercent,
+    run.diagnostics,
   );
 }
 
@@ -2006,96 +2013,49 @@ async function localResolveInventory(
  * `localResolveInventory` above.
  */
 async function localSettleReport(
-  request: LocalReviewRequest,
+  run: LocalRun,
   inventory: Inventory,
   settlement: Settlement,
   memo: MemoContext,
-  ledger: SpendLedger,
-  diagnostics: Diagnostics,
   started: number,
-  ruleDigest: string,
-  engineVersion: string,
 ): Promise<LocalReviewReport> {
   if (settlement.status === "incomplete") {
     const reviewed = verdictsSurviveIncompleteness(settlement.reason)
       ? settlement.coveredPaths.size + memo.hitPaths.size
       : memo.hitPaths.size;
     return localIncompleteReport(
-      request,
+      run,
       inventory,
       settlement.reason,
-      ledger,
-      diagnostics,
-      mergeHitFindings(settlement.findings, memo.hits),
-      new Set(settlement.findings),
+      {
+        findings: mergeHitFindings(settlement.findings, memo.hits),
+        fresh: new Set(settlement.findings),
+      },
       reviewed,
-      ruleDigest,
-      engineVersion,
       memo,
     );
   }
 
-  const report = await completeLocalReport(
-    request,
-    inventory,
-    settlement,
-    memo,
-    ledger,
-    diagnostics,
-    ruleDigest,
-    engineVersion,
-  );
-  diagnostics.record("settlement.complete", {
-    headSha: request.head,
+  const report = await completeLocalReport(run, inventory, settlement, memo);
+  run.diagnostics.record("settlement.complete", {
+    headSha: run.request.head,
     durationMs: Date.now() - started,
   });
   return report;
 }
 
-async function performLocalReviewInner(
-  request: LocalReviewRequest,
-  diagnostics: Diagnostics,
-  ledger: SpendLedger,
-  ruleDigest: string,
-  engineVersion: string,
-): Promise<LocalReviewReport> {
+async function performLocalReviewInner(run: LocalRun): Promise<LocalReviewReport> {
   const started = Date.now();
-  const inventory = await localResolveInventory(request, diagnostics);
+  const inventory = await localResolveInventory(run);
 
-  const preEngine = await localPreEngineReport(
-    request,
-    inventory,
-    ledger,
-    diagnostics,
-    started,
-    ruleDigest,
-    engineVersion,
-  );
+  const preEngine = await localPreEngineReport(run, inventory, started);
   if (preEngine !== undefined) return preEngine;
 
-  const memo = prepareMemoization(request, inventory, diagnostics);
-  const settlement = await localSettleOrReport(
-    request,
-    inventory,
-    memo,
-    ledger,
-    diagnostics,
-    ruleDigest,
-    engineVersion,
-  );
+  const memo = prepareMemoization(run.request, inventory, run.diagnostics);
+  const settlement = await localSettleOrReport(run, inventory, memo);
   if ("outcome" in settlement) return settlement;
 
-  return localSettleReport(
-    request,
-    inventory,
-    settlement,
-    memo,
-    ledger,
-    diagnostics,
-    started,
-    ruleDigest,
-    engineVersion,
-  );
+  return localSettleReport(run, inventory, settlement, memo, started);
 }
 
 /**
@@ -2119,7 +2079,13 @@ export async function performLocalReview(
   const ruleDigest: string = promptIdentityDigest(request.profile, request.guidelines);
   const engineVersion: string = ENGINE_PIN.version;
   try {
-    return await performLocalReviewInner(request, diagnostics, ledger, ruleDigest, engineVersion);
+    return await performLocalReviewInner({
+      request,
+      ledger,
+      diagnostics,
+      ruleDigest,
+      engineVersion,
+    });
   } finally {
     // Identical guard to `performReview`'s own `finally` block: a pre-engine incomplete report or an
     // empty-inventory run never dispatched the engine at all, and a zero-spend `run.spend` line

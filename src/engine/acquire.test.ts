@@ -37,7 +37,6 @@ const WRONG_BYTES = Buffer.from("different fixture bytes that must never verify 
 const PIN: EnginePin = {
   engine: "example/fixture-engine",
   version: VERSION,
-  releaseUrl: `https://example.test/releases/${VERSION}`,
   platforms: {
     [`${PLATFORM}-${ARCH}`]: { asset: ASSET, sha256: GOOD_DIGEST },
   },

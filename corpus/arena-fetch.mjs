@@ -50,8 +50,13 @@ let cachedGhBinary;
  * `GH_TOKEN`, `GITHUB_TOKEN`, an enterprise host, …), and this reads only data already public in the
  * target repository, so there is no credential here worth narrowing the environment to protect —
  * unlike the engine invocations elsewhere in `corpus/`, which do carry a model credential.
+ *
+ * `corpus/live-telemetry.mjs` runs its own `gh` calls through this one — the same posture holds
+ * there (workflow run metadata and job logs of a repository the caller can already open in a
+ * browser). The 64 MB `maxBuffer` is the reason to keep it single: a run log that outgrows the
+ * bound throws rather than truncating, and raising it must not have to be remembered twice.
  */
-function runGh(args) {
+export function runGh(args) {
   cachedGhBinary ??= resolveGhBinary();
   return execFileSync(cachedGhBinary, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 }

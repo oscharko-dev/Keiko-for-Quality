@@ -47,9 +47,9 @@ export async function resolveReviewPair(
  * the `.` a nested name might suggest.
  */
 function bucketKey(item: InventoryItem): string {
-  const kind = item.classification.kind.replace(/-/g, "_");
+  const kind = item.classification.kind.replaceAll("-", "_");
   return item.classification.kind === "mechanically-clean"
-    ? `${kind}_${item.classification.reason.replace(/-/g, "_")}`
+    ? `${kind}_${item.classification.reason.replaceAll("-", "_")}`
     : kind;
 }
 

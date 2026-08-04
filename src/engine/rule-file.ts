@@ -370,6 +370,20 @@ function contractPairsSection(pairs: readonly ContractPair[]): string {
 }
 
 /**
+ * The `guidelines` default: a consumer that declared no guideline documents at all, for which
+ * `guidanceSection` renders nothing.
+ *
+ * A module-level constant rather than the object literal this used to be in `buildRuleFile`'s
+ * parameter list (Sonar S7737), which allocated a fresh object on every defaulted call. Frozen —
+ * the array too, which `Object.freeze` does not reach on its own — because one shared default is
+ * only safe while nothing can push a path into it: a mutation here would change what every later
+ * defaulted call renders, and `buildRuleFile`'s output is what `promptIdentityDigest`
+ * (`rule-identity.ts`) hashes into a cache identity that must depend on the profile and the
+ * guidelines alone.
+ */
+const NO_GUIDELINES: GuidelineIndex = Object.freeze({ paths: Object.freeze([]) });
+
+/**
  * @param mechanicallyClean Paths the inventory downgraded away from `reviewed` — a pure rename
  *   today. Each entry is a candidate-controlled path string handed to the engine's own rule
  *   interpreter, not this repository's `GlobSet`, so it is not guaranteed to be read as a literal
@@ -386,7 +400,7 @@ function contractPairsSection(pairs: readonly ContractPair[]): string {
  */
 export function buildRuleFile(
   profile: CompiledProfile,
-  guidelines: GuidelineIndex = { paths: [] },
+  guidelines: GuidelineIndex = NO_GUIDELINES,
   mechanicallyClean: readonly string[] = [],
 ): EngineRuleFile {
   // Both lists are derived from the consumer's own profile, so the engine's file selection and this

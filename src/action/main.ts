@@ -249,13 +249,6 @@ function buildReviewRequest(
   };
 }
 
-/**
- * The action entrypoint.
- *
- * Ordering is deliberate: eligibility is decided before any credential is used, and the identity is
- * resolved before the engine runs, so a misconfigured installation fails in seconds rather than
- * after a full model spend.
- */
 /** Decides eligibility and records the outcome. Returns false when the run should stop here. */
 function admit(env: NodeJS.ProcessEnv, event: EventContext, diagnostics: Diagnostics): boolean {
   const eligibility = evaluateEligibility(
@@ -281,6 +274,13 @@ function admit(env: NodeJS.ProcessEnv, event: EventContext, diagnostics: Diagnos
   return true;
 }
 
+/**
+ * The action entrypoint.
+ *
+ * Ordering is deliberate: eligibility is decided before any credential is used, and the identity is
+ * resolved before the engine runs, so a misconfigured installation fails in seconds rather than
+ * after a full model spend.
+ */
 export async function runAction(
   env: NodeJS.ProcessEnv,
   diagnostics: Diagnostics,

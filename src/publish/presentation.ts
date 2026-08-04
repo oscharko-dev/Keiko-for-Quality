@@ -103,7 +103,10 @@ export function splitTitle(prose: string): { title: string; body: string } {
  * what prevents a wrong finding from being force-fitted into the code just to clear the thread.
  */
 function repairPrompt(context: FindingContext, title: string): string {
-  const where = `${escapeInline(context.path)}${context.line > 0 ? ` around line ${String(context.line)}` : ""}`;
+  // A line of 0 means the finding carries no usable anchor, so the instruction names the file alone
+  // rather than pointing an agent at line zero.
+  const atLine = context.line > 0 ? ` around line ${String(context.line)}` : "";
+  const where = `${escapeInline(context.path)}${atLine}`;
   return [
     "Verify this finding against the current code before acting on it.",
     "",
@@ -133,8 +136,9 @@ export function composeFindingBody(
 
   const parts = [`_${category.icon} ${category.text}_ | _${severity.icon} ${severity.text}_`, ""];
   if (title !== "") parts.push(`**${title}**`, "");
-  parts.push(body, "");
   parts.push(
+    body,
+    "",
     "<details>",
     "<summary>🤖 Prompt for AI agents</summary>",
     "",
