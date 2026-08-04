@@ -38,8 +38,6 @@ export const REASON_CODES = [
   "engine.run.timeout",
   "engine.run.spawn_failed",
   "engine.run.nonzero_exit",
-  "engine.run.output_unparsable",
-  "engine.run.schema_rejected",
 
   // Settlement
   "settlement.complete",

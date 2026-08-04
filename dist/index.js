@@ -1025,8 +1025,6 @@ var REASON_CODES = [
   "engine.run.timeout",
   "engine.run.spawn_failed",
   "engine.run.nonzero_exit",
-  "engine.run.output_unparsable",
-  "engine.run.schema_rejected",
   // Settlement
   "settlement.complete",
   // Which coverage question was actually answered. Recorded on every run, because a consumer
@@ -1810,14 +1808,18 @@ var AcquisitionError = class extends Error {
   }
 };
 var MAX_BINARY_BYTES = 256 * 1024 * 1024;
-async function download(url) {
+function reportDownloadFailed(diagnostics, version) {
+  diagnostics.record("engine.acquire.download_failed", { version });
+  throw new AcquisitionError("engine.acquire.download_failed");
+}
+async function download(url, diagnostics, version) {
   const response = await fetch(url, { redirect: "follow" });
-  if (!response.ok) throw new AcquisitionError("engine.acquire.download_failed");
+  if (!response.ok) reportDownloadFailed(diagnostics, version);
   const declared = Number(response.headers.get("content-length") ?? "0");
-  if (declared > MAX_BINARY_BYTES) throw new AcquisitionError("engine.acquire.download_failed");
+  if (declared > MAX_BINARY_BYTES) reportDownloadFailed(diagnostics, version);
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_BINARY_BYTES) {
-    throw new AcquisitionError("engine.acquire.download_failed");
+    reportDownloadFailed(diagnostics, version);
   }
   return bytes;
 }
@@ -1855,7 +1857,7 @@ async function populateCache(cachedPath, bytes) {
 async function acquireVerifiedBytes(cachedPath, pin, target, diagnostics) {
   const cached = await readCachedIfValid(cachedPath, target);
   if (cached !== void 0) return { bytes: cached, cacheHit: true };
-  const bytes = await download(assetUrl(pin, target.asset));
+  const bytes = await download(assetUrl(pin, target.asset), diagnostics, pin.version);
   const actual = digestOf(bytes);
   if (actual !== target.sha256) {
     diagnostics.record("engine.acquire.digest_mismatch", {
@@ -2620,10 +2622,18 @@ function startModelProxy(options2) {
 import { execFile } from "node:child_process";
 var ExecFailure = class extends Error {
   code;
-  constructor(command, code) {
+  /**
+   * Set when `options.timeoutMs` killed the process rather than it exiting on its own. Node
+   * reports no exit code for a timeout kill (`error.code` is `null`, not a number) and sets
+   * `error.killed` instead — the one signal below distinguishes it from an ordinary non-zero exit,
+   * which always carries a real numeric code.
+   */
+  timedOut;
+  constructor(command, code, timedOut = false) {
     super(`${command} exited with ${String(code)}`);
     this.name = "ExecFailure";
     this.code = code;
+    this.timedOut = timedOut;
   }
 };
 function run(command, args, options2) {
@@ -2648,7 +2658,7 @@ function run(command, args, options2) {
           return;
         }
         const code = typeof error.code === "number" ? error.code : 1;
-        reject(new ExecFailure(command, code));
+        reject(new ExecFailure(command, code, error.killed === true));
       }
     );
   });
@@ -2758,6 +2768,10 @@ function recordModelUsage(diagnostics, proxy, options2) {
     }
   });
 }
+function engineFailureReason(error) {
+  if (!(error instanceof ExecFailure)) return "engine.run.spawn_failed";
+  return error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit";
+}
 async function runEngine(options2, diagnostics) {
   const token = readModelToken(options2.config, options2.env);
   if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
@@ -2785,7 +2799,7 @@ async function runEngine(options2, diagnostics) {
     });
     return { stdout: result.stdout.toString("utf8"), ruleDigest };
   } catch (error) {
-    const reason = error instanceof ExecFailure ? "engine.run.nonzero_exit" : "engine.run.spawn_failed";
+    const reason = engineFailureReason(error);
     diagnostics.record(reason, {
       headSha: options2.pair.head,
       durationMs: Date.now() - started
@@ -4923,7 +4937,7 @@ async function collectChangePassFindings(request, inventory, ledger, diagnostics
   if (request.config.crossArtifactPass !== true) return [];
   const deps = classifyDeps(request);
   if (deps === void 0) return [];
-  const remaining = ledger.allotted - ledger.engine - ledger.classify;
+  const remaining = request.config.tokenBudget - ledger.engine - ledger.classify;
   if (remaining < CHANGE_PASS_RESERVE_TOKENS) {
     diagnostics.record("contracts.change_pass", {
       headSha: request.head,
@@ -5022,7 +5036,7 @@ async function auditFreshSurvivors(request, fresh, ledger, diagnostics) {
   if (fresh.length === 0) return NO_AUDITED;
   const deps = classifyDeps(request);
   if (deps === void 0) return NO_AUDITED;
-  const remaining = ledger.allotted - ledger.engine - ledger.classify;
+  const remaining = request.config.tokenBudget - ledger.engine - ledger.classify;
   if (remaining < AUDIT_RESERVE_PER_FINDING * fresh.length) {
     diagnostics.record("classify.skipped_budget", {
       headSha: request.head,
@@ -5199,11 +5213,19 @@ async function performReview(request, diagnostics) {
     }
   }
 }
+async function resolvePairOrReport(ctx, request, diagnostics) {
+  try {
+    return await resolveReviewPair(ctx, request.base, request.head);
+  } catch (error) {
+    diagnostics.record("review_pair.merge_base_unresolved", { headSha: request.head });
+    throw error;
+  }
+}
 async function performReviewInner(request, diagnostics, ledger) {
   const started = Date.now();
   diagnostics.record("run.started", { headSha: request.head });
   const ctx = gitContext(request);
-  const pair = await resolveReviewPair(ctx, request.base, request.head);
+  const pair = await resolvePairOrReport(ctx, request, diagnostics);
   diagnostics.record("review_pair.resolved", { headSha: request.head });
   const inventory = await buildInventory(
     ctx,
@@ -5591,10 +5613,18 @@ async function runAction(env, diagnostics) {
     Math.floor(Date.now() / 1e3)
   );
   if (identity === void 0) throw new Error("no posting identity configured");
-  const config = runtimeConfigFromInputs(env);
-  const profilePath = readRequiredInput(env, "profile");
-  const profile = loadReviewProfile(await readFile2(profilePath, "utf8"));
-  const guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
+  let config;
+  let profile;
+  let guidelines;
+  try {
+    config = runtimeConfigFromInputs(env);
+    const profilePath = readRequiredInput(env, "profile");
+    profile = loadReviewProfile(await readFile2(profilePath, "utf8"));
+    guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
+  } catch (error) {
+    diagnostics.record("config.invalid", { headSha: event.head });
+    throw error;
+  }
   diagnostics.record("config.loaded", { headSha: event.head });
   const storePath = readInput(env, "review_store_path");
   const cacheStore = storePath === "" ? void 0 : await loadCacheStore(storePath, diagnostics);

@@ -228,6 +228,18 @@ function recordModelUsage(
   });
 }
 
+/**
+ * Maps a spawn/exec failure to its reason code: a timeout kill (`ExecFailure.timedOut`, from
+ * Node's `error.killed`) is distinguishable from an ordinary non-zero exit; anything that is not
+ * an `ExecFailure` at all never produced a process to exit.
+ */
+function engineFailureReason(
+  error: unknown,
+): "engine.run.timeout" | "engine.run.nonzero_exit" | "engine.run.spawn_failed" {
+  if (!(error instanceof ExecFailure)) return "engine.run.spawn_failed";
+  return error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit";
+}
+
 export async function runEngine(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
@@ -262,8 +274,7 @@ export async function runEngine(
 
     return { stdout: result.stdout.toString("utf8"), ruleDigest };
   } catch (error) {
-    const reason =
-      error instanceof ExecFailure ? "engine.run.nonzero_exit" : "engine.run.spawn_failed";
+    const reason = engineFailureReason(error);
     diagnostics.record(reason, {
       headSha: options.pair.head,
       durationMs: Date.now() - started,

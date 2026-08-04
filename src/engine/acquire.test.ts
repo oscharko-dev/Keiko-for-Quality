@@ -160,13 +160,19 @@ describe("acquireEngine: cache present but digest-mismatched", () => {
 
     stubFetchReturning(GOOD_BYTES, false); // non-ok response -> download_failed, thrown pre-populate
 
+    const diagnostics = createSilentDiagnostics();
     await expect(
-      acquireEngine(workspace, createSilentDiagnostics(), PIN, PLATFORM, ARCH, {
+      acquireEngine(workspace, diagnostics, PIN, PLATFORM, ARCH, {
         RUNNER_TOOL_CACHE: cacheRoot,
       }),
     ).rejects.toMatchObject({ reason: "engine.acquire.download_failed" });
 
     await expect(readFile(cachedAssetPath(cacheRoot))).rejects.toThrow();
+
+    // The thrown reason and the recorded diagnostic must agree — an operator reading the log and
+    // a caller catching the error are both looking at the same fact.
+    const failed = diagnostics.drain().find((r) => r.code === "engine.acquire.download_failed");
+    expect(failed?.version).toBe(VERSION);
   });
 });
 

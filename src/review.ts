@@ -49,6 +49,7 @@ import {
   mechanicallyCleanPaths,
   resolveReviewPair,
   type Inventory,
+  type ReviewPair,
 } from "./inventory/inventory.js";
 import type { GitHubClient, RepoRef } from "./github/client.js";
 import {
@@ -778,7 +779,9 @@ async function collectChangePassFindings(
   if (request.config.crossArtifactPass !== true) return [];
   const deps = classifyDeps(request);
   if (deps === undefined) return [];
-  const remaining = ledger.allotted - ledger.engine - ledger.classify;
+  // Same ceiling and same reasoning as `auditFreshSurvivors`' guard below: the consumer's declared
+  // budget, never the engine's size-scaled allotment, which live runs legally overshoot.
+  const remaining = request.config.tokenBudget - ledger.engine - ledger.classify;
   if (remaining < CHANGE_PASS_RESERVE_TOKENS) {
     diagnostics.record("contracts.change_pass", {
       headSha: request.head,
@@ -1021,12 +1024,19 @@ async function auditFreshSurvivors(
   const deps = classifyDeps(request);
   if (deps === undefined) return NO_AUDITED;
 
-  // The whole-review ceiling this run was allotted, minus whatever the engine and repair — both
-  // already final by the time publication runs — already spent. The audit is an add-on opinion, not
-  // a publication requirement: under a nearly spent budget the honest move is to publish with the
+  // The consumer's declared whole-run ceiling, minus whatever the engine and repair — both already
+  // final by the time publication runs — already spent. The audit is an add-on opinion, not a
+  // publication requirement: under a nearly spent budget the honest move is to publish with the
   // classification the engine and the repair already produced and skip the audit, not to borrow
   // against a ceiling the consumer set for the whole run.
-  const remaining = ledger.allotted - ledger.engine - ledger.classify;
+  //
+  // `config.tokenBudget`, deliberately NOT `ledger.allotted`: the allotment is the engine's
+  // size-scaled stop-loss, and the engine only consults it between dispatches — a run whose files
+  // are all dispatched up front can legally finish far above it (measured 12.5x on the first live
+  // v0.12.0 run, 2026-08-04, evidence in corpus/evidence/). Guarding the audit on that number
+  // disabled it in exactly the expensive runs where a second opinion matters most, while the
+  // ceiling this guard exists to protect — the consumer's — still had millions of tokens of room.
+  const remaining = request.config.tokenBudget - ledger.engine - ledger.classify;
   if (remaining < AUDIT_RESERVE_PER_FINDING * fresh.length) {
     diagnostics.record("classify.skipped_budget", {
       headSha: request.head,
@@ -1384,6 +1394,24 @@ export async function performReview(
   }
 }
 
+/**
+ * `resolveReviewPair` wrapped with its own diagnostic: an unfetched commit, or two histories `git
+ * merge-base` cannot bridge, is recorded before rethrowing, so an operator can tell this apart
+ * from every other cause `run.failed` alone would otherwise collapse it into.
+ */
+async function resolvePairOrReport(
+  ctx: GitContext,
+  request: ReviewRequest,
+  diagnostics: Diagnostics,
+): Promise<ReviewPair> {
+  try {
+    return await resolveReviewPair(ctx, request.base, request.head);
+  } catch (error) {
+    diagnostics.record("review_pair.merge_base_unresolved", { headSha: request.head });
+    throw error;
+  }
+}
+
 async function performReviewInner(
   request: ReviewRequest,
   diagnostics: Diagnostics,
@@ -1393,7 +1421,7 @@ async function performReviewInner(
   diagnostics.record("run.started", { headSha: request.head });
 
   const ctx = gitContext(request);
-  const pair = await resolveReviewPair(ctx, request.base, request.head);
+  const pair = await resolvePairOrReport(ctx, request, diagnostics);
   diagnostics.record("review_pair.resolved", { headSha: request.head });
 
   const inventory = await buildInventory(
