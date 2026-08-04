@@ -35,7 +35,13 @@ import { EngineRunError, runEngine, type EngineRunOptions } from "./engine/run.j
 import { settle, verdictsSurviveIncompleteness, type Settlement } from "./engine/settle.js";
 import { readTextAtCommit, type GitContext } from "./git/plumbing.js";
 import { runChangePass, type ChangedFile } from "./contracts/change-pass.js";
-import { compareContracts, describeMismatch } from "./contracts/shape-gate.js";
+import {
+  compareDeclaredContracts,
+  describeMismatch,
+  describeUnionGap,
+  findUncoveredUnionMembers,
+} from "./contracts/shape-gate.js";
+import { describePinDesync, detectPinDesync } from "./contracts/pin-desync.js";
 import type { InventoryItem } from "./inventory/classify.js";
 import {
   buildInventory,
@@ -143,7 +149,13 @@ const PER_LINE_TOKENS = 60;
  */
 const ALLOTMENT_MARGIN = 1.3;
 
-/** Floor beneath which a 1-2-file pull request would otherwise get an unworkably small allotment. */
+/**
+ * Floor beneath which a 1-2-file pull request would otherwise get an unworkably small allotment.
+ *
+ * Sized for a WHOLE review, not for a second attempt bounded inside one — see
+ * `RESUME_FLOOR_FRACTION` (near `runEngineWithOneResume`) for the resume's own floor, and for why
+ * reusing this constant there was the defect it now replaces.
+ */
 const ALLOTMENT_FLOOR = 80_000;
 
 /** Ceiling past which a run is expected to chunk or escalate rather than run as one unbounded spend. */
@@ -609,43 +621,123 @@ async function collectGateFindings(
   diagnostics: Diagnostics,
 ): Promise<readonly EngineFinding[]> {
   const pairs = request.profile.contractPairs ?? [];
-  if (pairs.length === 0) return [];
   const ctx = gitContext(request);
   const findings: EngineFinding[] = [];
   let compared = 0;
   for (const pair of pairs) {
     for (const item of inventory.items) {
       if (!item.reviewable || !pair.matcher.matches(item.path as string)) continue;
-      compared += await compareAgainstCounterparts(ctx, request.head, item, pair, findings);
+      compared += await compareAgainstCounterparts(
+        ctx,
+        request.base,
+        request.head,
+        item,
+        pair,
+        findings,
+      );
     }
   }
+  const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings);
+  if (pairs.length === 0 && findings.length === 0 && pinDesyncs === 0) return [];
   diagnostics.record("contracts.gate", {
     headSha: request.head,
-    counts: { pairs: pairs.length, compared, findings: findings.length },
+    counts: {
+      pairs: pairs.length,
+      compared,
+      findings: findings.length,
+      pin_desync: pinDesyncs,
+    },
   });
   return findings;
+}
+
+/**
+ * The duplicate-pin desync check (v0.12.0): one file declaring the same 40-hex reference in two
+ * places, where the change moved one and left the other behind.
+ *
+ * Unlike the shape gate above it needs no declared pair — both declarations live in the same file,
+ * and the base version is what proves they were meant to agree. It runs over every modified
+ * reviewable path for that reason, and its cost is two blob reads and a text scan per file, no
+ * model involvement at all.
+ *
+ * It exists because this reviewer measurably missed exactly this on a production pull request that
+ * advanced a pinned action's sha and left the variable declaring the same sha untouched — silently
+ * disabling the consumer's own review store — while two other reviewers caught it. A per-file diff
+ * review cannot see it: the changed line is correct in isolation, and the stale one did not change.
+ */
+async function collectPinDesyncFindings(
+  ctx: GitContext,
+  request: ReviewRequest,
+  inventory: Inventory,
+  findings: EngineFinding[],
+): Promise<number> {
+  let found = 0;
+  for (const item of inventory.items) {
+    // Modified only: an added file has no base to disagree with, and a deleted one declares
+    // nothing any more.
+    if (!item.reviewable || item.status !== "M") continue;
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    const path = item.path as string;
+    const base = await readTextAtCommit(ctx, request.base, path);
+    const head = await readTextAtCommit(ctx, request.head, path);
+    if (base === undefined || head === undefined) continue;
+    for (const desync of detectPinDesync(base, head)) {
+      if (findings.length >= MAX_GATE_FINDINGS) break;
+      findings.push({
+        path: item.path,
+        content: describePinDesync(desync, path),
+        startLine: 0,
+        endLine: 0,
+        category: "bug",
+        severity: "high",
+      });
+      found += 1;
+    }
+  }
+  return found;
 }
 
 /** One changed file against one pair's counterparts; returns how many comparisons actually ran. */
 async function compareAgainstCounterparts(
   ctx: GitContext,
+  base: CommitSha,
   head: CommitSha,
   item: InventoryItem,
   pair: { readonly counterparts: readonly string[] },
   findings: EngineFinding[],
 ): Promise<number> {
-  const left = await readTextAtCommit(ctx, head, item.path as string);
+  const path = item.path as string;
+  const left = await readTextAtCommit(ctx, head, path);
   if (left === undefined) return 0;
+  // Only needed by the union check, which asks what this change ADDED — a member present in both
+  // versions was never widened by this pull request and is not this review's question. Absent for
+  // an added file, which correctly leaves the union check with nothing to compare.
+  const leftBase = await readTextAtCommit(ctx, base, path);
   let compared = 0;
   for (const counterpart of pair.counterparts) {
     const right = await readTextAtCommit(ctx, head, counterpart);
     if (right === undefined) continue;
     compared += 1;
-    for (const mismatch of compareContracts(left, right)) {
+    // `compareDeclaredContracts`, not `compareContracts`: the profile named these two files as
+    // counterparts, so when neither side offers a same-named interface but each offers exactly
+    // one, comparing those two is the declaration's own meaning rather than this gate guessing.
+    for (const mismatch of compareDeclaredContracts(left, right)) {
       if (findings.length >= MAX_GATE_FINDINGS) return compared;
       findings.push({
         path: item.path,
-        content: describeMismatch(mismatch, item.path as string, counterpart),
+        content: describeMismatch(mismatch, path, counterpart),
+        startLine: 0,
+        endLine: 0,
+        category: "bug",
+        severity: "high",
+      });
+    }
+    if (leftBase === undefined) continue;
+    for (const gap of findUncoveredUnionMembers(leftBase, left, right)) {
+      if (findings.length >= MAX_GATE_FINDINGS) return compared;
+      findings.push({
+        path: item.path,
+        content: describeUnionGap(gap, path, counterpart),
         startLine: 0,
         endLine: 0,
         category: "bug",
@@ -778,6 +870,24 @@ async function repairEngineFindings(
 const RESUME_SEED = 43;
 
 /**
+ * The resume's own floor: a FRACTION of THIS review's allotment, not the constant `ALLOTMENT_FLOOR`
+ * above.
+ *
+ * `ALLOTMENT_FLOOR` is sized for a whole 1-2-file review, not for a second attempt bounded inside
+ * one. Using it as the resume's floor too meant the overrun got WORSE the smaller the review's own
+ * allotment was: at the smallest possible allotment (a review already pinned to `ALLOTMENT_FLOOR`
+ * itself), a first attempt that spent its whole allotment and then resumed could reach a full 2x
+ * the configured ceiling. Measured this session on a representative 107,120-token allotment: a
+ * first attempt overspent it, the resume's flat 80,000-token floor stacked on top regardless, and
+ * the run landed at 201,881 tokens — 1.9x its own allotment. A quarter of the review's OWN ceiling
+ * instead bounds the worst case across both attempts at 1.25x the allotment — constant however
+ * large or small the allotment is, versus the ~1.75x that same 107,120-token example implies for
+ * the old formula (1 + 80,000/107,120). The bound now scales with the review instead of being a
+ * constant sized for a different one.
+ */
+const RESUME_FLOOR_FRACTION = 0.25;
+
+/**
  * Exactly one bounded resume (#57). A run that ends without a usable success — the process threw,
  * or the result reports a non-success status — is re-invoked once, and the second outcome stands
  * whatever it is. One, not N: an unbounded retry converts a provider outage into a doubled bill,
@@ -786,18 +896,27 @@ const RESUME_SEED = 43;
  * corpus reproduced the same signature four times before the session log named it). A second
  * failure settles incomplete precisely as it did before the resume existed.
  *
+ * A first attempt that already reports ITS OWN budget exceeded gets no resume at all: the
+ * resume's budget can only be carved from what the first attempt left (see
+ * `RESUME_FLOOR_FRACTION`), and an attempt that already spent past its own ceiling left nothing to
+ * fund a second opinion with. Resuming anyway would only re-pay for ground the first attempt
+ * already covered and settle incomplete regardless — cost with no chance of a different outcome.
+ *
  * `engineTokens` (v0.12.0) is the cumulative spend across every attempt that actually ran, not
  * just the one whose result stands: a resumed run paid for both attempts, and `run.spend` has to
- * say so rather than under-report by the size of the discarded first one.
+ * say so rather than under-report by the size of the discarded first one. A skipped resume is one
+ * attempt, so it is exactly that attempt's own total — never a guess at what a second would have
+ * cost.
  */
 async function runEngineWithOneResume(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
 ): Promise<{ result: EngineResult; engineTokens: number }> {
-  // The allotment is a whole-review ceiling and must hold ACROSS attempts: the resume runs on
-  // what the first attempt left, floored so a near-exhausted budget still allows a minimal
-  // second opinion. A thrown run reports no token total, so the full allotment stands there —
-  // nothing measured says it was spent.
+  // The resume runs on what the first attempt left, floored at RESUME_FLOOR_FRACTION of THIS
+  // review's own allotment (see that constant's own comment) rather than a literal whole-review
+  // ceiling held across attempts — that claim was never actually true of the old flat floor either.
+  // A thrown run reports no token total, so the full allotment stands there — nothing measured
+  // says it was spent.
   let remaining = options.allottedBudget;
   // Same honesty as the allotment above: a thrown first attempt leaves no parsed result behind,
   // so it contributes nothing measured to the total rather than a guess.
@@ -807,7 +926,22 @@ async function runEngineWithOneResume(
     const parsed = parseEngineResult(first.stdout);
     if (parsed.status === "success") return { result: parsed, engineTokens: parsed.totalTokens };
     firstAttemptTokens = parsed.totalTokens;
-    remaining = Math.max(ALLOTMENT_FLOOR, options.allottedBudget - parsed.totalTokens);
+    // No second opinion for a first attempt that already reports its budget exceeded (see this
+    // function's own doc comment). It gets its own code rather than borrowing one: `resumed_once`
+    // means a resume ran, and an absent line would leave an operator unable to tell a run that
+    // never needed a resume from one that was denied it — which is exactly the question a
+    // budget-truncated review raises.
+    if (parsed.budgetExceeded) {
+      diagnostics.record("engine.resume_skipped_budget_exceeded", {
+        counts: { spent: firstAttemptTokens, allotted: options.allottedBudget },
+      });
+      return { result: parsed, engineTokens: firstAttemptTokens };
+    }
+    remaining = clamp(
+      options.allottedBudget - parsed.totalTokens,
+      Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION),
+      options.allottedBudget,
+    );
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   } catch (error) {
     if (!(error instanceof EngineRunError)) throw error;

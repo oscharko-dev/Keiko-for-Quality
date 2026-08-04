@@ -136,15 +136,29 @@ function parseFindings(value: unknown, field: string): EngineFinding[] {
     const start = parseLine(object.start_line, `${scope}.start_line`);
     const end = parseLine(object.end_line, `${scope}.end_line`);
     if (end < start) throw new ValidationError(`${scope}.end_line`);
+    // The engine's path comes from candidate-controlled input and is used to address the GitHub
+    // API, so it is re-validated here rather than trusted because the engine echoed it.
+    const path = repoPath(asString(object.path, `${scope}.path`), `${scope}.path`);
+    const content = asString(object.content, `${scope}.content`, LIMITS.maxBodyChars);
+    const severity = optionalToken(object.severity);
+    const category = optionalToken(object.category);
+
+    // See `unwrapEnvelopeContent` below: the model sometimes answers with a full finding
+    // envelope stuffed into `content` instead of `content`'s prose. When that shape appears, the
+    // inner envelope is what the model actually meant to file, and the fields below adopt it
+    // field-by-field, falling back to this outer envelope wherever the inner one is absent or
+    // invalid.
+    const unwrapped = unwrapEnvelopeContent(content, `${scope}.content`);
+    if (unwrapped === undefined) {
+      return { path, content, startLine: start, endLine: end, severity, category };
+    }
     return {
-      // The engine's path comes from candidate-controlled input and is used to address the GitHub
-      // API, so it is re-validated here rather than trusted because the engine echoed it.
-      path: repoPath(asString(object.path, `${scope}.path`), `${scope}.path`),
-      content: asString(object.content, `${scope}.content`, LIMITS.maxBodyChars),
-      startLine: start,
-      endLine: end,
-      severity: optionalToken(object.severity),
-      category: optionalToken(object.category),
+      path: unwrapped.path ?? path,
+      content: unwrapped.content,
+      startLine: unwrapped.startLine ?? start,
+      endLine: unwrapped.endLine ?? end,
+      severity: unwrapped.severity ?? severity,
+      category: unwrapped.category ?? category,
     };
   });
 }
@@ -168,6 +182,122 @@ function parseFindings(value: unknown, field: string): EngineFinding[] {
 function optionalToken(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0 || value.length > 64) return undefined;
   return /^[a-z][a-z0-9_-]*$/i.test(value) ? value : undefined;
+}
+
+/**
+ * The finding-envelope keys other than `content` that the rule text (`CATCH_ALL_RULE` in
+ * `rule-file.ts`) instructs the model to emit alongside it. Any one of these, found as a sibling
+ * of a `content` string inside a parsed object, is enough to suspect the model nested its answer
+ * instead of writing prose — see `unwrapEnvelopeContent` below.
+ */
+const ENVELOPE_KEYS = ["path", "start_line", "end_line", "category", "severity"] as const;
+
+/** Adopts the inner envelope's `path` — through the same validators the outer envelope uses —
+ *  only when it is present and valid; otherwise the caller keeps its own.
+ */
+function unwrapInnerPath(inner: Record<string, unknown>, field: string): RepoPath | undefined {
+  const pathField = `${field}.path`;
+  try {
+    return repoPath(asString(inner.path, pathField), pathField);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Adopts the inner envelope's line range only as a matched pair: `start_line` and `end_line` must
+ * both be individually valid (via `parseLine`, the same validator the outer envelope uses) AND
+ * satisfy the same non-inverted-range rule `parseFindings` enforces on the outer pair. Anything
+ * less and both fall back to the outer pair together — mixing an inner `start_line` with an outer
+ * `end_line` (or vice versa) would silently produce a range neither the model nor this parser ever
+ * actually validated together.
+ */
+function unwrapInnerLines(
+  inner: Record<string, unknown>,
+  field: string,
+): { readonly startLine: number; readonly endLine: number } | undefined {
+  try {
+    const startLine = parseLine(inner.start_line, `${field}.start_line`);
+    const endLine = parseLine(inner.end_line, `${field}.end_line`);
+    if (endLine < startLine) throw new ValidationError(`${field}.end_line`);
+    return { startLine, endLine };
+  } catch {
+    return undefined;
+  }
+}
+
+interface UnwrappedEnvelope {
+  readonly content: string;
+  readonly path: RepoPath | undefined;
+  readonly startLine: number | undefined;
+  readonly endLine: number | undefined;
+  readonly severity: string | undefined;
+  readonly category: string | undefined;
+}
+
+/**
+ * Recovers a finding the model filed as a JSON envelope nested inside its own `content` field.
+ *
+ * Measured, not hypothesized: a same-day 32-case qualification run over gpt-oss-120b produced six
+ * findings, across two arms, whose `content` was itself a JSON object carrying the finding
+ * envelope's own keys — a body beginning `{"path": "src/candidate-deliverability.ts",
+ * "start_line": 4, "end_line": 4, "category": "bug", "severity": "high", "content": "The
+ * predicate excludes only needs-review, so a rejected candidate still reads as deliverable."}`.
+ * That cost two things: the raw JSON was published verbatim as a review comment body (it
+ * contains no HTML or links, so `sanitizeFindingBody` had no reason to reject it), and in the
+ * `status-union-widened-consumer-missed` case the corpus scored a genuinely correct finding a
+ * miss, because the NESTED path named the correct consumer file while the outer envelope named
+ * the changed file the engine was actually looking at — the model found the defect and filed it
+ * in the wrong field.
+ *
+ * This is the same recoverable-format-error family `optionalToken` above already treats
+ * leniently: the model's judgement was sound and only its envelope shape is wrong, so both
+ * discarding the finding and publishing the raw JSON are worse outcomes than deterministically
+ * taking what the model plainly meant. It does not bend "reject rather than repair" any more than
+ * `optionalToken` does, and for the same reason: the outer envelope has already validated in full
+ * by the time this runs, so there is always a structurally sound finding to fall back to — this
+ * only decides, field by field, which of two well-formed candidates to keep.
+ *
+ * Unwraps at most one level. A `content` string that, after unwrapping, is again a nested envelope
+ * is left as literal text, because this function is called exactly once per finding (from
+ * `parseFindings`) and its result is never fed back into itself. A model nesting its answer twice
+ * is not the single format slip this exists to recover; guessing through a second layer of it
+ * would be exactly the kind of guess "reject rather than repair" does forbid.
+ */
+function unwrapEnvelopeContent(content: string, field: string): UnwrappedEnvelope | undefined {
+  let inner: Record<string, unknown>;
+  try {
+    inner = asObject(parseJson(content, field), field);
+  } catch {
+    return undefined;
+  }
+  // `content` missing or non-string, or no sibling envelope key at all, means this is either
+  // ordinary prose that happens to parse as JSON (a bare `{"debug": true}` quoted from the diff,
+  // say) or an object this heuristic has no basis to treat as a nested finding. Silence beats a
+  // guess: leave the finding exactly as it arrived.
+  if (typeof inner.content !== "string") return undefined;
+  if (!ENVELOPE_KEYS.some((key) => key in inner)) return undefined;
+
+  // The inner content becomes the finding body, so it must clear the same bound the outer
+  // content already had to: reused, not restated. In practice only the empty-string floor can
+  // fire here — the inner string is nested inside the already-bounded outer one, so it can never
+  // itself exceed `maxBodyChars`.
+  let innerContent: string;
+  try {
+    innerContent = asString(inner.content, `${field}.content`, LIMITS.maxBodyChars);
+  } catch {
+    return undefined;
+  }
+
+  const lines = unwrapInnerLines(inner, field);
+  return {
+    content: innerContent,
+    path: unwrapInnerPath(inner, field),
+    startLine: lines?.startLine,
+    endLine: lines?.endLine,
+    severity: optionalToken(inner.severity),
+    category: optionalToken(inner.category),
+  };
 }
 
 function parseWarnings(value: unknown, field: string): EngineWarning[] {

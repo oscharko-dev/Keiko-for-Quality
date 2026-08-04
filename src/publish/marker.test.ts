@@ -79,6 +79,63 @@ describe("fingerprint", () => {
   });
 });
 
+/**
+ * Freeze-backlog item B6: `normalizeForFingerprint` here and `similarity.ts`'s `tokenize` used to run
+ * their own, independently written Unicode handling, and the marker stage's ASCII-only keep-set
+ * diverged from the tokenizer's Unicode-aware one on exactly the inputs that matter most for
+ * cross-run deduplication — the same finding, reproduced with a cosmetically different but
+ * semantically identical encoding. Verified before extracting `normalizeUnicodeText`
+ * (both functions reimplemented standalone and run against every pair below): the NFC-vs-NFD pair and
+ * the zero-width-joiner pair genuinely produced two different fingerprints; the curly-quote,
+ * non-breaking-space, and mixed-case pairs already agreed by coincidence (neither function's old
+ * "keep" character class included quotes or whitespace, and both already lowercased independently).
+ * All five stay in one table regardless — they are exactly the dimensions a text normalizer owns, and
+ * this pins that consolidating the logic did not regress the three that already worked while fixing
+ * the two that did not.
+ *
+ * Every pair here must also agree under `similarity.ts`'s tokenizer — see
+ * `similarity.test.ts`'s matching "Unicode-adversarial pairs" suite, built from the identical bodies.
+ */
+describe("fingerprint: Unicode-adversarial pairs now agree (freeze-backlog B6)", () => {
+  it("NFC vs NFD: the same accented letter, precomposed and canonically decomposed", () => {
+    const nfc = "The café approach breaks under load during a retry.";
+    const nfd = nfc.normalize("NFD");
+    expect(nfc).not.toBe(nfd); // sanity: the pair is actually byte-different going in
+    expect(fingerprint({ ...BASE, body: nfc })).toBe(fingerprint({ ...BASE, body: nfd }));
+  });
+
+  it("curly vs straight quotes", () => {
+    const straight = "The retry loop doesn't reset the counter after a timeout.";
+    const curly = "The retry loop doesn’t reset the counter after a timeout.";
+    expect(fingerprint({ ...BASE, body: straight })).toBe(fingerprint({ ...BASE, body: curly }));
+  });
+
+  it("non-breaking space vs a normal space", () => {
+    const normal = "Restore the fallback connector when the endpoint is unset.";
+    const nbsp = normal.replace(/ /g, "\u00A0");
+    expect(nbsp).not.toBe(normal); // sanity
+    expect(fingerprint({ ...BASE, body: normal })).toBe(fingerprint({ ...BASE, body: nbsp }));
+  });
+
+  it("a zero-width joiner silently inserted mid-word", () => {
+    const clean = "Validate the token before granting access to the resource.";
+    const withZwj = clean.replace("token", "to\u200Dken");
+    expect(fingerprint({ ...BASE, body: clean })).toBe(fingerprint({ ...BASE, body: withZwj }));
+  });
+
+  it("mixed case", () => {
+    const upper = "NULL POINTER EXCEPTION in the retry handler during shutdown.";
+    const lower = "null pointer exception in the retry handler during shutdown.";
+    expect(fingerprint({ ...BASE, body: upper })).toBe(fingerprint({ ...BASE, body: lower }));
+  });
+
+  it("still distinguishes genuinely different content — the fix does not collapse everything", () => {
+    const a = fingerprint({ ...BASE, body: "Restore the fallback connector." });
+    const b = fingerprint({ ...BASE, body: "An unrelated defect about locking exists." });
+    expect(a).not.toBe(b);
+  });
+});
+
 describe("marker rendering", () => {
   it("round-trips through render and extract", () => {
     const value = fingerprint(BASE);

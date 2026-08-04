@@ -1,0 +1,83 @@
+{
+  "runs": [
+    {
+      "runId": 30890860029,
+      "runNumber": 275,
+      "headSha": "098a3a0bd910676b8ee7b1b0269bd0070f243a5b",
+      "createdAt": "2026-08-04T08:10:46Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30890860029"
+    },
+    {
+      "runId": 30890199827,
+      "runNumber": 274,
+      "headSha": "629d42f40927eeadf5336543919609b9ce9bb18d",
+      "createdAt": "2026-08-04T08:01:37Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30890199827"
+    },
+    {
+      "runId": 30890199342,
+      "runNumber": 273,
+      "headSha": "52b4190ba2855197688b0fd72fecfc9958290364",
+      "createdAt": "2026-08-04T08:01:36Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30890199342"
+    },
+    {
+      "runId": 30890198725,
+      "runNumber": 272,
+      "headSha": "b55f5a07639ec8ea4b7c6eca6ff6193587e6873f",
+      "createdAt": "2026-08-04T08:01:36Z",
+      "conclusion": "skipped",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30890198725"
+    },
+    {
+      "runId": 30889585349,
+      "runNumber": 271,
+      "headSha": "098a3a0bd910676b8ee7b1b0269bd0070f243a5b",
+      "createdAt": "2026-08-04T07:52:49Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30889585349",
+      "outcome": "complete",
+      "durationMs": 1988,
+      "cacheHits": 1,
+      "cacheMisses": 0
+    },
+    {
+      "runId": 30889033210,
+      "runNumber": 270,
+      "headSha": "0ef6d57c1e6d97a1729566695c3949d4cc5cf8dd",
+      "createdAt": "2026-08-04T07:44:37Z",
+      "conclusion": "success",
+      "status": "completed",
+      "url": "https://github.com/oscharko-dev/Keiko/actions/runs/30889033210",
+      "outcome": "complete",
+      "durationMs": 90903,
+      "cacheHits": 0,
+      "cacheMisses": 6
+    }
+  ],
+  "aggregate": {
+    "runCount": 6,
+    "completeCount": 2,
+    "incompleteCount": 0,
+    "unknownCount": 4,
+    "totals": {
+      "cacheHits": 1,
+      "cacheMisses": 6
+    },
+    "stats": {
+      "durationMs": {
+        "n": 2,
+        "median": 46445.5,
+        "p95": 90903
+      }
+    }
+  }
+}

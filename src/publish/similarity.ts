@@ -1,3 +1,5 @@
+import { normalizeUnicodeText } from "./marker.js";
+
 /**
  * The second, phrasing-independent deduplication stage.
  *
@@ -184,11 +186,19 @@ function shareCodeBlock(a: string, b: string): boolean {
   return false;
 }
 
-/** Lowercased, code-fence-stripped, stopword-filtered content words. Unicode-aware for non-English review output. */
+/**
+ * Lowercased, code-fence-stripped, stopword-filtered content words. Unicode-aware for non-English
+ * review output.
+ *
+ * Canonicalized through `marker.ts`'s `normalizeUnicodeText` before this function's own keep-set
+ * (`\p{L}\p{N}`, still Unicode-wide — unlike the fingerprint's ASCII-only skeleton) and stopword/
+ * length filter run, so the two dedup stages now agree on what "the same text" looks like at the
+ * Unicode-encoding level (NFC form, curly quotes, exotic spaces, zero-width characters, case) — see
+ * that function's doc comment for exactly which dimensions and why it lives there rather than here.
+ */
 function tokenize(text: string): ReadonlySet<string> {
   const withoutCode = clip(text).replace(/```[\s\S]*?```/g, " ");
-  const words = withoutCode
-    .toLowerCase()
+  const words = normalizeUnicodeText(withoutCode)
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .split(" ")
     .filter((word) => word.length >= 3 && !STOPWORDS.has(word));

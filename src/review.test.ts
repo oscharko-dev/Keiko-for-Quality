@@ -757,8 +757,9 @@ describe("performReview: review-cache memoization end to end", () => {
       const secondOptions = runEngineMock.mock.calls[1]?.[0] as { samplingSeed?: number };
       expect(firstOptions.samplingSeed).toBeUndefined();
       expect(secondOptions.samplingSeed).toBe(43);
-      // The allotment is a whole-review ceiling across attempts: the second invocation runs on
-      // what the first left, floored — for this tiny repository the floor IS the remainder.
+      // A thrown first attempt spends nothing measured, so `remaining` stays the untouched full
+      // allotment (see `runEngineWithOneResume`'s own comment) rather than being reduced by
+      // anything the resume-floor formula computes — the second call's budget equals the first's.
       const firstBudget = (runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number })
         .allottedBudget;
       const secondBudget = (runEngineMock.mock.calls[1]?.[0] as { allottedBudget: number })
@@ -778,6 +779,114 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("incomplete");
       expect(runEngineMock).toHaveBeenCalledTimes(2);
+    });
+
+    /**
+     * The leak this block closes: a first attempt that reports spending its whole allotment used
+     * to still unlock a further flat `ALLOTMENT_FLOOR` (80,000) tokens on the resume, regardless of
+     * how large the review's own allotment was. `RESUME_FLOOR_FRACTION` replaces that flat floor
+     * with a quarter of THIS review's own allotment, so the resume's own budget is asserted here
+     * directly against the value `computeAllottedBudget` actually gave the first call — never a
+     * hard-coded 80,000 — which is what makes this test fail if the formula ever regresses back to
+     * the constant floor.
+     */
+    it("floors the resume at a quarter of this review's own allotment, never the fixed 80,000 floor", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // Non-success, and reports spending far more than any plausible allotment for this tiny
+      // fixture — `budget_exceeded` stays false, since a first attempt that itself flagged the
+      // budget exceeded takes the OTHER new path (skips the resume entirely — see below).
+      const overspent = JSON.stringify({
+        status: "failed",
+        summary: { files_reviewed: 0, total_tokens: 9_000_000, budget_exceeded: false },
+        comments: [],
+      });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: overspent, ruleDigest: engineDigest })
+        .mockResolvedValueOnce({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const report = await performReview(baseRequest(undefined), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      const firstBudget = (runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number })
+        .allottedBudget;
+      const secondBudget = (runEngineMock.mock.calls[1]?.[0] as { allottedBudget: number })
+        .allottedBudget;
+      expect(secondBudget).toBe(Math.round(firstBudget * 0.25));
+      expect(secondBudget).not.toBe(80_000);
+    });
+
+    it("gives the resume the real remainder when the first attempt spent only part of its allotment", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // The mocked first response reads back `options.allottedBudget` so the fixture does not need
+      // to hard-code a number this test itself does not control — 30% spent, however large the
+      // real allotment `computeAllottedBudget` gave this run turns out to be.
+      runEngineMock
+        .mockImplementationOnce((options: { allottedBudget: number }) => ({
+          stdout: JSON.stringify({
+            status: "failed",
+            summary: {
+              files_reviewed: 0,
+              total_tokens: Math.round(options.allottedBudget * 0.3),
+              budget_exceeded: false,
+            },
+            comments: [],
+          }),
+          ruleDigest: engineDigest,
+        }))
+        .mockResolvedValueOnce({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const report = await performReview(baseRequest(undefined), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      const firstBudget = (runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number })
+        .allottedBudget;
+      const secondBudget = (runEngineMock.mock.calls[1]?.[0] as { allottedBudget: number })
+        .allottedBudget;
+      const spent = Math.round(firstBudget * 0.3);
+      // The real 70% remainder, not the 25% floor — the floor only binds once the true remainder
+      // would otherwise fall beneath it.
+      expect(secondBudget).toBe(firstBudget - spent);
+      expect(secondBudget).toBeGreaterThan(Math.round(firstBudget * 0.25));
+    });
+
+    it("skips the resume entirely when the first attempt already reports its budget exceeded", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const overBudget = JSON.stringify({
+        status: "failed",
+        summary: { files_reviewed: 1, total_tokens: 40_000, budget_exceeded: true },
+        comments: [],
+      });
+      runEngineMock.mockResolvedValueOnce({ stdout: overBudget, ruleDigest: engineDigest });
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      // No second opinion: the resume's own budget can only be carved from what the first attempt
+      // left, and the first attempt already reports nothing left.
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
+
+      // `settleCounted` (settle.ts) decides on `status` before it ever looks at `budgetExceeded`,
+      // so a non-success counted-mode result settles for the same reason whether or not a resume
+      // was ever attempted — this is exactly today's behaviour for this engine output, not a new
+      // outcome the skip introduces.
+      expect(report.outcome).toBe("incomplete");
+      expect(report.reason).toBe("settlement.incomplete.engine_status_not_success");
+
+      // Skipped, not resumed: the resume-only diagnostic must not fire for a resume that never ran.
+      const codes = diagnostics.drain().map((record) => record.code);
+      expect(codes).not.toContain("engine.resumed_once");
+
+      // Exactly the first (and only) attempt's own tokens — never a guess, and never inflated by a
+      // second call that never happened.
+      const spend = diagnostics.drain().find((record) => record.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 40_000, classify: 0, total: 40_000 });
     });
   });
 
@@ -1226,7 +1335,222 @@ describe("performReview: review-cache memoization end to end", () => {
       // Deterministic means deterministic: no audit, no repair, no pass — zero model traffic.
       expect(modelCalls).toBe(0);
       const record = diagnostics.drain().find((r) => r.code === "contracts.gate");
-      expect(record?.counts).toStrictEqual({ pairs: 1, compared: 1, findings: 1 });
+      expect(record?.counts).toStrictEqual({
+        pairs: 1,
+        compared: 1,
+        findings: 1,
+        pin_desync: 0,
+      });
+    });
+
+    /**
+     * The production miss this check was built for, end to end: oscharko-dev/Keiko#2977 advanced a
+     * pinned action's sha and left the variable declaring the same sha behind, silently disabling
+     * the consumer's own review store. Two other reviewers caught it; this one published nothing.
+     * The fixture is that exact shape — one file, the same 40-hex value at two sites, the head
+     * moving only one of them — and it must now produce a published finding without a single model
+     * call, because a value declared twice and changed once is a fact, not an opinion.
+     */
+    it("catches a same-file duplicate pin the change moved at only one site", async () => {
+      const oldSha = "1".repeat(40);
+      const newSha = "2".repeat(40);
+      const workflow = (usesSha: string, pinSha: string): string =>
+        [
+          "jobs:",
+          "  review:",
+          "    steps:",
+          `      - uses: acme/reviewer@${usesSha} # keep in sync with ACTION_PIN`,
+          "        env:",
+          `          ACTION_PIN: "${pinSha}"`,
+          "",
+        ].join("\n");
+
+      await writeFile(join(repo, "src/pinned.yml"), workflow(oldSha, oldSha));
+      git(["add", "-A"]);
+      git(["commit", "-q", "-m", "pin-base", "--no-gpg-sign"]);
+      const pinBase = git(["rev-parse", "HEAD"]).trim();
+      // Only the `uses:` site advances — exactly the change that looked correct in isolation.
+      await writeFile(join(repo, "src/pinned.yml"), workflow(newSha, oldSha));
+      git(["add", "-A"]);
+      git(["commit", "-q", "-m", "pin-head", "--no-gpg-sign"]);
+      const pinHead = git(["rev-parse", "HEAD"]).trim();
+
+      const client = new GitHubClient("https://api.example.test", "unused");
+      const created: ReviewCommentInput[] = [];
+      const comments: ReviewComment[] = [];
+      vi.spyOn(client, "getPullRequest").mockResolvedValue({
+        headSha: commitSha(pinHead),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
+      vi.spyOn(client, "createReviewComment").mockImplementation((_ref, _num, input) => {
+        created.push(input);
+        const comment: ReviewComment = {
+          id: comments.length + 1,
+          body: input.body,
+          path: input.path,
+          authorLogin: "keiko-for-quality[bot]",
+          commitId: input.commitId,
+          url: "https://example.test/c",
+        };
+        comments.push(comment);
+        return Promise.resolve(comment);
+      });
+      vi.spyOn(client, "getReviewComment").mockImplementation((_ref, id) =>
+        Promise.resolve(comments[id - 1]!),
+      );
+
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "success",
+          summary: { files_reviewed: 1, total_tokens: 100, budget_exceeded: false },
+          comments: [],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      let modelCalls = 0;
+      globalThis.fetch = (() => {
+        modelCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(
+        {
+          ...baseRequest(undefined),
+          client,
+          base: commitSha(pinBase),
+          head: commitSha(pinHead),
+          config: GATE_CONFIG,
+          env: { MODEL_TOKEN: "fake-token" },
+        },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish?.published).toBe(1);
+      expect(created[0]?.path).toBe("src/pinned.yml");
+      expect(modelCalls).toBe(0);
+      const record = diagnostics.drain().find((r) => r.code === "contracts.gate");
+      expect(record?.counts?.pin_desync).toBe(1);
+    });
+
+    /**
+     * The corpus case `status-union-widened-consumer-missed`, which a full qualification run
+     * measured as a MISS in both arms: a status union gains `"rejected"`, and the consumer's
+     * predicate — unchanged, so invisible in the diff — still excludes only `"needs-review"`, which
+     * silently makes a rejected candidate deliverable. The model saw the widening and did not
+     * follow it to the consumer. The declared pair plus a text fact — the counterpart never
+     * mentions the new member at all — closes it deterministically.
+     */
+    it("catches a union member no declared counterpart mentions", async () => {
+      await writeFile(
+        join(repo, "src/status.ts"),
+        'export type CandidateStatus = "ready" | "needs-review";\n',
+      );
+      await writeFile(
+        join(repo, "src/deliverability.ts"),
+        [
+          'import type { CandidateStatus } from "./status.js";',
+          "",
+          "export function isDeliverable(status: CandidateStatus): boolean {",
+          '  return status !== "needs-review";',
+          "}",
+          "",
+        ].join("\n"),
+      );
+      git(["add", "-A"]);
+      git(["commit", "-q", "-m", "union-base", "--no-gpg-sign"]);
+      const unionBase = git(["rev-parse", "HEAD"]).trim();
+      // Only the union widens. The consumer is untouched and never appears in the diff.
+      await writeFile(
+        join(repo, "src/status.ts"),
+        'export type CandidateStatus = "ready" | "needs-review" | "rejected";\n',
+      );
+      git(["add", "-A"]);
+      git(["commit", "-q", "-m", "union-head", "--no-gpg-sign"]);
+      const unionHead = git(["rev-parse", "HEAD"]).trim();
+
+      const unionProfile = compileProfile({
+        version: 1,
+        reviewRelevant: ["src/**"],
+        deletionCritical: [],
+        generated: [],
+        excluded: [],
+        benignWarnings: [],
+        pathInstructions: [],
+        contractPairs: [{ paths: ["src/status.ts"], counterparts: ["src/deliverability.ts"] }],
+      } satisfies ReviewProfile);
+
+      const client = new GitHubClient("https://api.example.test", "unused");
+      const created: ReviewCommentInput[] = [];
+      const comments: ReviewComment[] = [];
+      vi.spyOn(client, "getPullRequest").mockResolvedValue({
+        headSha: commitSha(unionHead),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
+      vi.spyOn(client, "createReviewComment").mockImplementation((_ref, _num, input) => {
+        created.push(input);
+        const comment: ReviewComment = {
+          id: comments.length + 1,
+          body: input.body,
+          path: input.path,
+          authorLogin: "keiko-for-quality[bot]",
+          commitId: input.commitId,
+          url: "https://example.test/c",
+        };
+        comments.push(comment);
+        return Promise.resolve(comment);
+      });
+      vi.spyOn(client, "getReviewComment").mockImplementation((_ref, id) =>
+        Promise.resolve(comments[id - 1]!),
+      );
+
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "success",
+          summary: { files_reviewed: 1, total_tokens: 100, budget_exceeded: false },
+          comments: [],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      let modelCalls = 0;
+      globalThis.fetch = (() => {
+        modelCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(
+        {
+          ...baseRequest(undefined),
+          client,
+          base: commitSha(unionBase),
+          head: commitSha(unionHead),
+          config: GATE_CONFIG,
+          profile: unionProfile,
+          env: { MODEL_TOKEN: "fake-token" },
+        },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish?.published).toBe(1);
+      expect(created[0]?.path).toBe("src/status.ts");
+      expect(created[0]?.body).toContain("rejected");
+      expect(created[0]?.body).toContain("deliverability.ts");
+      expect(modelCalls).toBe(0);
     });
   });
 

@@ -28,5 +28,22 @@
       "paths": ["scripts/**"],
       "instructions": "Scripts run in CI where output is the only trace: a failure exit must name the file or gate that failed."
     }
+  ],
+  "contractPairs": [
+    {
+      "paths": ["src/import-response.ts"],
+      "counterparts": ["src/import-client.ts"],
+      "contract": "The server's response type and the client's declared twin must carry the same fields."
+    },
+    {
+      "paths": ["scripts/audit-metadata.mjs"],
+      "counterparts": ["src/metadata-store.ts"],
+      "contract": "The audit script must accept exactly what the production validator accepts."
+    },
+    {
+      "paths": ["src/candidate-status.ts"],
+      "counterparts": ["src/candidate-deliverability.ts"],
+      "contract": "Every status member must be classified by the deliverability predicate."
+    }
   ]
 }
