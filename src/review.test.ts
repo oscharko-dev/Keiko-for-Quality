@@ -345,6 +345,30 @@ describe("performReview: review-cache memoization end to end", () => {
   });
 
   /**
+   * The all-zero commit id (git's own placeholder for "no such object" — see `brands.ts`'s
+   * `blobId` doc comment for the same idiom on the blob side) is syntactically a valid `CommitSha`
+   * but never resolves in this fixture repo, so `verifyCommit` fails exactly as it would against an
+   * unfetched commit in production. Neither `acquireEngineMock` nor `runEngineMock` is given a
+   * resolved value here: a base/head pair that never resolves must never reach the engine at all.
+   */
+  it("records review_pair.merge_base_unresolved and fails the run when the base commit cannot be resolved", async () => {
+    // Earlier tests in this shared suite already called these mocks; clear that history so
+    // "never reached the engine" below is unambiguously about this test's own invocation.
+    acquireEngineMock.mockClear();
+    runEngineMock.mockClear();
+    const diagnostics = createSilentDiagnostics();
+    const request = { ...baseRequest(undefined), base: commitSha("0".repeat(40)) };
+
+    await expect(performReview(request, diagnostics)).rejects.toThrow();
+
+    expect(diagnostics.drain().map((r) => r.code)).toEqual([
+      "run.started",
+      "review_pair.merge_base_unresolved",
+    ]);
+    expect(acquireEngineMock).not.toHaveBeenCalled();
+  });
+
+  /**
    * Keiko-for-Quality#63, run-level: production evidence was a run that settled incomplete with
    * reason `publish.finding_rejected_placement` alone — no breakdown of what was actually tried.
    * `publisher.test.ts` already pins the per-finding tally this same rejection carries one layer
@@ -1893,9 +1917,49 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(callCount()).toBe(0);
 
       const skip = diagnostics.drain().find((r) => r.code === "classify.skipped_budget");
-      // allotted(50_000) - engine(49_000) - classify(0) = 1_000, below the 2_000 reserve for the
-      // one fresh survivor.
+      // tokenBudget(50_000) - engine(49_000) - classify(0) = 1_000, below the 2_000 reserve for
+      // the one fresh survivor.
       expect(skip?.counts).toStrictEqual({ skipped: 1, remaining: 1_000 });
+    });
+
+    it("still audits when the engine overshoots its allotment but the consumer ceiling has room", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY =
+        "This handler discards the parsed configuration and falls back to defaults silently.";
+      runEngineMock.mockResolvedValue({
+        // Far above this one-file fixture's 80_000-token allotment floor, far below the consumer's
+        // 2M ceiling — the first live v0.12.0 run's exact shape (998k reported against an 80k
+        // allotment, evidence in corpus/evidence/). Guarding on the allotment would skip here;
+        // guarding on the consumer ceiling — the ceiling this guard actually protects — must not.
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
+          2,
+          500_000,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      const { impl, callCount } = classifyFetchMock({
+        auditPair: { category: "security", severity: "critical" },
+      });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(auditRequest(client), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(created).toHaveLength(1);
+      // The audit RAN: the published body carries the audit's reclassification ("Security" is
+      // "security"'s rendered label in `composeFindingBody`'s CATEGORIES table), not the engine's
+      // original "bug".
+      expect(callCount()).toBeGreaterThan(0);
+      expect(created[0]?.body).toContain("Security");
+
+      const records = diagnostics.drain();
+      expect(records.find((r) => r.code === "classify.skipped_budget")).toBeUndefined();
+      expect(records.find((r) => r.code === "classify.audited")).toBeDefined();
     });
 
     it("suppresses a reclassified survivor at the execute-time marker re-check, end to end through publishAudited", async () => {
