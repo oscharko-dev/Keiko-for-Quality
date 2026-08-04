@@ -36,6 +36,21 @@ export interface RuntimeConfig {
    * deletion half may then be judged review-critical when nothing was actually removed.
    */
   readonly renameDetectionPercent: number;
+  /**
+   * Gates the change-level cross-artifact pass (`contracts/change-pass.ts`, issue #80 technique
+   * C): one additional bounded model call per run asking only cross-file contract questions.
+   * Default `false` — a dark-shipped prototype whose promotion depends on a later qualification-
+   * corpus measurement, not on this flag's own existence.
+   *
+   * Optional on this TYPE — not just defaulted by whoever builds a `RuntimeConfig` — because
+   * several existing call sites across the codebase construct a `RuntimeConfig` object literal
+   * directly (test fixtures predating this flag), and every one of them means "off" by simply not
+   * mentioning it. `parseRuntimeConfig` below is the only real parser boundary, and it still
+   * requires the raw key be present in its input, exactly like every other field: the action's
+   * actual config-building path (`runtimeConfigFromInputs`) always supplies a concrete value, and
+   * only hand-rolled fixtures elsewhere benefit from the type-level optionality.
+   */
+  readonly crossArtifactPass?: boolean;
 }
 
 const KEYS = [
@@ -50,6 +65,7 @@ const KEYS = [
   "tokenBudget",
   "maxFindings",
   "renameDetectionPercent",
+  "crossArtifactPass",
 ] as const;
 
 /**
@@ -78,6 +94,16 @@ function parseTokenEnvName(value: unknown, field: string): string {
   // configuration that names GITHUB_TOKEN would hand the repository token to the model process.
   if (name === "GITHUB_TOKEN" || name.startsWith("ACTIONS_")) throw new ValidationError(field);
   return name;
+}
+
+/**
+ * No shared `asBoolean` exists in `core/validate.ts` yet — every other typed accessor there
+ * (`asString`, `asInteger`, …) is used by several modules, and this one so far has exactly one
+ * caller. Kept local rather than adding a shared export on a single call site's behalf.
+ */
+function asBoolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") throw new ValidationError(field);
+  return value;
 }
 
 export function parseRuntimeConfig(input: unknown, field = "config"): RuntimeConfig {
@@ -115,6 +141,7 @@ export function parseRuntimeConfig(input: unknown, field = "config"): RuntimeCon
       1,
       100,
     ),
+    crossArtifactPass: asBoolean(object.crossArtifactPass, `${field}.crossArtifactPass`),
   };
 }
 

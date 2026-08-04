@@ -47,6 +47,14 @@
  * relied on `Infinity` now get an exception. Silence and a finding are both defensible, so the
  * case measured which way the model happened to land. Decidable from the diff is necessary but not
  * sufficient; a case must also have one defensible answer.
+ *
+ * The cross-artifact cases (epic #80) take one deliberate exception to "decidable from the diff
+ * alone": a file's `base` and `head` may be identical, so it sits in the fixture's tree but never
+ * appears in the diff between the two commits. That is not the forbidden kind of unseen code —
+ * every byte of it ships in the fixture, so ground truth is still decidable from the two commits
+ * taken together — it represents the counterpart artifact (a client type, a twin validator, a
+ * consumer predicate) that a per-file reviewer has no architectural reason to open. Whether it gets
+ * opened anyway is exactly what these cases measure.
  */
 
 const CHECKOUT_V4_2_0 = "11bd71901bbe5b1630ceea73d27597364c9af683";
@@ -770,6 +778,238 @@ export function digestBatches(
 ): string[][] {
   return splitIntoBatches(items, configuredSize ?? 0);
 }
+`,
+      },
+    ],
+  },
+
+  // --- Cross-artifact contract cases (epic #80): the ground truth for each of these lives in a
+  // SECOND file that a per-file reviewer has no architectural reason to open, because the changed
+  // file alone looks like routine, self-contained maintenance. The first three reproduce measured
+  // misses from the epic's Keiko#2963 appendix — a dropped response field, a drifted audit
+  // validator, a widened status union — as small, self-contained diffs rather than the literal
+  // findings (see the header note above on ground truth: proprietary source cannot be shown here).
+  // The fourth reproduces the same-file variant missed live on Keiko#2977, which both competing
+  // reviewers caught and this one did not. Added first, per the epic's own order ("E before
+  // anything"): this is the measured baseline before any detection technique changes.
+  {
+    id: "contract-response-field-dropped",
+    // The server route gains `skippedCount`; the client's separately declared response type and
+    // the one function that reads it are untouched by this diff. Nothing in the changed file says
+    // a client exists, so the loss is invisible unless the reviewer goes looking for the other side
+    // of the contract it just changed.
+    defect: { file: "src/import-client.ts", category: "bug", severity: "high" },
+    about:
+      "client declares a response type without the server's new skipped-items field, so a partial import silently reads as complete",
+    anchors: ["skipped*", "skippedcount", "drop*", "omit*", "silent*", "incomplete"],
+    files: [
+      {
+        path: "src/import-response.ts",
+        base: `export interface ImportResult {
+  imported: number;
+  failed: number;
+}
+
+export function buildImportResult(imported: number, failed: number): ImportResult {
+  return { imported, failed };
+}
+`,
+        head: `export interface ImportResult {
+  imported: number;
+  failed: number;
+  skippedCount: number;
+}
+
+export function buildImportResult(
+  imported: number,
+  failed: number,
+  skippedCount: number,
+): ImportResult {
+  return { imported, failed, skippedCount };
+}
+`,
+      },
+      {
+        // Present in both commits, byte-identical — it never appears in the diff between them.
+        // That is the point: the contradiction is decidable from the two-commit fixture taken
+        // together, never from the changed file in isolation.
+        path: "src/import-client.ts",
+        base: `export interface ImportResponse {
+  imported: number;
+  failed: number;
+}
+
+export function describeImport(response: ImportResponse): string {
+  if (response.failed === 0) return "Import complete";
+  return "Import complete, " + String(response.failed) + " failed";
+}
+`,
+        head: `export interface ImportResponse {
+  imported: number;
+  failed: number;
+}
+
+export function describeImport(response: ImportResponse): string {
+  if (response.failed === 0) return "Import complete";
+  return "Import complete, " + String(response.failed) + " failed";
+}
+`,
+      },
+    ],
+  },
+  {
+    id: "audit-validator-drift",
+    // The production validator requires authRef, schemaVersion, and provider; the audit script is
+    // loosened to accept authRef alone, so it now passes objects production would reject. The
+    // validator it is supposed to mirror is untouched by this diff.
+    defect: { file: "scripts/audit-metadata.mjs", category: "bug", severity: "high" },
+    about:
+      "audit script loosened to accept any object with authRef, so it now passes metadata the production validator rejects for missing schemaVersion and provider",
+    anchors: ["schemaversion", "production", "reject*", "loosen*", "accept*", "authref"],
+    files: [
+      {
+        // Present in both commits, byte-identical — the production validator this audit script is
+        // supposed to mirror never appears in the diff.
+        path: "src/metadata-store.ts",
+        base: `/** The production metadata store's validator. Every write path funnels through this. */
+export function validateMetadata(candidate: Record<string, unknown>): boolean {
+  return (
+    typeof candidate.authRef === "string" &&
+    typeof candidate.schemaVersion === "string" &&
+    typeof candidate.provider === "string"
+  );
+}
+`,
+        head: `/** The production metadata store's validator. Every write path funnels through this. */
+export function validateMetadata(candidate: Record<string, unknown>): boolean {
+  return (
+    typeof candidate.authRef === "string" &&
+    typeof candidate.schemaVersion === "string" &&
+    typeof candidate.provider === "string"
+  );
+}
+`,
+      },
+      {
+        path: "scripts/audit-metadata.mjs",
+        base: `/** Audits a stored metadata object against the shape production requires. */
+export function isValidMetadata(candidate) {
+  return (
+    typeof candidate.authRef === "string" &&
+    typeof candidate.schemaVersion === "string" &&
+    typeof candidate.provider === "string"
+  );
+}
+`,
+        head: `/** Audits a stored metadata object against the shape production requires. */
+export function isValidMetadata(candidate) {
+  return typeof candidate.authRef === "string";
+}
+`,
+      },
+    ],
+  },
+  {
+    id: "status-union-widened-consumer-missed",
+    // The status module adds "rejected" to its union; the deliverability predicate still excludes
+    // only "needs-review", so a rejected candidate now counts as deliverable. The predicate is
+    // untouched by this diff — the widened union looks like a self-contained type change.
+    defect: { file: "src/candidate-deliverability.ts", category: "bug", severity: "high" },
+    about:
+      "status union gains a rejected member; the deliverability predicate still excludes only needs-review, so rejected candidates count as deliverable",
+    anchors: ["rejected", "deliverab*", "exclud*", "predicate", "widen*", "consumer*"],
+    files: [
+      {
+        path: "src/candidate-status.ts",
+        base: `export type CandidateStatus = "draft" | "needs-review" | "approved";
+`,
+        head: `export type CandidateStatus = "draft" | "needs-review" | "approved" | "rejected";
+`,
+      },
+      {
+        // Present in both commits, byte-identical — the consumer that must handle the new member
+        // never appears in the diff that adds it.
+        path: "src/candidate-deliverability.ts",
+        base: `import type { CandidateStatus } from "./candidate-status.js";
+
+export function isDeliverable(status: CandidateStatus): boolean {
+  return status !== "needs-review";
+}
+`,
+        head: `import type { CandidateStatus } from "./candidate-status.js";
+
+export function isDeliverable(status: CandidateStatus): boolean {
+  return status !== "needs-review";
+}
+`,
+      },
+    ],
+  },
+  {
+    id: "pinned-reference-duplicate-desync",
+    // The live miss this epic exists to close: on Keiko#2977 a workflow advanced its checkout pin
+    // but not the ACTION_PIN variable the file itself says must move with it, silently disabling a
+    // downstream consumer. CodeRabbit and Codex both caught it; this reviewer did not. One file, one
+    // commit, two sites — the hardest instance of "hold two artifacts side by side" is one artifact
+    // holding both, because nothing about a same-file change signals that it needs a second look.
+    defect: { file: ".github/workflows/review-store.yml", category: "bug", severity: "high" },
+    about:
+      "checkout pin advances but ACTION_PIN, declared to move with it, does not, so the consistency check finds a mismatch and disables the review store",
+    anchors: ["both", "together", "desync*", "mismatch*", "second", "action_pin"],
+    files: [
+      {
+        path: ".github/workflows/review-store.yml",
+        base: `name: quality
+on: [pull_request]
+permissions: {}
+env:
+  # ADVANCE BOTH TOGETHER: bumping the checkout pin below without updating this value makes the
+  # verification step see a mismatch and disable the review store on every subsequent run.
+  ACTION_PIN: ${CHECKOUT_V4_2_0}
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@${CHECKOUT_V4_2_0} # v4.2.0
+        with:
+          persist-credentials: false
+      - name: Verify the action pin before enabling the review store
+        run: |
+          pinned="$(grep -oE 'actions/checkout@[0-9a-f]{40}' .github/workflows/review-store.yml | head -1 | cut -d@ -f2)"
+          if [ "$pinned" != "$ACTION_PIN" ]; then
+            echo "REVIEW_STORE=disabled" >> "$GITHUB_ENV"
+          else
+            echo "REVIEW_STORE=enabled" >> "$GITHUB_ENV"
+          fi
+      - run: npm ci --ignore-scripts && npm run review
+`,
+        head: `name: quality
+on: [pull_request]
+permissions: {}
+env:
+  # ADVANCE BOTH TOGETHER: bumping the checkout pin below without updating this value makes the
+  # verification step see a mismatch and disable the review store on every subsequent run.
+  ACTION_PIN: ${CHECKOUT_V4_2_0}
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@${CHECKOUT_V4_2_2} # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify the action pin before enabling the review store
+        run: |
+          pinned="$(grep -oE 'actions/checkout@[0-9a-f]{40}' .github/workflows/review-store.yml | head -1 | cut -d@ -f2)"
+          if [ "$pinned" != "$ACTION_PIN" ]; then
+            echo "REVIEW_STORE=disabled" >> "$GITHUB_ENV"
+          else
+            echo "REVIEW_STORE=enabled" >> "$GITHUB_ENV"
+          fi
+      - run: npm ci --ignore-scripts && npm run review
 `,
       },
     ],

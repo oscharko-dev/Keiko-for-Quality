@@ -80,6 +80,9 @@ export function runtimeConfigFromInputs(env: NodeJS.ProcessEnv): RuntimeConfig {
       tokenBudget: readIntegerInput(env, "token_budget", 2_000_000),
       maxFindings: readIntegerInput(env, "max_findings", 50),
       renameDetectionPercent: readIntegerInput(env, "rename_detection_percent", 50),
+      // Dark-shipped prototype (issue #80 technique C, contracts/change-pass.ts): off by
+      // default, same "absent means the default" contract every other input here follows.
+      crossArtifactPass: readBooleanInput(env, "cross_artifact_pass", false),
     },
     "input",
   );

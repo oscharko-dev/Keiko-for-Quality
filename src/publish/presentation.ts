@@ -200,6 +200,12 @@ export interface SummaryCounts {
   /** Reviewable paths actually sent to the engine this run: `reviewablePaths - cacheHits`. */
   readonly freshlyReviewed: number;
   readonly findingsPublished: number;
+  /** Suppressed as a near-duplicate of another finding in the SAME run (v0.12.0) — see
+   *  `similarity.ts`'s `areIntraRunDuplicates`. Always a plain number here, never `undefined`: the
+   *  optionality on `PublishOutcome.suppressedIntraRun` is a compile-time backward-compatibility
+   *  concern for a literal written before the field existed, not a real absence this table has to
+   *  represent — `buildSummaryReport` (`summary.ts`) already collapses it to `0` either way. */
+  readonly suppressedIntraRun: number;
   readonly suppressedExactDuplicate: number;
   readonly suppressedSimilar: number;
   /** Suppressed against a resolved thread with a substantive disposition reply (Keiko-for-Quality#64). */
@@ -238,6 +244,12 @@ export interface SummaryReport {
   readonly actionVersion: string;
   readonly counts: SummaryCounts;
   readonly budget: SummaryBudget;
+  /**
+   * Wall-clock milliseconds `main.ts` measured around `performReview` — unlike `eventTimestamp`
+   * above, this one IS a wall clock, deliberately. Issue #59 is visibility only: nothing here reads
+   * this number back to gate or speed anything up.
+   */
+  readonly durationMs: number;
 }
 
 function shortSha(sha: CommitSha): string {
@@ -270,12 +282,14 @@ function outcomeText(report: SummaryReport): string {
 
 /**
  * The metric table's rows, in the fixed order the epic's visibility requirement asks for: the path
- * accounting first, then the finding/dedup accounting, with the three duplicate-suppression stages
- * (Keiko-for-Quality#38/#51's exact marker and phrasing-independent similarity, #64's dispositioned
- * recurrence) broken out separately rather than folded into one number. These counts are
- * independently meaningful and are not required to sum to `totalPaths` — a generated, binary, or
- * non-critical pointer path is neither reviewable, excluded, nor mechanically clean, and omitting
- * that remainder from this compact table is deliberate (see the epic's leanness requirement).
+ * accounting first, then the finding/dedup accounting, with the four duplicate-suppression stages
+ * (v0.12.0's intra-run clustering, Keiko-for-Quality#38/#51's exact marker and phrasing-independent
+ * similarity, #64's dispositioned recurrence) broken out separately rather than folded into one
+ * number, in the same order those stages run: intra-run clustering happens first, inside
+ * `planPublication`, before a candidate ever reaches the other three. These counts are independently
+ * meaningful and are not required to sum to `totalPaths` — a generated, binary, or non-critical
+ * pointer path is neither reviewable, excluded, nor mechanically clean, and omitting that remainder
+ * from this compact table is deliberate (see the epic's leanness requirement).
  */
 function countRows(counts: SummaryCounts): readonly string[] {
   const rows: readonly (readonly [string, number])[] = [
@@ -286,6 +300,7 @@ function countRows(counts: SummaryCounts): readonly string[] {
     ["Replayed from cache", counts.cacheHits],
     ["Freshly reviewed", counts.freshlyReviewed],
     ["Findings published", counts.findingsPublished],
+    ["Suppressed (intra-run duplicate)", counts.suppressedIntraRun],
     ["Suppressed (exact duplicate)", counts.suppressedExactDuplicate],
     ["Suppressed (similar)", counts.suppressedSimilar],
     ["Suppressed (dispositioned)", counts.suppressedDispositioned],
@@ -298,6 +313,28 @@ function budgetLine(budget: SummaryBudget): string | undefined {
   return budget.spent === undefined
     ? `Budget: ${String(budget.allotted)} tokens allotted`
     : `Budget: ${String(budget.allotted)} tokens allotted, ${String(budget.spent)} reported`;
+}
+
+/**
+ * Whole seconds (Issue #59): this table is an operator's coarse overview, not a profiler, and
+ * sub-second precision would not change any decision a reader makes from it. Always rendered —
+ * `durationMs` is measured on every run, never conditionally, so there is no "unknown" case to omit
+ * the way there is for `spent` below.
+ */
+function durationRow(durationMs: number): string {
+  return `| Duration (s) | ${String(Math.round(durationMs / 1000))} |`;
+}
+
+/**
+ * Rounded up, never down: a reader gauging whether spend is proportionate to output should never
+ * see a number that understates real cost. Omitted rather than shown as a misleading zero when
+ * spend was never measured this run (`budget.spent === undefined`), or when nothing published yet
+ * exists to divide it by.
+ */
+function tokensPerFindingRow(budget: SummaryBudget, counts: SummaryCounts): string | undefined {
+  if (budget.spent === undefined || counts.findingsPublished <= 0) return undefined;
+  const perFinding = Math.ceil(budget.spent / counts.findingsPublished);
+  return `| Tokens per published finding | ${String(perFinding)} |`;
 }
 
 /**
@@ -320,6 +357,7 @@ export function composeSummaryBody(report: SummaryReport, marker: string): strin
     ...(action === undefined ? [] : [`action \`${action}\``]),
   ].join(" · ");
 
+  const tokensPerFinding = tokensPerFindingRow(report.budget, report.counts);
   const parts = [
     "**Keiko for Quality — run summary**",
     "",
@@ -328,6 +366,8 @@ export function composeSummaryBody(report: SummaryReport, marker: string): strin
     "| Metric | Count |",
     "| --- | ---: |",
     ...countRows(report.counts),
+    durationRow(report.durationMs),
+    ...(tokensPerFinding === undefined ? [] : [tokensPerFinding]),
   ];
   const budget = budgetLine(report.budget);
   if (budget !== undefined) parts.push("", budget);

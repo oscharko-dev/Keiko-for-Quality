@@ -169,6 +169,65 @@ const REVIEW_TEMPERATURE = 0;
  */
 const REVIEW_SEED = 42;
 
+/**
+ * Derives the proxy's `prompt_cache_key` (v0.13.0) from the rule digest `writeRuleFile` already
+ * computed for `keiko-rules.json`, rather than hashing anything independently — reusing that exact
+ * digest is what makes the key identical for every file in this run (all ~30 turns/file resend the
+ * same rule prefix, and OpenAI-compatible providers only discount a cache hit when the routing key
+ * matches too) and identical again on a future run over the same rule, without carrying anything
+ * about *this* run's candidate content: a 16-hex-char prefix of a content digest is not the content
+ * — it is a short fingerprint, no more revealing than the full digest this run already records in
+ * `engine.run.completed`, and it cannot be inverted back to rule or diff text. `kfq-` just namespaces
+ * the key against whatever else may share the provider account's cache key space.
+ */
+function promptCacheKeyForRule(ruleDigest: Sha256): string {
+  return `kfq-${ruleDigest.slice(0, 16)}`;
+}
+
+/**
+ * Starts the loopback proxy unless the protocol is anthropic, which speaks the model's native API
+ * directly and never sends an OpenAI chat-completions body for the proxy to rewrite. Split out of
+ * `runEngine` purely to keep that function under this file's line-count ceiling — the branch itself
+ * is unchanged from before this existed.
+ */
+async function startProxyIfNeeded(
+  options: EngineRunOptions,
+  ruleDigest: Sha256,
+): Promise<ModelProxy | undefined> {
+  if (options.config.protocol === "anthropic") return undefined;
+  return startModelProxy({
+    upstreamUrl: options.config.endpoint,
+    temperature: REVIEW_TEMPERATURE,
+    seed: options.samplingSeed ?? REVIEW_SEED,
+    promptCacheKey: promptCacheKeyForRule(ruleDigest),
+  });
+}
+
+/**
+ * Wire-level usage telemetry (v0.12.0), recorded once per invocation regardless of outcome — a run
+ * that ultimately throws or times out may still have made real, billable requests through the
+ * proxy, and that spend is real even though the run did not succeed. `proxy` is `undefined` on the
+ * anthropic path, which never speaks OpenAI chat completions, so nothing is recorded there.
+ */
+function recordModelUsage(
+  diagnostics: Diagnostics,
+  proxy: ModelProxy | undefined,
+  options: EngineRunOptions,
+): void {
+  if (proxy === undefined) return;
+  const usage = proxy.usage();
+  diagnostics.record("model.usage", {
+    headSha: options.pair.head,
+    counts: {
+      requests: usage.requests,
+      prompt: usage.prompt,
+      completion: usage.completion,
+      cached: usage.cached,
+      cache_key_rejected: usage.cacheKeyRejected,
+    },
+  });
+}
+
 export async function runEngine(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
@@ -182,14 +241,7 @@ export async function runEngine(
   try {
     await mkdir(join(home, "state"), { recursive: true, mode: 0o700 });
     const { rulePath, ruleDigest } = await writeRuleFile(options, home);
-    proxy =
-      options.config.protocol === "anthropic"
-        ? undefined
-        : await startModelProxy({
-            upstreamUrl: options.config.endpoint,
-            temperature: REVIEW_TEMPERATURE,
-            seed: options.samplingSeed ?? REVIEW_SEED,
-          });
+    proxy = await startProxyIfNeeded(options, ruleDigest);
     const env = engineEnvironment(options, token, home);
     if (proxy !== undefined) env.OCR_LLM_URL = proxy.url;
     await configureEngine(options, home, env);
@@ -218,6 +270,9 @@ export async function runEngine(
     });
     throw new EngineRunError(reason);
   } finally {
+    // Ordered before the close below on purpose, so the count is read while the proxy is still
+    // the authority on its own totals rather than relying on `close()` leaving them readable.
+    recordModelUsage(diagnostics, proxy, options);
     // The proxy dies with the invocation on every path — an orphaned listener would outlive the
     // credentials' purpose even though it never holds them.
     await proxy?.close();

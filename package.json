@@ -28,16 +28,18 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage && node --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/corpus-lcov.info --test corpus/*.test.mjs && cat coverage/corpus-lcov.info >> coverage/lcov.info",
+    "test:corpus": "node --test corpus/*.test.mjs",
     "build": "node scripts/build.mjs",
     "check:bundle": "node scripts/check-bundle.mjs",
     "review": "node --experimental-strip-types src/cli.ts",
-    "verify": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run build && npm run check:bundle",
+    "verify": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run test:corpus && npm run build && npm run check:bundle",
     "check:engine-pin": "node scripts/check-engine-pin.mjs",
     "corpus": "node corpus/run.mjs",
     "fetch:engine": "node scripts/fetch-engine.mjs",
     "check:qualification": "node scripts/check-qualification.mjs",
     "corpus:real": "node corpus/real-diffs.mjs",
-    "arena": "node corpus/arena.mjs"
+    "arena": "node corpus/arena.mjs",
+    "arena:trend": "node corpus/arena-trend.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",

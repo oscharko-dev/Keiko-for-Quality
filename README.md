@@ -200,12 +200,17 @@ same finding at a location someone already gave a considered answer to, checked 
    never a bare "resolved" click with no reply, or a resolve with no reply at all. Counted separately
    as `dedup.dispositioned` so it is never confused with the two stages above.
 
-Every stage but the third ignores a **resolved or outdated** conversation: once a conversation is no
-longer open, whatever it described can recur and be republished. Resolution state, and — for a
-genuinely resolved thread — its last reply's author and body, come from a best-effort GraphQL lookup
-the `Pull requests` permission above already covers; if a token or platform cannot answer it, every
-conversation is simply treated as open, which is exactly how deduplication behaved before this lookup
-existed.
+The exact-marker stage ignores only a **resolved** conversation, not merely an **outdated** one: a
+marker fingerprints a finding's content, never the line it sits on, so a push that moves a thread's
+hunk says nothing about whether the finding it described was ever answered. An outdated thread is
+still an open question; only an answered one may allow recurrence, so its marker keeps suppressing a
+repost. The similarity stage still ignores a **resolved or outdated** conversation together, exactly
+as before — its own match depends on a line anchor, and an outdated thread's anchor is the stale
+position it held before the push moved it, so matching a candidate against that stale coordinate
+would be noise, not signal. Resolution state, and — for a genuinely resolved thread — its last
+reply's author and body, come from a best-effort GraphQL lookup the `Pull requests` permission above
+already covers; if a token or platform cannot answer it, every conversation is simply treated as
+open, which is exactly how deduplication behaved before this lookup existed.
 
 ### The run-summary comment
 
@@ -291,7 +296,8 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 ## Measured quality
 
 "The reviews are good" is not a claim anyone can check, so there is a corpus that turns it into one.
-`corpus/cases.mjs` holds 28 two-commit fixtures — 24 with exactly one seeded defect, 4 that are
+`corpus/cases.mjs` holds 32 two-commit fixtures — 28 with exactly one seeded defect (four of them
+cross-artifact: the defect is invisible in the diff of any single file, issue #80), 4 that are
 clean and must produce silence — run against the real pinned engine and a real model. No mocks: the
 question is about judgement, and judgement is what a mock cannot stand in for.
 

@@ -434,38 +434,6 @@ function lastOccurrenceIndexes(entries: readonly CacheEntry[]): ReadonlySet<numb
   return new Set(lastIndexByKey.values());
 }
 
-/**
- * Merges freshly produced entries into a store, bounding both the per-entry finding count and the
- * total entry count.
- *
- * An incoming entry over `maxFindingsPerEntry` is dropped outright rather than truncated to fit —
- * repairing it by cutting its finding list would silently misreport what the engine actually found,
- * and the entries that were within bounds in the same call are unaffected either way. Any entry
- * whose key already exists in the store — because the same content, rule, engine, and model recurred
- * across two runs — is treated as freshly confirmed and moved to the newest position, so an oldest-
- * first eviction never discards a key this run just revalidated. Eviction removes from the front of
- * the merged list: the array order is itself the recency order, so which entries are "oldest" is
- * never a matter of interpretation.
- */
-export function appendEntries(
-  store: CacheStore,
-  entries: readonly CacheEntry[],
-  limits: RetentionLimits,
-): CacheStore {
-  const admissible = entries.filter((entry) => entry.findings.length <= limits.maxFindingsPerEntry);
-  const keep = lastOccurrenceIndexes(admissible);
-  const deduped = admissible.filter((_entry, index) => keep.has(index));
-
-  const touchedKeys = new Set(deduped.map((entry) => entry.key));
-  const retained = store.entries.filter((entry) => !touchedKeys.has(entry.key));
-
-  const merged = [...retained, ...deduped];
-  const bounded =
-    merged.length > limits.maxEntries ? merged.slice(merged.length - limits.maxEntries) : merged;
-
-  return { schemaVersion: store.schemaVersion, entries: bounded };
-}
-
 function canonicalFinding(finding: EngineFinding): Record<string, unknown> {
   return {
     path: finding.path,
@@ -491,6 +459,107 @@ function canonicalEntry(entry: CacheEntry): Record<string, unknown> {
     protocol: entry.protocol,
     findings: entry.findings.map(canonicalFinding),
   };
+}
+
+/**
+ * `JSON.stringify`'s compact form (no spacing argument — what `serializeStore` uses) joins array
+ * elements with exactly one comma and adds no other punctuation around them, so one entry's own
+ * marginal contribution to the whole store's serialized length is its own JSON length plus that one
+ * separator. `evictToFitByteBudget` sums this per entry, computed once, instead of re-serializing
+ * the whole candidate array for every entry it considers evicting.
+ */
+function serializedEntryLength(entry: CacheEntry): number {
+  return JSON.stringify(canonicalEntry(entry)).length + 1;
+}
+
+/**
+ * The cliff this closes: `maxEntries` bounds entry COUNT, not the bytes those entries serialize to.
+ * A minimal entry already runs to roughly 488 bytes, so 20,000 of them — fully within `maxEntries`
+ * — clear 9 MiB, well past `maxStoreBytes` (4 MiB). `readStore` rejects a store over that bound
+ * WHOLE, so a store this module was willing to write becomes one the very next run refuses to read
+ * at all, silently re-paying every file it should have memoized instead. An eviction policy
+ * permissive enough to produce a store the reader refuses is worse than a smaller cache: the
+ * smaller one still replays, the oversized one replays nothing.
+ *
+ * Eviction is oldest-first, mirroring `appendEntries`'s own count-based eviction immediately below
+ * and for the same reason: array order IS recency order here, so "oldest" is never a matter of
+ * interpretation.
+ *
+ * Sizing is a single pass over precomputed per-entry lengths (`serializedEntryLength`, above)
+ * rather than a re-serialization of the whole array for every entry considered, which would make a
+ * large eviction quadratic in the entry count. That running total is exact for `JSON.stringify`'s
+ * own compact output — not merely an estimate — but the result is still re-measured for real once
+ * at the end rather than trusted blindly: cheap insurance against this function's assumptions about
+ * `JSON.stringify`'s formatting ever drifting out from under `serializeStore`'s own.
+ */
+function evictToFitByteBudget(
+  schemaVersion: string,
+  entries: readonly CacheEntry[],
+  maxBytes: number,
+): readonly CacheEntry[] {
+  const envelope = JSON.stringify({ schemaVersion, entries: [] }).length;
+  const lengths = entries.map(serializedEntryLength);
+  let total = envelope + lengths.reduce((sum, length) => sum + length, 0);
+  // Every entry above was charged one joining comma, but N entries only ever need N-1 commas
+  // between them, so the sum is exactly one comma over whenever there is at least one entry.
+  // Correcting that fixed overcount once here is simpler than special-casing "no trailing comma
+  // after the last entry" inside `serializedEntryLength` itself.
+  if (entries.length > 0) total -= 1;
+
+  let start = 0;
+  while (total > maxBytes && start < entries.length) {
+    total -= lengths[start] ?? 0;
+    start += 1;
+  }
+
+  let survivors = entries.slice(start);
+  // The running estimate above should already land exactly on budget; this only runs at all if a
+  // real serialization ever disagrees with it, and it re-measures for real rather than extend the
+  // estimate further.
+  while (
+    survivors.length > 0 &&
+    JSON.stringify({ schemaVersion, entries: survivors.map(canonicalEntry) }).length > maxBytes
+  ) {
+    survivors = survivors.slice(1);
+  }
+  return survivors;
+}
+
+/**
+ * Merges freshly produced entries into a store, bounding the per-entry finding count, the total
+ * entry count, and — so this never writes a store `readStore` refuses whole on the very next run
+ * (the cliff `evictToFitByteBudget` above exists to close) — the total serialized byte size.
+ *
+ * An incoming entry over `maxFindingsPerEntry` is dropped outright rather than truncated to fit —
+ * repairing it by cutting its finding list would silently misreport what the engine actually found,
+ * and the entries that were within bounds in the same call are unaffected either way. Any entry
+ * whose key already exists in the store — because the same content, rule, engine, and model recurred
+ * across two runs — is treated as freshly confirmed and moved to the newest position, so an oldest-
+ * first eviction never discards a key this run just revalidated. Eviction removes from the front of
+ * the merged list: the array order is itself the recency order, so which entries are "oldest" is
+ * never a matter of interpretation.
+ */
+export function appendEntries(
+  store: CacheStore,
+  entries: readonly CacheEntry[],
+  limits: RetentionLimits,
+): CacheStore {
+  const admissible = entries.filter((entry) => entry.findings.length <= limits.maxFindingsPerEntry);
+  const keep = lastOccurrenceIndexes(admissible);
+  const deduped = admissible.filter((_entry, index) => keep.has(index));
+
+  const touchedKeys = new Set(deduped.map((entry) => entry.key));
+  const retained = store.entries.filter((entry) => !touchedKeys.has(entry.key));
+
+  const merged = [...retained, ...deduped];
+  const bounded =
+    merged.length > limits.maxEntries ? merged.slice(merged.length - limits.maxEntries) : merged;
+  // The byte bound comes from `PARSE_LIMITS` — the same source `readStore` checks against — rather
+  // than from this function's own parameters, so the writer's and the reader's ideas of "too big"
+  // can never drift apart.
+  const fitted = evictToFitByteBudget(store.schemaVersion, bounded, PARSE_LIMITS.maxStoreBytes);
+
+  return { schemaVersion: store.schemaVersion, entries: fitted };
 }
 
 /**

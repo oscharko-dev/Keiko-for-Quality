@@ -92,6 +92,7 @@ function runInput(overrides: Partial<SummaryRunInput> = {}): SummaryRunInput {
     eventTimestamp: "2026-08-02T10:15:00Z",
     engineVersion: versionTag("v1.8.4"),
     actionVersion: "abc1234",
+    durationMs: 12_345,
     ...overrides,
   };
 }
@@ -244,6 +245,7 @@ describe("buildSummaryReport", () => {
       publish: {
         published: 2,
         suppressed: 4,
+        suppressedIntraRun: 3,
         suppressedExactDuplicate: 1,
         suppressedSimilar: 2,
         suppressedDispositioned: 1,
@@ -260,6 +262,7 @@ describe("buildSummaryReport", () => {
     expect(summary.counts.mechanicallyClean).toBe(r.mechanicallyClean);
     expect(summary.counts.cacheHits).toBe(r.cacheHits);
     expect(summary.counts.findingsPublished).toBe(r.publish?.published);
+    expect(summary.counts.suppressedIntraRun).toBe(r.publish?.suppressedIntraRun);
     expect(summary.counts.suppressedExactDuplicate).toBe(r.publish?.suppressedExactDuplicate);
     expect(summary.counts.suppressedSimilar).toBe(r.publish?.suppressedSimilar);
     expect(summary.counts.suppressedDispositioned).toBe(r.publish?.suppressedDispositioned);
@@ -280,9 +283,23 @@ describe("buildSummaryReport", () => {
     const r: ReviewReport = withoutPublish;
     const summary = buildSummaryReport(runInput({ report: r }), []);
     expect(summary.counts.findingsPublished).toBe(0);
+    expect(summary.counts.suppressedIntraRun).toBe(0);
     expect(summary.counts.suppressedExactDuplicate).toBe(0);
     expect(summary.counts.suppressedSimilar).toBe(0);
     expect(summary.counts.suppressedDispositioned).toBe(0);
+  });
+
+  /**
+   * `PublishOutcome.suppressedIntraRun` (v0.12.0) is optional even when `publish` itself is
+   * present — see its doc comment in `publisher.ts` — for the same compile-time backward-
+   * compatibility reason `apiFailures` already was: a `PublishOutcome` literal written before the
+   * field existed (every fixture in this file's own `report()` helper, among others) must keep
+   * satisfying the type. This is the narrower case the test above does not cover: `publish` present,
+   * but this one field genuinely absent from it, rather than `publish` missing altogether.
+   */
+  it("defaults suppressedIntraRun to zero when publish is present but omits the optional field", () => {
+    const summary = buildSummaryReport(runInput(), []);
+    expect(summary.counts.suppressedIntraRun).toBe(0);
   });
 
   it("carries the reason code only for an incomplete outcome", () => {
@@ -318,19 +335,56 @@ describe("buildSummaryReport", () => {
       expect(summary.budget).toEqual({ allotted: 1_200_000, spent: undefined });
     });
 
-    it("reads a reported spend from any diagnostic on this run that carries one", () => {
+    it("reads the reported spend from run.spend's own counts.total field", () => {
       const diagnostics = createDiagnostics(() => undefined);
       diagnostics.record("engine.run.completed", { counts: { bytes: 500, budget: 1_200_000 } });
-      diagnostics.record("settlement.incomplete.budget_exceeded", {
-        counts: { tokens: 1_250_000 },
+      diagnostics.record("run.spend", {
+        counts: { engine: 1_100_000, classify: 150_000, total: 1_250_000 },
       });
       const summary = buildSummaryReport(runInput(), diagnostics.drain());
       expect(summary.budget).toEqual({ allotted: 1_200_000, spent: 1_250_000 });
+    });
+
+    /**
+     * The regression this guards: `spent` used to be whichever diagnostic's `counts.tokens` happened
+     * to fire last in the stream, and in the ordinary case that was `classify.audited` — the
+     * classification self-audit's own bill, an order of magnitude below what the engine itself
+     * spent. `classify.audited` still carries its own `tokens` field for its own purpose (see
+     * `review.ts`'s `repairFindingClassification`), so this proves it specifically is never read as
+     * run spend even when it is the very last record in the stream, not merely that something else
+     * happens to win a tie.
+     */
+    it("never reads spend from classify.audited's counts.tokens, even as the last record", () => {
+      const diagnostics = createDiagnostics(() => undefined);
+      diagnostics.record("engine.run.completed", { counts: { bytes: 500, budget: 1_200_000 } });
+      diagnostics.record("run.spend", {
+        counts: { engine: 1_100_000, classify: 150_000, total: 1_250_000 },
+      });
+      // Recorded after run.spend and carrying an unrelated, much smaller tokens count — if
+      // extractBudget still scanned for any counts.tokens field, this would silently overwrite the
+      // real total above with the classification audit's own bill.
+      diagnostics.record("classify.audited", { counts: { changed: 1, tokens: 400 } });
+      const summary = buildSummaryReport(runInput(), diagnostics.drain());
+      expect(summary.budget).toEqual({ allotted: 1_200_000, spent: 1_250_000 });
+    });
+
+    it("leaves spent undefined when only unrelated diagnostics carry a tokens count", () => {
+      const diagnostics = createDiagnostics(() => undefined);
+      diagnostics.record("engine.run.completed", { counts: { bytes: 500, budget: 1_200_000 } });
+      diagnostics.record("classify.repaired", { counts: { repaired: 1, failed: 0, tokens: 300 } });
+      diagnostics.record("classify.audited", { counts: { changed: 0, tokens: 400 } });
+      const summary = buildSummaryReport(runInput(), diagnostics.drain());
+      expect(summary.budget).toEqual({ allotted: 1_200_000, spent: undefined });
     });
 
     it("leaves both undefined when the engine never completed this run", () => {
       const summary = buildSummaryReport(runInput(), []);
       expect(summary.budget).toEqual({ allotted: undefined, spent: undefined });
     });
+  });
+
+  it("carries the caller-measured duration straight through, unmodified", () => {
+    const summary = buildSummaryReport(runInput({ durationMs: 7_531 }), []);
+    expect(summary.durationMs).toBe(7_531);
   });
 });
