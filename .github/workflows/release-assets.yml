@@ -1,0 +1,99 @@
+name: release assets
+
+# Publishes the digest-verifiable local-CLI release asset (issue #98, epic #94's release-asset
+# child): every published release gets `keiko-cli.js` — byte-identical to the committed
+# dist/cli.js at the tag — and a `sha256sum.txt` digest file, so the IDE extensions can pin,
+# download, and verify it exactly the way this repository pins and verifies the review engine
+# (src/engine/pinned-release.ts): digest-checked before first execution, fail closed on mismatch,
+# no fallback asset.
+#
+# Tags and releases are still cut by hand (AGENTS.md: a release pull request carries dev's tree to
+# main, tagged vX.Y.Z; a maintainer then creates the GitHub Release for that tag). This workflow
+# adds nothing to that sequence — it only reacts once the release is published. workflow_dispatch
+# exists purely so that sequence can be rehearsed against a prerelease tag beforehand: it always
+# builds and verifies the assets and never uploads anything to a release.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Existing tag to build release assets from. Always a dry run: assets are built and
+          verified but never attached to a release, whatever tag is given.
+        required: true
+        type: string
+
+# The reviewer runs inside other people's CI next to a private key, so its own pipeline holds no
+# more authority than the task requires — here, attaching two files to a release that already
+# exists. No secret beyond the default GITHUB_TOKEN, and never the model credential or the App key
+# (issue #98's own engineering notes).
+permissions:
+  contents: write
+
+concurrency:
+  group: release-assets-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release-assets:
+    name: release assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the exact tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install
+        run: npm ci --ignore-scripts
+
+      # Rebuilds dist/index.js and dist/cli.js from source at this exact tag and diffs both
+      # against the committed bytes, then executes both standalone. Every pull request already
+      # runs this; re-asserting it here — rather than assuming a past PR's green check still
+      # describes this tagged commit — is the "asserted in the workflow, not assumed" byte-
+      # identity proof issue #98 asks for.
+      - name: Verify the committed bundles are reproducible and run standalone
+        run: npm run check:bundle
+
+      - name: Run the release-asset staging tests
+        run: node --test scripts/release-assets.test.mjs
+
+      - name: Stage keiko-cli.js and sha256sum.txt
+        run: node scripts/release-assets.mjs dist/cli.js release-assets
+
+      # Independent recomputation with the real `sha256sum` binary, next to
+      # scripts/release-assets.test.mjs's own Node-crypto assertion: the digest file this step
+      # verifies is the exact one a consumer downloads, checked with the exact command consumers
+      # are told to run (docs: the sidecar pin format mirrors src/engine/pinned-release.ts).
+      - name: Recompute and verify the digest file
+        working-directory: release-assets
+        run: sha256sum -c sha256sum.txt
+
+      - name: Report the staged digest
+        run: |
+          {
+            echo "### Release assets"
+            echo
+            echo '```'
+            cat release-assets/sha256sum.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attach the release assets
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        # --clobber makes a re-run of this workflow against the same release idempotent (a
+        # transient failure after this point should not require deleting a partial upload by
+        # hand); contents: write is already scoped to only what this step needs.
+        run: gh release upload "$TAG" release-assets/keiko-cli.js release-assets/sha256sum.txt --clobber

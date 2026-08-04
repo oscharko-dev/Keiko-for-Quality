@@ -7,13 +7,15 @@ reading them will not surface in time to save you the cost of finding out the ha
 ## `npm run review`
 
 `src/cli.ts` is the local CLI entry point (epic #94, issue #96). Run `npm run review -- --help`
-for the full flag, environment-variable, and exit-code reference; do not restate it here.
+for the full flag, environment-variable, and exit-code reference; see the README's "Local runs"
+section for prerequisites and trust posture. Do not restate either here.
 
-Until issue #95 lands `performLocalReview` in `src/review.ts`, the CLI's own argument parsing,
-`KFQ_MODEL_*` configuration, profile/guideline loading, and base/head resolution all run for
-real, but the review itself reports a clear internal error (exit `5`) rather than reviewing
-anything — see the `// integration point:` comment near the bottom of `src/cli.ts`. Local-run
-documentation beyond `--help` (README, worked examples) is issue #99's scope, not this file's.
+Issue #95 landed `performLocalReview` in `src/review.ts`, so the CLI runs a real review end to
+end, through the same shared pipeline `performReview` runs — same digest-pinned engine, same rule
+text, same settlement semantics. What has not landed is the other end of that sharing:
+`corpus/real-diffs.mjs` still drives the engine with its own harness code rather than
+`performLocalReview` (issue #99), so today a change to the shared pipeline is proven against the
+CLI and against the qualification corpus separately — not yet by one measurement covering both.
 
 ## Two commands spend real money
 
