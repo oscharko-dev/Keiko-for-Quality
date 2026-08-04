@@ -12,22 +12,42 @@
  * Why a proxy rather than a fork of the engine: the engine is a digest-pinned upstream artifact —
  * this repository deliberately does not patch it. The proxy stays entirely inside the product
  * boundary: it listens on 127.0.0.1 only, exists for the lifetime of one engine invocation, and
- * rewrites exactly one thing — the sampling parameters of a chat-completions body. Credentials
- * pass through untouched in headers and are never read, logged, or stored; bodies are never
- * logged (the same redaction posture as the rest of this repository).
+ * rewrites a small, fixed set of fields on a chat-completions body: sampling parameters always,
+ * and — when configured — a cache-routing key. Credentials pass through untouched in headers and
+ * are never read, logged, or stored; bodies are never logged (the same redaction posture as the
+ * rest of this repository).
  *
  * Why it is import-free apart from node builtins: `corpus/run.mjs` loads this module directly
  * under Node's type stripping, so the corpus measures the identical pipeline the action ships —
  * the fixture-derives-from-the-producer rule, applied to ourselves.
  *
+ * The engine resends the same ~4.5–6.6k-token rule prefix on every turn of every file (~30
+ * turns/file). OpenAI-compatible providers cache identical prompt prefixes and discount cached
+ * input tokens, and OpenAI's `prompt_cache_key` request parameter improves cache routing so
+ * requests that share a prefix land on the same cache shard instead of scattering across many.
+ * When the caller configures one (`ModelProxyOptions.promptCacheKey`), the proxy sets it on every
+ * chat-completions body — the same rewrite point as temperature/seed.
+ *
+ * That injection is self-healing, because not every gateway in front of an OpenAI-compatible
+ * endpoint accepts an unrecognized body field; a strict one answers 400. When that happens to a
+ * request that carried the injected key, the proxy retries that exact request once with the key
+ * omitted and serves whatever the retry returns. If the retry stops the 400, the proxy also stops
+ * injecting the key for the rest of its own lifetime (a per-proxy latch, never a global one — the
+ * next engine invocation gets a fresh proxy and tries again). The retry is bounded to one attempt,
+ * scoped to the single request that triggered it, and reached only from that one failure path: a
+ * request that never carried the key cannot trigger it, and it cannot loop. Only a 400 triggers
+ * it — 401/403/429/5xx mean something else and already have handling upstream or in the engine.
+ *
  * Also accumulates wire-level usage telemetry across every request it forwards: a count of
- * chat-completions requests, plus prompt/completion/cached token totals read from each JSON
- * response. This exists because the engine's own self-report is not proof of what the wire
- * actually carried, and provider prompt-cache behaviour (the `cached` figure) is not visible
- * anywhere else in this pipeline. The accounting reads only the body already buffered for
- * forwarding, so it costs no extra I/O, and — unlike the reject-on-mismatch posture the rest of
- * this product takes at a trust boundary — a shape it does not recognise contributes zero rather
- * than interrupting the forward: this is observational telemetry, never a gate.
+ * chat-completions requests, prompt/completion/cached token totals read from each JSON response,
+ * and how many times the self-healing fallback above fired. This exists because the engine's own
+ * self-report is not proof of what the wire actually carried, and provider prompt-cache behaviour
+ * (the `cached` figure) is not visible anywhere else in this pipeline — it is how we measure
+ * whether the `prompt_cache_key` injection above is actually earning a cache discount. The
+ * accounting reads only the body already buffered for forwarding, so it costs no extra I/O, and —
+ * unlike the reject-on-mismatch posture the rest of this product takes at a trust boundary — a
+ * shape it does not recognise contributes zero rather than interrupting the forward: this is
+ * observational telemetry, never a gate.
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -40,6 +60,13 @@ export interface ModelUsage {
   readonly completion: number;
   /** Provider-reported `usage.prompt_tokens_details.cached_tokens`, summed. */
   readonly cached: number;
+  /**
+   * Count of the self-healing fallback firing: a 400 to a request that carried the injected
+   * `prompt_cache_key`, whether or not the retry that follows succeeds — see the module doc for
+   * the retry/latch mechanics this counts. 0 when `promptCacheKey` is not configured, or when the
+   * upstream simply accepts the key.
+   */
+  readonly cacheKeyRejected: number;
 }
 
 export interface ModelProxy {
@@ -64,6 +91,13 @@ export interface ModelProxyOptions {
    * noise), while an explicit seed produced byte-identical completions three out of three.
    */
   readonly seed: number;
+  /**
+   * Set as `prompt_cache_key` on every forwarded chat-completions body, at the same rewrite point
+   * as temperature/seed above. Omit to leave the field untouched — every existing caller that does
+   * not pass this gets output byte-identical to before this option existed. See the module doc for
+   * the self-healing fallback this enables.
+   */
+  readonly promptCacheKey?: string;
   readonly fetchImpl?: typeof fetch;
 }
 
@@ -101,21 +135,49 @@ function isChatCompletionsPath(path: string): boolean {
 }
 
 /**
- * Overwrites the sampling parameters when the body is a chat-completions JSON object; anything
- * else — other endpoints, malformed bodies — passes through byte-identical. Overwrite, not
- * default: the point is that the pinned value wins over whatever the engine chose.
+ * `pinSampling`'s result. `cacheKeyInjected` is distinct from "was injection requested": a
+ * malformed or non-object body falls through untouched even when the caller asked for the key, and
+ * the self-healing retry below must know which one actually happened — only a request that truly
+ * carries the key can have been rejected for carrying it.
  */
-function pinSampling(path: string, body: Buffer, options: ModelProxyOptions): Buffer {
-  if (!isChatCompletionsPath(path)) return body;
+interface PinnedBody {
+  readonly body: Buffer;
+  readonly cacheKeyInjected: boolean;
+}
+
+/**
+ * Overwrites the sampling parameters when the body is a chat-completions JSON object, and — when
+ * `includeCacheKey` is true and the caller configured one — sets `prompt_cache_key` alongside them;
+ * anything else — other endpoints, malformed bodies — passes through byte-identical. Overwrite, not
+ * default: the point is that the pinned values win over whatever the engine chose.
+ *
+ * `includeCacheKey` is a parameter rather than reading `options.promptCacheKey` directly so the one
+ * caller that needs to omit the key on a specific attempt — the self-healing retry in
+ * `fetchWithCacheKeyFallback` — can reuse this same rewrite with one field toggled, instead of a
+ * second near-duplicate code path.
+ */
+function pinSampling(
+  path: string,
+  body: Buffer,
+  options: ModelProxyOptions,
+  includeCacheKey: boolean,
+): PinnedBody {
+  if (!isChatCompletionsPath(path)) return { body, cacheKeyInjected: false };
   try {
     const parsed: unknown = JSON.parse(body.toString("utf8"));
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return body;
-    return Buffer.from(
-      JSON.stringify({ ...parsed, temperature: options.temperature, seed: options.seed }),
-      "utf8",
-    );
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return { body, cacheKeyInjected: false };
+    }
+    const rewritten: Record<string, unknown> = {
+      ...parsed,
+      temperature: options.temperature,
+      seed: options.seed,
+    };
+    const cacheKeyInjected = includeCacheKey && options.promptCacheKey !== undefined;
+    if (cacheKeyInjected) rewritten.prompt_cache_key = options.promptCacheKey;
+    return { body: Buffer.from(JSON.stringify(rewritten), "utf8"), cacheKeyInjected };
   } catch {
-    return body;
+    return { body, cacheKeyInjected: false };
   }
 }
 
@@ -125,6 +187,16 @@ interface MutableUsage {
   prompt: number;
   completion: number;
   cached: number;
+  cacheKeyRejected: number;
+}
+
+/**
+ * Per-proxy self-healing state (module doc). Starts open (`disabled: false`) and only ever latches
+ * to `true`, never back — "for the remainder of this proxy's lifetime" means exactly that; the next
+ * `startModelProxy` call (the next engine invocation) gets a fresh latch of its own.
+ */
+interface CacheKeyLatch {
+  disabled: boolean;
 }
 
 function isJsonContentType(contentType: string | null): boolean {
@@ -191,11 +263,65 @@ function countResponse(
   if (isChatCompletions && isJsonContentType(contentType)) accumulateUsage(usage, body);
 }
 
+/** The pieces of the inbound request `fetchWithCacheKeyFallback` needs, already read off the wire. */
+interface ChatCompletionsRequest {
+  readonly path: string;
+  readonly method: string;
+  readonly headers: Record<string, string>;
+  readonly body: Buffer;
+  readonly withBody: boolean;
+}
+
+/**
+ * Sends one chat-completions request upstream, applying the self-healing fallback described in the
+ * module doc. Split out of `forward` for the same reason `countRequest`/`countResponse` are: keeps
+ * this branching readable without tripping the file's complexity ceiling.
+ *
+ * The retry is bounded to exactly one extra attempt, scoped to this single request, and reached
+ * only on this one failure path: a 400 to an attempt that itself carried the injected cache key.
+ * Anything else — the key not configured, the latch already tripped, a body that never parsed as
+ * chat-completions JSON so nothing was injected, any status other than 400 — returns the first
+ * response untouched.
+ */
+async function fetchWithCacheKeyFallback(
+  doFetch: typeof fetch,
+  url: string,
+  request: ChatCompletionsRequest,
+  options: ModelProxyOptions,
+  usage: MutableUsage,
+  latch: CacheKeyLatch,
+): Promise<Response> {
+  const wantsCacheKey = options.promptCacheKey !== undefined && !latch.disabled;
+  const pinned = request.withBody
+    ? pinSampling(request.path, request.body, options, wantsCacheKey)
+    : undefined;
+  const upstream = await doFetch(url, {
+    method: request.method,
+    headers: request.headers,
+    ...(pinned !== undefined ? { body: new Uint8Array(pinned.body) } : {}),
+  });
+  if (pinned?.cacheKeyInjected !== true || upstream.status !== 400) return upstream;
+
+  usage.cacheKeyRejected += 1;
+  const retryPinned = pinSampling(request.path, request.body, options, false);
+  const retried = await doFetch(url, {
+    method: request.method,
+    headers: request.headers,
+    body: new Uint8Array(retryPinned.body),
+  });
+  // Only a retry that actually stops the 400 is evidence the key was the cause; a 400 that
+  // persists without the key says nothing about the key, so the latch stays open and the next
+  // request tries injection again.
+  if (retried.status !== 400) latch.disabled = true;
+  return retried;
+}
+
 async function forward(
   options: ModelProxyOptions,
   request: IncomingMessage,
   response: ServerResponse,
   usage: MutableUsage,
+  latch: CacheKeyLatch,
 ): Promise<void> {
   const doFetch = options.fetchImpl ?? fetch;
   try {
@@ -205,20 +331,28 @@ async function forward(
     const withBody = method !== "GET" && method !== "HEAD";
     // Counted at forward time, independent of what the upstream does with it: this is "did the
     // engine make the call", not "did the call succeed" — the 502 branch below still means the
-    // engine paid for the round trip in wall-clock time even though no tokens come back.
+    // engine paid for the round trip in wall-clock time even though no tokens come back. One count
+    // per inbound request regardless of the self-healing retry below: that retry is an internal
+    // proxy detail, invisible to the engine, which made exactly one call and got exactly one
+    // response back.
     const isChatCompletions = isChatCompletionsPath(path);
     countRequest(usage, isChatCompletions);
-    const upstream = await doFetch(`${options.upstreamUrl.replace(/\/+$/, "")}${path}`, {
-      method,
-      headers: upstreamHeaders(request),
-      ...(withBody ? { body: new Uint8Array(pinSampling(path, body, options)) } : {}),
-    });
+    const url = `${options.upstreamUrl.replace(/\/+$/, "")}${path}`;
+    const upstream = await fetchWithCacheKeyFallback(
+      doFetch,
+      url,
+      { path, method, headers: upstreamHeaders(request), body, withBody },
+      options,
+      usage,
+      latch,
+    );
     const contentType = upstream.headers.get("content-type");
     response.writeHead(upstream.status, { "content-type": contentType ?? "application/json" });
     const responseBody = Buffer.from(await upstream.arrayBuffer());
     // Reads the body already buffered for the forward above — no extra I/O, and nothing here can
     // delay or fail the response: an SSE or other non-JSON body still counted as a request above,
-    // it just carries no token fields to add.
+    // it just carries no token fields to add. Counts the response actually served — the retry's,
+    // when the fallback above fired — never the discarded 400 that triggered it.
     countResponse(usage, isChatCompletions, contentType, responseBody);
     response.end(responseBody);
   } catch {
@@ -240,9 +374,18 @@ async function forward(
 }
 
 export function startModelProxy(options: ModelProxyOptions): Promise<ModelProxy> {
-  const usage: MutableUsage = { requests: 0, prompt: 0, completion: 0, cached: 0 };
+  const usage: MutableUsage = {
+    requests: 0,
+    prompt: 0,
+    completion: 0,
+    cached: 0,
+    cacheKeyRejected: 0,
+  };
+  // Fresh per proxy, matching the module doc's "remainder of this proxy's lifetime": the next
+  // `startModelProxy` call — the next engine invocation — starts injecting again from a clean slate.
+  const latch: CacheKeyLatch = { disabled: false };
   const server: Server = createServer((request, response) => {
-    void forward(options, request, response, usage);
+    void forward(options, request, response, usage, latch);
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);

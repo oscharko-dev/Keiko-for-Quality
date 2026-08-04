@@ -9,6 +9,7 @@ import {
   type SummaryCounts,
   type SummaryReport,
 } from "./presentation.js";
+import type { PublishOutcome } from "./publisher.js";
 
 /**
  * Maintains the single, marker-identified run-summary comment a pull request carries in addition to
@@ -77,6 +78,24 @@ function extractBudget(records: readonly DiagnosticRecord[]): SummaryBudget {
 }
 
 /**
+ * Stands in for `report.publish` when a run never reached publication, so every count below can read
+ * a plain property off a real object instead of chaining `publish?.x ?? 0` once per field — five
+ * `?.`/`??` pairs inline here once pushed `buildSummaryReport` over this repository's cyclomatic
+ * complexity ceiling. Every field is `0` — the same fallback each field already used individually.
+ */
+const EMPTY_PUBLISH_OUTCOME: PublishOutcome = {
+  published: 0,
+  suppressed: 0,
+  suppressedIntraRun: 0,
+  suppressedExactDuplicate: 0,
+  suppressedSimilar: 0,
+  suppressedDispositioned: 0,
+  rejectedSanitization: 0,
+  rejectedPlacement: 0,
+  readbackFailures: 0,
+};
+
+/**
  * Projects the same `ReviewReport` the action's own outputs are built from into `SummaryReport`.
  *
  * Every count is read directly off `report` — extended for this feature with the inventory
@@ -90,7 +109,7 @@ export function buildSummaryReport(
   diagnostics: readonly DiagnosticRecord[],
 ): SummaryReport {
   const { report } = input;
-  const publish = report.publish;
+  const publish = report.publish ?? EMPTY_PUBLISH_OUTCOME;
   const counts: SummaryCounts = {
     totalPaths: report.inventorySize,
     reviewablePaths: report.reviewablePaths,
@@ -98,10 +117,15 @@ export function buildSummaryReport(
     mechanicallyClean: report.mechanicallyClean,
     cacheHits: report.cacheHits,
     freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits),
-    findingsPublished: publish?.published ?? 0,
-    suppressedExactDuplicate: publish?.suppressedExactDuplicate ?? 0,
-    suppressedSimilar: publish?.suppressedSimilar ?? 0,
-    suppressedDispositioned: publish?.suppressedDispositioned ?? 0,
+    findingsPublished: publish.published,
+    // Unlike the four counts below, this one stays optional on `PublishOutcome` even once `publish`
+    // is known to exist — see its own doc comment in `publisher.ts` — so `EMPTY_PUBLISH_OUTCOME`'s
+    // `0` alone cannot stand in for every absent case; a genuine, present-but-older `PublishOutcome`
+    // still needs its own fallback here.
+    suppressedIntraRun: publish.suppressedIntraRun ?? 0,
+    suppressedExactDuplicate: publish.suppressedExactDuplicate,
+    suppressedSimilar: publish.suppressedSimilar,
+    suppressedDispositioned: publish.suppressedDispositioned,
   };
   return {
     outcome: report.outcome,

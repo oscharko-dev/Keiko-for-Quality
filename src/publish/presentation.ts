@@ -200,6 +200,12 @@ export interface SummaryCounts {
   /** Reviewable paths actually sent to the engine this run: `reviewablePaths - cacheHits`. */
   readonly freshlyReviewed: number;
   readonly findingsPublished: number;
+  /** Suppressed as a near-duplicate of another finding in the SAME run (v0.12.0) — see
+   *  `similarity.ts`'s `areIntraRunDuplicates`. Always a plain number here, never `undefined`: the
+   *  optionality on `PublishOutcome.suppressedIntraRun` is a compile-time backward-compatibility
+   *  concern for a literal written before the field existed, not a real absence this table has to
+   *  represent — `buildSummaryReport` (`summary.ts`) already collapses it to `0` either way. */
+  readonly suppressedIntraRun: number;
   readonly suppressedExactDuplicate: number;
   readonly suppressedSimilar: number;
   /** Suppressed against a resolved thread with a substantive disposition reply (Keiko-for-Quality#64). */
@@ -276,12 +282,14 @@ function outcomeText(report: SummaryReport): string {
 
 /**
  * The metric table's rows, in the fixed order the epic's visibility requirement asks for: the path
- * accounting first, then the finding/dedup accounting, with the three duplicate-suppression stages
- * (Keiko-for-Quality#38/#51's exact marker and phrasing-independent similarity, #64's dispositioned
- * recurrence) broken out separately rather than folded into one number. These counts are
- * independently meaningful and are not required to sum to `totalPaths` — a generated, binary, or
- * non-critical pointer path is neither reviewable, excluded, nor mechanically clean, and omitting
- * that remainder from this compact table is deliberate (see the epic's leanness requirement).
+ * accounting first, then the finding/dedup accounting, with the four duplicate-suppression stages
+ * (v0.12.0's intra-run clustering, Keiko-for-Quality#38/#51's exact marker and phrasing-independent
+ * similarity, #64's dispositioned recurrence) broken out separately rather than folded into one
+ * number, in the same order those stages run: intra-run clustering happens first, inside
+ * `planPublication`, before a candidate ever reaches the other three. These counts are independently
+ * meaningful and are not required to sum to `totalPaths` — a generated, binary, or non-critical
+ * pointer path is neither reviewable, excluded, nor mechanically clean, and omitting that remainder
+ * from this compact table is deliberate (see the epic's leanness requirement).
  */
 function countRows(counts: SummaryCounts): readonly string[] {
   const rows: readonly (readonly [string, number])[] = [
@@ -292,6 +300,7 @@ function countRows(counts: SummaryCounts): readonly string[] {
     ["Replayed from cache", counts.cacheHits],
     ["Freshly reviewed", counts.freshlyReviewed],
     ["Findings published", counts.findingsPublished],
+    ["Suppressed (intra-run duplicate)", counts.suppressedIntraRun],
     ["Suppressed (exact duplicate)", counts.suppressedExactDuplicate],
     ["Suppressed (similar)", counts.suppressedSimilar],
     ["Suppressed (dispositioned)", counts.suppressedDispositioned],

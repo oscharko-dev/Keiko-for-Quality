@@ -80,8 +80,15 @@ export interface EngineResult {
   readonly budgetExceeded: boolean;
 }
 
-/** Bounds chosen so a hostile or degenerate result cannot exhaust memory or flood a pull request. */
-const LIMITS = {
+/**
+ * Bounds chosen so a hostile or degenerate result cannot exhaust memory or flood a pull request.
+ *
+ * Exported so a second finding source can apply the SAME bounds rather than restate them —
+ * `contracts/change-pass.ts`'s cross-file pass validates its own candidates against
+ * `maxBodyChars` from here, so the one content-length bound the engine's findings must respect
+ * cannot silently drift from the one this second, independent source respects.
+ */
+export const LIMITS = {
   maxResultBytes: 32 * 1024 * 1024,
   maxFindings: 1000,
   maxWarnings: 1000,

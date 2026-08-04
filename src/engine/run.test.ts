@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +9,7 @@ import { commitSha } from "../core/brands.js";
 import { createSilentDiagnostics } from "../diagnostics/sink.js";
 import type { ExecOptions, ExecResult } from "../git/exec.js";
 import type { ReviewPair } from "../inventory/inventory.js";
+import { buildRuleFile, serializeRuleFile } from "./rule-file.js";
 import type { EngineRunOptions } from "./run.js";
 
 // `runEngine`'s only process-spawn boundary, mocked so the `model.usage` suite below can drive
@@ -123,12 +125,23 @@ describe("runEngine: model.usage telemetry", () => {
     execRunMock.mockReset();
   });
 
-  /** A trivial hermetic upstream: always answers the same body, regardless of what arrives. */
-  function startUsageUpstream(body: string): Promise<{ url: string; close: () => Promise<void> }> {
+  /**
+   * A trivial hermetic upstream: always answers the same body, regardless of what arrives — but
+   * still captures each request body verbatim, so a test can inspect what the proxy actually put
+   * on the wire (the `prompt_cache_key` assertion below needs exactly this).
+   */
+  function startUsageUpstream(
+    body: string,
+  ): Promise<{ url: string; captured: string[]; close: () => Promise<void> }> {
+    const captured: string[] = [];
     const server: Server = createServer((request, response) => {
-      request.resume();
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(body);
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        captured.push(Buffer.concat(chunks).toString("utf8"));
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(body);
+      });
     });
     return new Promise((resolve) => {
       server.listen(0, "127.0.0.1", () => {
@@ -136,6 +149,7 @@ describe("runEngine: model.usage telemetry", () => {
         if (address === null || typeof address === "string") throw new Error("no address");
         resolve({
           url: `http://127.0.0.1:${String(address.port)}`,
+          captured,
           close: () =>
             new Promise<void>((done) => {
               server.close(() => {
@@ -202,8 +216,18 @@ describe("runEngine: model.usage telemetry", () => {
       expect(records).toHaveLength(1);
       expect(records[0]).toMatchObject({
         headSha: PAIR.head,
-        counts: { requests: 1, prompt: 120, completion: 30, cached: 40 },
+        counts: { requests: 1, prompt: 120, completion: 30, cached: 40, cache_key_rejected: 0 },
       });
+
+      // The proxy injects `prompt_cache_key` derived from the rule digest `runEngine` writes to
+      // `keiko-rules.json` — recomputed here from the same profile/guidelines/mechanicallyClean
+      // fixture `options()` defaults to, independently of `run.ts`, so this proves the wire value
+      // rather than assuming it. Same rule content must produce the same key.
+      const rule = buildRuleFile(PROFILE, { paths: [] }, []);
+      const ruleDigest = createHash("sha256").update(serializeRuleFile(rule)).digest("hex");
+      expect(upstream.captured).toHaveLength(1);
+      const body = JSON.parse(upstream.captured[0] ?? "{}") as { prompt_cache_key?: string };
+      expect(body.prompt_cache_key).toBe(`kfq-${ruleDigest.slice(0, 16)}`);
     } finally {
       await upstream.close();
     }
@@ -243,7 +267,13 @@ describe("runEngine: model.usage telemetry", () => {
 
       const records = diagnostics.drain().filter((record) => record.code === "model.usage");
       expect(records).toHaveLength(1);
-      expect(records[0]?.counts).toEqual({ requests: 1, prompt: 5, completion: 1, cached: 0 });
+      expect(records[0]?.counts).toEqual({
+        requests: 1,
+        prompt: 5,
+        completion: 1,
+        cached: 0,
+        cache_key_rejected: 0,
+      });
     } finally {
       await upstream.close();
     }

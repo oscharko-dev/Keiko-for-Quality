@@ -172,9 +172,9 @@ async function requestPair(
         model: deps.model,
         messages: [{ role: "user", content: prompt }],
         // Temperature pinned for the same reason the review itself is (model-proxy.ts); the seed
-        // comes from the caller because the majority audit needs three GENUINELY distinct votes —
-        // one pinned seed made the three requests byte-identical and the vote vacuous (caught by
-        // review on #84).
+        // comes from the caller because an escalated majority audit needs up to three GENUINELY
+        // distinct votes — one pinned seed made the three requests byte-identical and the vote
+        // vacuous (caught by review on #84).
         temperature: 0,
         seed,
         // Generous on purpose: reasoning models spend tokens before the final channel, and a cap
@@ -352,10 +352,43 @@ async function requestAuditVote(
   return { pair: retry.pair, tokens: first.tokens + retry.tokens, transportOk: retry.transportOk };
 }
 
+function pairKey(pair: { category: string; severity: string } | undefined): string {
+  return pair === undefined ? "" : `${pair.category}/${pair.severity}`;
+}
+
+// Distinct seeds per vote — reproducible run to run, genuinely independent within a run. A single
+// pinned seed made all three votes byte-identical clones (review catch on #84). Order is fixed
+// because vote 1 doubles as the fast-path vote below: it must always be seed 42, never reshuffled
+// in from the escalation pool.
+const VOTE_SEEDS = [42, 43, 44] as const;
+
 /**
- * Majority of three: prompt work moves the mean, only sampling moves the variance. Two agreeing
- * votes adopt (the third call is never spent); a 2-1 split adopts the pair two votes named; three
- * distinct answers decide nothing — that spread IS the close call the anti-churn clause protects.
+ * The pair the finding already carries, as the same `"category/severity"` key a vote is compared
+ * with. Only ever read after `auditClassification`'s `needsClassification` guard has passed, so
+ * both fields are already valid vocabulary values — the `?? ""` exists only to satisfy the wider
+ * `string | undefined` field type, not because either field is expected to be missing here.
+ */
+function existingPairKey(finding: ClassifiableFinding): string {
+  return pairKey({ category: finding.category ?? "", severity: finding.severity ?? "" });
+}
+
+/**
+ * Vote 1 is cast alone, first, and checked against the finding's OWN classification before any
+ * further call happens. Landing exactly on the pair the finding already carries is confirmation,
+ * not a coin toss that happened to agree once: the audit's job is to catch DRIFT between an
+ * independent re-derivation and the original, and a re-derivation that finds none of it IS the
+ * answer — not one sample out of a needed three. Measured reality is that most findings land here,
+ * so escalating anyway — two more calls to ask the identical question again — would only hand
+ * sampling noise a chance to overrule a finding vote 1 just corroborated, at 2-3x the cost, on the
+ * common case.
+ *
+ * A vote 1 that DISAGREES is a different signal: on its own it does not say whether the finding is
+ * wrong or vote 1 is the outlier, so it earns the majority-of-three escalation this always used to
+ * run unconditionally — two further calls on seeds 43 and 44, adopting a pair only when two of the
+ * three (vote 1 included) agree, with the same early exit once two agree; three distinct answers
+ * still decide nothing. A vote 1 that never resolves to a usable pair (its transport retry also
+ * failed, or its reply never parsed) cannot match anything either, so it escalates the same way
+ * rather than silently standing in for a real vote.
  */
 async function collectAuditVotes(
   finding: ClassifiableFinding,
@@ -363,10 +396,13 @@ async function collectAuditVotes(
 ): Promise<{ votes: readonly { category: string; severity: string }[]; tokens: number }> {
   const votes: { category: string; severity: string }[] = [];
   let tokens = 0;
-  // Distinct seeds per vote — reproducible run to run, genuinely independent within a run. A
-  // single pinned seed made all three votes byte-identical clones (review catch on #84).
-  const VOTE_SEEDS = [42, 43, 44] as const;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  const first = await requestAuditVote(finding, deps, VOTE_SEEDS[0]);
+  tokens += first.tokens;
+  if (first.pair !== undefined) {
+    votes.push(first.pair);
+    if (pairKey(first.pair) === existingPairKey(finding)) return { votes, tokens };
+  }
+  for (let attempt = 1; attempt < 3; attempt += 1) {
     const result = await requestAuditVote(finding, deps, VOTE_SEEDS[attempt] ?? 42);
     tokens += result.tokens;
     if (result.pair !== undefined) votes.push(result.pair);
@@ -375,11 +411,12 @@ async function collectAuditVotes(
   return { votes, tokens };
 }
 
-function pairKey(pair: { category: string; severity: string } | undefined): string {
-  return pair === undefined ? "" : `${pair.category}/${pair.severity}`;
-}
-
-/** Two matching votes decide; three distinct votes are a genuine close call and decide nothing. */
+/**
+ * Any two matching votes decide. Fewer than two survive to compare — including the fast path's
+ * lone, already-matching vote 1 — or every pair is distinct: both decide nothing, which for the
+ * fast path is already the right answer, since vote 1 equals the pair the caller compares it
+ * against.
+ */
 function majorityPair(
   votes: readonly { category: string; severity: string }[],
 ): { category: string; severity: string } | undefined {

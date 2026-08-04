@@ -178,7 +178,12 @@ function commonDisqualifier(
   // A result carrying more findings than the consumer believes plausible is more likely a
   // misconfigured model or a prompt-injection success than a genuinely terrible change.
   if (result.findings.length > config.maxFindings) {
-    return incomplete(mode, "settlement.incomplete.engine_error", result.findings, {
+    // Deliberately carries NO findings, unlike every other incomplete branch: this branch's whole
+    // claim is that a flood past the consumer's ceiling is a misconfigured model or a successful
+    // prompt injection rather than a genuinely terrible change — publishing the flood anyway would
+    // act on the very output just declared implausible, at two API calls per finding. The count in
+    // `counts` still tells the operator how large the flood was.
+    return incomplete(mode, "settlement.incomplete.engine_error", [], {
       findings: result.findings.length,
     });
   }

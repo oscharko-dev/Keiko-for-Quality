@@ -245,6 +245,7 @@ describe("buildSummaryReport", () => {
       publish: {
         published: 2,
         suppressed: 4,
+        suppressedIntraRun: 3,
         suppressedExactDuplicate: 1,
         suppressedSimilar: 2,
         suppressedDispositioned: 1,
@@ -261,6 +262,7 @@ describe("buildSummaryReport", () => {
     expect(summary.counts.mechanicallyClean).toBe(r.mechanicallyClean);
     expect(summary.counts.cacheHits).toBe(r.cacheHits);
     expect(summary.counts.findingsPublished).toBe(r.publish?.published);
+    expect(summary.counts.suppressedIntraRun).toBe(r.publish?.suppressedIntraRun);
     expect(summary.counts.suppressedExactDuplicate).toBe(r.publish?.suppressedExactDuplicate);
     expect(summary.counts.suppressedSimilar).toBe(r.publish?.suppressedSimilar);
     expect(summary.counts.suppressedDispositioned).toBe(r.publish?.suppressedDispositioned);
@@ -281,9 +283,23 @@ describe("buildSummaryReport", () => {
     const r: ReviewReport = withoutPublish;
     const summary = buildSummaryReport(runInput({ report: r }), []);
     expect(summary.counts.findingsPublished).toBe(0);
+    expect(summary.counts.suppressedIntraRun).toBe(0);
     expect(summary.counts.suppressedExactDuplicate).toBe(0);
     expect(summary.counts.suppressedSimilar).toBe(0);
     expect(summary.counts.suppressedDispositioned).toBe(0);
+  });
+
+  /**
+   * `PublishOutcome.suppressedIntraRun` (v0.12.0) is optional even when `publish` itself is
+   * present — see its doc comment in `publisher.ts` — for the same compile-time backward-
+   * compatibility reason `apiFailures` already was: a `PublishOutcome` literal written before the
+   * field existed (every fixture in this file's own `report()` helper, among others) must keep
+   * satisfying the type. This is the narrower case the test above does not cover: `publish` present,
+   * but this one field genuinely absent from it, rather than `publish` missing altogether.
+   */
+  it("defaults suppressedIntraRun to zero when publish is present but omits the optional field", () => {
+    const summary = buildSummaryReport(runInput(), []);
+    expect(summary.counts.suppressedIntraRun).toBe(0);
   });
 
   it("carries the reason code only for an incomplete outcome", () => {

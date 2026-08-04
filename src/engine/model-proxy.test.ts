@@ -153,6 +153,169 @@ describe("startModelProxy", () => {
     expect(response.status).toBe(502);
   });
 
+  describe("prompt cache key", () => {
+    it("injects the configured prompt_cache_key on a chat-completions body", async () => {
+      const upstream = await startUpstream();
+      cleanups.push(upstream.close);
+      const proxy = await startModelProxy({
+        upstreamUrl: upstream.url,
+        temperature: 0,
+        seed: 42,
+        promptCacheKey: "kfq-deadbeefcafef00d",
+      });
+      cleanups.push(() => proxy.close());
+
+      await fetch(`${proxy.url}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "m", messages: [] }),
+      });
+
+      const body = JSON.parse(upstream.captured[0]?.body ?? "{}") as {
+        prompt_cache_key?: string;
+      };
+      expect(body.prompt_cache_key).toBe("kfq-deadbeefcafef00d");
+    });
+
+    it("leaves prompt_cache_key absent when the option is not configured", async () => {
+      const { proxy, captured } = await proxied(0);
+      await fetch(`${proxy.url}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "m", messages: [] }),
+      });
+      const body = JSON.parse(captured[0]?.body ?? "{}") as { prompt_cache_key?: string };
+      expect(body.prompt_cache_key).toBeUndefined();
+      expect(proxy.usage().cacheKeyRejected).toBe(0);
+    });
+
+    it("does not inject the cache key on a non-chat-completions path", async () => {
+      const upstream = await startUpstream();
+      cleanups.push(upstream.close);
+      const proxy = await startModelProxy({
+        upstreamUrl: upstream.url,
+        temperature: 0,
+        seed: 42,
+        promptCacheKey: "kfq-deadbeefcafef00d",
+      });
+      cleanups.push(() => proxy.close());
+
+      const requestBody = JSON.stringify({ model: "m" });
+      await fetch(`${proxy.url}/models`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: requestBody,
+      });
+
+      expect(upstream.captured).toHaveLength(1);
+      expect(upstream.captured[0]?.body).toBe(requestBody);
+    });
+
+    /** Rejects any body carrying the key with 400, exactly like a strict gateway that has not
+     *  been taught `prompt_cache_key`; accepts everything else. Lets one upstream double as both
+     *  halves of the self-healing scenario below. */
+    function startKeyRejectingUpstream(): ReturnType<typeof startUpstream> {
+      return startUpstream((requestBody) => {
+        const parsed = JSON.parse(requestBody) as { prompt_cache_key?: string };
+        if (parsed.prompt_cache_key !== undefined) {
+          return {
+            status: 400,
+            contentType: "application/json",
+            body: '{"error":"unknown_param"}',
+          };
+        }
+        return {
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ usage: { prompt_tokens: 10, completion_tokens: 2 } }),
+        };
+      });
+    }
+
+    it("retries once without the key on a 400, then latches injection off for later requests", async () => {
+      const upstream = await startKeyRejectingUpstream();
+      cleanups.push(upstream.close);
+      const proxy = await startModelProxy({
+        upstreamUrl: upstream.url,
+        temperature: 0,
+        seed: 42,
+        promptCacheKey: "kfq-deadbeefcafef00d",
+      });
+      cleanups.push(() => proxy.close());
+
+      const send = (): Promise<Response> =>
+        fetch(`${proxy.url}/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ model: "m", messages: [] }),
+        });
+      const keyOf = (index: number): string | undefined =>
+        (JSON.parse(upstream.captured[index]?.body ?? "{}") as { prompt_cache_key?: string })
+          .prompt_cache_key;
+
+      const first = await send();
+      expect(first.status).toBe(200);
+      // The failing attempt (with the key) and the successful retry (without) both reached
+      // upstream: the self-heal is invisible to the caller of the proxy, not to the wire.
+      expect(upstream.captured).toHaveLength(2);
+      expect(keyOf(0)).toBe("kfq-deadbeefcafef00d");
+      expect(keyOf(1)).toBeUndefined();
+
+      const second = await send();
+      expect(second.status).toBe(200);
+      // The latch tripped after the first request's retry succeeded: this request never carried
+      // the key, so it never 400ed and never needed a retry of its own — exactly one more call.
+      expect(upstream.captured).toHaveLength(3);
+      expect(keyOf(2)).toBeUndefined();
+
+      // Usage keeps accumulating correctly through all of the above: one rejection counted (not
+      // two, and not once per upstream round trip), two served requests, and token totals read
+      // only from what was actually served — never from the discarded first 400.
+      expect(proxy.usage()).toEqual({
+        requests: 2,
+        prompt: 20,
+        completion: 4,
+        cached: 0,
+        cacheKeyRejected: 1,
+      });
+    });
+
+    it("forwards the retry's response, and leaves the latch open, when the 400 persists without the key too", async () => {
+      const upstream = await startUpstream(() => ({
+        status: 400,
+        contentType: "application/json",
+        body: '{"error":"still bad"}',
+      }));
+      cleanups.push(upstream.close);
+      const proxy = await startModelProxy({
+        upstreamUrl: upstream.url,
+        temperature: 0,
+        seed: 42,
+        promptCacheKey: "kfq-deadbeefcafef00d",
+      });
+      cleanups.push(() => proxy.close());
+
+      const response = await fetch(`${proxy.url}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "m", messages: [] }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.text()).toBe('{"error":"still bad"}');
+      // Both the original attempt and the bounded retry reached upstream — exactly one retry, not
+      // a loop — and the response served back is the retry's, not the discarded first attempt's.
+      expect(upstream.captured).toHaveLength(2);
+      expect(proxy.usage()).toEqual({
+        requests: 1,
+        prompt: 0,
+        completion: 0,
+        cached: 0,
+        cacheKeyRejected: 1,
+      });
+    });
+  });
+
   describe("usage()", () => {
     async function withUpstream(
       respond: (requestBody: string) => UpstreamReply,
@@ -166,7 +329,13 @@ describe("startModelProxy", () => {
 
     it("reports all-zero usage before any request is forwarded", async () => {
       const { proxy } = await proxied(0);
-      expect(proxy.usage()).toEqual({ requests: 0, prompt: 0, completion: 0, cached: 0 });
+      expect(proxy.usage()).toEqual({
+        requests: 0,
+        prompt: 0,
+        completion: 0,
+        cached: 0,
+        cacheKeyRejected: 0,
+      });
     });
 
     it("accumulates prompt, completion, and request counts across multiple JSON responses", async () => {
@@ -191,7 +360,13 @@ describe("startModelProxy", () => {
       await send();
 
       expect(captured).toHaveLength(2);
-      expect(proxy.usage()).toEqual({ requests: 2, prompt: 17, completion: 8, cached: 0 });
+      expect(proxy.usage()).toEqual({
+        requests: 2,
+        prompt: 17,
+        completion: 8,
+        cached: 0,
+        cacheKeyRejected: 0,
+      });
     });
 
     it("reads cached_tokens from usage.prompt_tokens_details", async () => {
@@ -213,7 +388,13 @@ describe("startModelProxy", () => {
         body: JSON.stringify({ model: "m", messages: [] }),
       });
 
-      expect(proxy.usage()).toEqual({ requests: 1, prompt: 100, completion: 20, cached: 64 });
+      expect(proxy.usage()).toEqual({
+        requests: 1,
+        prompt: 100,
+        completion: 20,
+        cached: 64,
+        cacheKeyRejected: 0,
+      });
     });
 
     it("tolerates a response with no usage field, then one with usage but no cache details", async () => {
@@ -239,7 +420,13 @@ describe("startModelProxy", () => {
 
       // First response had no `usage` at all; second had `usage` but no `prompt_tokens_details`.
       // Neither missing piece should cost the fields that were actually present.
-      expect(proxy.usage()).toEqual({ requests: 2, prompt: 5, completion: 2, cached: 0 });
+      expect(proxy.usage()).toEqual({
+        requests: 2,
+        prompt: 5,
+        completion: 2,
+        cached: 0,
+        cacheKeyRejected: 0,
+      });
     });
 
     it("counts an SSE chat-completions response as a request without adding token fields", async () => {
@@ -259,7 +446,13 @@ describe("startModelProxy", () => {
       // of this test — only the content-type gate decides whether accounting even looks at it.
       expect(response.headers.get("content-type")).toBe("text/event-stream");
       expect(captured).toHaveLength(1);
-      expect(proxy.usage()).toEqual({ requests: 1, prompt: 0, completion: 0, cached: 0 });
+      expect(proxy.usage()).toEqual({
+        requests: 1,
+        prompt: 0,
+        completion: 0,
+        cached: 0,
+        cacheKeyRejected: 0,
+      });
     });
 
     it("counts a malformed JSON chat-completions body as a request without adding token fields", async () => {
@@ -276,7 +469,13 @@ describe("startModelProxy", () => {
       });
 
       expect(response.status).toBe(200);
-      expect(proxy.usage()).toEqual({ requests: 1, prompt: 0, completion: 0, cached: 0 });
+      expect(proxy.usage()).toEqual({
+        requests: 1,
+        prompt: 0,
+        completion: 0,
+        cached: 0,
+        cacheKeyRejected: 0,
+      });
     });
 
     it("does not count a non-chat-completions path even with a usage-shaped JSON body", async () => {
@@ -293,7 +492,13 @@ describe("startModelProxy", () => {
       });
 
       expect(captured).toHaveLength(1);
-      expect(proxy.usage()).toEqual({ requests: 0, prompt: 0, completion: 0, cached: 0 });
+      expect(proxy.usage()).toEqual({
+        requests: 0,
+        prompt: 0,
+        completion: 0,
+        cached: 0,
+        cacheKeyRejected: 0,
+      });
     });
   });
 });

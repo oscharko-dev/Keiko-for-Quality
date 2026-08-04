@@ -14,12 +14,18 @@ import {
 } from "./cache/review-cache.js";
 import { compileProfile, type ReviewProfile } from "./config/profile.js";
 import type { RuntimeConfig } from "./config/runtime.js";
-import { blobId, commitSha, sha256 } from "./core/brands.js";
+import { blobId, commitSha, repoPath, sha256 } from "./core/brands.js";
 import { createSilentDiagnostics } from "./diagnostics/sink.js";
 import { currentPlatformDigest } from "./engine/pinned-release.js";
 import { SUPPORTED_MANIFEST_SCHEMA } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
-import { GitHubApiError, GitHubClient } from "./github/client.js";
+import {
+  GitHubApiError,
+  GitHubClient,
+  type ReviewComment,
+  type ReviewCommentInput,
+} from "./github/client.js";
+import { fingerprint, markerComment } from "./publish/marker.js";
 import type { ReviewRequest } from "./review.js";
 
 const acquireEngineMock = vi.fn();
@@ -612,6 +618,10 @@ describe("performReview: review-cache memoization end to end", () => {
 
       const codes = diagnostics.drain().map((record) => record.code);
       expect(codes).toContain("publish.abandoned_stale_head");
+      // SpendLedger (v0.12.0): the engine never ran and no classify call ever happened, so
+      // `performReview`'s `finally` block must not write a zero-spend `run.spend` line — that would
+      // misreport an abandoned run as one that reviewed the change for free.
+      expect(codes).not.toContain("run.spend");
     });
 
     it("still runs the engine when the head is current at the pre-flight check", async () => {
@@ -877,13 +887,20 @@ describe("performReview: review-cache memoization end to end", () => {
   });
 
   /**
-   * The classification cost bomb (order guard): `repairFindingClassification` runs BEFORE `settle`,
-   * and the engine's own result parser accepts up to 1,000 findings while `config.maxFindings`
-   * (50 here) is only enforced inside `settle`'s `commonDisqualifier`. Left unchecked, a runaway or
-   * prompt-injected result with hundreds of findings would pay repair-plus-audit's 2-3 model calls
-   * per finding for a run `settle` disqualifies as implausible either way. These use the openai
-   * protocol (unlike this file's shared `CONFIG`, which is anthropic and would skip classification
-   * for an unrelated reason) so a fetch call would genuinely happen if the guard did not intervene.
+   * The classification cost bomb (order guard): `repairEngineFindings` runs BEFORE `settle`, and the
+   * engine's own result parser accepts up to 1,000 findings while `config.maxFindings` (50 here) is
+   * only enforced inside `settle`'s `commonDisqualifier`. Left unchecked, a runaway or
+   * prompt-injected result with hundreds of findings would pay repair's model calls per finding for a
+   * run `settle` disqualifies as implausible either way. These use the openai protocol (unlike this
+   * file's shared `CONFIG`, which is anthropic and would skip classification for an unrelated reason)
+   * so a fetch call would genuinely happen if the guard did not intervene.
+   *
+   * The classification AUDIT (v0.12.0, moved to the publication path — see the
+   * "classification audit moves to the publication path" describe block below) needs no analogous
+   * guard of its own here: `settle`'s `commonDisqualifier` discards a disqualified result's findings
+   * outright (`findings: []`), so by the time publication could run the audit, there is nothing left
+   * for it to see. The second test below still proves the END-TO-END spend stays bounded at exactly
+   * `maxFindings`, repair and audit together — see its own updated comment.
    */
   describe("performReview: classification flood guard (order guard)", () => {
     const OPENAI_CONFIG: RuntimeConfig = { ...CONFIG, protocol: "openai", model: "gpt-oss-test" };
@@ -977,10 +994,883 @@ describe("performReview: review-cache memoization end to end", () => {
 
       // Exact call/token counts belong to `classify.test.ts`, which already pins repair's and
       // audit's own retry and voting behaviour; what THIS guard controls is only whether any of it
-      // runs at all, so a non-zero count is the whole claim being tested.
+      // runs at all, so a non-zero count is the whole claim being tested. Unchanged by the audit's
+      // v0.12.0 move to the publication path: none of these findings collide with an existing
+      // marker (a fresh pull request, `baseRequest`'s empty `listReviewComments`), so every one of
+      // them survives planning and is still a candidate for the audit exactly as it was before the
+      // move — the fetch count (and the fact `classify` end up non-zero on `run.spend`, which now
+      // sums repair AND audit together, v0.12.0) is identical either way.
       expect(classifyCalls).toBeGreaterThan(0);
       const spend = diagnostics.drain().find((record) => record.code === "run.spend");
       expect(spend?.counts?.classify).toBeGreaterThan(0);
+    });
+  });
+
+  /**
+   * The change-level pass (issue #80, technique C) ships dark: `cross_artifact_pass` defaults to
+   * false, and these tests pin the wiring — the flag gates everything, the budget guard records its
+   * skip honestly, and an enabled pass runs exactly one extra model call. The module's own parsing
+   * and bounds belong to `contracts/change-pass.test.ts`; this block proves `performReview` routes
+   * it correctly.
+   */
+  describe("performReview: change-level pass wiring (v0.12.0, #80 technique C)", () => {
+    const PASS_CONFIG: RuntimeConfig = {
+      ...CONFIG,
+      protocol: "openai",
+      model: "gpt-oss-test",
+      crossArtifactPass: true,
+    };
+    const originalFetch = globalThis.fetch;
+
+    beforeEach(() => {
+      runEngineMock.mockReset();
+      acquireEngineMock.mockReset();
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    function cleanEngineStdout(): string {
+      return JSON.stringify({
+        status: "success",
+        summary: { files_reviewed: 2, total_tokens: 100, budget_exceeded: false },
+        comments: [],
+      });
+    }
+
+    function passRequest(config: RuntimeConfig): ReviewRequest {
+      const request = baseRequest(undefined);
+      return { ...request, config, env: { MODEL_TOKEN: "fake-token" } };
+    }
+
+    it("does nothing at all when the flag is off — not even a diagnostic", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: cleanEngineStdout(), ruleDigest: engineDigest });
+      let fetchCalls = 0;
+      globalThis.fetch = (() => {
+        fetchCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(
+        passRequest({ ...PASS_CONFIG, crossArtifactPass: false }),
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(fetchCalls).toBe(0);
+      expect(diagnostics.drain().some((r) => r.code === "contracts.change_pass")).toBe(false);
+    });
+
+    it("runs the pass when enabled and records its outcome, without failing the run", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: cleanEngineStdout(), ruleDigest: engineDigest });
+      let fetchCalls = 0;
+      globalThis.fetch = (() => {
+        fetchCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(passRequest(PASS_CONFIG), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      // This fixture's files carry no summarizable exported declarations (`export const a = 2;`
+      // has no type annotation), so the module's own zero-summary short-circuit fires and no model
+      // call happens — the case a real repo hits when a change touches nothing declaration-shaped.
+      // What the WIRING owns, and what this pins, is that the pass ran its guards, recorded its
+      // outcome honestly, and cost nothing; the fetch-reaching path is pinned by
+      // `contracts/change-pass.test.ts` against summarizable fixtures.
+      expect(fetchCalls).toBe(0);
+      const record = diagnostics.drain().find((r) => r.code === "contracts.change_pass");
+      expect(record?.counts).toStrictEqual({
+        findings: 0,
+        dropped_unanchorable: 0,
+        tokens: 0,
+        skipped_budget: 0,
+      });
+    });
+
+    it("skips on an exhausted allotment and says so, instead of overdrawing", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: cleanEngineStdout(), ruleDigest: engineDigest });
+      let fetchCalls = 0;
+      globalThis.fetch = (() => {
+        fetchCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      const diagnostics = createSilentDiagnostics();
+      // A 1,000-token ceiling leaves well under CHANGE_PASS_RESERVE_TOKENS after the engine's own
+      // 100 — the pass must decline rather than become the reason the run overdraws.
+      const report = await performReview(
+        passRequest({ ...PASS_CONFIG, tokenBudget: 1_000 }),
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(fetchCalls).toBe(0);
+      const record = diagnostics.drain().find((r) => r.code === "contracts.change_pass");
+      expect(record?.counts?.skipped_budget).toBe(1);
+      expect(record?.counts?.findings).toBe(0);
+    });
+  });
+
+  /**
+   * The deterministic contract gate (issue #80, technique D) end to end: a profile-declared pair
+   * whose two same-named interfaces drifted produces a published, file-level finding on the changed
+   * side — with ZERO model calls, because a gate finding is a fact about two declarations, not an
+   * opinion the audit could second-guess. Runs last in this file: it adds one commit on top of the
+   * shared fixture repo, which leaves every sha earlier tests captured untouched.
+   */
+  describe("performReview: deterministic contract gate (v0.12.0, #80 technique D)", () => {
+    const GATE_CONFIG: RuntimeConfig = { ...CONFIG, protocol: "openai", model: "gpt-oss-test" };
+    const originalFetch = globalThis.fetch;
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    it("publishes a drift finding for a declared pair, deterministically and unaudited", async () => {
+      await writeFile(
+        join(repo, "src/server-api.ts"),
+        "export interface ApiShape {\n  a: string;\n  b: string;\n}\n",
+      );
+      await writeFile(
+        join(repo, "src/client-api.ts"),
+        "export interface ApiShape {\n  a: string;\n}\n",
+      );
+      git(["add", "-A"]);
+      git(["commit", "-q", "-m", "gate", "--no-gpg-sign"]);
+      const gateHead = git(["rev-parse", "HEAD"]).trim();
+
+      const gateProfile = compileProfile({
+        version: 1,
+        reviewRelevant: ["src/**"],
+        deletionCritical: [],
+        generated: [],
+        excluded: [],
+        benignWarnings: [],
+        pathInstructions: [],
+        contractPairs: [{ paths: ["src/server-api.ts"], counterparts: ["src/client-api.ts"] }],
+      } satisfies ReviewProfile);
+
+      const client = new GitHubClient("https://api.example.test", "unused");
+      const created: ReviewCommentInput[] = [];
+      const comments: ReviewComment[] = [];
+      vi.spyOn(client, "getPullRequest").mockResolvedValue({
+        headSha: commitSha(gateHead),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
+      vi.spyOn(client, "createReviewComment").mockImplementation((_ref, _num, input) => {
+        created.push(input);
+        const comment: ReviewComment = {
+          id: comments.length + 1,
+          body: input.body,
+          path: input.path,
+          authorLogin: "keiko-for-quality[bot]",
+          commitId: input.commitId,
+          url: "https://example.test/c",
+        };
+        comments.push(comment);
+        return Promise.resolve(comment);
+      });
+      vi.spyOn(client, "getReviewComment").mockImplementation((_ref, id) =>
+        Promise.resolve(comments[id - 1]!),
+      );
+
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "success",
+          summary: { files_reviewed: 2, total_tokens: 100, budget_exceeded: false },
+          comments: [],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      let modelCalls = 0;
+      globalThis.fetch = (() => {
+        modelCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(
+        {
+          ...baseRequest(undefined),
+          client,
+          base: commitSha(headSha),
+          head: commitSha(gateHead),
+          config: GATE_CONFIG,
+          profile: gateProfile,
+          env: { MODEL_TOKEN: "fake-token" },
+        },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish?.published).toBe(1);
+      expect(created[0]?.path).toBe("src/server-api.ts");
+      expect(created[0]?.body).toContain("ApiShape");
+      expect(created[0]?.body).toContain("client-api.ts");
+      // Deterministic means deterministic: no audit, no repair, no pass — zero model traffic.
+      expect(modelCalls).toBe(0);
+      const record = diagnostics.drain().find((r) => r.code === "contracts.gate");
+      expect(record?.counts).toStrictEqual({ pairs: 1, compared: 1, findings: 1 });
+    });
+  });
+
+  /**
+   * Classification audit economy (v0.12.0): `repairFindingClassification` used to run BOTH repair
+   * AND the self-audit on every fresh engine finding, before `settle` and before deduplication. On a
+   * repeat run every suppressed duplicate still paid 1-3 audit calls for an opinion nobody would ever
+   * read. The audit now runs from `publishAudited` (`review.ts`), only on plan survivors that are
+   * ALSO fresh engine output — repair stays where it was, pre-settle, because a finding without a
+   * category or severity cannot be triaged anywhere downstream.
+   *
+   * Every test below drives `performReview` end to end against this file's real git fixture, with
+   * only the engine process and `fetch` mocked away — proof of the WIRING, not just the pure
+   * `classify.ts` functions `classify.test.ts` already covers in isolation.
+   */
+  describe("performReview: classification audit moves to the publication path (v0.12.0)", () => {
+    const AUDIT_CONFIG: RuntimeConfig = { ...CONFIG, protocol: "openai", model: "gpt-oss-test" };
+    const originalFetch = globalThis.fetch;
+
+    beforeEach(() => {
+      runEngineMock.mockReset();
+      acquireEngineMock.mockReset();
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
+    /**
+     * A `GitHubClient` whose create/read-back calls actually succeed, so a finding can be observed
+     * reaching real publication instead of only being planned — none of the fixtures elsewhere in
+     * this file exercise a successful `createReviewComment` round trip. `existing` seeds
+     * `listReviewComments`; every seeded comment is authored as this reviewer's own identity, the
+     * property `ownMarkers`/`toExistingConversation` (`publisher.ts`) require to treat a marker as
+     * this reviewer's own.
+     */
+    function successfulClient(existing: readonly ReviewComment[] = []): {
+      client: GitHubClient;
+      created: ReviewCommentInput[];
+    } {
+      const client = new GitHubClient("https://api.example.test", "unused");
+      const createdComments: ReviewComment[] = [];
+      const createdInputs: ReviewCommentInput[] = [];
+      vi.spyOn(client, "getPullRequest").mockResolvedValue({
+        headSha: commitSha(headSha),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([...existing]);
+      vi.spyOn(client, "createReviewComment").mockImplementation((_ref, _num, input) => {
+        createdInputs.push(input);
+        const comment: ReviewComment = {
+          id: createdComments.length + 1,
+          body: input.body,
+          path: input.path,
+          authorLogin: "keiko-for-quality[bot]",
+          commitId: input.commitId,
+          url: "https://example.test/c",
+        };
+        createdComments.push(comment);
+        return Promise.resolve(comment);
+      });
+      vi.spyOn(client, "getReviewComment").mockImplementation((_ref, id) => {
+        const found = createdComments.find((c) => c.id === id);
+        return found === undefined
+          ? Promise.reject(new GitHubApiError(404))
+          : Promise.resolve(found);
+      });
+      return { client, created: createdInputs };
+    }
+
+    function auditRequest(client: GitHubClient, cacheStore?: CacheStore): ReviewRequest {
+      return {
+        client,
+        ref: { owner: "acme", repo: "widget" },
+        pullNumber: 1,
+        base: commitSha(baseSha),
+        head: commitSha(headSha),
+        repositoryPath: repo,
+        config: AUDIT_CONFIG,
+        profile: PROFILE,
+        guidelines: { paths: [] },
+        identity: "keiko-for-quality[bot]",
+        env: { MODEL_TOKEN: "fake-token" },
+        pathValue: process.env.PATH ?? "/usr/bin:/bin",
+        ...(cacheStore === undefined ? {} : { cacheStore }),
+      };
+    }
+
+    /** One already-published, still-open comment carrying the exact-marker fingerprint for
+     *  `(rule, body)` at `path` — the seed the plan-time exact-marker stage and the execute-time
+     *  re-check (`publisher.ts`) both compare a fresh finding's own fingerprint against. */
+    function seededMarker(rule: string, body: string, path = "src/a.ts"): ReviewComment {
+      const marker = fingerprint({ repository: "acme/widget", pullNumber: 1, path, rule, body });
+      return {
+        id: 1,
+        body: `Existing finding.\n\n<!-- ${markerComment(marker)} -->`,
+        path,
+        authorLogin: "keiko-for-quality[bot]",
+        commitId: headSha,
+        url: "https://example.test/existing",
+      };
+    }
+
+    interface StubFinding {
+      readonly path: string;
+      readonly content: string;
+      readonly category?: string;
+      readonly severity?: string;
+    }
+
+    /** Counted-mode engine output carrying zero or more findings, each optionally pre-classified. */
+    function findingsStdout(
+      findings: readonly StubFinding[],
+      filesReviewed: number,
+      totalTokens = 100,
+    ): string {
+      return JSON.stringify({
+        status: "success",
+        summary: {
+          files_reviewed: filesReviewed,
+          total_tokens: totalTokens,
+          budget_exceeded: false,
+        },
+        comments: findings.map((f) => ({
+          path: f.path,
+          content: f.content,
+          start_line: 1,
+          end_line: 1,
+          ...(f.category !== undefined ? { category: f.category } : {}),
+          ...(f.severity !== undefined ? { severity: f.severity } : {}),
+        })),
+      });
+    }
+
+    /**
+     * A stand-in classify endpoint: answers `repairPair` to a repair prompt and `auditPair` to an
+     * audit prompt. `classify.ts`'s `buildPrompt`/`buildAuditPrompt` preambles are disjoint text
+     * ("Classify one code-review finding." / "Your previous reply..." vs "Audit the classification
+     * of one code-review finding..."), so routing on a substring is exact, not a heuristic. Counts
+     * every call regardless of kind, which is what every economy assertion below reads.
+     */
+    function classifyFetchMock(opts: {
+      repairPair?: { category: string; severity: string };
+      auditPair?: { category: string; severity: string };
+      tokensPerCall?: number;
+    }): { impl: typeof fetch; callCount: () => number } {
+      let calls = 0;
+      const tokens = opts.tokensPerCall ?? 10;
+      const impl = ((_url: string, init?: { body?: string }) => {
+        calls += 1;
+        const parsedBody = JSON.parse(init?.body ?? "{}") as { messages?: { content?: string }[] };
+        const prompt = parsedBody.messages?.[0]?.content ?? "";
+        const pair = prompt.includes("Audit the classification") ? opts.auditPair : opts.repairPair;
+        const content =
+          pair === undefined ? "no pair configured for this call" : JSON.stringify(pair);
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              choices: [{ message: { content } }],
+              usage: { total_tokens: tokens },
+            }),
+            { status: 200 },
+          ),
+        );
+      }) as typeof fetch;
+      return { impl, callCount: () => calls };
+    }
+
+    it("never calls the classify endpoint for a fresh finding suppressed at plan time by an exact marker", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY =
+        "This handler swallows the write error and reports success to the caller regardless.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
+          2,
+          100,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      const { impl, callCount } = classifyFetchMock({});
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([seededMarker("bug", BODY)]);
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(auditRequest(client), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({
+        published: 0,
+        suppressed: 1,
+        suppressedExactDuplicate: 1,
+      });
+      expect(created).toHaveLength(0);
+      // Already classified (no repair needed) and plan-suppressed (never a `fresh` survivor for the
+      // audit) — the classify endpoint is never called at all.
+      expect(callCount()).toBe(0);
+
+      const records = diagnostics.drain();
+      expect(records.find((r) => r.code === "classify.audited")).toBeUndefined();
+      const spend = records.find((r) => r.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 0, total: 100 });
+    });
+
+    it("audits a surviving fresh finding once via the fast path and publishes it with the audited classification", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY =
+        "This retry loop never resets its attempt counter, so it spins forever after one failure.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
+          2,
+          100,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      // Vote 1 lands on the SAME pair the finding already carries — `classify.ts`'s fast path,
+      // exactly one call, no escalation.
+      const { impl, callCount } = classifyFetchMock({
+        auditPair: { category: "bug", severity: "medium" },
+        tokensPerCall: 37,
+      });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(auditRequest(client), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({ published: 1, suppressed: 0 });
+      expect(created).toHaveLength(1);
+      expect(callCount()).toBe(1);
+
+      const records = diagnostics.drain();
+      const audited = records.find((r) => r.code === "classify.audited");
+      expect(audited?.counts).toStrictEqual({ changed: 0, tokens: 37 });
+      const spend = records.find((r) => r.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 37, total: 137 });
+    });
+
+    it("never audits a cache-replayed finding, even when it survives the plan and publishes", async () => {
+      const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      const model = modelId(AUDIT_CONFIG.model);
+      const proto = protocol(AUDIT_CONFIG.protocol);
+      const base = blobId(baseBlobA);
+      const head = blobId(headBlobA);
+      const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+      const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+      const BODY = "This cached finding replays without ever asking the classify endpoint again.";
+      const store: CacheStore = {
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
+        entries: [
+          {
+            key,
+            baseBlob: base,
+            headBlob: head,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            modelId: model,
+            protocol: proto,
+            findings: [
+              {
+                path: repoPath("src/a.ts"),
+                content: BODY,
+                startLine: 1,
+                endLine: 1,
+                severity: "medium",
+                category: "bug",
+              },
+            ],
+          },
+        ],
+      };
+
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // src/a.ts is a hit and excluded; only src/b.ts is dispatched, with nothing fresh to report.
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout([], 1, 50),
+        ruleDigest: engineDigest,
+      });
+
+      const { impl, callCount } = classifyFetchMock({});
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(auditRequest(client, store), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(report.cacheHits).toBe(1);
+      // The replayed finding still goes through sanitization and dedup and publishes normally...
+      expect(report.publish).toMatchObject({ published: 1, suppressed: 0 });
+      expect(created).toHaveLength(1);
+      // ...but it was never a candidate for the audit — `freshEngineFindings` never contains it.
+      expect(callCount()).toBe(0);
+    });
+
+    it("skips the audit under a near-exhausted allotment, still publishes with pre-audit classification, and records classify.skipped_budget", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY =
+        "This handler discards the parsed configuration and falls back to defaults silently.";
+      runEngineMock.mockResolvedValue({
+        // Close to the tiny allotment below, so almost nothing remains for the audit.
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
+          2,
+          49_000,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      const { impl, callCount } = classifyFetchMock({
+        auditPair: { category: "security", severity: "critical" },
+      });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+      // tokenBudget below the formula's own floor: `computeAllottedBudget` returns exactly this
+      // value (`Math.min(tokenBudget, clamped)`), so the allotment is deterministic at 50_000.
+      const request = { ...auditRequest(client), config: { ...AUDIT_CONFIG, tokenBudget: 50_000 } };
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(request, diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(created).toHaveLength(1);
+      // Published under the classification the engine reported ("bug"), never the "security" the
+      // (unreached) audit mock was configured to answer with — "Correctness" is "bug"'s rendered
+      // label in `composeFindingBody`'s CATEGORIES table (`publish/presentation.ts`).
+      expect(created[0]?.body).toContain("Correctness");
+      expect(callCount()).toBe(0);
+
+      const skip = diagnostics.drain().find((r) => r.code === "classify.skipped_budget");
+      // allotted(50_000) - engine(49_000) - classify(0) = 1_000, below the 2_000 reserve for the
+      // one fresh survivor.
+      expect(skip?.counts).toStrictEqual({ skipped: 1, remaining: 1_000 });
+    });
+
+    it("suppresses a reclassified survivor at the execute-time marker re-check, end to end through publishAudited", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY =
+        "This SQL string concatenates the caller-supplied filter directly into the WHERE clause.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
+          2,
+          100,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      // Seeded under "security" — the category the audit mock below reclassifies the fresh finding
+      // TO, simulating an earlier run that already published this exact defect correctly.
+      const { client, created } = successfulClient([seededMarker("security", BODY)]);
+      const { impl, callCount } = classifyFetchMock({
+        auditPair: { category: "security", severity: "critical" },
+      });
+      globalThis.fetch = impl;
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(auditRequest(client), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({
+        published: 0,
+        suppressed: 1,
+        suppressedExactDuplicate: 1,
+      });
+      expect(created).toHaveLength(0);
+      // Vote 1 disagrees with the finding's own "bug" ("security" != "bug"), so the audit escalates
+      // to a second vote before two agreeing votes reach majority — two calls, not one.
+      expect(callCount()).toBe(2);
+    });
+
+    it("stores the audited category for a published finding and the raw category for a plan-suppressed one", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+
+      const BODY_A =
+        "This function never releases the lock it acquires on the early-return branch.";
+      const BODY_B =
+        "This workflow step checks out the pull request's own head inside a privileged job.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [
+            // Unclassified — goes through repair first.
+            { path: "src/a.ts", content: BODY_A },
+            // Already classified, and matches an existing marker below: plan-suppressed, so it
+            // never reaches repair (already classified) or the audit (never a plan survivor).
+            { path: "src/b.ts", content: BODY_B, category: "security", severity: "high" },
+          ],
+          2,
+          100,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      const { client, created } = successfulClient([seededMarker("security", BODY_B, "src/b.ts")]);
+      const { impl, callCount } = classifyFetchMock({
+        repairPair: { category: "bug", severity: "medium" },
+        auditPair: { category: "maintainability", severity: "low" },
+      });
+      globalThis.fetch = impl;
+
+      const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(auditRequest(client, empty), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({
+        published: 1,
+        suppressed: 1,
+        suppressedExactDuplicate: 1,
+      });
+      expect(created).toHaveLength(1);
+      // 1 repair call (src/a.ts) + 2 audit calls (src/a.ts's vote 1 disagrees with the just-repaired
+      // "bug", escalating to a vote 2 that agrees) — src/b.ts never calls out at all.
+      expect(callCount()).toBe(3);
+
+      const entries = report.updatedCacheStore?.entries ?? [];
+      const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+      const aEntry = entries.find((e) => String(e.headBlob) === headBlobA);
+      const bEntry = entries.find((e) => String(e.headBlob) === headBlobB);
+      // Published under its audited category — the reader saw "maintainability", so that is what
+      // must be replayed on a future cache hit.
+      expect(aEntry?.findings[0]?.category).toBe("maintainability");
+      // Never audited (plan-suppressed before it could be): the store keeps its raw, as-emitted
+      // category, matching what the ALREADY-published twin it was compared against actually carries.
+      expect(bEntry?.findings[0]?.category).toBe("security");
+
+      // run.spend: engine(100) + repair(1 call) + audit(2 calls), all at the mock's default 10
+      // tokens/call — proof the total now covers audit spend incurred during publication, not just
+      // the engine and repair halves `executeEngine` alone used to record.
+      const spend = diagnostics.drain().find((r) => r.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 30, total: 130 });
+    });
+
+    it("keeps engine and classify spend correct across the bounded resume when the resumed run also triggers the audit", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+
+      const BODY = "This cache key omits the tenant id, so two tenants can collide on one entry.";
+      const nonSuccess = JSON.stringify({
+        status: "failed",
+        summary: { files_reviewed: 0, total_tokens: 30, budget_exceeded: false },
+        comments: [],
+      });
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: nonSuccess, ruleDigest: engineDigest })
+        .mockResolvedValueOnce({
+          stdout: findingsStdout(
+            [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
+            2,
+            100,
+          ),
+          ruleDigest: engineDigest,
+        });
+
+      const { impl, callCount } = classifyFetchMock({
+        auditPair: { category: "bug", severity: "medium" },
+      });
+      globalThis.fetch = impl;
+      const { client } = successfulClient([]);
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(auditRequest(client), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      // Fast-path audit vote agrees with the finding's own classification — one call.
+      expect(callCount()).toBe(1);
+
+      const spend = diagnostics.drain().find((r) => r.code === "run.spend");
+      // 30 (the discarded first attempt) + 100 (the resume that stands) = 130 engine tokens, plus
+      // the audit's own 10 (default mock tokens) spent during publication — the ledger accumulates
+      // across BOTH the resume and publication, not just whichever happened to run last.
+      expect(spend?.counts).toStrictEqual({ engine: 130, classify: 10, total: 140 });
+    });
+  });
+
+  /**
+   * Allotment on dispatched work (v0.12.0): `computeAllottedBudget`'s call site now prices only what
+   * the engine is actually dispatched for — reviewable paths minus cache hits and mechanically-clean
+   * renames — rather than the inventory's raw reviewable shape. `computeAllottedBudget` itself is
+   * unit-tested directly at the top of this file; these prove the CALL SITE wiring reaches the real
+   * `runEngine` invocation, the same way the very first test in this file proves the exclude wiring
+   * does.
+   */
+  describe("performReview: dispatched-only allotment (v0.12.0)", () => {
+    beforeEach(() => {
+      runEngineMock.mockReset();
+      acquireEngineMock.mockReset();
+    });
+
+    it("prices a smaller allotment when a cache hit removes a file from dispatch", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      await performReview(baseRequest(undefined), createSilentDiagnostics());
+      const noHits = (runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number })
+        .allottedBudget;
+
+      runEngineMock.mockClear();
+      acquireEngineMock.mockClear();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(1), ruleDigest: engineDigest });
+
+      const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+      const model = modelId(CONFIG.model);
+      const proto = protocol(CONFIG.protocol);
+      const base = blobId(baseBlobA);
+      const head = blobId(headBlobA);
+      const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+      const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+      const store: CacheStore = {
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
+        entries: [
+          {
+            key,
+            baseBlob: base,
+            headBlob: head,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            modelId: model,
+            protocol: proto,
+            findings: [],
+          },
+        ],
+      };
+
+      await performReview(baseRequest(store), createSilentDiagnostics());
+      const oneHit = (runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number })
+        .allottedBudget;
+
+      expect(oneHit).toBeLessThan(noHits);
+    });
+
+    it("does not change the allotment when a mechanically-clean rename sits alongside a reviewable file", async () => {
+      const engineDigest = currentPlatformDigest();
+      if (engineDigest === undefined) return;
+
+      const renameRepo = await mkdtemp(join(tmpdir(), "kfq-review-rename-"));
+      try {
+        const renameGit = (args: readonly string[]): string =>
+          execFileSync("git", args, {
+            cwd: renameRepo,
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              GIT_AUTHOR_NAME: "t",
+              GIT_AUTHOR_EMAIL: "t@example.test",
+              GIT_COMMITTER_NAME: "t",
+              GIT_COMMITTER_EMAIL: "t@example.test",
+              GIT_CONFIG_GLOBAL: "/dev/null",
+              GIT_CONFIG_SYSTEM: "/dev/null",
+            },
+          });
+        renameGit(["init", "-q", "-b", "main"]);
+        await mkdir(join(renameRepo, "src"), { recursive: true });
+        await writeFile(join(renameRepo, "src/a.ts"), "export const a = 1;\n");
+        await writeFile(join(renameRepo, "src/old.ts"), "export const c = 1;\n");
+        renameGit(["add", "-A"]);
+        renameGit(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+        const renameBase = renameGit(["rev-parse", "HEAD"]).trim();
+
+        await writeFile(join(renameRepo, "src/a.ts"), "export const a = 2;\n");
+        renameGit(["add", "-A"]);
+        renameGit(["commit", "-q", "-m", "edit", "--no-gpg-sign"]);
+        const editOnly = renameGit(["rev-parse", "HEAD"]).trim();
+
+        renameGit(["mv", "src/old.ts", "src/new.ts"]);
+        renameGit(["add", "-A"]);
+        renameGit(["commit", "-q", "-m", "rename", "--no-gpg-sign"]);
+        const withRename = renameGit(["rev-parse", "HEAD"]).trim();
+
+        function renameRequest(head: string): ReviewRequest {
+          const client = new GitHubClient("https://api.example.test", "unused");
+          vi.spyOn(client, "getPullRequest").mockResolvedValue({
+            headSha: commitSha(head),
+            draft: false,
+            baseRef: "dev",
+            headRepoFullName: undefined,
+          });
+          vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
+          return {
+            client,
+            ref: { owner: "acme", repo: "widget" },
+            pullNumber: 1,
+            base: commitSha(renameBase),
+            head: commitSha(head),
+            repositoryPath: renameRepo,
+            config: CONFIG,
+            profile: PROFILE,
+            guidelines: { paths: [] },
+            identity: "keiko-for-quality[bot]",
+            env: {},
+            pathValue: process.env.PATH ?? "/usr/bin:/bin",
+          };
+        }
+
+        const oneFileStdout = JSON.stringify({
+          status: "success",
+          summary: { files_reviewed: 1, total_tokens: 100, budget_exceeded: false },
+          comments: [],
+        });
+
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        runEngineMock.mockResolvedValue({ stdout: oneFileStdout, ruleDigest: engineDigest });
+        await performReview(renameRequest(editOnly), createSilentDiagnostics());
+        const withoutRename = (runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number })
+          .allottedBudget;
+
+        runEngineMock.mockClear();
+        acquireEngineMock.mockClear();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        runEngineMock.mockResolvedValue({ stdout: oneFileStdout, ruleDigest: engineDigest });
+        const report = await performReview(renameRequest(withRename), createSilentDiagnostics());
+        const withRenameBudget = (runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number })
+          .allottedBudget;
+
+        // The rename is real content in the diff (`inventorySize` grows) but contributes zero to
+        // the allotment: `mechanically-clean` is not `reviewable` (`inventory/classify.ts`), so it
+        // is absent from both the dispatched file count and the dispatched changed-line sum.
+        expect(report.inventorySize).toBe(2);
+        expect(report.mechanicallyClean).toBe(1);
+        expect(withRenameBudget).toBe(withoutRename);
+      } finally {
+        await rm(renameRepo, { recursive: true, force: true });
+      }
     });
   });
 });

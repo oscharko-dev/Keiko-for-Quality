@@ -15,6 +15,7 @@ const VALID = {
   tokenBudget: 2_000_000,
   maxFindings: 50,
   renameDetectionPercent: 50,
+  crossArtifactPass: false,
 };
 
 describe("parseRuntimeConfig", () => {
@@ -88,6 +89,38 @@ describe("parseRuntimeConfig", () => {
 
     it("rejects a non-integer numeric value", () => {
       expect(() => parseRuntimeConfig({ ...VALID, concurrency: 2.5 })).toThrow(ValidationError);
+    });
+  });
+
+  // The change-level cross-artifact pass (contracts/change-pass.ts, issue #80 technique C) is
+  // gated by this flag, dark-shipped and off by default; parseRuntimeConfig itself never defaults
+  // it, exactly like every other field here — `runtimeConfigFromInputs` (action/inputs.ts) is
+  // where "absent means off" actually lives.
+  describe("crossArtifactPass", () => {
+    it("accepts an explicit true", () => {
+      expect(parseRuntimeConfig({ ...VALID, crossArtifactPass: true }).crossArtifactPass).toBe(
+        true,
+      );
+    });
+
+    it("accepts an explicit false", () => {
+      expect(parseRuntimeConfig({ ...VALID, crossArtifactPass: false }).crossArtifactPass).toBe(
+        false,
+      );
+    });
+
+    it("rejects a missing key rather than substituting a default", () => {
+      const { crossArtifactPass: _omitted, ...incomplete } = VALID;
+      expect(() => parseRuntimeConfig(incomplete)).toThrow(ValidationError);
+    });
+
+    // The string-typed input contract belongs to readBooleanInput (action/inputs.ts); by the
+    // time a value reaches parseRuntimeConfig it must already be a real boolean, not a string
+    // that merely looks like one.
+    it("rejects a string value rather than coercing it", () => {
+      expect(() => parseRuntimeConfig({ ...VALID, crossArtifactPass: "true" })).toThrow(
+        ValidationError,
+      );
     });
   });
 
