@@ -4,12 +4,16 @@ README.md, CONTRIBUTING.md, and SECURITY.md are thorough, and the source carries
 that explain the reasoning behind most decisions. Read those first. This file holds only what
 reading them will not surface in time to save you the cost of finding out the hard way.
 
-## `npm run review` does not work
+## `npm run review`
 
-It runs `node --experimental-strip-types src/cli.ts`. `src/cli.ts` does not exist — there is no
-local CLI entry point today. To exercise a review by hand, call `performReview` (exported from
-`src/index.ts`) directly, or follow the `action-smoke` job in `.github/workflows/ci.yml`, which
-drives the built `dist/index.js` with a constructed `GITHUB_EVENT_PATH`.
+`src/cli.ts` is the local CLI entry point (epic #94, issue #96). Run `npm run review -- --help`
+for the full flag, environment-variable, and exit-code reference; do not restate it here.
+
+Until issue #95 lands `performLocalReview` in `src/review.ts`, the CLI's own argument parsing,
+`KFQ_MODEL_*` configuration, profile/guideline loading, and base/head resolution all run for
+real, but the review itself reports a clear internal error (exit `5`) rather than reviewing
+anything — see the `// integration point:` comment near the bottom of `src/cli.ts`. Local-run
+documentation beyond `--help` (README, worked examples) is issue #99's scope, not this file's.
 
 ## Two commands spend real money
 

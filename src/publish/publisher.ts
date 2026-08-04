@@ -24,13 +24,39 @@ import {
 } from "./similarity.js";
 
 export interface PublishContext {
-  readonly client: ReviewCommentApi;
+  /**
+   * Absent for a publication-free local run (`performLocalReview`, `review.ts`, issue #95): it
+   * plans and audits findings the same way the action does, but never posts anything, so it never
+   * needs a real GitHub client. Every function below that actually calls GitHub still requires one
+   * — see `requireClient` — this field is optional only so a client-less context stays type-safe
+   * without a stub `ReviewCommentApi` standing in for a client that genuinely is not there.
+   */
+  readonly client?: ReviewCommentApi;
   readonly ref: RepoRef;
   readonly pullNumber: number;
   readonly headSha: CommitSha;
   /** The login this reviewer authors as, resolved at run time. */
   readonly identity: string;
   readonly items: ReadonlyMap<string, InventoryItem>;
+}
+
+/**
+ * Unwraps `context.client`, failing closed if it is absent.
+ *
+ * Every caller of this function is reachable only from a real pull request's publish step —
+ * `executePublication`, `publishIncompleteNotice`, and `planPublication`'s own default-fetch
+ * fallback when no `prefetch` was supplied — and the action path always reaches every one of them
+ * with a real `GitHubClient` behind `context.client`. A publication-free local run never reaches any
+ * of them: it always supplies its own `prefetch` to `planPublication` and never calls the other two,
+ * so this throw is unreachable in practice today. It exists so the four call sites below stay
+ * type-safe against the now-optional `client` field without weakening them to a silent `undefined`
+ * dereference, and without a stub implementation pretending to be a client that is not there.
+ */
+function requireClient(context: PublishContext): ReviewCommentApi {
+  if (context.client === undefined) {
+    throw new Error("PublishContext.client is required for this operation");
+  }
+  return context.client;
 }
 
 export interface PublishOutcome {
@@ -162,7 +188,7 @@ export interface ExistingConversationsPrefetch {
 export async function prefetchExistingConversations(
   context: PublishContext,
 ): Promise<ExistingConversationsPrefetch> {
-  const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
+  const comments = await requireClient(context).listReviewComments(context.ref, context.pullNumber);
   return {
     markers: ownMarkers(comments, context.identity),
     threads: comments.map((comment) => toExistingConversation(comment, context.identity)),
@@ -176,10 +202,14 @@ async function publishWithLadder(
 ): Promise<{ comment: ReviewComment; placement: string } | undefined> {
   for (const attempt of ladder) {
     try {
-      const created = await context.client.createReviewComment(context.ref, context.pullNumber, {
-        ...attempt,
-        body,
-      });
+      const created = await requireClient(context).createReviewComment(
+        context.ref,
+        context.pullNumber,
+        {
+          ...attempt,
+          body,
+        },
+      );
       return { comment: created, placement: describePlacement(attempt) };
     } catch (error) {
       // 422 means this anchor is not on the diff. Any other status is a real failure and must not
@@ -203,7 +233,7 @@ async function verifyPublication(
   created: ReviewComment,
   expectedMarker: string,
 ): Promise<boolean> {
-  const readBack = await context.client.getReviewComment(context.ref, created.id);
+  const readBack = await requireClient(context).getReviewComment(context.ref, created.id);
   return (
     readBack.id === created.id &&
     readBack.authorLogin === context.identity &&
@@ -794,11 +824,15 @@ export async function publishIncompleteNotice(
   if (existing.has(marker)) return true;
 
   try {
-    const created = await context.client.createReviewComment(context.ref, context.pullNumber, {
-      body: composeIncompleteNotice(reasonCode, markerComment(marker)),
-      commitId: context.headSha,
-      path: anchorPath,
-    });
+    const created = await requireClient(context).createReviewComment(
+      context.ref,
+      context.pullNumber,
+      {
+        body: composeIncompleteNotice(reasonCode, markerComment(marker)),
+        commitId: context.headSha,
+        path: anchorPath,
+      },
+    );
     const verified = await verifyPublication(context, created, marker);
     diagnostics.record("publish.incomplete_notice_published", { headSha: context.headSha });
     return verified;
