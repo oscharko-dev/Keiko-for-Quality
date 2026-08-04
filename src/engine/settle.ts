@@ -206,9 +206,12 @@ function settleReconciled(
     // used to borrow. A settlement reason is published in the incomplete notice, so it has to
     // answer "why was my change not fully reviewed" for a reader with no access to the log;
     // naming an engine-execution diagnostic there said where the trouble was seen rather than
-    // what it meant for coverage. The diagnostic keeps its own name where the manifest is
-    // validated. Dormant until an engine ships a manifest this path can reach, which is exactly
-    // why it went unnoticed — the same taxonomy break as #57, one family over.
+    // what it meant for coverage. The borrowed diagnostic was retired rather than kept: an audit
+    // (2026-08-04) found no code path had ever emitted it under its own name — this branch was its
+    // only real source, and this branch had already moved to the settlement code above. This
+    // branch itself is dormant until an engine ships a manifest it can reach, which is exactly why
+    // the unused diagnostic went unnoticed for as long as it did — the same taxonomy break as #57,
+    // one family over.
     return incomplete("reconciled", "settlement.incomplete.schema_rejected", []);
   }
   if (result.terminalState !== "complete") {

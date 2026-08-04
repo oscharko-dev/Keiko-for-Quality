@@ -23,12 +23,20 @@ export interface ExecOptions {
 
 export class ExecFailure extends Error {
   public readonly code: number;
+  /**
+   * Set when `options.timeoutMs` killed the process rather than it exiting on its own. Node
+   * reports no exit code for a timeout kill (`error.code` is `null`, not a number) and sets
+   * `error.killed` instead — the one signal below distinguishes it from an ordinary non-zero exit,
+   * which always carries a real numeric code.
+   */
+  public readonly timedOut: boolean;
 
-  public constructor(command: string, code: number) {
+  public constructor(command: string, code: number, timedOut = false) {
     // Deliberately excludes stderr: git echoes candidate paths and content into it.
     super(`${command} exited with ${String(code)}`);
     this.name = "ExecFailure";
     this.code = code;
+    this.timedOut = timedOut;
   }
 }
 
@@ -58,7 +66,7 @@ export function run(
           return;
         }
         const code = typeof error.code === "number" ? error.code : 1;
-        reject(new ExecFailure(command, code));
+        reject(new ExecFailure(command, code, error.killed === true));
       },
     );
   });

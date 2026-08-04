@@ -228,6 +228,225 @@ describe("parseEngineResult", () => {
         expect(() => parseEngineResult(doc)).toThrow(ValidationError);
       });
     });
+
+    // Measured on a same-day 32-case qualification run over gpt-oss-120b: six findings across two
+    // arms carried a `content` field that was itself JSON carrying the finding envelope's own
+    // keys. This is the same recoverable-format-error family as the malformed-token case above —
+    // see `unwrapEnvelopeContent` in result.ts for the full rationale and the measured evidence.
+    describe("a finding whose content is itself a nested finding envelope", () => {
+      it("unwraps the exact shape measured in the qualification run", () => {
+        const inner = {
+          path: "src/candidate-deliverability.ts",
+          start_line: 4,
+          end_line: 4,
+          category: "bug",
+          severity: "high",
+          content:
+            "The predicate excludes only needs-review, so a rejected candidate still reads as " +
+            "deliverable.",
+        };
+        const doc = document({
+          comments: [
+            {
+              path: "src/changed-file.ts",
+              content: JSON.stringify(inner),
+              start_line: 100,
+              end_line: 100,
+              category: "maintainability",
+              severity: "low",
+            },
+          ],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings).toHaveLength(1);
+        expect(result.findings[0]).toMatchObject({
+          path: "src/candidate-deliverability.ts",
+          content: inner.content,
+          startLine: 4,
+          endLine: 4,
+          category: "bug",
+          severity: "high",
+        });
+      });
+
+      it("does not unwrap when the inner object has no content field", () => {
+        const rawContent = JSON.stringify({ path: "src/other.ts", category: "bug" });
+        const doc = document({
+          comments: [
+            {
+              path: "src/a.ts",
+              content: rawContent,
+              start_line: 1,
+              end_line: 1,
+              category: "test",
+            },
+          ],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings[0]).toMatchObject({
+          path: "src/a.ts",
+          content: rawContent,
+          startLine: 1,
+          endLine: 1,
+          category: "test",
+        });
+      });
+
+      it("unwraps the body but keeps the outer path when the inner envelope omits path", () => {
+        const inner = { category: "bug", severity: "high", content: "inner sentence body text" };
+        const doc = document({
+          comments: [
+            { path: "src/outer.ts", content: JSON.stringify(inner), start_line: 5, end_line: 5 },
+          ],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings[0]).toMatchObject({
+          path: "src/outer.ts",
+          content: "inner sentence body text",
+          category: "bug",
+          severity: "high",
+        });
+      });
+
+      it("unwraps the body but falls back to undefined when the inner category is invalid", () => {
+        // The outer envelope carries no category of its own, so the fallback this exercises
+        // resolves to `undefined` rather than to some other outer value — asserting the actual
+        // behaviour rather than assuming which "fallback" the reader might expect.
+        const inner = {
+          path: "src/inner.ts",
+          category: "bug (logic)",
+          content: "inner sentence body text",
+        };
+        const doc = document({
+          comments: [
+            { path: "src/outer.ts", content: JSON.stringify(inner), start_line: 5, end_line: 5 },
+          ],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings[0]?.content).toBe("inner sentence body text");
+        expect(result.findings[0]?.path).toBe("src/inner.ts");
+        expect(result.findings[0]?.category).toBeUndefined();
+      });
+
+      it("unwraps exactly one level when the envelope is nested twice", () => {
+        const innermost = {
+          path: "src/deepest.ts",
+          start_line: 9,
+          end_line: 9,
+          category: "bug",
+          severity: "high",
+          content: "the actual sentence, two levels down",
+        };
+        const middle = {
+          path: "src/middle.ts",
+          start_line: 7,
+          end_line: 7,
+          category: "security",
+          severity: "critical",
+          content: JSON.stringify(innermost),
+        };
+        const doc = document({
+          comments: [
+            { path: "src/outer.ts", content: JSON.stringify(middle), start_line: 1, end_line: 1 },
+          ],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings).toHaveLength(1);
+        expect(result.findings[0]).toMatchObject({
+          path: "src/middle.ts",
+          startLine: 7,
+          endLine: 7,
+          category: "security",
+          severity: "critical",
+        });
+        // Exactly one level: the body is the literal (still-JSON) text of the second envelope,
+        // not the sentence buried two levels down inside it.
+        expect(result.findings[0]?.content).toBe(JSON.stringify(innermost));
+      });
+
+      it("falls back to the outer line pair together when the inner range is only half present", () => {
+        const inner = { start_line: 4, category: "bug", content: "inner sentence" };
+        const doc = document({
+          comments: [
+            {
+              path: "src/outer.ts",
+              content: JSON.stringify(inner),
+              start_line: 10,
+              end_line: 12,
+            },
+          ],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings[0]?.startLine).toBe(10);
+        expect(result.findings[0]?.endLine).toBe(12);
+        expect(result.findings[0]?.content).toBe("inner sentence");
+      });
+
+      it("does not unwrap ordinary prose that merely contains a brace", () => {
+        const prose = "See config: { debug: true } for details, though it is not valid JSON.";
+        const doc = document({
+          comments: [
+            { path: "src/a.ts", content: prose, start_line: 1, end_line: 1, category: "bug" },
+          ],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings[0]?.content).toBe(prose);
+        expect(result.findings[0]?.path).toBe("src/a.ts");
+        expect(result.findings[0]?.category).toBe("bug");
+      });
+
+      it("does not unwrap prose that starts with a brace but is not valid JSON", () => {
+        const prose = "{this is not json, just a sentence that happens to start with a brace}";
+        const doc = document({
+          comments: [{ path: "src/a.ts", content: prose, start_line: 1, end_line: 1 }],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings[0]?.content).toBe(prose);
+      });
+
+      it("does not unwrap a body that is valid JSON but an array", () => {
+        const raw = JSON.stringify(["path", "start_line", "not an envelope"]);
+        const doc = document({
+          comments: [{ path: "src/a.ts", content: raw, start_line: 1, end_line: 1 }],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings[0]?.content).toBe(raw);
+      });
+
+      it("does not unwrap a body that is a valid JSON object without a content field", () => {
+        const raw = JSON.stringify({ path: "src/other.ts", category: "bug", severity: "high" });
+        const doc = document({
+          comments: [{ path: "src/a.ts", content: raw, start_line: 1, end_line: 1 }],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings[0]?.content).toBe(raw);
+        expect(result.findings[0]?.path).toBe("src/a.ts");
+      });
+
+      it("does not unwrap a JSON object that carries only a content field", () => {
+        const raw = JSON.stringify({ content: "just a note with no sibling envelope keys" });
+        const doc = document({
+          comments: [{ path: "src/a.ts", content: raw, start_line: 1, end_line: 1 }],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings[0]?.content).toBe(raw);
+      });
+
+      it("still rejects a structural violation on a finding whose content also looks like a nested envelope", () => {
+        const inner = { path: "src/inner.ts", content: "inner sentence" };
+        const doc = document({
+          comments: [
+            {
+              path: "../../etc/passwd",
+              content: JSON.stringify(inner),
+              start_line: 1,
+              end_line: 1,
+            },
+          ],
+        });
+        expect(() => parseEngineResult(doc)).toThrow(ValidationError);
+      });
+    });
   });
 
   describe("budget signals", () => {

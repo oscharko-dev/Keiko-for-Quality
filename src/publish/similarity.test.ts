@@ -509,3 +509,62 @@ describe("areIntraRunDuplicates", () => {
     ).toBe(true);
   });
 });
+
+/**
+ * Freeze-backlog item B6, this stage's own side: every pair `marker.test.ts`'s matching
+ * "Unicode-adversarial pairs" suite pins for `fingerprint` must ALSO be a duplicate by this stage's
+ * own, more permissive tokenizer — built from the identical bodies, so the two suites together prove
+ * both dedup stages now agree on what "the same text" looks like. See that file's suite for which of
+ * these five pairs provably diverged before `marker.ts`'s `normalizeUnicodeText` was extracted (NFC
+ * vs NFD, and the zero-width joiner) versus which already agreed by coincidence (curly quotes,
+ * non-breaking space, mixed case) — the same split applies here, since both functions now share the
+ * identical upstream normalization.
+ *
+ * `areIntraRunDuplicates` is the right entry point rather than `findsSimilarOpenConversation`: both
+ * sides raw and uncomposed, compared symmetrically — exactly what a cross-run repost of the same
+ * finding looks like before either stage's own downstream logic (the fingerprint's alnum skeleton, or
+ * this stage's stopword/length filter) runs.
+ */
+describe("areIntraRunDuplicates: Unicode-adversarial pairs agree (freeze-backlog B6)", () => {
+  function pairCandidate(body: string): CandidateForDedup {
+    return { path: PATH, startLine: 100, endLine: 100, body };
+  }
+
+  it("NFC vs NFD: the same accented letter, precomposed and canonically decomposed", () => {
+    const nfc = "The café approach breaks under load during a retry.";
+    const nfd = nfc.normalize("NFD");
+    expect(nfc).not.toBe(nfd); // sanity: the pair is actually byte-different going in
+    expect(areIntraRunDuplicates(pairCandidate(nfc), pairCandidate(nfd))).toBe(true);
+  });
+
+  it("curly vs straight quotes", () => {
+    const straight = "The retry loop doesn't reset the counter after a timeout.";
+    const curly = "The retry loop doesn’t reset the counter after a timeout.";
+    expect(areIntraRunDuplicates(pairCandidate(straight), pairCandidate(curly))).toBe(true);
+  });
+
+  it("non-breaking space vs a normal space", () => {
+    const normal = "Restore the fallback connector when the endpoint is unset.";
+    const nbsp = normal.replace(/ /g, "\u00A0");
+    expect(nbsp).not.toBe(normal); // sanity
+    expect(areIntraRunDuplicates(pairCandidate(normal), pairCandidate(nbsp))).toBe(true);
+  });
+
+  it("a zero-width joiner silently inserted mid-word", () => {
+    const clean = "Validate the token before granting access to the resource.";
+    const withZwj = clean.replace("token", "to\u200Dken");
+    expect(areIntraRunDuplicates(pairCandidate(clean), pairCandidate(withZwj))).toBe(true);
+  });
+
+  it("mixed case", () => {
+    const upper = "NULL POINTER EXCEPTION in the retry handler during shutdown.";
+    const lower = "null pointer exception in the retry handler during shutdown.";
+    expect(areIntraRunDuplicates(pairCandidate(upper), pairCandidate(lower))).toBe(true);
+  });
+
+  it("still rejects genuinely different content after normalization — the fix does not collapse everything", () => {
+    const a = pairCandidate("Restore the fallback connector when the endpoint is unset.");
+    const b = pairCandidate("An unrelated defect about a locking bug entirely elsewhere.");
+    expect(areIntraRunDuplicates(a, b)).toBe(false);
+  });
+});

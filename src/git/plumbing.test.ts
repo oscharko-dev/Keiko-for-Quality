@@ -12,6 +12,8 @@ import {
   listChanges,
   readTextAtCommit,
   mergeBase,
+  resolveRef,
+  resolveTargetBranchTip,
   type GitContext,
 } from "./plumbing.js";
 
@@ -218,5 +220,118 @@ describe("readTextAtCommit", () => {
 
   it("refuses binary content rather than hand it to a text-parsing caller", async () => {
     expect(await readTextAtCommit(ctx, commitSha(baseSha), "image.bin")).toBeUndefined();
+  });
+});
+
+/**
+ * `resolveRef`/`resolveTargetBranchTip` back the local CLI's `--base`/`--head`/`--target-branch`
+ * resolution (`cli.ts`), so this exercises the same branch/remote/detached-HEAD shapes a real
+ * developer clone presents — never a captured string, for the same reason the suites above use a
+ * real repository rather than hand-written fixtures.
+ */
+describe("resolveRef / resolveTargetBranchTip", () => {
+  let branchRepo: string;
+  let branchCtx: GitContext;
+  let trunkSha: string;
+  let devSha: string;
+  let featureSha: string;
+
+  beforeAll(async () => {
+    branchRepo = await mkdtemp(join(tmpdir(), "kfq-branch-"));
+    git(["init", "-q", "-b", "trunk"], branchRepo);
+    git(["commit", "--allow-empty", "-q", "-m", "trunk", "--no-gpg-sign"], branchRepo);
+    trunkSha = git(["rev-parse", "HEAD"], branchRepo).trim();
+
+    git(["checkout", "-q", "-b", "dev"], branchRepo);
+    git(["commit", "--allow-empty", "-q", "-m", "dev", "--no-gpg-sign"], branchRepo);
+    devSha = git(["rev-parse", "HEAD"], branchRepo).trim();
+
+    git(["checkout", "-q", "-b", "feature"], branchRepo);
+    git(["commit", "--allow-empty", "-q", "-m", "feature", "--no-gpg-sign"], branchRepo);
+    featureSha = git(["rev-parse", "HEAD"], branchRepo).trim();
+
+    branchCtx = {
+      cwd: branchRepo,
+      timeoutMs: 30_000,
+      pathValue: process.env.PATH ?? "/usr/bin:/bin",
+    };
+  });
+
+  afterAll(async () => {
+    await rm(branchRepo, { recursive: true, force: true });
+  });
+
+  describe("resolveRef", () => {
+    it("resolves HEAD to the checked-out commit", async () => {
+      expect(await resolveRef(branchCtx, "HEAD")).toBe(featureSha);
+    });
+
+    it("resolves a local branch name", async () => {
+      expect(await resolveRef(branchCtx, "dev")).toBe(devSha);
+    });
+
+    it("resolves an explicit full commit id", async () => {
+      expect(await resolveRef(branchCtx, trunkSha)).toBe(trunkSha);
+    });
+
+    it("resolves HEAD in a detached state, not only on a branch", async () => {
+      git(["checkout", "-q", "--detach", trunkSha], branchRepo);
+      try {
+        expect(await resolveRef(branchCtx, "HEAD")).toBe(trunkSha);
+      } finally {
+        git(["checkout", "-q", "feature"], branchRepo);
+      }
+    });
+
+    it("rejects a ref that names nothing in this repository", async () => {
+      await expect(resolveRef(branchCtx, "does-not-exist")).rejects.toThrow();
+    });
+  });
+
+  describe("resolveTargetBranchTip", () => {
+    it("prefers the local branch when one exists", async () => {
+      expect(await resolveTargetBranchTip(branchCtx, "dev")).toBe(devSha);
+    });
+
+    it("falls back to origin/<name> when no local branch exists", async () => {
+      const originRepo = await mkdtemp(join(tmpdir(), "kfq-origin-"));
+      const cloneRepo = await mkdtemp(join(tmpdir(), "kfq-clone-"));
+      try {
+        git(["init", "-q", "-b", "dev"], originRepo);
+        git(["commit", "--allow-empty", "-q", "-m", "origin-dev", "--no-gpg-sign"], originRepo);
+        const originDevSha = git(["rev-parse", "HEAD"], originRepo).trim();
+
+        // A clone whose only knowledge of "dev" is the remote-tracking ref — no local branch by
+        // that name was ever created, the shape a shallow or partial CI checkout commonly has.
+        git(["clone", "-q", "--no-local", originRepo, cloneRepo], branchRepo);
+        git(["checkout", "-q", "-b", "unrelated"], cloneRepo);
+        git(["branch", "-D", "dev"], cloneRepo);
+
+        const cloneCtx: GitContext = {
+          cwd: cloneRepo,
+          timeoutMs: 30_000,
+          pathValue: process.env.PATH ?? "/usr/bin:/bin",
+        };
+        expect(await resolveTargetBranchTip(cloneCtx, "dev")).toBe(originDevSha);
+      } finally {
+        await rm(originRepo, { recursive: true, force: true });
+        await rm(cloneRepo, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects a name that resolves neither locally nor on origin", async () => {
+      await expect(resolveTargetBranchTip(branchCtx, "never-branched")).rejects.toThrow();
+    });
+  });
+
+  describe("composed with mergeBase", () => {
+    it("resolves the same base a --target-branch review would use", async () => {
+      const head = await resolveRef(branchCtx, "HEAD");
+      const targetTip = await resolveTargetBranchTip(branchCtx, "dev");
+      const base = await mergeBase(branchCtx, targetTip, head);
+      // "feature" branched from "dev" with no further commits on "dev" since, so their merge base
+      // is exactly dev's own tip.
+      expect(base).toBe(devSha);
+    });
   });
 });

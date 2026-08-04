@@ -4,12 +4,18 @@ README.md, CONTRIBUTING.md, and SECURITY.md are thorough, and the source carries
 that explain the reasoning behind most decisions. Read those first. This file holds only what
 reading them will not surface in time to save you the cost of finding out the hard way.
 
-## `npm run review` does not work
+## `npm run review`
 
-It runs `node --experimental-strip-types src/cli.ts`. `src/cli.ts` does not exist — there is no
-local CLI entry point today. To exercise a review by hand, call `performReview` (exported from
-`src/index.ts`) directly, or follow the `action-smoke` job in `.github/workflows/ci.yml`, which
-drives the built `dist/index.js` with a constructed `GITHUB_EVENT_PATH`.
+`src/cli.ts` is the local CLI entry point (epic #94, issue #96). Run `npm run review -- --help`
+for the full flag, environment-variable, and exit-code reference; see the README's "Local runs"
+section for prerequisites and trust posture. Do not restate either here.
+
+Issue #95 landed `performLocalReview` in `src/review.ts`, so the CLI runs a real review end to
+end, through the same shared pipeline `performReview` runs — same digest-pinned engine, same rule
+text, same settlement semantics. What has not landed is the other end of that sharing:
+`corpus/real-diffs.mjs` still drives the engine with its own harness code rather than
+`performLocalReview` (issue #99), so today a change to the shared pipeline is proven against the
+CLI and against the qualification corpus separately — not yet by one measurement covering both.
 
 ## Two commands spend real money
 

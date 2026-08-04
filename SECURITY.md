@@ -117,8 +117,41 @@ consumers implicitly trust inside a job holding a private key.
 - **The consumer's own workflow.** If the consumer checks out the candidate head instead of the
   base, or grants the job more permission than documented, this bot's guarantees do not apply.
 
+### Local runs
+
+`npm run review` (`src/cli.ts`, Keiko-for-Quality#94) runs the same shared pipeline described
+above against a local repository instead of a pull request. The protections above apply because
+the code is shared, not reimplemented — with four properties worth stating explicitly for this
+entry point.
+
+**The CLI never holds a GitHub token.** Its configuration surface (`RuntimeConfig`) has no GitHub
+field, `KFQ_MODEL_TOKEN_ENV` refuses to name `GITHUB_TOKEN` or any `ACTIONS_*` variable, and the
+engine's spawned environment is still built from nothing rather than filtered from the operator's
+own shell — so even an operator whose environment already holds a GitHub token never has it reach
+the engine. The CLI makes no GitHub API call on any path: nothing here constructs a client, and
+nothing is published.
+
+**Candidate content is still read as Git objects, never checked out or executed.** Base and head
+are resolved to commits and read through the identical git-plumbing layer the action uses,
+invoked through the same neutralized `git` configuration described above — no candidate script,
+hook, or package manager runs, and this tool never checks a candidate ref out over the operator's
+own working tree.
+
+**Writes are confined to paths the operator names.** The rendered report goes to stdout or
+`--out`; the optional review-cache goes only to `--store`. Neither defaults inside the reviewed
+repository, and nothing else is written to disk. A report file is an ordinary file once written —
+sanitized the same way a published finding is, but not subject to GitHub's own access controls
+afterward, so its distribution from that point on is the operator's responsibility, same as the
+source it describes.
+
+**A locally produced review store is never consumed by CI.** It exists to make repeated local runs
+cheaper, never to feed a verdict into the pipeline that gates a pull request — trusting a local
+store from CI would let whoever controls the local run manufacture a clean result. The boundary is
+one-directional by design and permanent: CI→local sharing may be considered separately; local→CI is
+rejected outright (Keiko-for-Quality#94).
+
 ## Supported versions
 
-Only the newest release line — currently 0.8 — receives fixes. There are no maintenance branches
+Only the newest release line — currently 0.13 — receives fixes. There are no maintenance branches
 for older lines. Because consumers pin this action to a full commit SHA, a fix takes effect only
 when the pin is advanced to a release that carries it.

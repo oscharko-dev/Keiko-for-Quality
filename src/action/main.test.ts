@@ -142,6 +142,27 @@ function entry(_path: string, findings: CacheEntry["findings"] = []): CacheEntry
   };
 }
 
+describe("runAction: invalid configuration", () => {
+  it("records config.invalid and fails the run when the profile does not validate", async () => {
+    const env = await baseEnv();
+    // Valid JSON, but missing every required key `compileProfile` demands — a stand-in for any of
+    // the three config-loading calls (runtime inputs, profile, guidelines) rejecting its input.
+    await writeFile(env.INPUT_PROFILE ?? "", "{}", "utf8");
+    const diagnostics = createDiagnostics(() => undefined);
+
+    await expect(runAction(env, diagnostics)).rejects.toThrow();
+
+    // Eligibility already passed (this event is an ordinary, non-draft, same-repo synchronize
+    // against the configured target branch) before configuration was ever loaded, so that
+    // diagnostic precedes the rejection rather than being pre-empted by it.
+    expect(diagnostics.drain().map((r) => r.code)).toEqual([
+      "eligibility.accepted",
+      "config.invalid",
+    ]);
+    expect(performReviewMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("runAction: review-cache inert path", () => {
   it("passes no cacheStore, records no cache diagnostic, and reports zero hits/misses", async () => {
     performReviewMock.mockResolvedValue(report());

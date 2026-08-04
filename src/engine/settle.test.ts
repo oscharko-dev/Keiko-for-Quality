@@ -113,8 +113,10 @@ describe("settle", () => {
       // The invariant this pins — an unfamiliar schema settles incomplete rather than being read
       // as if its fields still meant what they used to — is unchanged. Only the reason moved
       // family: a settlement reason is published in the incomplete notice, so it names what the
-      // outcome means for coverage rather than which internal step noticed the trouble.
-      // `engine.run.schema_rejected` keeps its diagnostic role where the manifest is validated.
+      // outcome means for coverage rather than which internal step noticed the trouble. The
+      // `engine.run.schema_rejected` diagnostic it used to borrow has since been retired from the
+      // vocabulary (2026-08-04): this branch was its only real source, and this branch had already
+      // moved to the settlement code above.
       expect(outcome).toMatchObject({
         status: "incomplete",
         reason: "settlement.incomplete.schema_rejected",

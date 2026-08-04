@@ -1,4 +1,4 @@
-// Keiko for Quality 0.12.0 — generated bundle, do not edit.
+// Keiko for Quality 0.13.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/action/main.ts
@@ -716,21 +716,71 @@ function parseFindings2(value, field) {
     const start = parseLine(object.start_line, `${scope}.start_line`);
     const end = parseLine(object.end_line, `${scope}.end_line`);
     if (end < start) throw new ValidationError(`${scope}.end_line`);
+    const path = repoPath(asString(object.path, `${scope}.path`), `${scope}.path`);
+    const content = asString(object.content, `${scope}.content`, LIMITS.maxBodyChars);
+    const severity = optionalToken2(object.severity);
+    const category = optionalToken2(object.category);
+    const unwrapped = unwrapEnvelopeContent(content, `${scope}.content`);
+    if (unwrapped === void 0) {
+      return { path, content, startLine: start, endLine: end, severity, category };
+    }
     return {
-      // The engine's path comes from candidate-controlled input and is used to address the GitHub
-      // API, so it is re-validated here rather than trusted because the engine echoed it.
-      path: repoPath(asString(object.path, `${scope}.path`), `${scope}.path`),
-      content: asString(object.content, `${scope}.content`, LIMITS.maxBodyChars),
-      startLine: start,
-      endLine: end,
-      severity: optionalToken2(object.severity),
-      category: optionalToken2(object.category)
+      path: unwrapped.path ?? path,
+      content: unwrapped.content,
+      startLine: unwrapped.startLine ?? start,
+      endLine: unwrapped.endLine ?? end,
+      severity: unwrapped.severity ?? severity,
+      category: unwrapped.category ?? category
     };
   });
 }
 function optionalToken2(value) {
   if (typeof value !== "string" || value.length === 0 || value.length > 64) return void 0;
   return /^[a-z][a-z0-9_-]*$/i.test(value) ? value : void 0;
+}
+var ENVELOPE_KEYS = ["path", "start_line", "end_line", "category", "severity"];
+function unwrapInnerPath(inner, field) {
+  const pathField = `${field}.path`;
+  try {
+    return repoPath(asString(inner.path, pathField), pathField);
+  } catch {
+    return void 0;
+  }
+}
+function unwrapInnerLines(inner, field) {
+  try {
+    const startLine = parseLine(inner.start_line, `${field}.start_line`);
+    const endLine = parseLine(inner.end_line, `${field}.end_line`);
+    if (endLine < startLine) throw new ValidationError(`${field}.end_line`);
+    return { startLine, endLine };
+  } catch {
+    return void 0;
+  }
+}
+function unwrapEnvelopeContent(content, field) {
+  let inner;
+  try {
+    inner = asObject(parseJson(content, field), field);
+  } catch {
+    return void 0;
+  }
+  if (typeof inner.content !== "string") return void 0;
+  if (!ENVELOPE_KEYS.some((key) => key in inner)) return void 0;
+  let innerContent;
+  try {
+    innerContent = asString(inner.content, `${field}.content`, LIMITS.maxBodyChars);
+  } catch {
+    return void 0;
+  }
+  const lines = unwrapInnerLines(inner, field);
+  return {
+    content: innerContent,
+    path: unwrapInnerPath(inner, field),
+    startLine: lines?.startLine,
+    endLine: lines?.endLine,
+    severity: optionalToken2(inner.severity),
+    category: optionalToken2(inner.category)
+  };
 }
 function parseWarnings(value, field) {
   if (value === void 0 || value === null) return [];
@@ -913,8 +963,11 @@ import { createHash as createHash2 } from "node:crypto";
 var MARKER_PREFIX = "keiko-for-quality";
 var MARKER_PATTERN = new RegExp(`<!--\\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\\s*-->`);
 var FIELD_SEPARATOR2 = "\0";
+function normalizeUnicodeText(input) {
+  return input.normalize("NFC").replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").replace(/[\u2018\u2019\u201A\u201B]/g, "'").replace(/[\u201C\u201D\u201E\u201F]/g, '"').replace(new RegExp("\\p{Zs}", "gu"), " ").toLowerCase();
+}
 function normalizeForFingerprint(body) {
-  return body.toLowerCase().replace(/```[\s\S]*?```/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+  return normalizeUnicodeText(body).replace(/```[\s\S]*?```/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
 }
 function fingerprint(input) {
   const material = [
@@ -972,8 +1025,6 @@ var REASON_CODES = [
   "engine.run.timeout",
   "engine.run.spawn_failed",
   "engine.run.nonzero_exit",
-  "engine.run.output_unparsable",
-  "engine.run.schema_rejected",
   // Settlement
   "settlement.complete",
   // Which coverage question was actually answered. Recorded on every run, because a consumer
@@ -1065,6 +1116,12 @@ var REASON_CODES = [
   // review; a second failure settles incomplete exactly as before, so "incomplete never reads
   // as clean" survives the resume.
   "engine.resumed_once",
+  // The resume that deliberately did NOT happen (v0.12.0): the first attempt reported its budget
+  // exhausted, and a second attempt cannot review more of a change than the budget allows — it can
+  // only re-pay for what the first one already did and settle incomplete anyway. Recorded rather
+  // than left silent because "no resume line in the log" would otherwise be indistinguishable
+  // between a run that never needed one and a run that was denied one.
+  "engine.resume_skipped_budget_exceeded",
   // Run-level spend accounting (v0.12.0): one record per engine execution naming what the review
   // actually cost — the engine's own reported total plus the classification side-calls. The parts
   // stay separate because they answer different questions (engine behaviour vs. adapter-added
@@ -1751,14 +1808,18 @@ var AcquisitionError = class extends Error {
   }
 };
 var MAX_BINARY_BYTES = 256 * 1024 * 1024;
-async function download(url) {
+function reportDownloadFailed(diagnostics, version) {
+  diagnostics.record("engine.acquire.download_failed", { version });
+  throw new AcquisitionError("engine.acquire.download_failed");
+}
+async function download(url, diagnostics, version) {
   const response = await fetch(url, { redirect: "follow" });
-  if (!response.ok) throw new AcquisitionError("engine.acquire.download_failed");
+  if (!response.ok) reportDownloadFailed(diagnostics, version);
   const declared = Number(response.headers.get("content-length") ?? "0");
-  if (declared > MAX_BINARY_BYTES) throw new AcquisitionError("engine.acquire.download_failed");
+  if (declared > MAX_BINARY_BYTES) reportDownloadFailed(diagnostics, version);
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.byteLength === 0 || bytes.byteLength > MAX_BINARY_BYTES) {
-    throw new AcquisitionError("engine.acquire.download_failed");
+    reportDownloadFailed(diagnostics, version);
   }
   return bytes;
 }
@@ -1796,7 +1857,7 @@ async function populateCache(cachedPath, bytes) {
 async function acquireVerifiedBytes(cachedPath, pin, target, diagnostics) {
   const cached = await readCachedIfValid(cachedPath, target);
   if (cached !== void 0) return { bytes: cached, cacheHit: true };
-  const bytes = await download(assetUrl(pin, target.asset));
+  const bytes = await download(assetUrl(pin, target.asset), diagnostics, pin.version);
   const actual = digestOf(bytes);
   if (actual !== target.sha256) {
     diagnostics.record("engine.acquire.digest_mismatch", {
@@ -2561,10 +2622,18 @@ function startModelProxy(options2) {
 import { execFile } from "node:child_process";
 var ExecFailure = class extends Error {
   code;
-  constructor(command, code) {
+  /**
+   * Set when `options.timeoutMs` killed the process rather than it exiting on its own. Node
+   * reports no exit code for a timeout kill (`error.code` is `null`, not a number) and sets
+   * `error.killed` instead — the one signal below distinguishes it from an ordinary non-zero exit,
+   * which always carries a real numeric code.
+   */
+  timedOut;
+  constructor(command, code, timedOut = false) {
     super(`${command} exited with ${String(code)}`);
     this.name = "ExecFailure";
     this.code = code;
+    this.timedOut = timedOut;
   }
 };
 function run(command, args, options2) {
@@ -2589,7 +2658,7 @@ function run(command, args, options2) {
           return;
         }
         const code = typeof error.code === "number" ? error.code : 1;
-        reject(new ExecFailure(command, code));
+        reject(new ExecFailure(command, code, error.killed === true));
       }
     );
   });
@@ -2726,7 +2795,7 @@ async function runEngine(options2, diagnostics) {
     });
     return { stdout: result.stdout.toString("utf8"), ruleDigest };
   } catch (error) {
-    const reason = error instanceof ExecFailure ? "engine.run.nonzero_exit" : "engine.run.spawn_failed";
+    const reason = error instanceof ExecFailure ? error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit" : "engine.run.spawn_failed";
     diagnostics.record(reason, {
       headSha: options2.pair.head,
       durationMs: Date.now() - started
@@ -3175,6 +3244,7 @@ async function runChangePass(files, deps) {
 
 // src/contracts/shape-gate.ts
 var MAX_INTERFACES = 200;
+var MAX_UNIONS = 200;
 var MAX_LINES = 4e3;
 var MAX_SOURCE_CHARS = 2e6;
 var WHITESPACE = /\s/;
@@ -3358,6 +3428,60 @@ function parseMembers(body) {
   if (!recordMember(members, body.slice(start))) return null;
   return [...members.values()];
 }
+var UNION_HEADER_PATTERN_SOURCE = String.raw`\bexport\s+type\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=`;
+function matchAllUnionHeaders(source) {
+  const pattern = new RegExp(UNION_HEADER_PATTERN_SOURCE, "g");
+  const out = [];
+  let match = pattern.exec(source);
+  while (match !== null) {
+    out.push({ name: match[1] ?? "", afterEquals: pattern.lastIndex });
+    if (out.length > MAX_UNIONS) return out;
+    match = pattern.exec(source);
+  }
+  return out;
+}
+function findAliasTerminator(source, from) {
+  let i = from;
+  while (i < source.length) {
+    if (source.charAt(i) === ";") return i;
+    const skipped = skipLiteralOrComment(source, i);
+    i = skipped > i ? skipped : i + 1;
+  }
+  return -1;
+}
+function splitUnionMembers(rhs) {
+  const parts = [];
+  let start = 0;
+  let i = 0;
+  while (i < rhs.length) {
+    if (rhs.charAt(i) === "|") {
+      parts.push(rhs.slice(start, i));
+      start = i + 1;
+      i += 1;
+      continue;
+    }
+    const skipped = skipLiteralOrComment(rhs, i);
+    i = skipped > i ? skipped : i + 1;
+  }
+  parts.push(rhs.slice(start));
+  return parts;
+}
+var STRING_LITERAL_MEMBER = /^(?:"[^"\n]*"|'[^'\n]*')$/;
+function parseStringUnionMembers(rhs) {
+  const seen = /* @__PURE__ */ new Set();
+  const members = [];
+  for (const rawPart of splitUnionMembers(rhs)) {
+    const candidate = stripLeadingComments(rawPart).trim();
+    if (candidate.length === 0) continue;
+    if (!STRING_LITERAL_MEMBER.test(candidate)) return null;
+    const literal = unquote(candidate);
+    if (!seen.has(literal)) {
+      seen.add(literal);
+      members.push(literal);
+    }
+  }
+  return members.length === 0 ? null : members;
+}
 function extractOneInterface(source, header) {
   const info = locateHeader(source, header.afterName);
   if (info === null || info.hasTypeParams || info.hasExtends) return null;
@@ -3375,6 +3499,20 @@ function extractFlatInterfaces(source) {
   for (const header of headers) {
     const flat = extractOneInterface(source, header);
     if (flat !== null) result.set(header.name, flat);
+  }
+  return result;
+}
+function extractStringUnions(source) {
+  const empty = /* @__PURE__ */ new Map();
+  if (source.length > MAX_SOURCE_CHARS || source.split("\n").length > MAX_LINES) return empty;
+  const headers = matchAllUnionHeaders(source);
+  if (headers.length > MAX_UNIONS) return empty;
+  const result = /* @__PURE__ */ new Map();
+  for (const header of headers) {
+    const terminator = findAliasTerminator(source, header.afterEquals);
+    if (terminator === -1) continue;
+    const members = parseStringUnionMembers(source.slice(header.afterEquals, terminator));
+    if (members !== null) result.set(header.name, { name: header.name, members });
   }
   return result;
 }
@@ -3415,6 +3553,50 @@ function compareContracts(left, right) {
   }
   return mismatches;
 }
+function compareDeclaredContracts(left, right) {
+  const sameName = compareContracts(left, right);
+  if (sameName.length > 0) return sameName;
+  const leftInterfaces = extractFlatInterfaces(left);
+  const rightInterfaces = extractFlatInterfaces(right);
+  if (leftInterfaces.size !== 1 || rightInterfaces.size !== 1) return [];
+  const [leftEntry] = leftInterfaces;
+  const [rightEntry] = rightInterfaces;
+  if (leftEntry === void 0 || rightEntry === void 0) return [];
+  const [leftName, leftInterface] = leftEntry;
+  const [rightName, rightInterface] = rightEntry;
+  return compareMembers(`${leftName} vs ${rightName}`, leftInterface, rightInterface);
+}
+function countOccurrences(source, needle) {
+  if (needle.length === 0) return 0;
+  let count = 0;
+  let from = 0;
+  for (; ; ) {
+    const index = source.indexOf(needle, from);
+    if (index === -1) return count;
+    count += 1;
+    from = index + needle.length;
+  }
+}
+function countLiteralMentions(source, literal) {
+  return countOccurrences(source, `"${literal}"`) + countOccurrences(source, `'${literal}'`);
+}
+function findUncoveredUnionMembers(baseSource, headSource, counterpartSource) {
+  if (counterpartSource.length > MAX_SOURCE_CHARS) return [];
+  const baseUnions = extractStringUnions(baseSource);
+  const headUnions = extractStringUnions(headSource);
+  const gaps = [];
+  for (const [name, headUnion] of headUnions) {
+    const baseUnion = baseUnions.get(name);
+    if (baseUnion === void 0) continue;
+    const baseMembers = new Set(baseUnion.members);
+    for (const member of headUnion.members) {
+      if (baseMembers.has(member)) continue;
+      const counterpartMentions = countLiteralMentions(counterpartSource, member);
+      if (counterpartMentions === 0) gaps.push({ unionName: name, member, counterpartMentions });
+    }
+  }
+  return gaps;
+}
 function escapeForCodeSpan(text3) {
   return text3.replace(/[`\\]/g, "\\$&");
 }
@@ -3430,6 +3612,144 @@ function describeMismatch(mismatch, leftPath, rightPath) {
     `Add the missing \`${member}\` member to \`${interfaceName}\`.`,
     "",
     `\`${interfaceName}\` is declared separately in \`${present}\` and in \`${absent}\`, and only the declaration in \`${present}\` includes \`${member}\`.${drift} A value the producing side writes into \`${member}\` therefore has no field to occupy on the consuming side: it is silently dropped in transit, or read back as undefined, wherever code trusts the two declarations to describe the same shape.`
+  ].join("\n");
+}
+function describeUnionGap(gap, changedPath, counterpartPath) {
+  const member = escapeForCodeSpan(gap.member);
+  const unionName = escapeForCodeSpan(gap.unionName);
+  const changed = escapeForCodeSpan(changedPath);
+  const counterpart = escapeForCodeSpan(counterpartPath);
+  return [
+    `Handle the new \`${member}\` member of \`${unionName}\` in \`${counterpart}\`.`,
+    "",
+    `\`${unionName}\` in \`${changed}\` gained the member \`${member}\`, and \`${counterpart}\` does not mention \`${member}\` anywhere. A value carrying this new member can reach \`${counterpart}\` with no branch written to handle it, silently falling through whatever case already covers the members that existed before.`
+  ].join("\n");
+}
+
+// src/contracts/pin-desync.ts
+var MAX_LINES2 = 4e3;
+var MAX_PIN_SITES = 200;
+var MAX_SOURCE_CHARS2 = 2e6;
+var SHA_SOURCE = String.raw`\b[0-9a-f]{40}\b`;
+var USES_PREFIX = /\buses\s*:\s*["']?[^\s"'@]+@$/;
+var ASSIGNMENT_PREFIX = /[A-Za-z_$][\w$.-]*\s*[:=]\s*["'`]?$/;
+function commentMarkerIndex(prefix) {
+  const hash = prefix.indexOf("#");
+  let slashes = prefix.indexOf("//");
+  while (slashes !== -1 && prefix.charAt(slashes - 1) === ":") {
+    slashes = prefix.indexOf("//", slashes + 2);
+  }
+  if (hash === -1) return slashes;
+  if (slashes === -1) return hash;
+  return Math.min(hash, slashes);
+}
+function classifyContext(prefix) {
+  if (commentMarkerIndex(prefix) !== -1) return "comment";
+  if (USES_PREFIX.test(prefix)) return "uses";
+  if (ASSIGNMENT_PREFIX.test(prefix)) return "assignment";
+  return null;
+}
+function scanLine(shaPattern, line, lineNumber, out) {
+  shaPattern.lastIndex = 0;
+  let match = shaPattern.exec(line);
+  while (match !== null) {
+    const context = classifyContext(line.slice(0, match.index));
+    if (context !== null) {
+      out.push({ line: lineNumber, value: match[0], context });
+      if (out.length > MAX_PIN_SITES) return true;
+    }
+    match = shaPattern.exec(line);
+  }
+  return false;
+}
+function collectPinSites(lines) {
+  const shaPattern = new RegExp(SHA_SOURCE, "gi");
+  const out = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (scanLine(shaPattern, lines[i] ?? "", i + 1, out)) return out;
+  }
+  return out;
+}
+function findPinSites(source) {
+  if (source.length > MAX_SOURCE_CHARS2) return [];
+  const lines = source.split("\n");
+  if (lines.length > MAX_LINES2) return [];
+  const sites = collectPinSites(lines);
+  return sites.length > MAX_PIN_SITES ? [] : sites;
+}
+function sameValue(a, b) {
+  return a.toLowerCase() === b.toLowerCase();
+}
+function groupByValue(sites) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const site of sites) {
+    const key = site.value.toLowerCase();
+    const group = groups.get(key);
+    if (group === void 0) groups.set(key, [site]);
+    else group.push(site);
+  }
+  return groups;
+}
+function groupByLine(sites) {
+  const groups = /* @__PURE__ */ new Map();
+  for (const site of sites) {
+    const group = groups.get(site.line);
+    if (group === void 0) groups.set(site.line, [site]);
+    else group.push(site);
+  }
+  return groups;
+}
+function correlateSite(baseSite, headByLine) {
+  const candidates = headByLine.get(baseSite.line) ?? [];
+  if (candidates.length === 1) return candidates[0];
+  return candidates.find((candidate) => candidate.context === baseSite.context);
+}
+function desyncForGroup(sites, headByLine) {
+  const moved = [];
+  const stale = [];
+  for (const site of sites) {
+    const match = correlateSite(site, headByLine);
+    if (match === void 0) continue;
+    if (sameValue(match.value, site.value)) stale.push(match);
+    else moved.push(match);
+  }
+  if (moved.length === 0 || stale.length === 0) return null;
+  const [first] = sites;
+  return first === void 0 ? null : { value: first.value, movedSites: moved, staleSites: stale };
+}
+function detectPinDesync(base, head) {
+  if (base === head) return [];
+  const baseSites = findPinSites(base);
+  const headSites = findPinSites(head);
+  if (baseSites.length === 0 || headSites.length === 0) return [];
+  const headByLine = groupByLine(headSites);
+  const results = [];
+  for (const sites of groupByValue(baseSites).values()) {
+    if (sites.length < 2) continue;
+    const desync = desyncForGroup(sites, headByLine);
+    if (desync !== null) results.push(desync);
+  }
+  return results;
+}
+function escapeForCodeSpan2(text3) {
+  return text3.replace(/[`\\]/g, "\\$&");
+}
+function formatLineList(sites) {
+  const lines = [...new Set(sites.map((site) => site.line))].sort((a, b) => a - b);
+  const label2 = lines.length === 1 ? "line" : "lines";
+  if (lines.length <= 1) return `${label2} ${String(lines[0] ?? "?")}`;
+  const last = lines[lines.length - 1] ?? "?";
+  return `${label2} ${lines.slice(0, -1).join(", ")} and ${String(last)}`;
+}
+function describePinDesync(desync, path) {
+  const movedText = formatLineList(desync.movedSites);
+  const staleText = formatLineList(desync.staleSites);
+  const safePath = escapeForCodeSpan2(path);
+  const safeValue = escapeForCodeSpan2(desync.value);
+  return [
+    `Advance the pin this change left behind, so every site names the same commit again.`,
+    "",
+    `\`${safePath}\` names commit \`${safeValue}\` at more than one site, and this change moved the pin at ${movedText} to a new value while the pin at ${staleText} still carried the old one. Whichever site actually governs behavior at runtime, the reviewed commit and the executed commit are no longer guaranteed to be the same commit, and nothing in the diff makes that drift visible. Advance ${staleText} to match, or explain why it intentionally still pins the earlier commit.`
   ].join("\n");
 }
 
@@ -3954,7 +4274,7 @@ function shareCodeBlock(a, b) {
 }
 function tokenize(text3) {
   const withoutCode = clip(text3).replace(/```[\s\S]*?```/g, " ");
-  const words = withoutCode.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").split(" ").filter((word) => word.length >= 3 && !STOPWORDS.has(word));
+  const words = normalizeUnicodeText(withoutCode).replace(/[^\p{L}\p{N}]+/gu, " ").split(" ").filter((word) => word.length >= 3 && !STOPWORDS.has(word));
   return new Set(words);
 }
 function tokenOverlap(a, b) {
@@ -4003,6 +4323,12 @@ function areIntraRunDuplicates(a, b) {
 }
 
 // src/publish/publisher.ts
+function requireClient(context) {
+  if (context.client === void 0) {
+    throw new Error("PublishContext.client is required for this operation");
+  }
+  return context.client;
+}
 function ownMarkers(comments, identity) {
   const markers = /* @__PURE__ */ new Set();
   for (const comment of comments) {
@@ -4024,7 +4350,7 @@ function toExistingConversation(comment, identity) {
   };
 }
 async function prefetchExistingConversations(context) {
-  const comments = await context.client.listReviewComments(context.ref, context.pullNumber);
+  const comments = await requireClient(context).listReviewComments(context.ref, context.pullNumber);
   return {
     markers: ownMarkers(comments, context.identity),
     threads: comments.map((comment) => toExistingConversation(comment, context.identity))
@@ -4033,10 +4359,14 @@ async function prefetchExistingConversations(context) {
 async function publishWithLadder(context, ladder, body) {
   for (const attempt of ladder) {
     try {
-      const created = await context.client.createReviewComment(context.ref, context.pullNumber, {
-        ...attempt,
-        body
-      });
+      const created = await requireClient(context).createReviewComment(
+        context.ref,
+        context.pullNumber,
+        {
+          ...attempt,
+          body
+        }
+      );
       return { comment: created, placement: describePlacement(attempt) };
     } catch (error) {
       if (error instanceof GitHubApiError && error.status === 422) continue;
@@ -4046,7 +4376,7 @@ async function publishWithLadder(context, ladder, body) {
   return void 0;
 }
 async function verifyPublication(context, created, expectedMarker) {
-  const readBack = await context.client.getReviewComment(context.ref, created.id);
+  const readBack = await requireClient(context).getReviewComment(context.ref, created.id);
   return readBack.id === created.id && readBack.authorLogin === context.identity && readBack.commitId === context.headSha && extractMarker(readBack.body) === expectedMarker;
 }
 function classifySuppression(finding, sanitizedBody, marker, existingMarkers, existingThreads, identity) {
@@ -4113,6 +4443,7 @@ function emptyCounters() {
     suppressedSimilar: 0,
     suppressedDispositioned: 0,
     rejectedSanitization: 0,
+    neutralized: 0,
     rejectedPlacement: 0,
     readbackFailures: 0,
     apiFailures: 0
@@ -4125,6 +4456,7 @@ function sanitizeOne(context, finding, counters, diagnostics) {
     diagnostics.record("publish.finding_rejected_sanitization", { headSha: context.headSha });
     return void 0;
   }
+  counters.neutralized += sanitized.neutralized ?? 0;
   return { finding, sanitizedBody: sanitized.body };
 }
 function toCandidateForDedup(candidate) {
@@ -4223,7 +4555,8 @@ async function planPublication(context, findings, diagnostics, prefetch) {
       suppressedExactDuplicate: counters.suppressedExactDuplicate,
       suppressedSimilar: counters.suppressedSimilar,
       suppressedDispositioned: counters.suppressedDispositioned,
-      rejectedSanitization: counters.rejectedSanitization
+      rejectedSanitization: counters.rejectedSanitization,
+      neutralized: counters.neutralized
     }
   };
 }
@@ -4286,11 +4619,15 @@ async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnost
   const { markers: existing } = prefetch ?? await prefetchExistingConversations(context);
   if (existing.has(marker)) return true;
   try {
-    const created = await context.client.createReviewComment(context.ref, context.pullNumber, {
-      body: composeIncompleteNotice(reasonCode, markerComment(marker)),
-      commitId: context.headSha,
-      path: anchorPath
-    });
+    const created = await requireClient(context).createReviewComment(
+      context.ref,
+      context.pullNumber,
+      {
+        body: composeIncompleteNotice(reasonCode, markerComment(marker)),
+        commitId: context.headSha,
+        path: anchorPath
+      }
+    );
     const verified = await verifyPublication(context, created, marker);
     diagnostics.record("publish.incomplete_notice_published", { headSha: context.headSha });
     return verified;
@@ -4301,10 +4638,10 @@ async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnost
 }
 
 // src/review.ts
-var PER_FILE_TOKENS = 4e4;
+var PER_FILE_TOKENS = 64e3;
 var PER_LINE_TOKENS = 60;
 var ALLOTMENT_MARGIN = 1.3;
-var ALLOTMENT_FLOOR = 8e4;
+var ALLOTMENT_FLOOR = 15e4;
 var ALLOTMENT_CEILING = 6e6;
 var RETENTION = {
   maxEntries: PARSE_LIMITS.maxEntries,
@@ -4516,35 +4853,86 @@ function classifyDeps(request) {
 var MAX_GATE_FINDINGS = 8;
 async function collectGateFindings(request, inventory, diagnostics) {
   const pairs = request.profile.contractPairs ?? [];
-  if (pairs.length === 0) return [];
   const ctx = gitContext(request);
   const findings = [];
   let compared = 0;
   for (const pair of pairs) {
     for (const item of inventory.items) {
       if (!item.reviewable || !pair.matcher.matches(item.path)) continue;
-      compared += await compareAgainstCounterparts(ctx, request.head, item, pair, findings);
+      compared += await compareAgainstCounterparts(
+        ctx,
+        request.base,
+        request.head,
+        item,
+        pair,
+        findings
+      );
     }
   }
+  const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings);
+  if (pairs.length === 0 && findings.length === 0 && pinDesyncs === 0) return [];
   diagnostics.record("contracts.gate", {
     headSha: request.head,
-    counts: { pairs: pairs.length, compared, findings: findings.length }
+    counts: {
+      pairs: pairs.length,
+      compared,
+      findings: findings.length,
+      pin_desync: pinDesyncs
+    }
   });
   return findings;
 }
-async function compareAgainstCounterparts(ctx, head, item, pair, findings) {
-  const left = await readTextAtCommit(ctx, head, item.path);
+async function collectPinDesyncFindings(ctx, request, inventory, findings) {
+  let found = 0;
+  for (const item of inventory.items) {
+    if (!item.reviewable || item.status !== "M") continue;
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    const path = item.path;
+    const base = await readTextAtCommit(ctx, request.base, path);
+    const head = await readTextAtCommit(ctx, request.head, path);
+    if (base === void 0 || head === void 0) continue;
+    for (const desync of detectPinDesync(base, head)) {
+      if (findings.length >= MAX_GATE_FINDINGS) break;
+      findings.push({
+        path: item.path,
+        content: describePinDesync(desync, path),
+        startLine: 0,
+        endLine: 0,
+        category: "bug",
+        severity: "high"
+      });
+      found += 1;
+    }
+  }
+  return found;
+}
+async function compareAgainstCounterparts(ctx, base, head, item, pair, findings) {
+  const path = item.path;
+  const left = await readTextAtCommit(ctx, head, path);
   if (left === void 0) return 0;
+  const leftBase = await readTextAtCommit(ctx, base, path);
   let compared = 0;
   for (const counterpart of pair.counterparts) {
     const right = await readTextAtCommit(ctx, head, counterpart);
     if (right === void 0) continue;
     compared += 1;
-    for (const mismatch of compareContracts(left, right)) {
+    for (const mismatch of compareDeclaredContracts(left, right)) {
       if (findings.length >= MAX_GATE_FINDINGS) return compared;
       findings.push({
         path: item.path,
-        content: describeMismatch(mismatch, item.path, counterpart),
+        content: describeMismatch(mismatch, path, counterpart),
+        startLine: 0,
+        endLine: 0,
+        category: "bug",
+        severity: "high"
+      });
+    }
+    if (leftBase === void 0) continue;
+    for (const gap of findUncoveredUnionMembers(leftBase, left, right)) {
+      if (findings.length >= MAX_GATE_FINDINGS) return compared;
+      findings.push({
+        path: item.path,
+        content: describeUnionGap(gap, path, counterpart),
         startLine: 0,
         endLine: 0,
         category: "bug",
@@ -4559,7 +4947,7 @@ async function collectChangePassFindings(request, inventory, ledger, diagnostics
   if (request.config.crossArtifactPass !== true) return [];
   const deps = classifyDeps(request);
   if (deps === void 0) return [];
-  const remaining = ledger.allotted - ledger.engine - ledger.classify;
+  const remaining = request.config.tokenBudget - ledger.engine - ledger.classify;
   if (remaining < CHANGE_PASS_RESERVE_TOKENS) {
     diagnostics.record("contracts.change_pass", {
       headSha: request.head,
@@ -4605,6 +4993,7 @@ async function repairEngineFindings(parsed, request, diagnostics) {
   return { result: { ...parsed, findings: outcome.findings }, classifyTokens: outcome.tokens };
 }
 var RESUME_SEED = 43;
+var RESUME_FLOOR_FRACTION = 0.25;
 async function runEngineWithOneResume(options2, diagnostics) {
   let remaining = options2.allottedBudget;
   let firstAttemptTokens = 0;
@@ -4613,7 +5002,17 @@ async function runEngineWithOneResume(options2, diagnostics) {
     const parsed = parseEngineResult(first.stdout);
     if (parsed.status === "success") return { result: parsed, engineTokens: parsed.totalTokens };
     firstAttemptTokens = parsed.totalTokens;
-    remaining = Math.max(ALLOTMENT_FLOOR, options2.allottedBudget - parsed.totalTokens);
+    if (parsed.budgetExceeded) {
+      diagnostics.record("engine.resume_skipped_budget_exceeded", {
+        counts: { spent: firstAttemptTokens, allotted: options2.allottedBudget }
+      });
+      return { result: parsed, engineTokens: firstAttemptTokens };
+    }
+    remaining = clamp(
+      options2.allottedBudget - parsed.totalTokens,
+      Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION),
+      options2.allottedBudget
+    );
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   } catch (error) {
     if (!(error instanceof EngineRunError)) throw error;
@@ -4647,7 +5046,7 @@ async function auditFreshSurvivors(request, fresh, ledger, diagnostics) {
   if (fresh.length === 0) return NO_AUDITED;
   const deps = classifyDeps(request);
   if (deps === void 0) return NO_AUDITED;
-  const remaining = ledger.allotted - ledger.engine - ledger.classify;
+  const remaining = request.config.tokenBudget - ledger.engine - ledger.classify;
   if (remaining < AUDIT_RESERVE_PER_FINDING * fresh.length) {
     diagnostics.record("classify.skipped_budget", {
       headSha: request.head,
@@ -4670,18 +5069,33 @@ async function auditFreshSurvivors(request, fresh, ledger, diagnostics) {
   });
   return byOriginal;
 }
-async function publishAudited(request, context, findings, freshEngineFindings, ledger, diagnostics, prefetch) {
-  const plan = await planPublication(context, findings, diagnostics, prefetch);
-  const fresh = plan.survivors.filter((survivor) => freshEngineFindings.has(survivor.finding));
-  const auditedByOriginal = await auditFreshSurvivors(request, fresh, ledger, diagnostics);
-  if (auditedByOriginal.size === 0) {
-    const outcome2 = await executePublication(context, plan, diagnostics);
-    return { outcome: outcome2, auditedByOriginal };
-  }
-  const survivors = plan.survivors.map((survivor) => {
+function substituteAudited(survivors, auditedByOriginal) {
+  if (auditedByOriginal.size === 0) return survivors;
+  return survivors.map((survivor) => {
     const audited = auditedByOriginal.get(survivor.finding);
     return audited === void 0 ? survivor : { ...survivor, finding: audited };
   });
+}
+async function planAndAudit(request, context, findings, freshEngineFindings, ledger, diagnostics, prefetch) {
+  const plan = await planPublication(context, findings, diagnostics, prefetch);
+  const fresh = plan.survivors.filter((survivor) => freshEngineFindings.has(survivor.finding));
+  const auditedByOriginal = await auditFreshSurvivors(request, fresh, ledger, diagnostics);
+  return {
+    plan,
+    survivors: substituteAudited(plan.survivors, auditedByOriginal),
+    auditedByOriginal
+  };
+}
+async function publishAudited(request, context, findings, freshEngineFindings, ledger, diagnostics, prefetch) {
+  const { plan, survivors, auditedByOriginal } = await planAndAudit(
+    request,
+    context,
+    findings,
+    freshEngineFindings,
+    ledger,
+    diagnostics,
+    prefetch
+  );
   const outcome = await executePublication(context, { ...plan, survivors }, diagnostics);
   return { outcome, auditedByOriginal };
 }
@@ -4824,11 +5238,19 @@ async function performReview(request, diagnostics) {
     }
   }
 }
+async function resolvePairOrReport(ctx, request, diagnostics) {
+  try {
+    return await resolveReviewPair(ctx, request.base, request.head);
+  } catch (error) {
+    diagnostics.record("review_pair.merge_base_unresolved", { headSha: request.head });
+    throw error;
+  }
+}
 async function performReviewInner(request, diagnostics, ledger) {
   const started = Date.now();
   diagnostics.record("run.started", { headSha: request.head });
   const ctx = gitContext(request);
-  const pair = await resolveReviewPair(ctx, request.base, request.head);
+  const pair = await resolvePairOrReport(ctx, request, diagnostics);
   diagnostics.record("review_pair.resolved", { headSha: request.head });
   const inventory = await buildInventory(
     ctx,
@@ -5216,10 +5638,18 @@ async function runAction(env, diagnostics) {
     Math.floor(Date.now() / 1e3)
   );
   if (identity === void 0) throw new Error("no posting identity configured");
-  const config = runtimeConfigFromInputs(env);
-  const profilePath = readRequiredInput(env, "profile");
-  const profile = loadReviewProfile(await readFile2(profilePath, "utf8"));
-  const guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
+  let config;
+  let profile;
+  let guidelines;
+  try {
+    config = runtimeConfigFromInputs(env);
+    const profilePath = readRequiredInput(env, "profile");
+    profile = loadReviewProfile(await readFile2(profilePath, "utf8"));
+    guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
+  } catch (error) {
+    diagnostics.record("config.invalid", { headSha: event.head });
+    throw error;
+  }
   diagnostics.record("config.loaded", { headSha: event.head });
   const storePath = readInput(env, "review_store_path");
   const cacheStore = storePath === "" ? void 0 : await loadCacheStore(storePath, diagnostics);
