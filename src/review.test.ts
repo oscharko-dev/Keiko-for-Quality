@@ -41,9 +41,11 @@ const { computeAllottedBudget, performReview } = await import("./review.js");
 const { EngineRunError } = await import("./engine/run.js");
 
 describe("computeAllottedBudget", () => {
-  it("matches the worked example: 87 files, 3,175 changed lines", () => {
-    // 1.3 * (87 * 40_000 + 3_175 * 60) = 1.3 * (3_480_000 + 190_500) = 1.3 * 3_670_500 = 4_771_650.
-    expect(computeAllottedBudget(6_000_000, 87, 3_175)).toBe(4_771_650);
+  it("matches the worked example: the measured 55-file live run (Keiko#2981)", () => {
+    // 1.3 * (55 * 64_000 + 1_374 * 60) = 1.3 * (3_520_000 + 82_440) = 1.3 * 3_602_440 = 4_683_172 —
+    // comfortably above that run's real 3.56M spend, which the previous constants priced at 2.97M
+    // and thereby truncated into an incomplete settlement.
+    expect(computeAllottedBudget(6_000_000, 55, 1_374)).toBe(4_683_172);
   });
 
   it("never exceeds the consumer's configured ceiling, however large the change", () => {
@@ -51,8 +53,8 @@ describe("computeAllottedBudget", () => {
   });
 
   it("floors a tiny change rather than starving it", () => {
-    // 1.3 * (1 * 40_000 + 5 * 60) = 1.3 * 40_300 = 52_390, below the 80_000 floor.
-    expect(computeAllottedBudget(2_000_000, 1, 5)).toBe(80_000);
+    // 1.3 * (1 * 64_000 + 5 * 60) = 1.3 * 64_300 = 83_590, below the 150_000 floor.
+    expect(computeAllottedBudget(2_000_000, 1, 5)).toBe(150_000);
   });
 
   it("does not let the floor exceed a ceiling configured below it", () => {
@@ -60,7 +62,7 @@ describe("computeAllottedBudget", () => {
   });
 
   it("caps a huge change at the ceiling rather than the raw estimate", () => {
-    // 1.3 * (1000 * 40_000) = 52_000_000, far past the 6_000_000 ceiling.
+    // 1.3 * (1000 * 64_000) = 83_200_000, far past the 6_000_000 ceiling.
     expect(computeAllottedBudget(100_000_000, 1000, 0)).toBe(6_000_000);
   });
 
@@ -68,7 +70,7 @@ describe("computeAllottedBudget", () => {
     // `performReview` never calls this with an empty inventory — it short-circuits on
     // `reviewablePaths.size === 0` first — but the formula itself has no special case for it, and
     // the floor exists precisely so a small raw estimate never becomes a smaller allotment.
-    expect(computeAllottedBudget(2_000_000, 0, 0)).toBe(80_000);
+    expect(computeAllottedBudget(2_000_000, 0, 0)).toBe(150_000);
   });
 
   it("always returns an integer, guarding against floating-point residue from the 1.3 margin", () => {
@@ -85,7 +87,7 @@ describe("computeAllottedBudget", () => {
   it("scales with line count, but only as the weak secondary term the constant implies", () => {
     const withoutLines = computeAllottedBudget(6_000_000, 10, 0);
     const withLines = computeAllottedBudget(6_000_000, 10, 1000);
-    // 60 tokens/line * 1000 lines * 1.3 margin = 78_000 — a small delta next to the 40_000/file term.
+    // 60 tokens/line * 1000 lines * 1.3 margin = 78_000 — a small delta next to the 64_000/file term.
     expect(withLines - withoutLines).toBe(78_000);
   });
 });

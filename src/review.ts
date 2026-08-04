@@ -256,8 +256,20 @@ interface SpendLedger {
   classify: number;
 }
 
-/** Measured blended cost per reviewable file, rounded up. The formula's dominant term by design. */
-const PER_FILE_TOKENS = 40_000;
+/**
+ * Measured blended cost per reviewable file, rounded up. The formula's dominant term by design.
+ *
+ * Recalibrated 2026-08-04 from the first three live v0.12.0 data points (32k for a one-file
+ * config change, 65k/file across a 55-file feature PR, 200k/file across a five-file dense-code
+ * PR): the previous 40k — calibrated on single-file corpus cases — under-priced the 55-file live
+ * run so far that the engine's own budget stop fired at 84% coverage and the run settled
+ * incomplete after 3.56M tokens; the follow-up push then re-paid the full amount (7.1M total, two
+ * incompletes, evidence in corpus/evidence/). At 64k — the live median — that same run's
+ * allotment is ~4.7M and it completes. Deliberately the median, not the 200k tail: the allotment
+ * is a stop-loss, and provisioning every run for the dense-code worst case would neuter it (see
+ * ALLOTMENT_MARGIN's own comment for where the tail is handled instead).
+ */
+const PER_FILE_TOKENS = 64_000;
 
 /**
  * A weak secondary term, in tokens per changed line.
@@ -280,11 +292,17 @@ const ALLOTMENT_MARGIN = 1.3;
 /**
  * Floor beneath which a 1-2-file pull request would otherwise get an unworkably small allotment.
  *
+ * Raised 80k -> 150k alongside the 2026-08-04 PER_FILE_TOKENS recalibration above: at 64k/file a
+ * single file prices at ~83k and the old floor never bound again, while the measured one-file
+ * spread (32k config change vs a five-file run at 200k/file) says small dense changes need real
+ * headroom. Risk-free since the audit guard subtracts from the consumer ceiling, not from this
+ * stop-loss (see auditFreshSurvivors).
+ *
  * Sized for a WHOLE review, not for a second attempt bounded inside one — see
  * `RESUME_FLOOR_FRACTION` (near `runEngineWithOneResume`) for the resume's own floor, and for why
  * reusing this constant there was the defect it now replaces.
  */
-const ALLOTMENT_FLOOR = 80_000;
+const ALLOTMENT_FLOOR = 150_000;
 
 /** Ceiling past which a run is expected to chunk or escalate rather than run as one unbounded spend. */
 const ALLOTMENT_CEILING = 6_000_000;
