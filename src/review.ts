@@ -127,6 +127,16 @@ interface PipelineRequest {
   readonly env: NodeJS.ProcessEnv;
   readonly pathValue: string;
   /**
+   * What the pull request says it is for — title and description, as the author wrote them.
+   *
+   * Absent by default and absent for the local CLI, which has no pull request to read one from.
+   * Threaded to `model-proxy.ts` rather than into the rule text, and that placement is the whole
+   * design: `promptIdentityDigest` hashes the rule document into the review cache's key, so a
+   * per-pull-request rule would make every cache entry unique to one pull request and destroy
+   * memoization across the repository. The proxy rewrites the wire body without touching the digest.
+   */
+  readonly changeIntent?: string;
+  /**
    * The parsed review-cache store, already read by the caller (v0.9.0). `undefined` — not an empty
    * store — is what disables the feature entirely: every code path below only branches on this
    * being present, so an absent store costs this run nothing beyond the check itself.
@@ -858,6 +868,7 @@ async function executeEngine(
         guidelines: request.guidelines,
         env: request.env,
         pathValue: request.pathValue,
+        ...(request.changeIntent === undefined ? {} : { changeIntent: request.changeIntent }),
         allottedBudget,
         mechanicallyCleanPaths: excluded,
       },
