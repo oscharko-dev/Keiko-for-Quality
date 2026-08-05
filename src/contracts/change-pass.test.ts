@@ -146,6 +146,41 @@ describe("summarizeDeclarations", () => {
       expect(summary).toContain("[truncated: 5 more declarations]");
     });
 
+    /**
+     * The bound `shape-gate.ts` and `pin-desync.ts` already enforce against the same trust boundary
+     * (candidate-controlled diff content) — this pins that `extractDeclarations` closes the one gap
+     * where it had not: a source past either limit degrades to no declarations rather than forcing
+     * the per-declaration scan to repeat its own bounded search across an effectively unbounded file.
+     */
+    it("degrades to no declarations for a source past the line-count bound, instead of scanning it unbounded", () => {
+      const lines = Array.from({ length: 4001 }, (_, i) => `export type T${String(i)} = "x";`);
+      // A file contributing zero declarations is dropped from the summary entirely — the same
+      // treatment a file with no exported declarations at all already gets — so the whole-summary
+      // shape (empty here, since this is the only file) is the observable proof of the degradation.
+      const summary = summarizeDeclarations([{ path: "src/huge.ts", source: lines.join("\n") }]);
+
+      expect(summary).toBe("");
+    });
+
+    it("degrades to no declarations for a source past the char-count bound, instead of scanning it unbounded", () => {
+      const source = `export type T = "${"a".repeat(2_000_001)}";`;
+      const summary = summarizeDeclarations([{ path: "src/huge.ts", source }]);
+
+      expect(summary).toBe("");
+    });
+
+    it("still contributes its declarations normally when a huge file sits alongside an ordinary one", () => {
+      const lines = Array.from({ length: 4001 }, (_, i) => `export type T${String(i)} = "x";`);
+      const summary = summarizeDeclarations([
+        { path: "src/huge.ts", source: lines.join("\n") },
+        { path: "src/normal.ts", source: 'export type Status = "active" | "retired";' },
+      ]);
+
+      expect(summary).not.toContain("src/huge.ts");
+      expect(summary).toContain("src/normal.ts");
+      expect(summary).toContain("type Status");
+    });
+
     it("truncates a type alias's right-hand side at 200 characters", () => {
       const rhs = `"${"a".repeat(400)}"`;
       const summary = summarizeDeclarations([

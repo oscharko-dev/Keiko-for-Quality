@@ -198,10 +198,6 @@ describe("lookupMemoized", () => {
   });
 
   it.each([
-    [
-      "a rename",
-      rawChange({ path: "src/renamed.ts", status: "R", oldPath: repoPath("src/old.ts") }),
-    ],
     ["a deletion", rawChange({ path: "src/gone.ts", status: "D", newMode: MODE_ABSENT })],
     ["a critical symlink pointer", rawChange({ path: "src/link", newMode: MODE_SYMLINK })],
   ])("never treats %s as cache-eligible", (_name, change) => {
@@ -214,6 +210,33 @@ describe("lookupMemoized", () => {
       PATH_SET_DIGEST,
     );
     expect(result.eligiblePaths.size).toBe(0);
+  });
+
+  /**
+   * A rename is eligible only WITH real content edits (v0.13.0) — a pure rename never reaches this
+   * function at all, downgraded to `mechanically-clean` by `classify()` before the inventory ever
+   * calls here, so there is nothing to pin for that case in this file (`inventory/classify.test.ts`
+   * already owns it). This is the positive case: `"R"` with a blob pair that actually differs.
+   */
+  it("treats a rename with real content edits as cache-eligible", () => {
+    const rename = rawChange({
+      path: "src/renamed.ts",
+      status: "R",
+      oldPath: repoPath("src/old.ts"),
+      // Distinct from CHANGE's own default blob pair, so this test's result is never a fixture
+      // collision — only ever the real eligibility decision under test.
+      oldBlob: blobId("6".repeat(40)),
+      newBlob: blobId("7".repeat(40)),
+    });
+    const result = lookupMemoized(
+      storeWithEntry(entryFor(CHANGE)),
+      inventoryOf([rename]),
+      RULE_DIGEST,
+      ENGINE_DIGEST,
+      CONFIG,
+      PATH_SET_DIGEST,
+    );
+    expect(result.eligiblePaths).toEqual(new Set(["src/renamed.ts"]));
   });
 
   it("fails open — no hits, no crash — when the configured model id is malformed", () => {
@@ -309,11 +332,17 @@ describe("lookupMemoized: changed-path-set digest (v0.10.0, issue #50)", () => {
     const stateA = inventoryOf([A, B]);
     const store = storeWithEntry(entryFor(A, [], computePrPathSetDigest(stateA)));
 
-    // `a` and `b` are both untouched; an unrelated file is renamed in this push.
+    // `a` and `b` are both untouched; an unrelated file is renamed in this push. A distinct blob
+    // pair (v0.13.0: a rename with real edits is itself cache-eligible content, see
+    // `isCacheEligible`) keeps this test about the path-set digest alone — without it, the
+    // rename's default blobs would accidentally match `a`'s own stored key and this test would be
+    // pinning a fixture collision, not the invalidation rule it names.
     const rename = rawChange({
       path: "src/e.ts",
       status: "R",
       oldPath: repoPath("src/d.ts"),
+      oldBlob: blobId("8".repeat(40)),
+      newBlob: blobId("9".repeat(40)),
     });
     const stateB = inventoryOf([A, B, rename]);
 
@@ -515,6 +544,27 @@ describe("mergeHitFindings", () => {
   it("contributes nothing from a hit that cached a clean (empty findings) result", () => {
     const hits = new Map([["src/clean.ts", entryFor(rawChange({ path: "src/clean.ts" }), [])]]);
     expect(mergeHitFindings([FINDING], hits)).toEqual([FINDING]);
+  });
+
+  /**
+   * The remap (v0.13.0): a replayed finding's path comes from the LOOKUP key `hits` is keyed by,
+   * never trusted from the stored entry itself — the prerequisite for a rename with real content
+   * edits (`isCacheEligible`) to replay soundly, since its stored entry carries its OLD path.
+   */
+  it("remaps a replayed finding's path onto the current lookup path, not whatever the stored entry says", () => {
+    // The entry was written under a DIFFERENT path than the one it is looked up for here — exactly
+    // the shape a renamed file's stored entry takes.
+    const staleFinding: EngineFinding = { ...FINDING, path: repoPath("src/old-name.ts") };
+    const hits = new Map([
+      ["src/new-name.ts", entryFor(rawChange({ path: "src/old-name.ts" }), [staleFinding])],
+    ]);
+
+    const merged = mergeHitFindings([], hits);
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]?.path).toBe("src/new-name.ts");
+    // Nothing else about the finding is touched — only the path field is ever remapped.
+    expect(merged[0]).toMatchObject({ content: FINDING.content, startLine: FINDING.startLine });
   });
 });
 

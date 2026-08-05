@@ -59,6 +59,10 @@ function reportOutputs(
     findings_suppressed: String(report.publish?.suppressed ?? 0),
     cache_hits: String(report.cacheHits),
     cache_misses: String(report.cacheMisses),
+    // Isolates the one cache miss reason that costs nothing to fix from the ordinary kind: a file
+    // whose own bytes never changed, denied replay only because the pull request's reviewable-path
+    // set moved since the entry was written (see `ReviewReport.contextInvalidated`, review.ts).
+    cache_context_invalidated: String(report.contextInvalidated),
     // Whether this run left a store behind, decided by the same rule that governs the write
     // rather than restated by the caller. A consumer needs it because "did you persist" is not
     // "did you settle complete": since #75 a budget-truncated run persists the verdicts it
@@ -152,6 +156,15 @@ async function saveCacheStore(
  *
  * Without it a large pull request could never converge: every push exceeded the budget, settled
  * incomplete, persisted nothing, and re-priced every file from scratch (Keiko-for-Quality#75).
+ *
+ * `abandoned` (v0.13.0) joins the allowed set for the identical reason: `performReview`'s own
+ * post-publish staleness check now populates `updatedCacheStore` on that outcome too, and only for
+ * the one case where doing so is sound — the ENGINE's verdict was already `complete` before the
+ * pull request's head moved out from under it, and a review-cache entry is keyed by blob content,
+ * not by head sha, so what was reviewed stays exactly as replayable as it would from a `complete`
+ * report. The check above this one is what makes trusting the outcome here safe: the PRE-flight
+ * abandon (before the engine ever runs) never attaches `updatedCacheStore` at all, so an `abandoned`
+ * report reaches this branch only in the one case `performReview` deliberately allowed.
  */
 async function maybeSaveCacheStore(
   storePath: string,
@@ -159,11 +172,12 @@ async function maybeSaveCacheStore(
   diagnostics: Diagnostics,
 ): Promise<boolean> {
   if (storePath === "" || report.updatedCacheStore === undefined) return false;
+  // `ReviewOutcome` is exactly `"complete" | "incomplete" | "abandoned"` — once "incomplete" is
+  // excluded below, both remaining outcomes are already in the allowed set the doc comment above
+  // describes, so there is nothing further to reject here.
   if (report.outcome === "incomplete") {
     // An incomplete report without a reason cannot be argued into the allowed set, so it is not.
     if (report.reason === undefined || !verdictsSurviveIncompleteness(report.reason)) return false;
-  } else if (report.outcome !== "complete") {
-    return false;
   }
   return await saveCacheStore(
     storePath,
@@ -243,19 +257,13 @@ function buildReviewRequest(
     profile,
     guidelines,
     identity: identity.login,
+    identityExclusive: identity.exclusive,
     env,
     pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     ...(cacheStore === undefined ? {} : { cacheStore }),
   };
 }
 
-/**
- * The action entrypoint.
- *
- * Ordering is deliberate: eligibility is decided before any credential is used, and the identity is
- * resolved before the engine runs, so a misconfigured installation fails in seconds rather than
- * after a full model spend.
- */
 /** Decides eligibility and records the outcome. Returns false when the run should stop here. */
 function admit(env: NodeJS.ProcessEnv, event: EventContext, diagnostics: Diagnostics): boolean {
   const eligibility = evaluateEligibility(
@@ -281,6 +289,76 @@ function admit(env: NodeJS.ProcessEnv, event: EventContext, diagnostics: Diagnos
   return true;
 }
 
+/**
+ * Resolves this run's posting identity, recording a distinguishing diagnostic on failure — mirrors
+ * `loadConfiguration` below so an operator can tell an identity failure apart from every other
+ * cause `run.failed` alone would otherwise collapse it into.
+ */
+async function resolveIdentityOrThrow(
+  apiBase: string,
+  env: NodeJS.ProcessEnv,
+  event: EventContext,
+  diagnostics: Diagnostics,
+): Promise<ResolvedIdentity> {
+  let identity: ResolvedIdentity | undefined;
+  try {
+    identity = await resolveIdentity(
+      apiBase,
+      env,
+      event.owner,
+      event.repo,
+      diagnostics,
+      Math.floor(Date.now() / 1000),
+    );
+  } catch (error) {
+    // A `mintInstallationToken` failure (a malformed PEM, a network blip, the App not installed on
+    // this repository) otherwise collapses into the same generic `run.failed` every other cause
+    // does, with nothing in the diagnostics stream to tell an operator this was an identity problem
+    // rather than, say, a config or an engine one.
+    diagnostics.record("publish.identity_mint_failed", { headSha: event.head });
+    throw error;
+  }
+  if (identity === undefined) throw new Error("no posting identity configured");
+  return identity;
+}
+
+interface LoadedConfiguration {
+  readonly config: RuntimeConfig;
+  readonly profile: CompiledProfile;
+  readonly guidelines: GuidelineIndex;
+}
+
+/**
+ * Loads runtime inputs, the review profile, and the guidelines list, recording a distinguishing
+ * diagnostic on failure — mirrors `resolveIdentityOrThrow` above for the same reason.
+ */
+async function loadConfiguration(
+  env: NodeJS.ProcessEnv,
+  event: EventContext,
+  diagnostics: Diagnostics,
+): Promise<LoadedConfiguration> {
+  try {
+    const config = runtimeConfigFromInputs(env);
+    const profilePath = readRequiredInput(env, "profile");
+    const profile = loadReviewProfile(await readFile(profilePath, "utf8"));
+    const guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
+    return { config, profile, guidelines };
+  } catch (error) {
+    // The supplied configuration — runtime inputs, the review profile, or the guidelines list —
+    // failed to validate. Recorded before rethrowing so an operator can tell this apart from
+    // every other cause `run.failed` alone would otherwise collapse it into.
+    diagnostics.record("config.invalid", { headSha: event.head });
+    throw error;
+  }
+}
+
+/**
+ * The action entrypoint.
+ *
+ * Ordering is deliberate: eligibility is decided before any credential is used, and the identity is
+ * resolved before the engine runs, so a misconfigured installation fails in seconds rather than
+ * after a full model spend.
+ */
 export async function runAction(
   env: NodeJS.ProcessEnv,
   diagnostics: Diagnostics,
@@ -289,31 +367,9 @@ export async function runAction(
   if (!admit(env, event, diagnostics)) return undefined;
 
   const apiBase = env.GITHUB_API_URL ?? DEFAULT_API_BASE;
-  const identity = await resolveIdentity(
-    apiBase,
-    env,
-    event.owner,
-    event.repo,
-    diagnostics,
-    Math.floor(Date.now() / 1000),
-  );
-  if (identity === undefined) throw new Error("no posting identity configured");
+  const identity = await resolveIdentityOrThrow(apiBase, env, event, diagnostics);
 
-  let config: RuntimeConfig;
-  let profile: CompiledProfile;
-  let guidelines: GuidelineIndex;
-  try {
-    config = runtimeConfigFromInputs(env);
-    const profilePath = readRequiredInput(env, "profile");
-    profile = loadReviewProfile(await readFile(profilePath, "utf8"));
-    guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
-  } catch (error) {
-    // The supplied configuration — runtime inputs, the review profile, or the guidelines list —
-    // failed to validate. Recorded before rethrowing so an operator can tell this apart from
-    // every other cause `run.failed` alone would otherwise collapse it into.
-    diagnostics.record("config.invalid", { headSha: event.head });
-    throw error;
-  }
+  const { config, profile, guidelines } = await loadConfiguration(env, event, diagnostics);
   diagnostics.record("config.loaded", { headSha: event.head });
 
   // Empty disables the feature entirely: no store is loaded, `cacheStore` stays `undefined`, and
@@ -340,7 +396,15 @@ export async function runAction(
     diagnostics,
   );
 
-  writeOutputs(env, reportOutputs(report, summaryCommentUrl, storeWritten));
+  try {
+    writeOutputs(env, reportOutputs(report, summaryCommentUrl, storeWritten));
+  } catch {
+    // Mirrors `saveCacheStore`'s own reasoning: a delivery-mechanism failure at the very last step
+    // — `$GITHUB_OUTPUT` unwritable, a disk full — must not retroactively turn a completed,
+    // already-published review into an undiagnosable total failure. The review already happened;
+    // only the action's own output plumbing failed to report it.
+    diagnostics.record("outputs.write_failed");
+  }
   return report;
 }
 

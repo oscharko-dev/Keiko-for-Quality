@@ -111,6 +111,45 @@ describe("buildJsonReport", () => {
   });
 });
 
+describe("the file-level 0-anchor sentinel", () => {
+  it("renders both line anchors as null keys, never omitted, for a 0-anchor finding", () => {
+    // `isFileLevel` (types.ts) is the shared decision both renderers make; this pins what JSON
+    // renders it TO. It is not an edge case: every deterministic-gate finding is emitted with
+    // `startLine: 0, endLine: 0` (review.ts, contracts/change-pass.ts) and `cli.ts` passes both
+    // fields straight through, so a local run whose only findings come from the contract gates
+    // takes this branch for all of them. Keys, not just values: docs/local-report-schema.md
+    // promises consumers a fixed key set, so an omitted `startLine` is a DIFFERENT wire shape
+    // from `null` — the same rule `settlement.reason` is pinned under below.
+    const finding: ReportFinding = { ...FINDING_A, startLine: 0, endLine: 0 };
+    const [rendered] = buildJsonReport(baseInput({ findings: [finding] })).findings;
+
+    expect(rendered).toHaveProperty("startLine", null);
+    expect(rendered).toHaveProperty("endLine", null);
+    expect(Object.keys(rendered ?? {})).toEqual([
+      "path",
+      "startLine",
+      "endLine",
+      "category",
+      "severity",
+      "body",
+    ]);
+    // Nulling the anchors is the whole translation — nothing else about the finding changes.
+    expect(rendered?.path).toBe(FINDING_A.path);
+    expect(rendered?.category).toBe(FINDING_A.category);
+    expect(rendered?.severity).toBe(FINDING_A.severity);
+    expect(rendered?.body).toBe(FINDING_A.body);
+  });
+
+  it("keeps a file-level and a line-anchored finding side by side in one report", () => {
+    const report = buildJsonReport(
+      baseInput({ findings: [{ ...FINDING_A, startLine: 0, endLine: 0 }, FINDING_B] }),
+    );
+    expect(report.findings).toHaveLength(2);
+    expect(report.findings[0]).toMatchObject({ startLine: null, endLine: null });
+    expect(report.findings[1]).toMatchObject({ startLine: 10, endLine: 10 });
+  });
+});
+
 describe("settlement distinctness", () => {
   it("distinguishes an incomplete, empty-findings run from a complete, empty-findings run", () => {
     const complete = buildJsonReport(baseInput({ outcome: "complete", findings: [] }));

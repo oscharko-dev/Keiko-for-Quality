@@ -117,8 +117,10 @@ export interface ReviewProfile {
    */
   readonly pathInstructions: readonly PathInstruction[];
   /**
-   * Declared contract pairs — schema and compilation only; see `ContractPair`'s own doc comment for
-   * what this field is for and why nothing reads it into a review yet. Optional in the source JSON —
+   * Declared contract pairs — see `ContractPair`'s own doc comment for what this field is for and
+   * which two consumers read it: `rule-file.ts`'s `contractPairsSection` renders this raw form into
+   * the rule, and `review.ts`'s deterministic contract gate matches on the compiled form
+   * `compileProfile` derives from it below. Optional in the source JSON —
    * an absent key parses to `[]`, the same additive contract `pathInstructions` above has, so every
    * profile written before this field existed still parses unchanged.
    *
@@ -183,8 +185,10 @@ const MAX_PATHS_PER_INSTRUCTION = 16;
  * Matches `ExclusionRule.pattern`'s own bound — the same kind of value, the same limit.
  * `contractPairs[].paths` reuses this exact constant too (see `parseGlobPaths` below), rather than
  * restating the same number under a second name for what is, there as well, the same kind of value.
+ * Exported so `config/guidelines.ts`'s own path list — the same kind of value again, a repository
+ * path rendered into the same rule prompt — reuses it by reference too (v0.13.0).
  */
-const MAX_INSTRUCTION_PATH_LENGTH = 512;
+export const MAX_INSTRUCTION_PATH_LENGTH = 512;
 const MAX_INSTRUCTION_TEXT_LENGTH = 1024;
 /** Ceiling on the sum of every entry's `instructions.length`, independent of the per-entry bound. */
 const MAX_TOTAL_INSTRUCTION_TEXT_LENGTH = 8192;
@@ -193,9 +197,14 @@ const MAX_TOTAL_INSTRUCTION_TEXT_LENGTH = 8192;
  * Newline is the only control character natural-language instruction text legitimately needs.
  * Tighter than `sanitize.ts`'s published-body check, which also allows tab: that check governs a
  * Markdown comment body, and this one governs text composed directly into the engine's rule prompt.
+ *
+ * A literal rather than `new RegExp("…")`, for the reason `brands.ts`'s `CONTROL_CHARACTERS` gives:
+ * the string form's doubled backslash is a single one by the time the pattern is parsed, so the two
+ * compile to the same `source` with the same (empty) flags. The one gap in the ranges is still
+ * U+000A, the newline this check exists to let through.
  */
 // eslint-disable-next-line no-control-regex -- detecting control characters is this pattern's purpose
-const CONTROL_EXCEPT_NEWLINE = new RegExp("[\\u0000-\\u0009\\u000B-\\u001F\\u007F-\\u009F]");
+const CONTROL_EXCEPT_NEWLINE = /[\u0000-\u0009\u000B-\u001F\u007F-\u009F]/;
 
 function parseExclusions(value: unknown, field: string): ExclusionRule[] {
   return asArray(value, field, 512).map((entry, i) => {

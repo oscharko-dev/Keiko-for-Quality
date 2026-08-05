@@ -30,30 +30,43 @@ export type SanitizeResult =
 
 /** Newline and tab are the only control characters a Markdown body legitimately needs. */
 // eslint-disable-next-line no-control-regex -- detecting control characters is this rule's purpose
-const CONTROL_EXCEPT_WHITESPACE = new RegExp("[\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]");
+const CONTROL_EXCEPT_WHITESPACE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/;
 
 /**
  * Bidirectional formatting characters can make rendered text read in a different order than it is
  * stored, so a comment can claim one thing to a human and another to a parser.
  */
-const BIDIRECTIONAL = new RegExp("[\\u202A-\\u202E\\u2066-\\u2069\\u200E\\u200F\\u061C]");
+const BIDIRECTIONAL = /[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/;
 
 /** Zero-width characters are invisible, which makes them a carrier for hidden content. */
 // Each code point is rejected on its own. They are never meant to combine into a grapheme here —
 // that they could is precisely why they are listed.
 // eslint-disable-next-line no-misleading-character-class -- see above
-const ZERO_WIDTH = new RegExp("[\\u200B\\u200C\\u200D\\u2060\\uFEFF\\u180E]");
+const ZERO_WIDTH = /[\u200B\u200C\u200D\u2060\uFEFF\u180E]/;
 
 /** Any tag-like construct. GitHub renders a subset of HTML, and that subset is enough. */
-const HTML_TAG = new RegExp("<[A-Za-z!/?]");
+const HTML_TAG = /<[A-Za-z!/?]/;
 
-/** A one-click-applicable code block. Never acceptable from a model reading hostile input. */
-const SUGGESTION_BLOCK = new RegExp("```+\\s*suggestion", "i");
+/**
+ * A one-click-applicable code block. Never acceptable from a model reading hostile input.
+ *
+ * The leading negative lookbehind pins a match to the FIRST backtick of a run, and that is the
+ * whole reason it is there (Sonar S8786): without it every position inside a run of N backticks is
+ * its own start position, each one scanning the rest of the run before failing — quadratic. This
+ * check runs on the RAW body, ahead of the length bound, so a body that is nothing but backticks
+ * is reachable, and reachable is the standard this module is held to. The accepted language does
+ * not change, because a run of three or more backticks always contains its own first backtick:
+ * every body that matched before still matches, anchored one or more characters further left.
+ * Checked against a plain suggestion fence, a four-backtick uppercase one, one preceded by a
+ * letter, and one preceded by a shorter backtick run — all still rejected — and against 32000
+ * backticks, which still does not match, in 0.2ms rather than 1.6 seconds.
+ */
+const SUGGESTION_BLOCK = /(?<!`)```+\s*suggestion/i;
 
 /** `@name` outside of code. Publishing one notifies a real person on the model's behalf. */
-const MENTION = new RegExp("(^|[^\\w`])@[A-Za-z0-9][A-Za-z0-9-]{0,38}", "m");
+const MENTION = /(^|[^\w`])@[A-Za-z0-9][A-Za-z0-9-]{0,38}/m;
 
-const IMAGE = new RegExp("!\\[");
+const IMAGE = /!\[/;
 
 /**
  * Any URI scheme, plus protocol-relative and bare-www forms.
@@ -64,22 +77,41 @@ const IMAGE = new RegExp("!\\[");
  * short fenced code block showing the line at issue, and in JavaScript or TypeScript that block
  * very often contains one; the whole finding was then discarded and the run settled incomplete.
  * A correct review was lost to a pattern meant to catch a URL.
+ *
+ * Written as a literal, like every pattern here (Sonar S6325/S7780): what is written is what the
+ * engine compiles, with no string-escape layer in between to read past. The one thing the literal
+ * form adds is the `\/` — the regex delimiter escaping itself, not part of the pattern — so the
+ * alternatives are still `scheme://`, `www.`, and a line-initial `//host`, character for character.
+ *
+ * Sonar also reports this shape, and `LINK_NEUTRALIZE`'s copy of it, as super-linear (S8786). The
+ * cost is real and there is no fix that keeps the pattern honest. `[A-Za-z0-9+.-]*` is followed by
+ * `://`, which is disjoint from it, so no backtracking step ever does any work — but the scan
+ * still restarts at every letter, which makes `1a1a1a…` quadratic on its own. Both anchors that
+ * would stop the restarts change what matches: `(?<![A-Za-z0-9+.-])` stops matching `1a://x`,
+ * where the scheme legitimately begins mid-run, and `(?<![A-Za-z])` matches the same set but
+ * leaves the same quadratic on that same input. So the shape stays. Loosening a pattern that
+ * decides what this product publishes, to quiet an analyser, is not a trade available here.
  */
-const LINK = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.|^//[A-Za-z0-9-]+\\.[A-Za-z])", "m");
+const LINK = /([A-Za-z][A-Za-z0-9+.-]*:\/\/|\bwww\.|^\/\/[A-Za-z0-9-]+\.[A-Za-z])/m;
 
 /**
  * Shapes that look like credentials.
  *
  * This is a backstop, not a secret scanner: the engine should never have been given a credential to
  * echo. It exists because the cost of publishing one publicly is unrecoverable.
+ *
+ * `\w` in the fine-grained-PAT shape is exactly `[A-Za-z0-9_]` (Sonar S6353), never a wider set:
+ * these are plain literals with no `u` and no `v` flag, and that flag is the only thing that would
+ * widen it. The other classes keep their explicit spelling because none of them is `\w`'s set —
+ * `[A-Za-z0-9]` has no underscore, `[A-Za-z0-9_-]` adds a hyphen.
  */
 const CREDENTIAL_SHAPES = [
-  new RegExp("gh[pousr]_[A-Za-z0-9]{16,}"),
-  new RegExp("github_pat_[A-Za-z0-9_]{20,}"),
-  new RegExp("sk-[A-Za-z0-9]{20,}"),
-  new RegExp("-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-  new RegExp("(?:AKIA|ASIA)[A-Z0-9]{16}"),
-  new RegExp("eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}\\."),
+  /gh[pousr]_[A-Za-z0-9]{16,}/,
+  /github_pat_\w{20,}/,
+  /sk-[A-Za-z0-9]{20,}/,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+  /(?:AKIA|ASIA)[A-Z0-9]{16}/,
+  /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\./,
 ];
 
 const MAX_BODY_CHARS = 8000;
@@ -112,8 +144,28 @@ const MASKED_CHECKS: readonly { readonly pattern: RegExp; readonly reason: Rejec
   { pattern: MENTION, reason: "mention" },
 ];
 
-/** A fence opener: up to three spaces, a run of three or more backticks or tildes, an info string. */
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+/**
+ * A fence opener: up to three spaces, a run of three or more backticks or tildes, an info string.
+ *
+ * The lookahead after each run makes that run possessive, answering Sonar S8786: `.` matches a
+ * backtick and a tilde too, so without it the run and the info string can decompose the same
+ * delimiter many ways and the engine walks every one of them. Nothing about the accepted language
+ * changes: the greedy run already took the whole delimiter on its first attempt, and giving one
+ * character back could never have helped, because `.*` stops at the same place either way — the
+ * first newline, or the end of the line — so `$` is tested at exactly the same index and group 2
+ * ends up with the same text. All the lookahead removes is the walk (confirmed by comparing index
+ * and both groups across an exhaustive set of short backtick/tilde/space strings: no difference).
+ *
+ * Unlike `INLINE_SPAN`'s below, this walk was never reachable, and the distinction is worth
+ * keeping straight. The engine only backtracks here when `$` fails, which needs a newline in the
+ * subject — and this pattern is applied only by `openingFenceMarker`, which is only ever handed an
+ * element of `body.split("\n")`. A lone `\r` cannot smuggle one in either: `\r\n` is normalized
+ * before any of this runs, and a bare `\r` is inside `CONTROL_EXCEPT_WHITESPACE`'s range, so it is
+ * rejected as `control_characters` first. So this is a latent shape made impossible rather than a
+ * live denial of service closed — `SUGGESTION_BLOCK`'s and `URL_TRAILING_PUNCTUATION`'s fixes are
+ * the reachable ones.
+ */
+const FENCE_OPEN = /^ {0,3}(`{3,}(?!`)|~{3,}(?!~))(.*)$/;
 
 /** A fence closer: the same run alone on its line, trailing blanks allowed. */
 const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
@@ -153,16 +205,24 @@ function openingFenceMarker(line: string): string | undefined {
  * Masks the body of every closed fenced block, walking LINES rather than matching a multi-line
  * regex: the regex form was super-linear (Sonar S8786) because a lazy `[\s\S]*?` re-scans toward
  * every candidate closing line. A line walk is linear and states CommonMark's rules directly.
+ *
+ * The cursor is a `while` with an explicit `i` rather than a `for` header because a closed block
+ * jumps it PAST the closing line in one step: a closing fence is not a candidate opener, and a
+ * nested-looking fence inside a block is content, not a fence. Reassigning a `for` counter in the
+ * body says that badly (Sonar S2310) and reads as an accident; the jump is the point.
  */
 function maskFencedBlocks(body: string): string {
   const lines = body.split("\n");
-  for (let i = 0; i < lines.length; i += 1) {
+  let i = 0;
+  while (i < lines.length) {
     const marker = openingFenceMarker(lines[i] ?? "");
-    if (marker === undefined) continue;
-    const close = closingFenceIndex(lines, i + 1, marker);
-    if (close === -1) continue;
+    const close = marker === undefined ? -1 : closingFenceIndex(lines, i + 1, marker);
+    if (close === -1) {
+      i += 1;
+      continue;
+    }
     for (let k = i + 1; k < close; k += 1) lines[k] = (lines[k] ?? "").replace(/./g, "x");
-    i = close;
+    i = close + 1;
   }
   return lines.join("\n");
 }
@@ -227,23 +287,45 @@ interface Span {
  * the shape the check rejects is left alone, and the check rejects it exactly as it did before this
  * pass existed.
  */
-const MENTION_NEUTRALIZE = new RegExp(
-  "(^|[^\\w`])(@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:/[A-Za-z0-9][A-Za-z0-9-]{0,38})?)",
-  "gm",
-);
+const MENTION_NEUTRALIZE =
+  /(^|[^\w`])(@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\/[A-Za-z0-9][A-Za-z0-9-]{0,38})?)/gm;
 
 /**
  * `LINK`'s first two alternatives — scheme and bare `www.` — deliberately without its third: the
  * protocol-relative `^//host` form is rare in prose and already shares its shape with an accepted
  * divider of slashes (see `LINK`'s own comment), so it is left to keep rejecting rather than
  * guessed at.
+ *
+ * It inherits `LINK`'s scheme alternative and therefore `LINK`'s super-linear scan restarts
+ * (Sonar S8786) and `LINK`'s reasons for keeping them — see there. The trailing `\S*` is not part
+ * of that: it is terminal and greedy with nothing after it to fail against, so it never backtracks.
+ * What differs from `LINK` is only where the two run. `LINK` is a masked check, downstream of the
+ * length bound; this one runs inside `neutralize`, which is why `sanitizeFindingBody` checks that
+ * bound on both sides of the pass rather than only after it.
  */
-const LINK_NEUTRALIZE = new RegExp("([A-Za-z][A-Za-z0-9+.-]*://|\\bwww\\.)\\S*", "g");
+const LINK_NEUTRALIZE = /([A-Za-z][A-Za-z0-9+.-]*:\/\/|\bwww\.)\S*/g;
 
-/** Trailing punctuation that closes a sentence or a parenthetical, not the URL itself. */
-const URL_TRAILING_PUNCTUATION = /[.,;:!?)\]}'"]+$/;
+/**
+ * Trailing punctuation that closes a sentence or a parenthetical, not the URL itself.
+ *
+ * The lookbehind pins the match to the START of the trailing run — which is where `replace` finds
+ * it anyway, since the leftmost match of `[…]+$` is by definition the earliest position from which
+ * every remaining character is punctuation, and that position is never itself preceded by one.
+ * Saying so out loud is what keeps the scan linear (Sonar S8786): without it, every position
+ * inside a long punctuation run is retried as its own start. Measured on 32000 dots followed by a
+ * letter, the shape that forced the retries: 0.1ms instead of 617ms, same result.
+ */
+const URL_TRAILING_PUNCTUATION = /(?<![.,;:!?)\]}'"])[.,;:!?)\]}'"]+$/;
 
-/** An identifier immediately followed by `<` — the head of a generic type reference. */
+/**
+ * An identifier immediately followed by `<` — the head of a generic type reference.
+ *
+ * Super-linear (Sonar S8786) for exactly the reason `LINK` is, and with the same absence of a
+ * remedy — see there. `[\w$]*` and the `<` after it are disjoint, so backtracking is free, but the
+ * scan restarts at every identifier character; the anchor that would stop it, `(?<![\w$])`, drops
+ * `1a<b>`, whose identifier starts mid-run. The `a<`-repeated pin in the tests is what guards the
+ * property that actually matters here: bounded, not exponential.
+ */
 const GENERIC_HEAD = /[A-Za-z_$][\w$]*</g;
 
 function mentionSpans(masked: string): Span[] {
@@ -332,7 +414,7 @@ function resolveOverlaps(spans: readonly Span[]): Span[] {
   const ordered = [...spans].sort((a, b) => a.start - b.start);
   const accepted: Span[] = [];
   for (const span of ordered) {
-    const last = accepted[accepted.length - 1];
+    const last = accepted.at(-1);
     if (last !== undefined && span.start < last.end) continue;
     accepted.push(span);
   }
@@ -371,15 +453,19 @@ function neutralize(body: string): NeutralizeOutcome {
 }
 
 /** True when some fence in the body never closes — the same walk `maskFencedBlocks` performs,
- *  reported as a boolean instead of applied. */
+ *  cursor jump and all (see its doc comment), reported as a boolean instead of applied. */
 function hasUnclosedFence(body: string): boolean {
   const lines = body.split("\n");
-  for (let i = 0; i < lines.length; i += 1) {
+  let i = 0;
+  while (i < lines.length) {
     const marker = openingFenceMarker(lines[i] ?? "");
-    if (marker === undefined) continue;
+    if (marker === undefined) {
+      i += 1;
+      continue;
+    }
     const close = closingFenceIndex(lines, i + 1, marker);
     if (close === -1) return true;
-    i = close;
+    i = close + 1;
   }
   return false;
 }
@@ -420,8 +506,8 @@ function withNeutralizedCount(body: string, neutralized: number): SanitizeResult
  */
 export function sanitizeFindingBody(raw: string): SanitizeResult {
   const body = raw
-    .replace(/\r\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
+    .replaceAll("\r\n", "\n")
+    .replaceAll(/\n{3,}/g, "\n\n")
     .trim();
   if (body.length < MIN_BODY_CHARS) return { ok: false, reason: "empty" };
   for (const check of RAW_CHECKS) {
@@ -429,11 +515,25 @@ export function sanitizeFindingBody(raw: string): SanitizeResult {
   }
   if (looksLikeCredential(body)) return { ok: false, reason: "credential" };
 
+  // An over-long body is rejected BEFORE neutralization as well as after, and the early return
+  // decides nothing the later one would not have. `applySpans` only ever inserts two backticks per
+  // span and copies the rest, so the candidate is never shorter than the body it came from: a body
+  // already past 8000 characters cannot come back under it, and the reason code, the result, and
+  // the absence of a `neutralized` count on this path are all the same either way.
+  //
+  // What it buys is a bound on the input to the neutralization scan. `LINK_NEUTRALIZE` and
+  // `GENERIC_HEAD` are quadratic in scan restarts (see their doc comments for why every
+  // reformulation that removes the restart also changes what they match, which for these patterns
+  // is the worse trade). Every other pattern in this module already runs against input the checks
+  // above have bounded; without this line those two were the exception, reachable at whatever
+  // length the engine happened to emit.
+  if (body.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
+
   const { body: candidate, neutralized } = neutralizeGuardingUnclosedFence(body);
 
-  // Checked AFTER neutralization, not before: a backtick pair adds two characters, so a body that
-  // only clears 8000 once its own rewrites are undone is still over the bound. Honesty about size
-  // outranks the convenience of a rewrite that only fits by construction.
+  // Checked AFTER neutralization too, not only before: a backtick pair adds two characters, so a
+  // body that only clears 8000 once its own rewrites are undone is still over the bound. Honesty
+  // about size outranks the convenience of a rewrite that only fits by construction.
   if (candidate.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
   const masked = maskCodeRegions(candidate);
   for (const check of MASKED_CHECKS) {
@@ -447,7 +547,11 @@ export function sanitizeFindingBody(raw: string): SanitizeResult {
  *
  * Product-authored text still embeds candidate-controlled values, so it is escaped rather than
  * trusted for being ours.
+ *
+ * The replacement is a raw string (Sonar S7780) because it carries exactly one backslash, and a
+ * `"\\$&"` written with two invites the reader to count them: `$&` re-emits the matched backtick
+ * or backslash, and the single backslash in front of it is the escape.
  */
 export function escapeInline(text: string): string {
-  return text.replace(/[`\\]/g, "\\$&");
+  return text.replace(/[`\\]/g, String.raw`\$&`);
 }

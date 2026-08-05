@@ -215,30 +215,55 @@ describe("buildRuleFile", () => {
    * anchor-matching false pass would need the model to reconstruct the guidance on its own).
    */
   describe("issue #58 coverage-gap guidance", () => {
-    it("asks for a cleared value and a success-shaped error fallback to be treated as defects", () => {
-      const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
-      expect(rule).toContain("empty, zero, or cleared value is not the same as no value provided");
-      expect(rule).toContain("maps every failure to a success-shaped fallback");
-    });
+    // One row per addition: what it pins, and the exact phrases that addition put into the text.
+    // Parameterised because the four bodies differed only in those strings (Sonar S5976) — every
+    // phrase below is the same assertion it was under its own `it`, and the next corpus-driven
+    // addition is a row here rather than a fifth copy of the same body.
+    const additions: { name: string; phrases: string[] }[] = [
+      {
+        name: "asks for a cleared value and a success-shaped error fallback to be treated as defects",
+        phrases: [
+          "empty, zero, or cleared value is not the same as no value provided",
+          "maps every failure to a success-shaped fallback",
+        ],
+      },
+      {
+        name: "asks for a narrowed-to-exclusion or stale-reference assertion to be treated as weakened",
+        phrases: [
+          "exact-value assertion narrowed to merely excluding the old value",
+          "captured before a later refresh or refetch",
+        ],
+      },
+      {
+        name: "requires an exhaustive-search statement before a negative-existence claim is published",
+        phrases: [
+          "before claiming nothing calls, passes, or reaches a value",
+          "no caller passes X",
+        ],
+      },
+      {
+        name: "guards the two ghost-defect classes: a schema-ruled-out collision, and an unverified claim",
+        phrases: [
+          "primary key or unique constraint on the compared columns already",
+          "before stating how an encoding, format, or algorithm behaves",
+          "confidently wrong claim about padding, rounding",
+        ],
+      },
+    ];
 
-    it("asks for a narrowed-to-exclusion or stale-reference assertion to be treated as weakened", () => {
-      const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
-      expect(rule).toContain("exact-value assertion narrowed to merely excluding the old value");
-      expect(rule).toContain("captured before a later refresh or refetch");
-    });
-
-    it("requires an exhaustive-search statement before a negative-existence claim is published", () => {
-      const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
-      expect(rule).toContain("before claiming nothing calls, passes, or reaches a value");
-      expect(rule).toContain("no caller passes X");
-    });
-
-    it("guards the two ghost-defect classes: a schema-ruled-out collision, and an unverified claim", () => {
-      const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
-      expect(rule).toContain("primary key or unique constraint on the compared columns already");
-      expect(rule).toContain("before stating how an encoding, format, or algorithm behaves");
-      expect(rule).toContain("confidently wrong claim about padding, rounding");
-    });
+    // Rows are spread as positional tuples with a `%s` title, not as objects with `$name`: `$key`
+    // interpolation renders the value through chai's `objDisplay`, which quote-wraps it and
+    // truncates past 40 characters, and every name above is longer than that. Under `$name` all
+    // four arrive in the reporter ellipsised, so the failure no longer says which addition
+    // regressed and `vitest -t "<full title>"` stops matching. `%s` emits a string verbatim, which
+    // is what keeps these titles the specifications they were under four separate `it`s.
+    it.each(additions.map((addition) => [addition.name, addition.phrases] as const))(
+      "%s",
+      (_name, phrases) => {
+        const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+        for (const phrase of phrases) expect(rule).toContain(phrase);
+      },
+    );
   });
 
   describe("path-scoped instructions", () => {

@@ -8,7 +8,7 @@ third-party software the product depends on, and the precise nature of each depe
 - **Project:** [alibaba/open-code-review](https://github.com/alibaba/open-code-review)
 - **Copyright:** Copyright 2026 alibaba/open-code-review Contributors
 - **License:** Apache License, Version 2.0
-- **Pinned release:** see [`engine/pinned-release.json`](engine/pinned-release.json)
+- **Pinned release:** see [`src/engine/pinned-release.ts`](src/engine/pinned-release.ts)
 
 ### Nature of the dependency
 

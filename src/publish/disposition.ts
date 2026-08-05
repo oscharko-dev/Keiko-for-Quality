@@ -43,9 +43,24 @@ const FOOTER_LINE = /^\s*(?:🤖\s*)?(?:generated with|co-authored-by:)/i;
  *  shape a templated signature block would also use. Never itself part of an authored argument. */
 const HTML_COMMENT = /<!--[\s\S]*?-->/g;
 
+/**
+ * Bounds `substantiveText`'s regex/scan cost against a hostile or degenerate reply body, mirroring
+ * `similarity.ts`'s `MAX_INPUT_CHARS`/`clip()` exactly: `HTML_COMMENT`'s `[\s\S]*?` is the same
+ * unanchored-scan shape a large, comment-free input turns quadratic — comfortably above
+ * `MIN_SUBSTANTIVE_CHARS` so no real disposition's verdict can change, comfortably below any length
+ * that makes the scan itself the cost. A thread's last reply is candidate-influenced content (an
+ * attacker who can comment can shape what this function reads), the same trust boundary
+ * `similarity.ts` already bounds for the identical reason.
+ */
+const MAX_INPUT_CHARS = 20_000;
+
+function clip(text: string): string {
+  return text.length > MAX_INPUT_CHARS ? text.slice(0, MAX_INPUT_CHARS) : text;
+}
+
 /** Strips signature and attribution noise, leaving only the text an author actually wrote. */
 function substantiveText(body: string): string {
-  return body
+  return clip(body)
     .replace(HTML_COMMENT, " ")
     .split("\n")
     .filter((line) => !FOOTER_LINE.test(line))

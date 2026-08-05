@@ -1,5 +1,5 @@
 import type { RuntimeConfig } from "../config/runtime.js";
-import type { Sha256 } from "../core/brands.js";
+import { repoPath, type Sha256 } from "../core/brands.js";
 import type { EngineFinding } from "../engine/result.js";
 import type { InventoryItem } from "../inventory/classify.js";
 import type { Inventory } from "../inventory/inventory.js";
@@ -24,15 +24,24 @@ import {
 /**
  * Whether an inventory item can ever be looked up in, or written to, the review cache.
  *
- * Restricted to `"M"`/`"A"` content actually classified `reviewed` — a rename or a deletion is
- * cache-ineligible by design (v0.9.0 scope boundary, not a defect: a rename's content did not
- * change and a deletion has no head blob to key on), and a symlink or submodule pointer is a
- * pointer move, not reviewed text, even when the inventory still requires coverage of it.
+ * Restricted to content actually classified `reviewed`, with a real head blob to key content on —
+ * a deletion has no head blob at all, and a symlink or submodule pointer is a pointer move, not
+ * reviewed text, even when the inventory still requires coverage of it. A PURE rename never reaches
+ * this function to begin with: `classify()` (`inventory/classify.ts`) downgrades a rename with an
+ * unchanged blob to `mechanically-clean`, which is never `reviewable` and therefore never iterated
+ * here.
+ *
+ * `"R"` (v0.13.0) joins `"M"`/`"A"` for exactly that reason: every `"R"` status this function ever
+ * sees is a rename WITH real content edits — its blob changed, so `classify()` already decided its
+ * content needs review — and content-addressed lookup keys on the blob alone, never the path.
+ * `mergeHitFindings`'s own path-remap (this module) is the prerequisite that makes replaying one
+ * sound: a rename's stored entry carries its OLD path, and only that remap onto the current lookup
+ * path stops a hit from replaying under a name the file no longer has.
  */
 function isCacheEligible(item: InventoryItem): boolean {
   return (
     item.classification.kind === "reviewed" &&
-    (item.status === "M" || item.status === "A") &&
+    (item.status === "M" || item.status === "A" || item.status === "R") &&
     item.baseBlob !== undefined &&
     item.headBlob !== undefined
   );
@@ -186,13 +195,25 @@ export function combinedExcludes(
  * A hit's findings are exactly as untrusted on replay as they were the run they were first
  * produced: they still pass through the existing publisher path — sanitization and marker-based
  * deduplication run again — so nothing here treats a cached finding as pre-cleared for publication.
+ *
+ * Every replayed finding's `path` is remapped to the LOOKUP key — the current path `hits` is keyed
+ * by (see `lookupMemoized`) — rather than trusted from the stored entry itself. This is required,
+ * not defensive, now that `isCacheEligible` admits `"R"`: a rename's stored entry carries the path
+ * it was written under, which is the file's OLD name, and only this remap makes replaying it under
+ * the CURRENT name sound. It also protects an `"M"`/`"A"` entry against a rarer failure mode a
+ * rename does not raise at all — a hash collision across two different paths whose blob/rule/
+ * engine/model/protocol tuples happen to produce the identical content key — by trusting the
+ * lookup path (a property of THIS run's own inventory) over whatever an old, possibly-colliding
+ * stored entry happens to say.
  */
 export function mergeHitFindings(
   engineFindings: readonly EngineFinding[],
   hits: ReadonlyMap<string, CacheEntry>,
 ): readonly EngineFinding[] {
   if (hits.size === 0) return engineFindings;
-  const cached = [...hits.values()].flatMap((entry) => entry.findings);
+  const cached = [...hits.entries()].flatMap(([path, entry]) =>
+    entry.findings.map((finding) => ({ ...finding, path: repoPath(path) })),
+  );
   return [...engineFindings, ...cached];
 }
 

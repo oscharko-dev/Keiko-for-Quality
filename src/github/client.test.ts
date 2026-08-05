@@ -300,4 +300,75 @@ describe("GitHubClient retry and backoff (secondary rate limit)", () => {
     expect(callCount()).toBe(2);
     expect(sleepCalls).toEqual([1000]);
   });
+
+  /**
+   * The primary rate limit (v0.13.0): no `retry-after` at all, only `x-ratelimit-remaining: 0` and
+   * `x-ratelimit-reset` (a Unix epoch second). Before this, a 429 shaped like this fell through to
+   * the ordinary linear backoff — a few seconds — and burned all three attempts against a limit that
+   * was never going to lift that fast.
+   */
+  it("honors x-ratelimit-reset on a primary-limit 429, not the linear backoff", async () => {
+    const resetAt = Math.floor(Date.now() / 1000) + 45;
+    const { fetch: stub, callCount } = sequencedFetch([
+      statusResponse(429, {
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": String(resetAt),
+      }),
+      jsonResponse({ id: 6, user: { login: "keiko-for-quality[bot]" } }),
+    ]);
+    globalThis.fetch = stub;
+    const client = new GitHubClient("https://api.github.test", "token");
+
+    await client.getReviewComment(REF, 6);
+
+    expect(callCount()).toBe(2);
+    // Within 1s of the real 45s window — `Date.now()` moves between the fixture's own computation
+    // and the function's internal read of it, so an exact match would be flaky.
+    expect(sleepCalls).toHaveLength(1);
+    expect(sleepCalls[0]).toBeGreaterThanOrEqual(44_000);
+    expect(sleepCalls[0]).toBeLessThanOrEqual(45_000);
+  });
+
+  it("falls back to the linear backoff when a primary-limit 429 carries no readable reset", async () => {
+    const { fetch: stub, callCount } = sequencedFetch([
+      statusResponse(429, { "x-ratelimit-remaining": "0" }),
+      jsonResponse({ id: 7, user: { login: "keiko-for-quality[bot]" } }),
+    ]);
+    globalThis.fetch = stub;
+    const client = new GitHubClient("https://api.github.test", "token");
+
+    await client.getReviewComment(REF, 7);
+
+    expect(callCount()).toBe(2);
+    expect(sleepCalls).toEqual([1000]);
+  });
+
+  /**
+   * The ambiguous-write refusal (v0.13.0): a 5xx on a WRITE (creating a comment) may have already
+   * succeeded server-side before the response was lost, and retrying could create a SECOND comment
+   * for the one finding — unlike a 5xx on a read, which costs nothing to repeat.
+   */
+  it("does not retry a 500 on createIssueComment — an ambiguous write, unlike an ordinary read", async () => {
+    const { fetch: stub, callCount } = sequencedFetch([statusResponse(500)]);
+    globalThis.fetch = stub;
+    const client = new GitHubClient("https://api.github.test", "token");
+
+    await expect(client.createIssueComment(REF, 1, "a summary")).rejects.toThrow(GitHubApiError);
+    expect(callCount()).toBe(1);
+    expect(sleepCalls).toEqual([]);
+  });
+
+  it("still retries a 429 or a secondary-rate-limit 403 on the same write — neither is ambiguous", async () => {
+    const { fetch: stub, callCount } = sequencedFetch([
+      statusResponse(429),
+      jsonResponse({ id: 99, body: "posted" }),
+    ]);
+    globalThis.fetch = stub;
+    const client = new GitHubClient("https://api.github.test", "token");
+
+    const created = await client.createIssueComment(REF, 1, "a summary");
+
+    expect(created.id).toBe(99);
+    expect(callCount()).toBe(2);
+  });
 });

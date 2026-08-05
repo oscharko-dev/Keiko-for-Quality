@@ -95,7 +95,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: git fetch --no-tags origin "pull/${PR}/head"
 
-      - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.8.0
+      - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.14.0
         env:
           # The credential is passed by variable NAME, never as an input.
           KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
@@ -175,12 +175,19 @@ comment carrying a valid-looking marker and silence a real finding.
 3. Store its id and private key as `KFQ_APP_ID` and `KFQ_APP_PRIVATE_KEY`.
 
 Without them the action falls back to `github_token` and posts as the shared Actions identity. It
-works; it is weaker; the fallback exists so you can try the reviewer before registering an App.
+works; it is weaker; the fallback exists so you can try the reviewer before registering an App. The
+weakening now costs more than deduplication: this reviewer also resolves its own past
+"incomplete review" notices once a later push supersedes them (see [Automatic
+cleanup](#automatic-cleanup) below), and that cleanup is a GitHub thread-resolution WRITE, not a
+read-only suppression check — it runs only when the identity is provably exclusive (a GitHub App),
+never under the shared fallback, where this run cannot prove a matching comment was actually its
+own.
 
 ### Deduplication
 
-A finding is suppressed only when it is the same finding this reviewer already published, or the
-same finding at a location someone already gave a considered answer to, checked in three stages:
+A finding is suppressed against an existing conversation only when it is the same finding this
+reviewer already published, or the same finding at a location someone already gave a considered
+answer to, checked in three stages:
 
 1. **Exact marker.** Every published conversation carries a hidden fingerprint of its content. A
    later run recomputes the same fingerprint for the same defect and suppresses the repost.
@@ -199,6 +206,23 @@ same finding at a location someone already gave a considered answer to, checked 
    characters once signature lines (an automation footer, a `Co-Authored-By:` trailer) are stripped —
    never a bare "resolved" click with no reply, or a resolve with no reply at all. Counted separately
    as `dedup.dispositioned` so it is never confused with the two stages above.
+4. **Outdated recurrence.** The similarity stage above needs a trustworthy line anchor, and an
+   _outdated_ thread — one whose diff hunk a later push moved — no longer has one, so it is invisible
+   to that stage the same way a resolved one is. Left uncaught, one still-open, unfixed defect
+   re-filed itself as a brand-new blocking conversation on every push that merely touched its file.
+   This stage suppresses a candidate against a still-open, outdated conversation on a body-similarity
+   match alone, at a higher bar than the similarity stage's own (no location left to narrow on, so
+   the body carries the whole decision) — never against a genuinely resolved thread, which keeps
+   stage 3's contract intact. Counted as `publish.finding_suppressed_outdated_recurrence`.
+
+A fifth suppression runs earlier, and independently of those four, inside a single run. When the
+model describes one defect twice in one pass, the near-duplicates are clustered against each other —
+after sanitization, before any of the stages above — and only the best-articulated instance of each
+cluster goes on to those stages; a suppressed member never reaches them at all. No cross-run stage
+could have caught this case, because both candidates arrive before either one is published. The run
+loses redundancy, never coverage. Counted separately as `publish.finding_suppressed_intra_run`, so
+"the model repeats itself within a run" is never read as "a later run repeated an earlier one" — the
+two call for different remedies.
 
 The exact-marker stage ignores only a **resolved** conversation, not merely an **outdated** one: a
 marker fingerprints a finding's content, never the line it sits on, so a push that moves a thread's
@@ -211,6 +235,27 @@ would be noise, not signal. Resolution state, and — for a genuinely resolved t
 reply's author and body, come from a best-effort GraphQL lookup the `Pull requests` permission above
 already covers; if a token or platform cannot answer it, every conversation is simply treated as
 open, which is exactly how deduplication behaved before this lookup existed.
+
+### Automatic cleanup
+
+Branch protection can require every conversation resolved before merge. An "this change was not
+fully reviewed" notice from an earlier, incomplete run is not exempt — and once a later push
+produces a fresh, complete assessment, the old notice is not merely stale, it is actively wrong, yet
+nothing resolved it automatically. Left alone, that is a human hand-resolving a bot's own mistake on
+every pull request that ever truncated once.
+
+At the end of every run, the reviewer resolves its own past incomplete-review notices whose target
+commit GitHub has marked outdated — a later push moved the hunk they anchored, so the commit they
+describe is no longer the head under review. It never resolves a **finding**: a finding is an open
+question for a human, and auto-resolving one would defeat the entire point of raising it. Detection
+is a fixed, product-controlled sentence no model output can produce, so it can never mistake a
+genuine finding for a notice.
+
+This is a GitHub thread-resolution **write**, not a read-only suppression check, so it runs only
+under a provably exclusive identity — the GitHub App, never the shared `github_token` fallback (see
+[The bot identity](#the-bot-identity) above). It never affects this run's own completeness: a failed
+cleanup pass costs the next push one more stale thread to resolve by hand, exactly as if this
+feature did not exist, never a failed review.
 
 ### The run-summary comment
 
@@ -230,7 +275,8 @@ The comment states, for every settlement outcome including `incomplete` and `aba
   identifiers;
 - a compact table of counts: total, reviewable, excluded, and mechanically-clean paths; paths
   replayed from the review-cache store versus freshly reviewed; findings published; and duplicates
-  suppressed, broken out by dedup stage (exact marker, phrasing-independent similarity);
+  suppressed, broken out by dedup stage (intra-run duplicate, exact marker, phrasing-independent
+  similarity, dispositioned recurrence);
 - the per-run token budget, and the engine-reported spend when it is available.
 
 It carries no finding body, no file content, and no free-form model text — every field is a
@@ -462,7 +508,7 @@ generated prose distributed through this repository, not just this reviewer's ow
 
 ```bash
 npm ci
-npm run verify            # typecheck, lint, format, test, build, bundle reproducibility
+npm run verify            # typecheck, lint, format, test, corpus tests, build, bundle reproducibility
 npm run check:engine-pin  # downloads and verifies every pinned engine asset
 ```
 

@@ -129,12 +129,17 @@ const totalNoise = reportResults.reduce(
 const severeHitsFallback = CASES.filter(isSevere).filter(
   (c) => byId.get(c.id)?.pass === true,
 ).length;
+// Named and computed up front rather than nested inside the choice below: the ratio is pure
+// arithmetic over numbers already in hand, so evaluating it even when the report carries its own
+// `aggregates` costs nothing and leaves one flat question — reported, or recomputed — at the
+// point of use. `null` is the no-severe-hits answer, and stays distinct from the `undefined` an
+// `aggregates` block without the field yields; the printer below folds both to "n/a".
+const recomputedTokensPerSevereHit =
+  severeHitsFallback > 0 ? Math.round(totalTokens / severeHitsFallback) : null;
 const tokensPerSevereHit =
   report.aggregates !== undefined
     ? report.aggregates.tokensPerSevereHit
-    : severeHitsFallback > 0
-      ? Math.round(totalTokens / severeHitsFallback)
-      : null;
+    : recomputedTokensPerSevereHit;
 
 console.log(`     ${"tokens".padEnd(18)} ${String(totalTokens)} total`);
 console.log(

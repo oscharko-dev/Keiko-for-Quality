@@ -116,11 +116,21 @@ function parseCoverage(value: unknown, field: string): EngineCoverage {
   };
 }
 
+/**
+ * `report/types.ts`'s shared contract: `startLine`/`endLine` are 1-based, with exactly one
+ * carved-out sentinel — both fields `0` together, meaning file-level (`isFileLevel`). That
+ * sentinel is only ever constructed directly, as a literal `{ startLine: 0, endLine: 0 }` pair, by
+ * deterministic code in review.ts (the contract gate and pin-desync findings) — it never passes
+ * through this parser, which is model-facing only (`parseFindings`, `unwrapInnerLines`). `0` is
+ * therefore never a legitimate value here: a model-produced `{ start_line: 0, end_line: 5 }` used
+ * to parse successfully into a finding neither renderer's file-level sentinel nor SARIF's spec can
+ * represent, since `end < start` (the only cross-field check) is false whenever `start` is `0`.
+ */
 function parseLine(value: unknown, field: string): number {
   if (
     typeof value !== "number" ||
     !Number.isInteger(value) ||
-    value < 0 ||
+    value < 1 ||
     value > LIMITS.maxLine
   ) {
     throw new ValidationError(field);

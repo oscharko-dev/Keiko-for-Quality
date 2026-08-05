@@ -412,13 +412,39 @@ describe("GitHubClient.listReviewComments resolved/outdated merge", () => {
     expect(comments.find((c) => c.id === 71)).toMatchObject({ line: 8, startLine: 6 });
   });
 
+  /**
+   * v0.13.0: nothing for the GraphQL walk to attach state to when there are zero REST comments —
+   * a fresh pull request this reviewer has never commented on yet, which every one of its runs
+   * reaches at least once. Skipping the round trip entirely costs nothing this reviewer needed.
+   */
+  it("never calls GraphQL at all when the REST comment list is empty", async () => {
+    let graphqlCalled = false;
+    globalThis.fetch = ((input: string | URL | Request) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/graphql")) {
+        graphqlCalled = true;
+        return Promise.resolve(jsonResponse(threadsResponse([])));
+      }
+      return Promise.resolve(jsonResponse([]));
+    }) as typeof fetch;
+    const client = new GitHubClient("https://api.example.test", "token");
+
+    const comments = await client.listReviewComments(REF, 1);
+
+    expect(comments).toEqual([]);
+    expect(graphqlCalled).toBe(false);
+  });
+
   it("uses the caller-supplied GraphQL endpoint instead of the github.com default", async () => {
     const requested: string[] = [];
     globalThis.fetch = ((input: string | URL | Request) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       requested.push(url);
       if (url.includes("graphql")) return Promise.resolve(jsonResponse(threadsResponse([])));
-      return Promise.resolve(jsonResponse([]));
+      // At least one REST comment: the GraphQL overlay walk has nothing to attach state to, and is
+      // deliberately skipped entirely, on an empty comment list — this test is about which endpoint
+      // gets used, not about that skip, so it needs a comment to reach the walk at all.
+      return Promise.resolve(jsonResponse([restComment(90)]));
     }) as typeof fetch;
     const client = new GitHubClient(
       "https://ghes.example.test/api/v3",

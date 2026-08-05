@@ -123,6 +123,18 @@ describe("parseEngineResult", () => {
       expect(() => parseEngineResult(doc)).toThrow(ValidationError);
     });
 
+    // report/types.ts's `isFileLevel` sentinel is `startLine: 0, endLine: 0` TOGETHER, and it is
+    // only ever constructed directly by deterministic code in review.ts — never by this parser.
+    // Before this bound, `start_line: 0, end_line: 5` parsed successfully: `end < start` (the only
+    // cross-field check) is false whenever `start` is 0, producing a finding neither renderer's
+    // file-level sentinel nor SARIF's spec can represent.
+    it("rejects a start_line of 0, which the inverted-range check alone cannot catch", () => {
+      const doc = document({
+        comments: [{ path: "src/a.ts", content: "x".repeat(20), start_line: 0, end_line: 5 }],
+      });
+      expect(() => parseEngineResult(doc)).toThrow(ValidationError);
+    });
+
     it("tolerates absent optional classification fields", () => {
       const doc = document({
         comments: [{ path: "src/a.ts", content: "x".repeat(20), start_line: 1, end_line: 1 }],
@@ -326,6 +338,29 @@ describe("parseEngineResult", () => {
         expect(result.findings[0]?.content).toBe("inner sentence body text");
         expect(result.findings[0]?.path).toBe("src/inner.ts");
         expect(result.findings[0]?.category).toBeUndefined();
+      });
+
+      // Mirrors the invalid-inner-category case above: `unwrapInnerLines` catches its own
+      // `parseLine` throw and returns `undefined`, so an invalid inner line range falls back to
+      // the OUTER pair rather than taking the whole finding down — the same "one bad field
+      // degrades gracefully" posture as `unwrapInnerPath`/category, now that `parseLine` itself
+      // rejects `0`.
+      it("unwraps the body but falls back to the outer line range when the inner start_line is 0", () => {
+        const inner = {
+          path: "src/inner.ts",
+          start_line: 0,
+          end_line: 5,
+          content: "inner sentence body text",
+        };
+        const doc = document({
+          comments: [
+            { path: "src/outer.ts", content: JSON.stringify(inner), start_line: 9, end_line: 9 },
+          ],
+        });
+        const result = parseEngineResult(doc);
+        expect(result.findings[0]?.content).toBe("inner sentence body text");
+        expect(result.findings[0]?.startLine).toBe(9);
+        expect(result.findings[0]?.endLine).toBe(9);
       });
 
       it("unwraps exactly one level when the envelope is nested twice", () => {

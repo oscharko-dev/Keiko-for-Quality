@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,7 +32,6 @@ vi.mock("./identity.js", () => ({
   resolveIdentity: vi.fn(() => ({
     client: IDENTITY_CLIENT,
     login: "keiko-for-quality[bot]",
-    usedApp: true,
   })),
 }));
 
@@ -76,8 +75,10 @@ function report(overrides: Partial<ReviewReport> = {}): ReviewReport {
     reviewablePaths: 1,
     excludedPaths: 0,
     mechanicallyClean: 0,
+    criticalPointers: 0,
     cacheHits: 0,
     cacheMisses: 0,
+    contextInvalidated: 0,
     cacheAppended: 0,
     ...overrides,
   };
@@ -160,6 +161,44 @@ describe("runAction: invalid configuration", () => {
       "config.invalid",
     ]);
     expect(performReviewMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("runAction: identity resolution failure (v0.13.0)", () => {
+  it("records publish.identity_mint_failed before rethrowing, distinct from config.invalid", async () => {
+    const { resolveIdentity } = await import("./identity.js");
+    vi.mocked(resolveIdentity).mockRejectedValueOnce(new Error("malformed PEM"));
+    const env = await baseEnv();
+    const diagnostics = createDiagnostics(() => undefined);
+
+    await expect(runAction(env, diagnostics)).rejects.toThrow("malformed PEM");
+
+    expect(diagnostics.drain().map((r) => r.code)).toEqual([
+      "eligibility.accepted",
+      "publish.identity_mint_failed",
+    ]);
+    expect(performReviewMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("runAction: final output write failure (v0.13.0)", () => {
+  it("records outputs.write_failed instead of losing an already-completed review to a delivery failure", async () => {
+    performReviewMock.mockResolvedValue(report());
+    // A directory, not a file: `appendFileSync` throws EISDIR — a portable, permission-free way to
+    // force the exact failure shape `writeOutputs` can hit in production ($GITHUB_OUTPUT unwritable,
+    // a full disk), without needing filesystem permission tricks.
+    const outputDir = join(dir, "output-is-a-directory");
+    await mkdir(outputDir);
+    const env = await baseEnv();
+    env.GITHUB_OUTPUT = outputDir;
+    const diagnostics = createDiagnostics(() => undefined);
+
+    const result = await runAction(env, diagnostics);
+
+    // The review itself still completed and is still returned — only the delivery of its outputs
+    // failed, and that failure did not retroactively turn a successful run into a rejected one.
+    expect(result?.outcome).toBe("complete");
+    expect(diagnostics.drain().map((r) => r.code)).toContain("outputs.write_failed");
   });
 });
 
@@ -294,6 +333,12 @@ describe("runAction: writing the store back", () => {
    * So the refusal is kept in full for the second class and lifted only for the first — and even
    * then `performReview` restricts the store's entries to the paths the engine reports it reached,
    * so a file that was never opened can still never be replayed as reviewed.
+   *
+   * `settlement.incomplete.publication_degraded` is deliberately NOT in this list (v0.13.0) — see
+   * "writes the verdicts a truncated run did earn" below, where it joined the OTHER class: the
+   * engine's own verdict there was `complete`, full coverage, properly judged; only delivery to
+   * GitHub had a hiccup on one finding, which says nothing about whether the manifest is
+   * trustworthy.
    */
   it.each([
     ["a rejected manifest schema", "settlement.incomplete.schema_rejected"],
@@ -301,7 +346,7 @@ describe("runAction: writing the store back", () => {
     ["a failed coverage entry", "settlement.incomplete.coverage_failed"],
     ["an implausible finding count", "settlement.incomplete.engine_error"],
     ["an unlisted warning", "settlement.incomplete.warning_not_allowlisted"],
-    ["a degraded publication", "settlement.incomplete.publication_degraded"],
+    ["a non-success engine status", "settlement.incomplete.engine_status_not_success"],
   ] as const)("never writes when the manifest is not to be believed: %s", async (_name, reason) => {
     const updated: CacheStore = {
       schemaVersion: SUPPORTED_STORE_SCHEMA,
@@ -398,31 +443,39 @@ describe("runAction: writing the store back", () => {
     expect((await readOutputs(env)).store_written).toBe("true");
   });
 
-  it.each([
-    ["an untrustworthy manifest", "settlement.incomplete.schema_rejected"],
-    ["a degraded publication", "settlement.incomplete.publication_degraded"],
-  ] as const)("reports store_written false when nothing was persisted: %s", async (_n, reason) => {
-    performReviewMock.mockResolvedValue(
-      report({
-        outcome: "incomplete",
-        reason,
-        cacheAppended: 1,
-        updatedCacheStore: { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [entry("src/a.ts")] },
-      }),
-    );
-    const env = await baseEnv({ reviewStorePath: join(dir, "store.json") });
+  it.each([["an untrustworthy manifest", "settlement.incomplete.schema_rejected"]] as const)(
+    "reports store_written false when nothing was persisted: %s",
+    async (_n, reason) => {
+      performReviewMock.mockResolvedValue(
+        report({
+          outcome: "incomplete",
+          reason,
+          cacheAppended: 1,
+          updatedCacheStore: {
+            schemaVersion: SUPPORTED_STORE_SCHEMA,
+            entries: [entry("src/a.ts")],
+          },
+        }),
+      );
+      const env = await baseEnv({ reviewStorePath: join(dir, "store.json") });
 
-    await runAction(
-      env,
-      createDiagnostics(() => undefined),
-    );
+      await runAction(
+        env,
+        createDiagnostics(() => undefined),
+      );
 
-    expect((await readOutputs(env)).store_written).toBe("false");
-  });
+      expect((await readOutputs(env)).store_written).toBe("false");
+    },
+  );
 
   it.each([
     ["a budget overrun", "settlement.incomplete.budget_exceeded"],
     ["a coverage gap", "settlement.incomplete.coverage_gap"],
+    // Not a truncated engine run at all — the engine's own verdict was `complete`, full coverage,
+    // properly judged; delivery to GitHub had a hiccup on one finding. Grouped with the other two
+    // because the question this whole pair answers ("are the per-file verdicts still trustworthy")
+    // has the same answer, not because the underlying failure is the same shape.
+    ["a degraded publication", "settlement.incomplete.publication_degraded"],
   ] as const)("writes the verdicts a truncated run did earn: %s", async (_name, reason) => {
     const updated: CacheStore = {
       schemaVersion: SUPPORTED_STORE_SCHEMA,
@@ -461,6 +514,19 @@ describe("runAction: writing the store back", () => {
     await runAction(env, diagnostics);
 
     expect(await readOutputs(env)).toMatchObject({ cache_hits: "3", cache_misses: "2" });
+  });
+
+  // The one cache-miss reason a consumer can act on without touching the reviewed files: the
+  // pull request's own path set moved, not the file's bytes. Wired from the same report field
+  // `cacheCounts`/`SummarySourceReport` already surface, not recomputed here.
+  it("wires cache_context_invalidated from the report into the action outputs", async () => {
+    performReviewMock.mockResolvedValue(report({ contextInvalidated: 4 }));
+    const env = await baseEnv({ reviewStorePath: join(dir, "does-not-exist.json") });
+    const diagnostics = createDiagnostics(() => undefined);
+
+    await runAction(env, diagnostics);
+
+    expect(await readOutputs(env)).toMatchObject({ cache_context_invalidated: "4" });
   });
 });
 
