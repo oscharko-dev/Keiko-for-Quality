@@ -11,6 +11,7 @@ import {
   protocol,
   SUPPORTED_STORE_SCHEMA,
   type CacheStore,
+  PUBLICATION_SEMANTICS,
 } from "./cache/review-cache.js";
 import { compileProfile, type ReviewProfile } from "./config/profile.js";
 import type { RuntimeConfig } from "./config/runtime.js";
@@ -304,6 +305,7 @@ describe("performReview: review-cache memoization end to end", () => {
           ruleDigest,
           engineDigest,
           prPathSetDigest: currentPathSet,
+          semantics: PUBLICATION_SEMANTICS,
           modelId: model,
           protocol: proto,
           findings: [],
@@ -356,6 +358,7 @@ describe("performReview: review-cache memoization end to end", () => {
           ruleDigest,
           engineDigest,
           prPathSetDigest: stalePathSet,
+          semantics: PUBLICATION_SEMANTICS,
           modelId: model,
           protocol: proto,
           findings: [],
@@ -635,6 +638,7 @@ describe("performReview: review-cache memoization end to end", () => {
             ruleDigest,
             engineDigest,
             prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
             modelId: model,
             protocol: proto,
             findings: [],
@@ -949,6 +953,7 @@ describe("performReview: review-cache memoization end to end", () => {
             ruleDigest,
             engineDigest,
             prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
             modelId: model,
             protocol: proto,
             findings: [],
@@ -960,6 +965,7 @@ describe("performReview: review-cache memoization end to end", () => {
             ruleDigest,
             engineDigest,
             prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
             modelId: model,
             protocol: proto,
             findings: [],
@@ -2768,6 +2774,7 @@ describe("performReview: review-cache memoization end to end", () => {
             ruleDigest,
             engineDigest,
             prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
             modelId: model,
             protocol: proto,
             findings: [
@@ -3076,6 +3083,7 @@ describe("performReview: review-cache memoization end to end", () => {
             ruleDigest,
             engineDigest,
             prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
             modelId: model,
             protocol: proto,
             findings: [],

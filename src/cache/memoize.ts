@@ -8,6 +8,7 @@ import {
   computePathSetDigest,
   lookup,
   modelId,
+  PUBLICATION_SEMANTICS,
   type CacheEntry,
   type CacheStore,
 } from "./review-cache.js";
@@ -284,6 +285,10 @@ export function buildNewEntries(inputs: NewEntryInputs): CacheEntry[] {
       ruleDigest: inputs.ruleDigest,
       engineDigest: inputs.engineDigest,
       prPathSetDigest: inputs.pathSetDigest,
+      // Stamped from the constant rather than passed in: only this build knows which publication
+      // contract produced these findings, and an entry that lied about it would be replayed by a
+      // build whose sanitizer disagrees with the body it stored.
+      semantics: PUBLICATION_SEMANTICS,
       modelId: model,
       protocol: proto,
       findings: byPath.get(path) ?? [],

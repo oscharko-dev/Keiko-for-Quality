@@ -2,6 +2,7 @@ import { readFile, writeFile } from "node:fs/promises";
 
 import {
   SUPPORTED_STORE_SCHEMA,
+  entriesUnderCurrentSemantics,
   readStore,
   serializeStore,
   type CacheStore,
@@ -111,8 +112,17 @@ async function loadCacheStore(path: string, diagnostics: Diagnostics): Promise<C
     diagnostics.record("cache.store_rejected");
     return EMPTY_STORE;
   }
-  diagnostics.record("cache.store_loaded", { counts: { entries: result.store.entries.length } });
-  return result.store;
+  // A structurally valid store may still hold entries a different publication contract wrote; those
+  // drop out here rather than at parse time, because they are not a corrupt store and must not be
+  // reported as one. Both counts are recorded: `entries` is what this build may replay, `retired` is
+  // what a release cost, which is the number that tells an operator whether a version bump — rather
+  // than the pull request's own churn — explains a cold run.
+  const usable = entriesUnderCurrentSemantics(result.store);
+  const retired = result.store.entries.length - usable.entries.length;
+  diagnostics.record("cache.store_loaded", {
+    counts: { entries: usable.entries.length, retired },
+  });
+  return usable;
 }
 
 /**

@@ -12,6 +12,7 @@ import {
   computePathSetDigest,
   lookup,
   modelId,
+  entriesUnderCurrentSemantics,
   protocol,
   readStore,
   serializeStore,
@@ -21,6 +22,7 @@ import {
   type CacheStore,
   type ModelId,
   type Protocol,
+  PUBLICATION_SEMANTICS,
 } from "./review-cache.js";
 
 const BASE_BLOB = blobId("a".repeat(40));
@@ -89,6 +91,7 @@ function entryFor(
     ruleDigest: inputs.rule,
     engineDigest: inputs.engine,
     prPathSetDigest: pathSetDigest,
+    semantics: PUBLICATION_SEMANTICS,
     modelId: inputs.model,
     protocol: inputs.proto,
     findings,
@@ -301,6 +304,7 @@ describe("serializeStore", () => {
       protocol: entry.protocol,
       modelId: entry.modelId,
       prPathSetDigest: entry.prPathSetDigest,
+      semantics: PUBLICATION_SEMANTICS,
       engineDigest: entry.engineDigest,
       ruleDigest: entry.ruleDigest,
       headBlob: entry.headBlob,
@@ -523,5 +527,96 @@ describe("branded input validators", () => {
 
   it("rejects a protocol outside the closed set", () => {
     expect(() => protocol("grpc")).toThrow();
+  });
+});
+
+describe("entriesUnderCurrentSemantics", () => {
+  /**
+   * The behaviour the whole v3 schema exists for. Before it, the consumer partitioned the store by
+   * the action's commit sha, so every release discarded every entry of every open pull request —
+   * measured on the live consumer as four pins in 33 hours against a 9% hit rate on large runs. The
+   * cost of that coarseness is what this keeps: a release that did not touch publication now keeps
+   * the week of entries a long-running pull request accumulated.
+   */
+  it("keeps the entries this build's publication contract wrote", () => {
+    const entry = entryFor(baseline(), []);
+    const store: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [entry] };
+
+    expect(entriesUnderCurrentSemantics(store)).toEqual(store);
+  });
+
+  /**
+   * And the half that makes keeping the rest safe. A finding list written under an older sanitizer
+   * may contain a body this build refuses to publish — v0.15.0's diff-echo rejection is the worked
+   * example — so replaying it would post something the current sanitizer already rejected once.
+   */
+  it("drops an entry another publication contract wrote, and only that entry", () => {
+    const mine = entryFor(baseline(), []);
+    const theirs: CacheEntry = {
+      ...entryFor({ ...baseline(), base: blobId("c".repeat(40)) }, []),
+      semantics: "v0.14.0-whatever",
+    };
+    const store: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [mine, theirs] };
+
+    const usable = entriesUnderCurrentSemantics(store);
+
+    expect(usable.entries).toEqual([mine]);
+    expect(usable.schemaVersion).toBe(SUPPORTED_STORE_SCHEMA);
+  });
+
+  /**
+   * A store nothing was retired from must come back as the same object: `loadCacheStore` reports the
+   * difference between the two lengths as `retired`, and an allocation that changed nothing would
+   * make an ordinary run look like it had paid for a release it did not.
+   */
+  it("returns the store unchanged when every entry belongs to this build", () => {
+    const store: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [
+        entryFor(baseline(), []),
+        entryFor({ ...baseline(), base: blobId("c".repeat(40)) }, []),
+      ],
+    };
+
+    expect(entriesUnderCurrentSemantics(store)).toBe(store);
+  });
+
+  /**
+   * The round trip the field has to survive to be worth storing: written, serialized, read back,
+   * still recognised. `parseEntry` re-derives `key` from the entry's own digests but deliberately
+   * does not re-derive this — nothing in the entry's content determines which wrapper wrote it.
+   */
+  it("survives serialization and is honoured on the way back in", () => {
+    const store: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [
+        entryFor(baseline(), []),
+        {
+          ...entryFor({ ...baseline(), base: blobId("c".repeat(40)) }, []),
+          semantics: "v0.14.0-old",
+        },
+      ],
+    };
+
+    const result = readStore(serializeStore(store));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.store.entries.length).toBe(2);
+    expect(entriesUnderCurrentSemantics(result.store).entries.length).toBe(1);
+  });
+
+  /** An entry with no `semantics` at all is a v2 store's shape, and v2 is not read at all. */
+  it("refuses a store whose entries predate the field", () => {
+    const legacy = JSON.stringify({
+      schemaVersion: "keiko-for-quality.review-cache/v2",
+      entries: [],
+    });
+
+    const result = readStore(legacy);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("unreachable");
+    expect(result.reason).toBe("cache.store.schema_invalid");
   });
 });

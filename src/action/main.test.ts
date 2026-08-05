@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { blobId, sha256 } from "../core/brands.js";
 import {
+  PUBLICATION_SEMANTICS,
   SUPPORTED_STORE_SCHEMA,
   computeKey,
   modelId,
@@ -137,6 +138,7 @@ function entry(_path: string, findings: CacheEntry["findings"] = []): CacheEntry
     ruleDigest: rule,
     engineDigest: engine,
     prPathSetDigest: pathSet,
+    semantics: PUBLICATION_SEMANTICS,
     modelId: model,
     protocol: proto,
     findings,

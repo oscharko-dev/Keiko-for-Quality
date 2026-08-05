@@ -11,6 +11,7 @@ import {
   protocol,
   SUPPORTED_STORE_SCHEMA,
   type CacheStore,
+  PUBLICATION_SEMANTICS,
 } from "./cache/review-cache.js";
 import { compileProfile, type ReviewProfile } from "./config/profile.js";
 import type { RuntimeConfig } from "./config/runtime.js";
@@ -504,6 +505,7 @@ describe("performLocalReview: review-cache memoization end to end", () => {
           ruleDigest,
           engineDigest,
           prPathSetDigest: computePathSetDigest(["src/a.ts", "src/b.ts"]),
+          semantics: PUBLICATION_SEMANTICS,
           modelId: model,
           protocol: proto,
           findings: [],

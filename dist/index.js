@@ -99,7 +99,8 @@ function parseJson(text3, field) {
 }
 
 // src/cache/review-cache.ts
-var SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v2";
+var SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
+var PUBLICATION_SEMANTICS = "v0.15.0-diff-echo";
 var CACHE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 var PROTOCOLS = /* @__PURE__ */ new Set(["openai", "anthropic"]);
 var FIELD_SEPARATOR = "\0";
@@ -177,10 +178,12 @@ var ENTRY_KEYS = [
   "ruleDigest",
   "engineDigest",
   "prPathSetDigest",
+  "semantics",
   "modelId",
   "protocol",
   "findings"
 ];
+var MAX_SEMANTICS_CHARS = 64;
 function parseEntry(value, index) {
   const scope = `store.entries[${String(index)}]`;
   const object = asObject(value, scope);
@@ -200,6 +203,7 @@ function parseEntry(value, index) {
     asString(object.prPathSetDigest, `${scope}.prPathSetDigest`, 64),
     `${scope}.prPathSetDigest`
   );
+  const entrySemantics = asString(object.semantics, `${scope}.semantics`, MAX_SEMANTICS_CHARS);
   const model = modelId(
     asString(object.modelId, `${scope}.modelId`, PARSE_LIMITS.maxModelIdChars),
     `${scope}.modelId`
@@ -216,6 +220,7 @@ function parseEntry(value, index) {
     ruleDigest: rule,
     engineDigest: engine,
     prPathSetDigest: pathSet,
+    semantics: entrySemantics,
     modelId: model,
     protocol: proto,
     findings: parseFindings(object.findings, `${scope}.findings`)
@@ -260,6 +265,10 @@ function readStore(text3) {
     return { ok: false, reason: classifyRejection(field) };
   }
 }
+function entriesUnderCurrentSemantics(store) {
+  const kept = store.entries.filter((entry) => entry.semantics === PUBLICATION_SEMANTICS);
+  return kept.length === store.entries.length ? store : { ...store, entries: kept };
+}
 function lookup(store, key) {
   return store.entries.find((entry) => entry.key === key);
 }
@@ -288,6 +297,7 @@ function canonicalEntry(entry) {
     ruleDigest: entry.ruleDigest,
     engineDigest: entry.engineDigest,
     prPathSetDigest: entry.prPathSetDigest,
+    semantics: entry.semantics,
     modelId: entry.modelId,
     protocol: entry.protocol,
     findings: entry.findings.map(canonicalFinding)
@@ -1804,6 +1814,10 @@ function buildNewEntries(inputs) {
       ruleDigest: inputs.ruleDigest,
       engineDigest: inputs.engineDigest,
       prPathSetDigest: inputs.pathSetDigest,
+      // Stamped from the constant rather than passed in: only this build knows which publication
+      // contract produced these findings, and an entry that lied about it would be replayed by a
+      // build whose sanitizer disagrees with the body it stored.
+      semantics: PUBLICATION_SEMANTICS,
       modelId: model,
       protocol: proto,
       findings: byPath.get(path) ?? []
@@ -6000,8 +6014,12 @@ async function loadCacheStore(path, diagnostics) {
     diagnostics.record("cache.store_rejected");
     return EMPTY_STORE;
   }
-  diagnostics.record("cache.store_loaded", { counts: { entries: result.store.entries.length } });
-  return result.store;
+  const usable = entriesUnderCurrentSemantics(result.store);
+  const retired = result.store.entries.length - usable.entries.length;
+  diagnostics.record("cache.store_loaded", {
+    counts: { entries: usable.entries.length, retired }
+  });
+  return usable;
 }
 async function saveCacheStore(path, store, appended, diagnostics) {
   try {
