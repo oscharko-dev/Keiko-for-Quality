@@ -700,7 +700,7 @@ function parseCoverage(value, field) {
   };
 }
 function parseLine(value, field) {
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > LIMITS.maxLine) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > LIMITS.maxLine) {
     throw new ValidationError(field);
   }
   return value;
@@ -2952,7 +2952,8 @@ async function readTextAtCommit(ctx, commit, path) {
   let content;
   try {
     content = await git(ctx, ["cat-file", "blob", `${commit}:${path}`], MAX_TEXT_BLOB_BYTES);
-  } catch {
+  } catch (error) {
+    if (error instanceof ExecFailure && error.timedOut) throw error;
     return void 0;
   }
   if (content.includes("\0")) return void 0;
@@ -5180,11 +5181,10 @@ async function compareMatchedPairs(blobCache, ctx, request, inventory, pairs, fi
   }
   return compared;
 }
-async function collectGateFindings(request, inventory, diagnostics) {
+async function collectGateFindings(request, inventory, diagnostics, blobCache = /* @__PURE__ */ new Map()) {
   const pairs = request.profile.contractPairs ?? [];
   const ctx = gitContext(request);
   const findings = [];
-  const blobCache = /* @__PURE__ */ new Map();
   const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings, blobCache);
   const compared = await compareMatchedPairs(blobCache, ctx, request, inventory, pairs, findings);
   if (pairs.length === 0 && findings.length === 0 && pinDesyncs === 0) return [];
@@ -5275,7 +5275,7 @@ async function compareAgainstCounterparts(blobCache, ctx, head, item, pair, left
   return compared;
 }
 var CHANGE_PASS_RESERVE_TOKENS = 1e4;
-async function collectChangePassFindings(request, inventory, ledger, diagnostics) {
+async function collectChangePassFindings(request, inventory, ledger, diagnostics, blobCache = /* @__PURE__ */ new Map()) {
   if (request.config.crossArtifactPass !== true) return [];
   const deps = classifyDeps(request);
   if (deps === void 0) return [];
@@ -5291,7 +5291,7 @@ async function collectChangePassFindings(request, inventory, ledger, diagnostics
   const files = [];
   for (const item of inventory.items) {
     if (!item.reviewable) continue;
-    const source = await readTextAtCommit(ctx, request.head, item.path);
+    const source = await readTextAtCommitCached(blobCache, ctx, request.head, item.path);
     if (source !== void 0) files.push({ path: item.path, source });
   }
   const { findings, tokens } = await runChangePass(files, deps);
@@ -5524,25 +5524,28 @@ async function abandonStalePublish(run2, inventory, memo, settlement) {
     ...finalized === void 0 ? {} : { updatedCacheStore: finalized.store }
   };
 }
+function combineSettledFindings(settlement, memo, gate, changePass) {
+  const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
+  const fresh = /* @__PURE__ */ new Set([...settlement.findings, ...changePass]);
+  return { merged, fresh };
+}
 async function publishSettledFindings(run2, inventory, settlement, memo, startedAt) {
-  const gate = await collectGateFindings(run2.request, inventory, run2.diagnostics);
+  const blobCache = /* @__PURE__ */ new Map();
+  const gate = await collectGateFindings(run2.request, inventory, run2.diagnostics, blobCache);
   const changePass = await collectChangePassFindings(
     run2.request,
     inventory,
     run2.ledger,
-    run2.diagnostics
+    run2.diagnostics,
+    blobCache
   );
-  const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
-  const freshEngineFindings = /* @__PURE__ */ new Set([
-    ...settlement.findings,
-    ...changePass
-  ]);
+  const combined = combineSettledFindings(settlement, memo, gate, changePass);
   const stale = await abandonStalePublish(run2, inventory, memo, settlement);
   if (stale !== void 0) return stale;
   const { outcome: publish, auditedByOriginal } = await publishAudited(
     run2,
     publishContextFor(run2.request, inventory),
-    { findings: merged, fresh: freshEngineFindings }
+    { findings: combined.merged, fresh: combined.fresh }
   );
   if (publicationDegraded(publish)) {
     return reportDegradedPublication(run2, inventory, memo, publish, settlement, auditedByOriginal);

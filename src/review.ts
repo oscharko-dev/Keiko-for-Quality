@@ -894,7 +894,10 @@ function classifyDeps(request: PipelineRequest): ClassifyEndpoint | undefined {
 const MAX_GATE_FINDINGS = 8;
 
 /**
- * A per-run cache of `readTextAtCommit` results, shared by every deterministic gate below.
+ * A per-run cache of `readTextAtCommit` results, shared by every deterministic gate below AND by
+ * `collectChangePassFindings` (#33) — its own model-facing pass reads the identical head-side text
+ * for any reviewable file that also matches a declared contract pair or carries a duplicate pin, a
+ * third independent git subprocess for content the gate collectors already fetched.
  *
  * The contract-pair comparison and the pin-desync scan both read the SAME (commit, path) text for
  * any item that happens to match a declared pair AND carry a duplicate pin — two independent git
@@ -993,11 +996,15 @@ async function collectGateFindings(
   request: PipelineRequest,
   inventory: Inventory,
   diagnostics: Diagnostics,
+  // Shared with `collectChangePassFindings` at the one caller (`publishSettledFindings`/
+  // `completeLocalReport`) that runs both against the same head — see `BlobTextCache`'s own doc
+  // comment (#33). Defaulted rather than required so the two incomplete-settlement call sites,
+  // which never pair with a change-pass call, do not need to construct a Map they would never share.
+  blobCache: BlobTextCache = new Map(),
 ): Promise<readonly EngineFinding[]> {
   const pairs = request.profile.contractPairs ?? [];
   const ctx = gitContext(request);
   const findings: EngineFinding[] = [];
-  const blobCache: BlobTextCache = new Map();
   const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings, blobCache);
   const compared = await compareMatchedPairs(blobCache, ctx, request, inventory, pairs, findings);
 
@@ -1198,6 +1205,9 @@ async function collectChangePassFindings(
   inventory: Inventory,
   ledger: SpendLedger,
   diagnostics: Diagnostics,
+  // See `BlobTextCache`'s own doc comment (#33) for why this is shared with `collectGateFindings`
+  // at their one common caller rather than each spawning its own git subprocess for the same text.
+  blobCache: BlobTextCache = new Map(),
 ): Promise<readonly EngineFinding[]> {
   if (request.config.crossArtifactPass !== true) return [];
   const deps = classifyDeps(request);
@@ -1216,7 +1226,7 @@ async function collectChangePassFindings(
   const files: ChangedFile[] = [];
   for (const item of inventory.items) {
     if (!item.reviewable) continue;
-    const source = await readTextAtCommit(ctx, request.head, item.path as string);
+    const source = await readTextAtCommitCached(blobCache, ctx, request.head, item.path as string);
     if (source !== undefined) files.push({ path: item.path as string, source });
   }
   const { findings, tokens } = await runChangePass(files, deps);
@@ -1840,10 +1850,13 @@ async function reportDegradedPublication(
 }
 
 /**
- * The v0.13.0 staleness recheck's own abandon branch, checked immediately before the operation it
- * actually protects — see `publishSettledFindings`'s own call site for why every check like this
- * needs its own copy rather than one shared guard. Split out purely for that function's own line
- * budget. `undefined` means the head was still current and publication should proceed.
+ * The v0.13.0 staleness recheck's own abandon branch. Called immediately before `publishAudited`,
+ * after gate collection (free) and the change-level pass (which just spent real model tokens) have
+ * already run — checking any earlier would leave a push that lands DURING that collection free to
+ * sail through to publication unchecked. Every check like this needs its own copy rather than one
+ * shared guard: the pull request's head can move at any point across a review that takes minutes
+ * end to end. Split out purely for `publishSettledFindings`'s own line budget. `undefined` means
+ * the head was still current and publication should proceed.
  */
 async function abandonStalePublish(
   run: ReviewRun,
@@ -1871,6 +1884,24 @@ async function abandonStalePublish(
   };
 }
 
+/**
+ * Only THIS run's model output is eligible for the audit — the engine's own findings plus the
+ * change-level pass's, never a cache hit's replayed findings, which `mergeHitFindings` appended
+ * without cloning them (see `publishAudited`'s doc comment for why that makes reference identity
+ * sound here). Change-pass findings are fresh model output like any other and audit the same way.
+ * Shared by `publishSettledFindings` and `completeLocalReport`, which assemble this identically.
+ */
+function combineSettledFindings(
+  settlement: Extract<Settlement, { status: "complete" }>,
+  memo: MemoContext,
+  gate: readonly EngineFinding[],
+  changePass: readonly EngineFinding[],
+): { readonly merged: readonly EngineFinding[]; readonly fresh: ReadonlySet<EngineFinding> } {
+  const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
+  const fresh: ReadonlySet<EngineFinding> = new Set([...settlement.findings, ...changePass]);
+  return { merged, fresh };
+}
+
 async function publishSettledFindings(
   run: ReviewRun,
   inventory: Inventory,
@@ -1878,35 +1909,25 @@ async function publishSettledFindings(
   memo: MemoContext,
   startedAt: number,
 ): Promise<ReviewReport> {
-  const gate = await collectGateFindings(run.request, inventory, run.diagnostics);
+  // Shared across both collectors (#33) — see `BlobTextCache`'s own doc comment.
+  const blobCache: BlobTextCache = new Map();
+  const gate = await collectGateFindings(run.request, inventory, run.diagnostics, blobCache);
   const changePass = await collectChangePassFindings(
     run.request,
     inventory,
     run.ledger,
     run.diagnostics,
+    blobCache,
   );
-  const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
-  // Only THIS run's model output is eligible for the audit — the engine's own findings plus the
-  // change-level pass's, never a cache hit's replayed findings, which `mergeHitFindings` appended
-  // without cloning them (see `publishAudited`'s doc comment for why that makes reference identity
-  // sound here). Change-pass findings are fresh model output like any other and audit the same way.
-  const freshEngineFindings: ReadonlySet<EngineFinding> = new Set([
-    ...settlement.findings,
-    ...changePass,
-  ]);
+  const combined = combineSettledFindings(settlement, memo, gate, changePass);
 
-  // The staleness recheck (v0.13.0), moved here from `performReviewInner` to sit immediately before
-  // the operation it actually protects: gate collection is free, but the change-level pass above
-  // just spent real model tokens, and checking any earlier would leave a push that lands DURING
-  // that collection free to sail through to publication unchecked. The pull request's head can
-  // move at any point across a review that takes minutes end to end.
   const stale = await abandonStalePublish(run, inventory, memo, settlement);
   if (stale !== undefined) return stale;
 
   const { outcome: publish, auditedByOriginal } = await publishAudited(
     run,
     publishContextFor(run.request, inventory),
-    { findings: merged, fresh: freshEngineFindings },
+    { findings: combined.merged, fresh: combined.fresh },
   );
 
   // A finding the reviewer found but could not publish is a finding the consumer never saw. The
@@ -2395,22 +2416,22 @@ async function completeLocalReport(
   settlement: Extract<Settlement, { status: "complete" }>,
   memo: MemoContext,
 ): Promise<LocalReviewReport> {
-  const gate = await collectGateFindings(run.request, inventory, run.diagnostics);
+  // Shared across both collectors (#33) — same reasoning as `publishSettledFindings`'s identical
+  // pairing.
+  const blobCache: BlobTextCache = new Map();
+  const gate = await collectGateFindings(run.request, inventory, run.diagnostics, blobCache);
   const changePass = await collectChangePassFindings(
     run.request,
     inventory,
     run.ledger,
     run.diagnostics,
+    blobCache,
   );
-  const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
-  const freshEngineFindings: ReadonlySet<EngineFinding> = new Set([
-    ...settlement.findings,
-    ...changePass,
-  ]);
+  const combined = combineSettledFindings(settlement, memo, gate, changePass);
 
   const reported = await localFindings(run, inventory, {
-    findings: merged,
-    fresh: freshEngineFindings,
+    findings: combined.merged,
+    fresh: combined.fresh,
   });
   // Identical admission call to the action path's: only a complete outcome reaches this function,
   // and what is stored is the AUDITED form of the engine's own findings (never a gate or
