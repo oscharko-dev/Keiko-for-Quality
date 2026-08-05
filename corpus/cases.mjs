@@ -1160,4 +1160,207 @@ jobs:
       },
     ],
   },
+
+  // ---------------------------------------------------------------------------------------------
+  // Precision cases derived from REAL false positives this reviewer published on its consumer's
+  // pull requests (Keiko#2985 and siblings, 2026-08-05). An external review of 49 findings across
+  // two pull requests scored this reviewer at 18% precision against 92% for two other bots — while
+  // this corpus reported 4/4 precision. Both numbers were correct: the corpus carried 28
+  // seeded-defect cases against 4 clean ones, and production is the opposite ratio. Precision was
+  // therefore measured on almost nothing, and the metric could not see the failure mode that
+  // actually mattered.
+  //
+  // Each case below reproduces one published false positive as the CORRECT code it was reported
+  // against. `defect: null` means the only passing answer is silence. They are deliberately small
+  // and self-evident: none of them requires taste or a judgement call, and a reviewer that speaks
+  // here has contradicted a fact visible in the diff it was given.
+  // ---------------------------------------------------------------------------------------------
+  {
+    id: "clean-import-present-above",
+    defect: null,
+    // Published three times on one pull request: "randomUUID is used but never imported", with a
+    // patch that would have added a SECOND import from "crypto" instead of "node:crypto". The
+    // import is on line 1 of the file the finding names. The added function sits below it and uses
+    // the same symbol, so a reviewer reading only the added hunk cannot see the import — which is
+    // exactly what an incomplete run produces.
+    //
+    // Strictly ADDITIVE on purpose: the existing function is byte-identical across base and head.
+    // A first draft changed `slice(0, 8)` to `slice(0, 12)` and was not clean at all — that alters
+    // every id this function hands out, which a reviewer may legitimately object to. `clean-refactor`
+    // documents the same trap: a clean case that is not clean scores a missed defect as a success.
+    about: "a used symbol whose import is present, above the added hunk",
+    files: [
+      {
+        path: "src/ids.ts",
+        base: `import { randomUUID } from "node:crypto";
+
+export function requestId(prefix: string): string {
+  return prefix + "-" + randomUUID().slice(0, 8);
+}
+`,
+        head: `import { randomUUID } from "node:crypto";
+
+export function requestId(prefix: string): string {
+  return prefix + "-" + randomUUID().slice(0, 8);
+}
+
+export function traceId(): string {
+  return "trace-" + randomUUID().slice(0, 8);
+}
+`,
+      },
+    ],
+  },
+  {
+    id: "clean-literal-is-in-union",
+    defect: null,
+    // Published twice: "this literal is not a member of the declared union". The union is declared
+    // at the top of the file and consists of exactly the two literals used. Nothing here requires
+    // inference — only reading the type that is in the same file.
+    //
+    // Additive: a new exported predicate beside an untouched one. A first draft added a REQUIRED
+    // parameter to the existing function, and the reviewer correctly called that a breaking API
+    // change — the fixture was the defect, not the reviewer.
+    about: "a literal that is a declared member of the union it is compared against",
+    files: [
+      {
+        path: "src/mode.ts",
+        base: `export type Mode = "strict" | "lenient";
+
+export function isStrict(mode: Mode): boolean {
+  return mode === "strict";
+}
+`,
+        head: `export type Mode = "strict" | "lenient";
+
+export function isStrict(mode: Mode): boolean {
+  return mode === "strict";
+}
+
+export function isLenient(mode: Mode): boolean {
+  return mode === "lenient";
+}
+`,
+      },
+    ],
+  },
+  {
+    id: "clean-test-asserts-the-opposite",
+    defect: null,
+    // Published twice as "Critical: modelId leaks secrets". The cited file is this test, and it
+    // asserts the exact opposite of the claim — and passes. Reporting a leak against a test that
+    // proves there is none is wrong-file attribution, and severity "Critical" made it worse: all
+    // five Critical findings on that pull request were false, which is what makes a severity
+    // signal worthless rather than merely noisy.
+    about: "a passing test that proves the property a false finding claims is broken",
+    files: [
+      {
+        path: "src/redact.test.ts",
+        base: `import { describe, expect, it } from "vitest";
+import { redactModelId } from "./redact.js";
+
+describe("redactModelId", () => {
+  it("keeps the family and drops the deployment secret", () => {
+    expect(redactModelId("gpt-oss-120b#dep_9f3a")).toBe("gpt-oss-120b");
+  });
+});
+`,
+        head: `import { describe, expect, it } from "vitest";
+import { redactModelId } from "./redact.js";
+
+describe("redactModelId", () => {
+  it("keeps the family and drops the deployment secret", () => {
+    expect(redactModelId("gpt-oss-120b#dep_9f3a")).toBe("gpt-oss-120b");
+  });
+
+  it("drops the secret however many separators follow it", () => {
+    expect(redactModelId("gpt-oss-120b#dep_9f3a#extra")).toBe("gpt-oss-120b");
+  });
+});
+`,
+      },
+    ],
+  },
+  {
+    id: "clean-schema-version-is-pinned",
+    defect: null,
+    // Published as "bump schemaVersion from 1 to 2". Applying it WOULD have been the breaking
+    // change the finding claimed to prevent: the comment directly above states that the version is
+    // pinned and that consumers reject anything else. A reviewer proposing a repair must read the
+    // constraint stated next to the value it wants to change.
+    //
+    // Additive: a new reader for the same pinned constant, with `envelope` untouched. A first draft
+    // widened `envelope`'s signature and return type, which is a breaking change of its own.
+    about: "a pinned schema version the surrounding comment forbids changing",
+    files: [
+      {
+        path: "src/event.ts",
+        base: `// Pinned. Consumers reject any other value, so this moves only in a coordinated release.
+const SCHEMA_VERSION = "1";
+
+export function envelope(kind: string): { schemaVersion: string; kind: string } {
+  return { schemaVersion: SCHEMA_VERSION, kind };
+}
+`,
+        head: `// Pinned. Consumers reject any other value, so this moves only in a coordinated release.
+const SCHEMA_VERSION = "1";
+
+export function envelope(kind: string): { schemaVersion: string; kind: string } {
+  return { schemaVersion: SCHEMA_VERSION, kind };
+}
+
+export function schemaVersion(): string {
+  return SCHEMA_VERSION;
+}
+`,
+      },
+    ],
+  },
+  {
+    id: "clean-reset-modules-is-load-bearing",
+    defect: null,
+    // Published as "remove the redundant vi.resetModules()". Removing it produces exactly the
+    // test bleeding the call prevents — the suite mutates a module-level cache, and the comment
+    // above the call says so. A finding that proposes deleting a guard must account for what the
+    // guard is guarding.
+    about: "a test reset whose removal would reintroduce state bleeding",
+    files: [
+      {
+        path: "src/cache.test.ts",
+        base: `import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// The module under test memoizes at module scope, so each case needs a fresh copy of it.
+beforeEach(() => {
+  vi.resetModules();
+});
+
+describe("cache", () => {
+  it("memoizes the first answer", async () => {
+    const { lookup } = await import("./cache.js");
+    expect(lookup("a")).toBe(lookup("a"));
+  });
+});
+`,
+        head: `import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// The module under test memoizes at module scope, so each case needs a fresh copy of it.
+beforeEach(() => {
+  vi.resetModules();
+});
+
+describe("cache", () => {
+  it("memoizes the first answer", async () => {
+    const { lookup } = await import("./cache.js");
+    expect(lookup("a")).toBe(lookup("a"));
+  });
+
+  it("does not carry a memoized answer across cases", async () => {
+    const { lookup } = await import("./cache.js");
+    expect(lookup("b")).toBe(lookup("b"));
+  });
+});
+`,
+      },
+    ],
+  },
 ];
