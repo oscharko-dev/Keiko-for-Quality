@@ -693,14 +693,43 @@ choose one on the caller's behalf.
     defect: { file: "src/capabilities.ts", category: "bug", severity: "high" },
     about: "an intentional empty selection is dropped from the update instead of sent explicitly",
     anchors: ["empty", "clear*", "omit*", "unset", "workfloweligiblemodelids", "partial"],
+    // `EligibilityUpdate` is declared here as unchanged context (present in both revisions, so it
+    // produces no hunk) because part of the verdict hangs on it: whether `return {}` is even legal,
+    // and whether dropping the field loses information, is a question about the field's optionality.
+    //
+    // Measured, and NOT the whole story. Undeclared: 1 of 3 runs passed, the survivor costing ~151k
+    // tokens, two runs dying in the subtask spiral. Declared: 3 of 6, one spiral, 79k–143k tokens.
+    // Real but partial — the declaration was worth keeping and was not the main cause.
+    //
+    // What remains is written in this case's own header and missing from its fixture: the defect is
+    // that "a preserve-existing merge ON THE RECEIVING END keeps the stale list". No receiving end
+    // exists here. Deciding whether the dropped field is a bug means knowing what the consumer does
+    // with an absent key, so the reviewer goes looking for a consumer the fixture never commits —
+    // ~100k tokens of searching for a 180-byte diff. Committing a consumer as context is the fix
+    // this points to; it is a larger intervention than a declaration and is deliberately left for
+    // its own measurement rather than bundled into a release. Until then the case roams, and the
+    // qualification records it as roaming instead of pretending otherwise.
+    //
+    // Twelve other cases reference a type they never declare and are left alone: theirs are opaque
+    // handles (`db: Db`, `client: Client`, `store: Store`) whose shape cannot change the verdict —
+    // nobody needs the definition of `Db` to see string-concatenated SQL. The distinction that
+    // matters is not "undeclared" but "undeclared AND decides the verdict".
     files: [
       {
         path: "src/capabilities.ts",
-        base: `export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
+        base: `export interface EligibilityUpdate {
+  workflowEligibleModelIds?: readonly string[];
+}
+
+export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
   return { workflowEligibleModelIds: selected };
 }
 `,
-        head: `export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
+        head: `export interface EligibilityUpdate {
+  workflowEligibleModelIds?: readonly string[];
+}
+
+export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
   if (selected.length === 0) return {};
   return { workflowEligibleModelIds: selected };
 }
