@@ -132,6 +132,13 @@ jobs:
         # workflow_dispatch rehearsal path cannot catch that class of bug — this step is gated on
         # `github.event_name == 'release'`, so a dry run never executes it.
         #
+        # A `release` event runs the workflow file from the RELEASE'S OWN TAG, not from the default
+        # branch. That is why fixing this on `dev` did not repair v0.14.0: re-publishing the release
+        # re-ran the workflow as it existed at `v0.14.0`, broken, twice. A fix here reaches a
+        # release only once `main` carries it — that is, from the NEXT release onward. v0.14.0's own
+        # assets were recovered by downloading this job's successful `build` artifact and attaching
+        # it by hand, digest re-verified against `dist/cli.js` at the tag.
+        #
         # --clobber makes a re-run of this workflow against the same release idempotent (a
         # transient failure after this point should not require deleting a partial upload by
         # hand); contents: write is already scoped to only this job, the one step that needs it.
