@@ -202,6 +202,7 @@ describe("composeSummaryBody", () => {
     reviewablePaths: 30,
     excludedPaths: 8,
     mechanicallyClean: 4,
+    criticalPointers: 1,
     cacheHits: 5,
     contextInvalidated: 2,
     freshlyReviewed: 25,
@@ -308,6 +309,7 @@ describe("composeSummaryBody", () => {
       expect(body).toContain("| Reviewable | 30 |");
       expect(body).toContain("| Excluded | 8 |");
       expect(body).toContain("| Mechanically clean | 4 |");
+      expect(body).toContain("| Critical pointer changes (content not reviewable) | 1 |");
       expect(body).toContain("| Replayed from cache | 5 |");
       expect(body).toContain("| Cache miss (path-set shape changed) | 2 |");
       expect(body).toContain("| Freshly reviewed | 25 |");

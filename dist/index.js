@@ -1520,6 +1520,7 @@ function countRows(counts) {
     ["Reviewable", counts.reviewablePaths],
     ["Excluded", counts.excludedPaths],
     ["Mechanically clean", counts.mechanicallyClean],
+    ["Critical pointer changes (content not reviewable)", counts.criticalPointers],
     ["Replayed from cache", counts.cacheHits],
     ["Cache miss (path-set shape changed)", counts.contextInvalidated],
     ["Freshly reviewed", counts.freshlyReviewed],
@@ -1611,6 +1612,7 @@ function buildSummaryReport(input, diagnostics) {
     reviewablePaths: report.reviewablePaths,
     excludedPaths: report.excludedPaths,
     mechanicallyClean: report.mechanicallyClean,
+    criticalPointers: report.criticalPointers,
     cacheHits: report.cacheHits,
     contextInvalidated: report.contextInvalidated,
     freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits),
@@ -3962,7 +3964,13 @@ async function resolveReviewPair(ctx, base, head) {
 }
 function bucketKey(item) {
   const kind = item.classification.kind.replaceAll("-", "_");
-  return item.classification.kind === "mechanically-clean" ? `${kind}_${item.classification.reason.replaceAll("-", "_")}` : kind;
+  if (item.classification.kind === "mechanically-clean") {
+    return `${kind}_${item.classification.reason.replaceAll("-", "_")}`;
+  }
+  if (item.classification.kind === "submodule-pointer" && item.classification.critical) {
+    return `${kind}_critical`;
+  }
+  return kind;
 }
 function countByKind(items) {
   const counts = {};
@@ -3977,6 +3985,11 @@ function mechanicallyCleanPaths(inventory) {
 }
 function excludedPathCount(inventory) {
   return inventory.items.filter((item) => item.classification.kind === "excluded").length;
+}
+function criticalPointerCount(inventory) {
+  return inventory.items.filter(
+    (item) => item.classification.kind === "submodule-pointer" && item.classification.critical
+  ).length;
 }
 async function buildInventory(ctx, profile, pair, renamePercent, diagnostics) {
   const changes = await listChanges(ctx, pair.mergeBase, pair.head, renamePercent);
@@ -4988,7 +5001,8 @@ function inventoryCounts(inventory) {
     inventorySize: inventory.items.length,
     reviewablePaths: inventory.reviewablePaths.size,
     excludedPaths: excludedPathCount(inventory),
-    mechanicallyClean: mechanicallyCleanPaths(inventory).length
+    mechanicallyClean: mechanicallyCleanPaths(inventory).length,
+    criticalPointers: criticalPointerCount(inventory)
   };
 }
 function publishContextFor(request, inventory) {

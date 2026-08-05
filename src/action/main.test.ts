@@ -75,6 +75,7 @@ function report(overrides: Partial<ReviewReport> = {}): ReviewReport {
     reviewablePaths: 1,
     excludedPaths: 0,
     mechanicallyClean: 0,
+    criticalPointers: 0,
     cacheHits: 0,
     cacheMisses: 0,
     contextInvalidated: 0,

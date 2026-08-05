@@ -25,19 +25,20 @@ on:
         type: string
 
 # The reviewer runs inside other people's CI next to a private key, so its own pipeline holds no
-# more authority than the task requires — here, attaching two files to a release that already
-# exists. No secret beyond the default GITHUB_TOKEN, and never the model credential or the App key
-# (issue #98's own engineering notes).
+# more authority than the task requires. Workflow-level default is read-only; `contents: write`
+# is granted only on the `publish` job below, and only for the one step that actually writes —
+# `build` runs untrusted, freshly-built bundle code (`npm run check:bundle` executes both
+# dist/index.js and dist/cli.js) with no write access to the repository at all.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-assets-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
 jobs:
-  release-assets:
-    name: release assets
+  build:
+    name: build release assets
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -88,12 +89,37 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Attach the release assets
+      # Hand-off to `publish` below: the only job that ever needs `contents: write`, and the only
+      # step in this job whose output that job requires — everything above ran with `contents:
+      # read` (the workflow-level default), including the digest-verified staged files below.
+      - name: Upload the staged release assets
         if: github.event_name == 'release'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: release-assets/
+          retention-days: 1
+
+  publish:
+    name: attach release assets
+    needs: build
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download the staged release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Attach the release assets
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         # --clobber makes a re-run of this workflow against the same release idempotent (a
         # transient failure after this point should not require deleting a partial upload by
-        # hand); contents: write is already scoped to only what this step needs.
+        # hand); contents: write is already scoped to only this job, the one step that needs it.
         run: gh release upload "$TAG" release-assets/keiko-cli.js release-assets/sha256sum.txt --clobber

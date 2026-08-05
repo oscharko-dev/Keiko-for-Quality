@@ -675,12 +675,18 @@ function scoreOne(testCase, result, plan) {
 const results = [];
 for (const testCase of cases) {
   let dir;
+  // Hoisted out of the try, not declared inside it: a throw in `computeGateFindings`,
+  // `planCaseFindings`, or anything else after the model already ran must still leave the catch
+  // block able to read the real spend `result.summary.total_tokens` already carries by that
+  // point — a `const` scoped to the try block would put it out of reach and force the catch back
+  // to a hardcoded 0, discarding tokens that were genuinely spent.
+  let result;
   try {
     // Inside the try, not before it: `buildRepo` can throw in `mkdtemp`, in either `writeTree`, or
     // in any of the four git calls, and a throw outside would abort the whole run and leak the
     // directory it had already created.
     dir = buildRepo(testCase);
-    const result = await runEngineWithOneResume(dir);
+    result = await runEngineWithOneResume(dir);
     await repairFindings(result);
     // Merged AFTER classification repair/audit, at the same point production's
     // `publishSettledFindings` merges `collectGateFindings`'s output into what gets published — so a
@@ -734,7 +740,10 @@ for (const testCase of cases) {
       detail: "the harness threw while running this case",
       findings: [],
       rejected: [],
-      tokens: 0,
+      // The one fact still known even when the plan/gate stage fails: what the model call already
+      // cost before the throw. `result` is `undefined` when `buildRepo` or the engine invocation
+      // itself is what threw — there was nothing to spend yet, and 0 is the honest answer there too.
+      tokens: result?.summary?.total_tokens ?? 0,
       rejectedSanitization: 0,
       suppressedIntraRun: 0,
     });

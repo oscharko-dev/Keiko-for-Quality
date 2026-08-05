@@ -45,6 +45,7 @@ import { describePinDesync, detectPinDesync } from "./contracts/pin-desync.js";
 import type { InventoryItem } from "./inventory/classify.js";
 import {
   buildInventory,
+  criticalPointerCount,
   excludedPathCount,
   mechanicallyCleanPaths,
   resolveReviewPair,
@@ -160,6 +161,14 @@ export interface ReviewReport {
   readonly excludedPaths: number;
   /** Paths downgraded to mechanically-clean (a pure rename today) — never sent to the engine. */
   readonly mechanicallyClean: number;
+  /**
+   * Submodule-pointer bumps on a path the profile's own `deletionCritical`/`reviewRelevant` rules
+   * call out (#37) — content the engine structurally cannot review (a gitlink SHA is not a blob
+   * this repository's object store holds) on a path the consumer told the profile mattered. Never
+   * affects `outcome`: this is honest reporting of a fact the classifier already knows, not a new
+   * completeness requirement.
+   */
+  readonly criticalPointers: number;
   readonly publish?: PublishOutcome;
   /** Cache-eligible paths a stored entry answered instead of the engine. Always 0 when inert. */
   readonly cacheHits: number;
@@ -515,12 +524,16 @@ function itemIndex(inventory: Inventory): ReadonlyMap<string, InventoryItem> {
  */
 function inventoryCounts(
   inventory: Inventory,
-): Pick<ReviewReport, "inventorySize" | "reviewablePaths" | "excludedPaths" | "mechanicallyClean"> {
+): Pick<
+  ReviewReport,
+  "inventorySize" | "reviewablePaths" | "excludedPaths" | "mechanicallyClean" | "criticalPointers"
+> {
   return {
     inventorySize: inventory.items.length,
     reviewablePaths: inventory.reviewablePaths.size,
     excludedPaths: excludedPathCount(inventory),
     mechanicallyClean: mechanicallyCleanPaths(inventory).length,
+    criticalPointers: criticalPointerCount(inventory),
   };
 }
 

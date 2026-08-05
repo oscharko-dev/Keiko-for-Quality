@@ -216,6 +216,8 @@ export interface SummaryCounts {
   readonly reviewablePaths: number;
   readonly excludedPaths: number;
   readonly mechanicallyClean: number;
+  /** Submodule-pointer bumps on a critical path — see `ReviewReport.criticalPointers` (review.ts). */
+  readonly criticalPointers: number;
   /** Reviewable paths a review-cache hit answered instead of the engine (v0.9.0). Always 0 when inert. */
   readonly cacheHits: number;
   /** Of the cache misses, how many were a content match the changed-path-set shape invalidated —
@@ -327,7 +329,10 @@ function outcomeText(report: SummaryReport): string {
  * `planPublication`, before a candidate ever reaches the other three. These counts are independently
  * meaningful and are not required to sum to `totalPaths` — a generated, binary, or non-critical
  * pointer path is neither reviewable, excluded, nor mechanically clean, and omitting that remainder
- * from this compact table is deliberate (see the epic's leanness requirement).
+ * from this compact table is deliberate (see the epic's leanness requirement). A CRITICAL pointer
+ * bump is the one exception (#37): it is the supply-chain-relevant case CONTRIBUTING.md's threat
+ * model names by name, and folding it into that same silent remainder is exactly the gap this row
+ * closes.
  */
 function countRows(counts: SummaryCounts): readonly string[] {
   const rows: readonly (readonly [string, number])[] = [
@@ -335,6 +340,7 @@ function countRows(counts: SummaryCounts): readonly string[] {
     ["Reviewable", counts.reviewablePaths],
     ["Excluded", counts.excludedPaths],
     ["Mechanically clean", counts.mechanicallyClean],
+    ["Critical pointer changes (content not reviewable)", counts.criticalPointers],
     ["Replayed from cache", counts.cacheHits],
     ["Cache miss (path-set shape changed)", counts.contextInvalidated],
     ["Freshly reviewed", counts.freshlyReviewed],

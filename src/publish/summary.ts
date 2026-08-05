@@ -59,6 +59,9 @@ export interface SummarySourceReport {
   readonly excludedPaths: number;
   /** Paths downgraded to mechanically-clean — never sent to the engine. */
   readonly mechanicallyClean: number;
+  /** Submodule-pointer bumps on a critical path — see `ReviewReport.criticalPointers` (review.ts)
+   *  for the full rationale. */
+  readonly criticalPointers: number;
   /** Cache-eligible paths a stored entry answered instead of the engine. Always 0 when inert. */
   readonly cacheHits: number;
   /** Of the cache misses, how many were specifically a content match the changed-path-set shape
@@ -170,6 +173,7 @@ export function buildSummaryReport(
     reviewablePaths: report.reviewablePaths,
     excludedPaths: report.excludedPaths,
     mechanicallyClean: report.mechanicallyClean,
+    criticalPointers: report.criticalPointers,
     cacheHits: report.cacheHits,
     contextInvalidated: report.contextInvalidated,
     freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits),

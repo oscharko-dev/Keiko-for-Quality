@@ -3628,7 +3628,13 @@ async function resolveReviewPair(ctx, base, head) {
 }
 function bucketKey(item) {
   const kind = item.classification.kind.replaceAll("-", "_");
-  return item.classification.kind === "mechanically-clean" ? `${kind}_${item.classification.reason.replaceAll("-", "_")}` : kind;
+  if (item.classification.kind === "mechanically-clean") {
+    return `${kind}_${item.classification.reason.replaceAll("-", "_")}`;
+  }
+  if (item.classification.kind === "submodule-pointer" && item.classification.critical) {
+    return `${kind}_critical`;
+  }
+  return kind;
 }
 function countByKind(items) {
   const counts = {};
