@@ -1586,6 +1586,15 @@ function hasUnclosedFence(body) {
 function neutralizeGuardingUnclosedFence(body) {
   return hasUnclosedFence(body) ? { body, neutralized: 0 } : neutralize(body);
 }
+function isDiffEcho(body) {
+  const lines = body.split("\n").filter((line) => line.trim() !== "");
+  if (lines.length === 0) return false;
+  const everyLineIsDiffShaped = lines.every((line) => /^[+-]\s{2,}\S/.test(line));
+  const someLineLooksLikeCode = lines.some(
+    (line) => line.includes(";") || line.includes("(") || line.includes(" = ")
+  );
+  return everyLineIsDiffShaped && someLineLooksLikeCode;
+}
 function withNeutralizedCount(body, neutralized) {
   return neutralized > 0 ? { ok: true, body, neutralized } : { ok: true, body };
 }
@@ -1596,6 +1605,7 @@ function sanitizeFindingBody(raw) {
     if (check.pattern.test(body)) return { ok: false, reason: check.reason };
   }
   if (looksLikeCredential(body)) return { ok: false, reason: "credential" };
+  if (isDiffEcho(body)) return { ok: false, reason: "diff_echo" };
   if (body.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };
   const { body: candidate, neutralized } = neutralizeGuardingUnclosedFence(body);
   if (candidate.length > MAX_BODY_CHARS) return { ok: false, reason: "too_long" };

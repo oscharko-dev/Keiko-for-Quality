@@ -22,7 +22,8 @@ export type RejectionReason =
   | "link"
   | "credential"
   | "empty"
-  | "too_long";
+  | "too_long"
+  | "diff_echo";
 
 export type SanitizeResult =
   | { readonly ok: true; readonly body: string; readonly neutralized?: number }
@@ -483,6 +484,32 @@ function neutralizeGuardingUnclosedFence(body: string): NeutralizeOutcome {
 }
 
 /**
+ * A body that is nothing but echoed diff lines carries no claim, no reasoning, and no repair — the
+ * model wrote the hunk back instead of reviewing it. Two of the 127 findings this reviewer
+ * published on its consumer's Keiko#2970 were exactly this shape (one line each, `-  const …` /
+ * `+  const …`), and both cleared every other check here: no HTML, no link, well under the length
+ * bounds. A human reading them learns nothing; publishing them costs standing.
+ *
+ * The test is deliberately narrow, because its false-positive risk is a Markdown bullet list. A
+ * bullet is `- ` — marker, ONE space — while a diff line carrying indented code is marker plus the
+ * code's own leading whitespace, so `^[+-]\s{2,}` separates the two without guessing. On top of
+ * that at least one line must look like code (`;`, `(`, or ` = `), so even an eccentric two-space
+ * bullet list of prose stays publishable. Column-zero code (`+const x = 1;`) escapes this check on
+ * purpose: the gate prefers missing an echo to ever eating a real finding, and the offline run
+ * against all 127 production bodies (2 rejected, 125 untouched) is the measurement that bound was
+ * chosen against.
+ */
+function isDiffEcho(body: string): boolean {
+  const lines = body.split("\n").filter((line) => line.trim() !== "");
+  if (lines.length === 0) return false;
+  const everyLineIsDiffShaped = lines.every((line) => /^[+-]\s{2,}\S/.test(line));
+  const someLineLooksLikeCode = lines.some(
+    (line) => line.includes(";") || line.includes("(") || line.includes(" = "),
+  );
+  return everyLineIsDiffShaped && someLineLooksLikeCode;
+}
+
+/**
  * Adds the `neutralized` count only when a rewrite happened, so an ordinary body's result is
  * exactly `{ ok: true, body }`, as it was before this pass existed. `exactOptionalPropertyTypes`
  * makes an explicit `neutralized: undefined` a type error in this project regardless, so omission
@@ -514,6 +541,7 @@ export function sanitizeFindingBody(raw: string): SanitizeResult {
     if (check.pattern.test(body)) return { ok: false, reason: check.reason };
   }
   if (looksLikeCredential(body)) return { ok: false, reason: "credential" };
+  if (isDiffEcho(body)) return { ok: false, reason: "diff_echo" };
 
   // An over-long body is rejected BEFORE neutralization as well as after, and the early return
   // decides nothing the later one would not have. `applySpans` only ever inserts two backticks per
