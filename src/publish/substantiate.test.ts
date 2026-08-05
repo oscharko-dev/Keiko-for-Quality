@@ -53,6 +53,8 @@ function endpointReplying(replies: readonly (string | typeof TRANSPORT_FAIL)[]):
 const GROUNDED = '{"verdict":"grounded"}';
 const VAGUE = '{"verdict":"vague"}';
 const UNSUPPORTED = '{"verdict":"unsupported"}';
+const ACTIONABLE = '{"verdict":"actionable"}';
+const NITPICK = '{"verdict":"nitpick"}';
 
 describe("buildDossier", () => {
   it("sees a circumstance stated at the opening of the prose", () => {
@@ -126,7 +128,7 @@ describe("extractVerdict", () => {
 
 describe("substantiate", () => {
   it("publishes a grounded finding on one call", async () => {
-    const { deps, remaining } = endpointReplying([GROUNDED]);
+    const { deps, remaining } = endpointReplying([GROUNDED, ACTIONABLE]);
 
     const out = await substantiate(
       [finding("When the header is numeric, the wait is 1000× short.")],
@@ -136,7 +138,7 @@ describe("substantiate", () => {
 
     expect(out.findings).toHaveLength(1);
     expect(out.repaired).toBe(0);
-    expect(out.tokens).toBe(100);
+    expect(out.tokens).toBe(200);
     expect(remaining()).toBe(0);
   });
 
@@ -148,7 +150,7 @@ describe("substantiate", () => {
   it("repairs a vague finding and publishes the rewrite", async () => {
     const rewritten =
       "**Convert to milliseconds.**\n\nWhen the header is a bare number, the wait is 1000× short.";
-    const { deps, remaining } = endpointReplying([VAGUE, rewritten, GROUNDED]);
+    const { deps, remaining } = endpointReplying([VAGUE, rewritten, GROUNDED, ACTIONABLE]);
 
     const out = await substantiate(
       [finding("This makes the delay depend on the parsed value.")],
@@ -158,7 +160,7 @@ describe("substantiate", () => {
 
     expect(out.findings[0]?.content).toBe(rewritten);
     expect(out.repaired).toBe(1);
-    expect(out.tokens).toBe(300);
+    expect(out.tokens).toBe(400);
     expect(remaining()).toBe(0);
   });
 
@@ -262,7 +264,15 @@ describe("substantiate", () => {
   });
 
   it("tallies a mixed batch without losing a finding to the accounting", async () => {
-    const { deps } = endpointReplying([GROUNDED, UNSUPPORTED, VAGUE, "rewritten body", GROUNDED]);
+    const { deps } = endpointReplying([
+      GROUNDED,
+      ACTIONABLE,
+      UNSUPPORTED,
+      VAGUE,
+      "rewritten body",
+      GROUNDED,
+      ACTIONABLE,
+    ]);
 
     const out = await substantiate(
       [finding("When a, b."), finding("Never awaits."), finding("This changes things.")],
@@ -275,6 +285,61 @@ describe("substantiate", () => {
     expect(out.droppedUnsupported).toBe(1);
     expect(out.droppedVague).toBe(0);
     expect(out.undecided).toBe(0);
-    expect(out.tokens).toBe(500);
+    expect(out.tokens).toBe(700);
+  });
+});
+
+describe("the consequence axis", () => {
+  /**
+   * The volume half. Accuracy and worth fail independently: this finding names a real circumstance
+   * in code that does exactly what it says, and is still a comment nobody wanted. Measured on the
+   * consumer, this reviewer publishes 31.9 inline comments per pull request against 13.3 and 9.0 —
+   * and a finding dropped here is dropped for what it says, never for where it ranked.
+   */
+  it("drops an accurate finding that is not worth a reader's time", async () => {
+    const { deps, remaining } = endpointReplying([GROUNDED, NITPICK]);
+
+    const out = await substantiate(
+      [finding("When the list is empty, this logs a message with a trailing space.")],
+      () => HUNK,
+      deps,
+    );
+
+    expect(out.findings).toHaveLength(0);
+    expect(out.droppedNitpick).toBe(1);
+    expect(remaining()).toBe(0);
+  });
+
+  /** A repair may not launder a nitpick into publication by restating its circumstance. */
+  it("weighs a repaired finding too, and drops it when it is a nitpick", async () => {
+    const { deps } = endpointReplying([VAGUE, "a rewrite with a circumstance", GROUNDED, NITPICK]);
+
+    const out = await substantiate([finding("This adds a trailing space.")], () => HUNK, deps);
+
+    expect(out.findings).toHaveLength(0);
+    expect(out.droppedNitpick).toBe(1);
+    expect(out.repaired).toBe(0);
+  });
+
+  it("keeps a finding when the consequence call cannot be reached", async () => {
+    const { deps } = endpointReplying([GROUNDED, TRANSPORT_FAIL]);
+
+    const out = await substantiate([finding("When x is zero, compute throws.")], () => HUNK, deps);
+
+    expect(out.findings).toHaveLength(1);
+    expect(out.undecided).toBe(1);
+  });
+});
+
+/**
+ * Both prompts now reason before answering, and reasoning about a verdict quotes the vocabulary.
+ * Reading the FIRST match would let "this is not vague, because ..." be read as the verdict.
+ */
+describe("extractVerdict under a reasoning preamble", () => {
+  it("reads the last verdict in the reply, not the first", () => {
+    const reply =
+      '(a) The finding says nothing about when. (b) The code matches. It is not {"verdict":"grounded"} ' +
+      'in the strict sense.\n{"verdict":"vague"}';
+    expect(extractVerdict(reply)).toBe("vague");
   });
 });

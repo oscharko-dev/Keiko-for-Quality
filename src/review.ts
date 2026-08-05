@@ -1692,7 +1692,18 @@ async function hunksForSurvivors(
     const lines = text.split("\n");
     const from = Math.max(0, finding.startLine - HUNK_CONTEXT_LINES - 1);
     const to = Math.min(lines.length, finding.endLine + HUNK_CONTEXT_LINES);
-    hunks.set(key, lines.slice(from, to).join("\n"));
+    // Absolute line numbers inline, not a bare slice. The finding cites a line, and a slice with no
+    // positions makes the judge match on text alone. Lu et al. 2025 (arXiv:2505.17928) ablate the
+    // three options on an otherwise identical pipeline: no position at all scores CPI1 12.21,
+    // RELATIVE positions score 9.50 — worse than nothing — and inline absolute numbers score 17.51.
+    // The middle result is why this is written out rather than left to judgement later.
+    hunks.set(
+      key,
+      lines
+        .slice(from, to)
+        .map((line, offset) => `${String(from + offset + 1)}| ${line}`)
+        .join("\n"),
+    );
   }
   return hunks;
 }
@@ -1753,6 +1764,7 @@ async function substantiateFreshSurvivors(
       repaired: outcome.repaired,
       dropped_vague: outcome.droppedVague,
       dropped_unsupported: outcome.droppedUnsupported,
+      dropped_nitpick: outcome.droppedNitpick,
       undecided: outcome.undecided,
       tokens: outcome.tokens,
     },

@@ -2655,6 +2655,7 @@ describe("performReview: review-cache memoization end to end", () => {
       repairPair?: { category: string; severity: string };
       auditPair?: { category: string; severity: string };
       judgeVerdict?: "grounded" | "vague" | "unsupported";
+      consequence?: "actionable" | "nitpick";
       tokensPerCall?: number;
     }): { impl: typeof fetch; callCount: () => number } {
       let calls = 0;
@@ -2667,6 +2668,25 @@ describe("performReview: review-cache memoization end to end", () => {
         // this mock too. It answers `grounded` unless a case asks otherwise: these cases exist to
         // pin classification behaviour, and a judge that dropped their findings would make them
         // assert the wrong stage's failure. `judgeVerdict` is how a case opts into the other side.
+        // The consequence axis shares the endpoint too, and answers `actionable` unless a case
+        // opts out — same reasoning as the judge branch below it.
+        if (prompt.includes("worth a maintainer's attention")) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                choices: [
+                  {
+                    message: {
+                      content: JSON.stringify({ verdict: opts.consequence ?? "actionable" }),
+                    },
+                  },
+                ],
+                usage: { total_tokens: tokens },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
         if (prompt.includes("Judge whether one code-review finding")) {
           return Promise.resolve(
             new Response(
@@ -2769,7 +2789,7 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(created).toHaveLength(1);
       // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
       // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(2);
+      expect(callCount()).toBe(3);
 
       const records = diagnostics.drain();
       const audited = records.find((r) => r.code === "classify.audited");
@@ -2778,7 +2798,7 @@ describe("performReview: review-cache memoization end to end", () => {
       // `classify` now carries the substantiation judge's spend alongside the audit's: both are
       // bounded side-calls on the same endpoint, and the ledger has one line for them. What the
       // judge itself cost stays separately visible in the `publish.substantiated` diagnostic.
-      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 74, total: 174 });
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 111, total: 211 });
     });
 
     it("never audits a cache-replayed finding, even when it survives the plan and publishes", async () => {
@@ -2958,7 +2978,7 @@ describe("performReview: review-cache memoization end to end", () => {
       // to a second vote before two agreeing votes reach majority — two calls, not one.
       // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
       // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(3);
+      expect(callCount()).toBe(4);
     });
 
     it("stores the audited category for a published finding and the raw category for a plan-suppressed one", async () => {
@@ -3006,7 +3026,7 @@ describe("performReview: review-cache memoization end to end", () => {
       // "bug", escalating to a vote 2 that agrees) — src/b.ts never calls out at all.
       // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
       // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(4);
+      expect(callCount()).toBe(5);
 
       const entries = report.updatedCacheStore?.entries ?? [];
       const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
@@ -3026,7 +3046,7 @@ describe("performReview: review-cache memoization end to end", () => {
       // `classify` now carries the substantiation judge's spend alongside the audit's: both are
       // bounded side-calls on the same endpoint, and the ledger has one line for them. What the
       // judge itself cost stays separately visible in the `publish.substantiated` diagnostic.
-      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 40, total: 140 });
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 50, total: 150 });
     });
 
     it("keeps engine and classify spend correct across the bounded resume when the resumed run also triggers the audit", async () => {
@@ -3064,7 +3084,7 @@ describe("performReview: review-cache memoization end to end", () => {
       // Fast-path audit vote agrees with the finding's own classification — one call.
       // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
       // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(2);
+      expect(callCount()).toBe(3);
 
       const spend = diagnostics.drain().find((r) => r.code === "run.spend");
       // 30 (the discarded first attempt) + 100 (the resume that stands) = 130 engine tokens, plus
@@ -3073,7 +3093,7 @@ describe("performReview: review-cache memoization end to end", () => {
       // `classify` now carries the substantiation judge's spend alongside the audit's: both are
       // bounded side-calls on the same endpoint, and the ledger has one line for them. What the
       // judge itself cost stays separately visible in the `publish.substantiated` diagnostic.
-      expect(spend?.counts).toStrictEqual({ engine: 130, classify: 20, total: 150 });
+      expect(spend?.counts).toStrictEqual({ engine: 130, classify: 30, total: 160 });
     });
   });
 
