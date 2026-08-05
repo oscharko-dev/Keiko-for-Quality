@@ -15,6 +15,7 @@ import {
   protocol,
   type CacheEntry,
   type CacheStore,
+  PUBLICATION_SEMANTICS,
 } from "./review-cache.js";
 import {
   buildNewEntries,
@@ -109,6 +110,7 @@ function entryFor(
     ruleDigest: RULE_DIGEST,
     engineDigest: ENGINE_DIGEST,
     prPathSetDigest: pathSetDigest,
+    semantics: PUBLICATION_SEMANTICS,
     modelId: model,
     protocol: proto,
     findings,

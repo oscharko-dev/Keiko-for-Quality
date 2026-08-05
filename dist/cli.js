@@ -1,4 +1,4 @@
-// Keiko for Quality CLI 0.15.0 — generated bundle, do not edit.
+// Keiko for Quality CLI 0.16.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/cli.ts
@@ -101,7 +101,8 @@ function parseJson(text, field) {
 }
 
 // src/cache/review-cache.ts
-var SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v2";
+var SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
+var PUBLICATION_SEMANTICS = "v0.15.0-diff-echo";
 var CACHE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 var PROTOCOLS = /* @__PURE__ */ new Set(["openai", "anthropic"]);
 var FIELD_SEPARATOR = "\0";
@@ -179,10 +180,12 @@ var ENTRY_KEYS = [
   "ruleDigest",
   "engineDigest",
   "prPathSetDigest",
+  "semantics",
   "modelId",
   "protocol",
   "findings"
 ];
+var MAX_SEMANTICS_CHARS = 64;
 function parseEntry(value, index) {
   const scope = `store.entries[${String(index)}]`;
   const object = asObject(value, scope);
@@ -202,6 +205,7 @@ function parseEntry(value, index) {
     asString(object.prPathSetDigest, `${scope}.prPathSetDigest`, 64),
     `${scope}.prPathSetDigest`
   );
+  const entrySemantics = asString(object.semantics, `${scope}.semantics`, MAX_SEMANTICS_CHARS);
   const model = modelId(
     asString(object.modelId, `${scope}.modelId`, PARSE_LIMITS.maxModelIdChars),
     `${scope}.modelId`
@@ -218,6 +222,7 @@ function parseEntry(value, index) {
     ruleDigest: rule,
     engineDigest: engine,
     prPathSetDigest: pathSet,
+    semantics: entrySemantics,
     modelId: model,
     protocol: proto,
     findings: parseFindings(object.findings, `${scope}.findings`)
@@ -290,6 +295,7 @@ function canonicalEntry(entry) {
     ruleDigest: entry.ruleDigest,
     engineDigest: entry.engineDigest,
     prPathSetDigest: entry.prPathSetDigest,
+    semantics: entry.semantics,
     modelId: entry.modelId,
     protocol: entry.protocol,
     findings: entry.findings.map(canonicalFinding)
@@ -1745,6 +1751,10 @@ function buildNewEntries(inputs) {
       ruleDigest: inputs.ruleDigest,
       engineDigest: inputs.engineDigest,
       prPathSetDigest: inputs.pathSetDigest,
+      // Stamped from the constant rather than passed in: only this build knows which publication
+      // contract produced these findings, and an entry that lied about it would be replayed by a
+      // build whose sanitizer disagrees with the body it stored.
+      semantics: PUBLICATION_SEMANTICS,
       modelId: model,
       protocol: proto,
       findings: byPath.get(path) ?? []
@@ -4165,110 +4175,6 @@ function computeEngineBudget(request, inventory, memo) {
   );
   return { excluded, allottedBudget };
 }
-var TRANCHE_CONCURRENCY_FACTOR = 2;
-function dispatchPaths(inventory, excluded) {
-  return [...inventory.reviewablePaths].filter((path) => !excluded.has(path));
-}
-async function runEngineInTranches(base, paths, excluded, allottedBudget, concurrency, diagnostics) {
-  const trancheSize = Math.max(1, concurrency) * TRANCHE_CONCURRENCY_FACTOR;
-  if (paths.length <= trancheSize) {
-    return runEngineWithOneResume(
-      { ...base, allottedBudget, mechanicallyCleanPaths: excluded },
-      diagnostics
-    );
-  }
-  const tranches = [];
-  for (let i = 0; i < paths.length; i += trancheSize)
-    tranches.push(paths.slice(i, i + trancheSize));
-  const acc = newTrancheAccumulator();
-  for (const [index, tranche] of tranches.entries()) {
-    const others = paths.filter((path) => !tranche.includes(path));
-    const outcome = await runEngineWithOneResume(
-      {
-        ...base,
-        allottedBudget: Math.max(1, allottedBudget - acc.engineTokens),
-        mechanicallyCleanPaths: [...excluded, ...others]
-      },
-      diagnostics
-    );
-    if (absorbTranche(acc, outcome, tranche, allottedBudget, index === tranches.length - 1)) break;
-  }
-  if (acc.stopped === "adapter_budget" || acc.stopped === "engine_budget") {
-    diagnostics.record("engine.tranche_stopped", {
-      counts: {
-        tranches_total: tranches.length,
-        covered: acc.covered.length,
-        tokens: acc.engineTokens
-      }
-    });
-  }
-  return mergeTranches(acc);
-}
-function newTrancheAccumulator() {
-  return {
-    findings: [],
-    warnings: [],
-    covered: [],
-    alreadyReviewed: [],
-    engineTokens: 0,
-    filesReviewed: 0,
-    last: void 0,
-    stopped: void 0
-  };
-}
-function absorbTranche(acc, outcome, tranche, allottedBudget, lastTranche) {
-  acc.engineTokens += outcome.engineTokens;
-  acc.last = outcome.result;
-  if (outcome.result.budgetExceeded) {
-    acc.stopped = "engine_budget";
-    return true;
-  }
-  acc.findings.push(...outcome.result.findings);
-  acc.warnings.push(...outcome.result.warnings);
-  acc.filesReviewed += outcome.result.filesReviewed;
-  acc.covered.push(...tranche);
-  acc.alreadyReviewed.push(...outcome.alreadyReviewedPaths);
-  if (outcome.result.status !== "success") {
-    acc.stopped = "tranche_failed";
-    return true;
-  }
-  if (!lastTranche && acc.engineTokens >= allottedBudget) {
-    acc.stopped = "adapter_budget";
-    return true;
-  }
-  return false;
-}
-function mergeTranches(acc) {
-  if (acc.last === void 0) throw new Error("tranche dispatch ran zero tranches");
-  const last = acc.last;
-  const budgetStopped = acc.stopped === "adapter_budget" || acc.stopped === "engine_budget";
-  return {
-    result: {
-      manifestPresent: last.manifestPresent,
-      status: trancheStatus(acc.stopped, last.status),
-      filesReviewed: acc.filesReviewed,
-      schemaVersion: last.schemaVersion,
-      terminalState: last.terminalState,
-      coverage: {
-        selected: last.coverage.selected,
-        completed: acc.covered.map((path) => ({ path })),
-        reused: [],
-        failed: last.coverage.failed,
-        waived: []
-      },
-      findings: acc.findings,
-      warnings: acc.warnings,
-      totalTokens: acc.engineTokens,
-      budgetExceeded: budgetStopped
-    },
-    engineTokens: acc.engineTokens,
-    alreadyReviewedPaths: acc.alreadyReviewed
-  };
-}
-function trancheStatus(stopped, lastStatus) {
-  if (stopped === void 0) return "success";
-  return stopped === "tranche_failed" ? lastStatus : "failed";
-}
 async function executeEngine(request, inventory, memo, ledger, diagnostics) {
   const workspace = await mkdtemp2(join3(tmpdir2(), "kfq-engine-bin-"));
   try {
@@ -4279,7 +4185,7 @@ async function executeEngine(request, inventory, memo, ledger, diagnostics) {
       result: parsed,
       engineTokens,
       alreadyReviewedPaths
-    } = await runEngineInTranches(
+    } = await runEngineWithOneResume(
       {
         binaryPath: engine.binaryPath,
         repositoryPath: request.repositoryPath,
@@ -4288,12 +4194,10 @@ async function executeEngine(request, inventory, memo, ledger, diagnostics) {
         profile: request.profile,
         guidelines: request.guidelines,
         env: request.env,
-        pathValue: request.pathValue
+        pathValue: request.pathValue,
+        allottedBudget,
+        mechanicallyCleanPaths: excluded
       },
-      dispatchPaths(inventory, new Set(excluded)),
-      excluded,
-      allottedBudget,
-      request.config.concurrency,
       diagnostics
     );
     ledger.engine += engineTokens;
