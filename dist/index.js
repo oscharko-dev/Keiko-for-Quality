@@ -1,4 +1,4 @@
-// Keiko for Quality 0.15.0 — generated bundle, do not edit.
+// Keiko for Quality 0.16.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/action/main.ts
