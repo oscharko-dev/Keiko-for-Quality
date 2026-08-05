@@ -125,6 +125,13 @@ jobs:
       # fixed vocabulary — the thrown-error path deliberately records a constant phrase rather than
       # the error text, because a raw error reaches for whatever was in scope. That property is
       # what makes pasting this safe; it is not safe merely because it is short.
+      #
+      # One issue per drift, not one per week it stays open: this runs weekly, and a regression
+      # that takes a month to fix used to file four separate issues carrying the same evidence,
+      # each looking like a fresh report rather than a four-week-old one nobody has acted on yet.
+      # An open `qualification`-labelled issue absorbs every later run's evidence as a comment
+      # instead — the issue accumulates a timeline, and a maintainer opening it sees at a glance
+      # whether this is new or has been drifting for weeks.
       - name: File a drift issue
         if: failure() && steps.thresholds.outcome == 'failure'
         env:
@@ -144,8 +151,20 @@ jobs:
             echo "Treat it as a signal that the pinned pairing drifted, and re-measure locally"
             echo "before advancing the release."
           } > "${RUNNER_TEMP}/issue.md"
-          gh issue create \
+          existing=$(gh issue list \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "Qualification drift on $(date -u +%Y-%m-%d)" \
-            --body-file "${RUNNER_TEMP}/issue.md" \
-            --label qualification
+            --label qualification \
+            --state open \
+            --json number \
+            --jq '.[0].number')
+          if [ -n "${existing}" ]; then
+            gh issue comment "${existing}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --body-file "${RUNNER_TEMP}/issue.md"
+          else
+            gh issue create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "Qualification drift on $(date -u +%Y-%m-%d)" \
+              --body-file "${RUNNER_TEMP}/issue.md" \
+              --label qualification
+          fi

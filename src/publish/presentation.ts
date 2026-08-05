@@ -16,6 +16,7 @@
 
 import type { CommitSha, VersionTag } from "../core/brands.js";
 import { isReasonCode, type ReasonCode } from "../diagnostics/reason-codes.js";
+import { extractMarker } from "./marker.js";
 import { escapeInline } from "./sanitize.js";
 
 export interface FindingContext {
@@ -185,6 +186,36 @@ export function composeIncompleteNotice(reasonCode: string, marker: string): str
   ].join("\n");
 }
 
+/**
+ * True for a comment body this exact function produced — a fixed, product-controlled sentence,
+ * never model content, and never reachable from `composeFindingBody`: no entry in `CATEGORIES`
+ * above maps to "Coverage", the label line every incomplete notice starts with, so the two composers
+ * can never collide on their opening line, and the sentence checked here is stricter still.
+ *
+ * Exists so a later run can recognise its OWN past incomplete notices well enough to resolve the
+ * ones a subsequent push has superseded (`github/client.ts`'s `resolveSupersededOwnNotices`),
+ * without re-deriving the exact reason-code/head/path fingerprint that produced any given one just
+ * to ask "was this mine". Kept next to `composeIncompleteNotice` on purpose, the same discipline
+ * `rule-file.ts`/`sanitize.ts` document for themselves: change the template, update the detector in
+ * the same diff, or a later run stops recognising its own past notices.
+ *
+ * The sentence alone (#42) is public, product-controlled text — visible in every published comment,
+ * in this README, and in the committed `dist/index.js` — so it is guessable by anyone, not a secret
+ * this reviewer alone could have written. Combined with `resolveSupersededOwnNotices` now also
+ * requiring a provably exclusive identity (`action/identity.ts`), this raises the bar from "copy a
+ * public sentence" to "also carry a well-formed marker" before the mutation this predicate gates
+ * will even consider a thread. It does not make forgery impossible on its own — the fingerprint
+ * `extractMarker` checks the SHAPE of, not the exact value of, has no secret component — but a
+ * marker-less, sentence-only body (a contributor quoting the notice in conversation, say) no longer
+ * qualifies at all.
+ */
+export function isIncompleteNoticeBody(body: string): boolean {
+  return (
+    body.includes("Keiko for Quality could not complete its review.") &&
+    extractMarker(body) !== undefined
+  );
+}
+
 /** Mirrors `ReviewOutcome` (`review.ts`) without importing it, so `publish/` never depends on the
  *  top-level review orchestrator — only the orchestrator depends on `publish/`. */
 export type SummaryOutcome = "complete" | "incomplete" | "abandoned";
@@ -199,8 +230,13 @@ export interface SummaryCounts {
   readonly reviewablePaths: number;
   readonly excludedPaths: number;
   readonly mechanicallyClean: number;
+  /** Submodule-pointer bumps on a critical path — see `ReviewReport.criticalPointers` (review.ts). */
+  readonly criticalPointers: number;
   /** Reviewable paths a review-cache hit answered instead of the engine (v0.9.0). Always 0 when inert. */
   readonly cacheHits: number;
+  /** Of the cache misses, how many were a content match the changed-path-set shape invalidated —
+   *  see `ReviewReport.contextInvalidated` (review.ts). Always 0 when inert. */
+  readonly contextInvalidated: number;
   /** Reviewable paths actually sent to the engine this run: `reviewablePaths - cacheHits`. */
   readonly freshlyReviewed: number;
   readonly findingsPublished: number;
@@ -218,6 +254,16 @@ export interface SummaryCounts {
    *  `findsOutdatedRecurrence`. Always a plain number here, for the same reason
    *  `suppressedIntraRun` above is. */
   readonly suppressedRecurrence: number;
+  /**
+   * The four counters `publicationDegraded` (`review.ts`) actually decides complete-vs-incomplete
+   * on. Without them, a reader of the summary comment could see `findingsPublished` fall short of
+   * what the run's own diagnostics implied and have no visible reason why — these are that reason,
+   * surfaced on the one comment meant to answer "what happened this run" without requiring a log.
+   */
+  readonly rejectedSanitization: number;
+  readonly rejectedPlacement: number;
+  readonly readbackFailures: number;
+  readonly apiFailures: number;
 }
 
 /**
@@ -297,7 +343,10 @@ function outcomeText(report: SummaryReport): string {
  * `planPublication`, before a candidate ever reaches the other three. These counts are independently
  * meaningful and are not required to sum to `totalPaths` — a generated, binary, or non-critical
  * pointer path is neither reviewable, excluded, nor mechanically clean, and omitting that remainder
- * from this compact table is deliberate (see the epic's leanness requirement).
+ * from this compact table is deliberate (see the epic's leanness requirement). A CRITICAL pointer
+ * bump is the one exception (#37): it is the supply-chain-relevant case CONTRIBUTING.md's threat
+ * model names by name, and folding it into that same silent remainder is exactly the gap this row
+ * closes.
  */
 function countRows(counts: SummaryCounts): readonly string[] {
   const rows: readonly (readonly [string, number])[] = [
@@ -305,7 +354,9 @@ function countRows(counts: SummaryCounts): readonly string[] {
     ["Reviewable", counts.reviewablePaths],
     ["Excluded", counts.excludedPaths],
     ["Mechanically clean", counts.mechanicallyClean],
+    ["Critical pointer changes (content not reviewable)", counts.criticalPointers],
     ["Replayed from cache", counts.cacheHits],
+    ["Cache miss (path-set shape changed)", counts.contextInvalidated],
     ["Freshly reviewed", counts.freshlyReviewed],
     ["Findings published", counts.findingsPublished],
     ["Suppressed (intra-run duplicate)", counts.suppressedIntraRun],
@@ -313,6 +364,10 @@ function countRows(counts: SummaryCounts): readonly string[] {
     ["Suppressed (similar)", counts.suppressedSimilar],
     ["Suppressed (dispositioned)", counts.suppressedDispositioned],
     ["Suppressed (outdated recurrence)", counts.suppressedRecurrence],
+    ["Rejected (sanitization)", counts.rejectedSanitization],
+    ["Rejected (placement)", counts.rejectedPlacement],
+    ["Read-back failures", counts.readbackFailures],
+    ["API failures", counts.apiFailures],
   ];
   return rows.map(([label, value]) => `| ${label} | ${String(value)} |`);
 }

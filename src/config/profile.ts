@@ -185,8 +185,10 @@ const MAX_PATHS_PER_INSTRUCTION = 16;
  * Matches `ExclusionRule.pattern`'s own bound — the same kind of value, the same limit.
  * `contractPairs[].paths` reuses this exact constant too (see `parseGlobPaths` below), rather than
  * restating the same number under a second name for what is, there as well, the same kind of value.
+ * Exported so `config/guidelines.ts`'s own path list — the same kind of value again, a repository
+ * path rendered into the same rule prompt — reuses it by reference too (v0.13.0).
  */
-const MAX_INSTRUCTION_PATH_LENGTH = 512;
+export const MAX_INSTRUCTION_PATH_LENGTH = 512;
 const MAX_INSTRUCTION_TEXT_LENGTH = 1024;
 /** Ceiling on the sum of every entry's `instructions.length`, independent of the per-entry bound. */
 const MAX_TOTAL_INSTRUCTION_TEXT_LENGTH = 8192;

@@ -11,6 +11,7 @@ import { mergeBase, type GitContext } from "../git/plumbing.js";
 import type { InventoryItem } from "./classify.js";
 import {
   buildInventory,
+  criticalPointerCount,
   excludedPathCount,
   mechanicallyCleanPaths,
   resolveReviewPair,
@@ -115,7 +116,7 @@ describe("buildInventory: the pure-rename prefilter end to end", () => {
  * A pure function over already-classified items, so — unlike the suite above — this needs no real
  * git repository: a hand-built inventory exercises it directly and faster.
  */
-describe("excludedPathCount", () => {
+describe("excludedPathCount and criticalPointerCount", () => {
   function item(path: string, classification: InventoryItem["classification"]): InventoryItem {
     return {
       path: repoPath(path),
@@ -155,5 +156,87 @@ describe("excludedPathCount", () => {
       item("src/renamed.ts", { kind: "mechanically-clean", reason: "pure-rename" }),
     ]);
     expect(excludedPathCount(inventory)).toBe(2);
+  });
+
+  /**
+   * #37: the signal `classify.ts` already computes for a submodule bump (`critical`, mirroring
+   * `symlink-pointer`'s own flag) used to be discarded at every later stage — `isReviewable` does
+   * not honor it for this kind (a gitlink has no blob to review), and nothing else read it either.
+   * `criticalPointerCount` is the one place that fact now surfaces.
+   */
+  describe("criticalPointerCount", () => {
+    it("is zero for an inventory with no critical submodule pointer", () => {
+      const inventory = inventoryOf([
+        item("src/a.ts", { kind: "reviewed" }),
+        item("vendor/lib", { kind: "submodule-pointer", critical: false }),
+      ]);
+      expect(criticalPointerCount(inventory)).toBe(0);
+    });
+
+    it("counts only a critical submodule pointer, not a critical symlink pointer", () => {
+      const inventory = inventoryOf([
+        item("tests/vendor", { kind: "submodule-pointer", critical: true }),
+        item("vendor/inert", { kind: "submodule-pointer", critical: false }),
+        // A critical SYMLINK is a distinct kind — `isReviewable` already requires engine coverage
+        // for it, and it must not double-count here as though it were an unreviewable pointer too.
+        item("src/link.ts", { kind: "symlink-pointer", critical: true }),
+      ]);
+      expect(criticalPointerCount(inventory)).toBe(1);
+    });
+  });
+});
+
+describe("bucketKey (via inventory.completed diagnostics, #37)", () => {
+  it("distinguishes a critical submodule bump from a non-critical one in its own bucket", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "kfq-inventory-critical-pointer-"));
+    try {
+      git(["init", "-q", "-b", "main"], repo);
+      git(["commit", "--allow-empty", "-q", "-m", "root", "--no-gpg-sign"], repo);
+      // A real gitlink entry: `git update-index --add --cacheinfo` writes one without requiring an
+      // actual initialized submodule, which is exactly the "structural change, no content to read"
+      // shape `classifyStructural` reasons about.
+      git(["update-index", "--add", "--cacheinfo", "160000", "a".repeat(40), "tests/vendor"], repo);
+      git(["commit", "-q", "-m", "add critical pointer", "--no-gpg-sign"], repo);
+      const base = git(["rev-parse", "HEAD"], repo).trim();
+
+      git(["update-index", "--cacheinfo", "160000", "b".repeat(40), "tests/vendor"], repo);
+      git(["commit", "-q", "-m", "bump critical pointer", "--no-gpg-sign"], repo);
+      const head = git(["rev-parse", "HEAD"], repo).trim();
+
+      // A profile of its own, distinct from the file-scoped `compiled` above: this one's
+      // `deletionCritical` must actually match `tests/vendor` for `critical` to come out `true`,
+      // which the file-scoped fixture's own `deletionCritical: []` never does.
+      const criticalProfile = compileProfile({
+        version: 1,
+        reviewRelevant: ["src/**/*.ts"],
+        deletionCritical: ["tests/**"],
+        generated: [],
+        excluded: [],
+        benignWarnings: [],
+        pathInstructions: [],
+      } satisfies ReviewProfile);
+
+      const ctx: GitContext = {
+        cwd: repo,
+        timeoutMs: 30_000,
+        pathValue: process.env.PATH ?? "/usr/bin:/bin",
+      };
+      const pair = await resolveReviewPair(ctx, commitSha(base), commitSha(head));
+      const diagnostics = createSilentDiagnostics();
+      const inventory = await buildInventory(ctx, criticalProfile, pair, 50, diagnostics);
+
+      expect(inventory.items).toHaveLength(1);
+      expect(inventory.items[0]?.classification).toEqual({
+        kind: "submodule-pointer",
+        critical: true,
+      });
+      expect(criticalPointerCount(inventory)).toBe(1);
+      const completed = diagnostics.drain().find((record) => record.code === "inventory.completed");
+      expect(completed?.counts?.submodule_pointer_critical).toBe(1);
+      // Never the plain bucket too — a critical bump lands in exactly one bucket, not both.
+      expect(completed?.counts?.submodule_pointer).toBeUndefined();
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
   });
 });

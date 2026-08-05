@@ -7,7 +7,7 @@ import {
   type CommitSha,
   type RepoPath,
 } from "../core/brands.js";
-import { gitEnvironment, run, type ExecOptions } from "./exec.js";
+import { ExecFailure, gitEnvironment, run, type ExecOptions } from "./exec.js";
 
 /**
  * Read-only access to the candidate change.
@@ -121,7 +121,14 @@ export async function readTextAtCommit(
   let content: string;
   try {
     content = await git(ctx, ["cat-file", "blob", `${commit}:${path}`], MAX_TEXT_BLOB_BYTES);
-  } catch {
+  } catch (error) {
+    // Mirrors `engine/run.ts`'s own `failureReason` for the identical `ExecFailure` type: a timeout
+    // is a systemic execution failure, not one of this function's own documented "absent" outcomes
+    // (a missing path, an oversized blob, binary content), and swallowing it here would silently
+    // disable every caller's own signal with no diagnostic at all. Every OTHER `ExecFailure` —
+    // `cat-file blob` exits non-zero, untimed, for a path that simply does not exist at that commit
+    // — still degrades to `undefined`, exactly as this function's own doc comment promises.
+    if (error instanceof ExecFailure && error.timedOut) throw error;
     return undefined;
   }
   if (content.includes("\u0000")) return undefined;

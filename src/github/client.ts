@@ -110,6 +110,12 @@ export interface ReviewCommentApi {
     input: ReviewCommentInput,
   ): Promise<ReviewComment>;
   getReviewComment(ref: RepoRef, id: number): Promise<ReviewComment>;
+  resolveSupersededOwnNotices(
+    ref: RepoRef,
+    number: number,
+    identity: string,
+    isNoticeBody: (body: string) => boolean,
+  ): Promise<{ readonly attempted: number; readonly resolved: number }>;
 }
 
 /**
@@ -179,13 +185,32 @@ const MAX_RETRY_AFTER_SECONDS = 60;
  * a large or malformed value cannot stall the job far longer than the job itself is worth; a run that
  * would need to wait past the cap should fail and let the next trigger retry rather than block CI on
  * someone else's outage.
+ *
+ * GitHub reports two different rate limits through two different header shapes. The SECONDARY limit
+ * (rapid comment creation, exactly this client's own publish loop) sends `retry-after` directly —
+ * the fast path above. The PRIMARY limit (the account's overall request budget for the hour) sends
+ * no `retry-after` at all, only `x-ratelimit-remaining: 0` and `x-ratelimit-reset` (a Unix epoch
+ * second marking when the budget refills). Before this, a primary-limit 429 fell through to the
+ * linear backoff below — a few seconds — and burned all `MAX_ATTEMPTS` attempts against a limit
+ * that, unlike the secondary one, was never going to lift in seconds: the reset is typically
+ * minutes away. Reading `x-ratelimit-reset` is what gives this path the same real number the
+ * secondary path already had, capped by the identical `MAX_RETRY_AFTER_SECONDS` — past the cap this
+ * still fails fast rather than blocking the job, exactly as an unreadable `retry-after` already does.
  */
 function retryAfterMs(response: Response): number | undefined {
   const header = response.headers.get("retry-after");
-  if (header === null) return undefined;
-  const seconds = Number(header);
-  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-  return Math.min(seconds, MAX_RETRY_AFTER_SECONDS) * 1000;
+  if (header !== null) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds, MAX_RETRY_AFTER_SECONDS) * 1000;
+    }
+  }
+  if (response.headers.get("x-ratelimit-remaining") !== "0") return undefined;
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  if (!Number.isFinite(reset)) return undefined;
+  const secondsUntilReset = reset - Math.floor(Date.now() / 1000);
+  if (secondsUntilReset <= 0) return undefined;
+  return Math.min(secondsUntilReset, MAX_RETRY_AFTER_SECONDS) * 1000;
 }
 
 /**
@@ -209,9 +234,10 @@ const RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: 
     pullRequest(number: $number) {
       reviewThreads(first: 100, after: $cursor) {
         nodes {
+          id
           isResolved
           isOutdated
-          comments(first: 100) { nodes { databaseId } }
+          comments(first: 100) { nodes { databaseId author { login } body } }
           lastComment: comments(last: 1) { nodes { author { login } body } }
         }
         pageInfo { hasNextPage endCursor }
@@ -221,9 +247,16 @@ const RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: 
 }`;
 
 interface ReviewThreadNode {
+  readonly id?: unknown;
   readonly isResolved?: unknown;
   readonly isOutdated?: unknown;
-  readonly comments?: { readonly nodes?: readonly { readonly databaseId?: unknown }[] };
+  readonly comments?: {
+    readonly nodes?: readonly {
+      readonly databaseId?: unknown;
+      readonly author?: { readonly login?: unknown } | null;
+      readonly body?: unknown;
+    }[];
+  };
   readonly lastComment?: {
     readonly nodes?: readonly {
       readonly author?: { readonly login?: unknown } | null;
@@ -298,6 +331,56 @@ function collectThreadOverlays(
   }
 }
 
+/**
+ * The GraphQL node ids of every thread this reviewer should resolve as superseded — the reads half
+ * of `resolveSupersededOwnNotices`, split out so it can be unit-tested against raw query nodes the
+ * same way `collectThreadOverlays` already is.
+ *
+ * A thread qualifies on three independent facts, all conjunctive: GitHub reports it OUTDATED (a
+ * later push moved the diff hunk this thread anchored — so whatever it says is about a commit that
+ * is no longer HEAD), still UNRESOLVED (nobody has already closed it, by hand or otherwise — a
+ * resolved thread is not this function's concern either way), and it carries at least one comment
+ * authored by `identity` whose body `isNoticeBody` recognises as this reviewer's own incomplete-
+ * review notice — never a finding, however outdated: a finding is an open question for a human, and
+ * auto-resolving it would defeat the entire point of raising it (Keiko-for-Quality#38's contract
+ * that a merely-outdated thread must not read as answered applies with even more force to a thread
+ * this function would resolve outright, not just treat as ineligible for a later match). Checked
+ * across the thread's own first 100 comments, not just its first: a human may have replied to the
+ * notice before this reviewer ever revisits the pull request, which still leaves the notice itself,
+ * wherever it sits in the thread, exactly as stale.
+ */
+function collectResolvableNoticeThreadIds(
+  nodes: readonly ReviewThreadNode[],
+  identity: string,
+  isNoticeBody: (body: string) => boolean,
+  into: string[],
+): void {
+  for (const node of nodes) {
+    if (node.isOutdated !== true || node.isResolved === true) continue;
+    if (typeof node.id !== "string") continue;
+    const hasOwnNotice = (node.comments?.nodes ?? []).some(
+      (comment) =>
+        comment.author?.login === identity &&
+        typeof comment.body === "string" &&
+        isNoticeBody(comment.body),
+    );
+    if (hasOwnNotice) into.push(node.id);
+  }
+}
+
+const RESOLVE_REVIEW_THREAD_MUTATION = `mutation($threadId: ID!) {
+  resolveReviewThread(input: { threadId: $threadId }) {
+    thread { id isResolved }
+  }
+}`;
+
+interface ResolveReviewThreadResponse {
+  readonly data?: {
+    readonly resolveReviewThread?: { readonly thread?: { readonly isResolved?: unknown } };
+  };
+  readonly errors?: unknown;
+}
+
 /** A GraphQL error response, or one with no page at all, ends the walk with nothing more to add. */
 function reviewThreadsPage(raw: ReviewThreadsResponse): ReviewThreadsPage | undefined {
   if (raw.errors !== undefined) return undefined;
@@ -314,6 +397,35 @@ function nextThreadsCursor(page: ReviewThreadsPage): string | undefined {
 /** GitHub's default GraphQL endpoint. Actions sets `GITHUB_GRAPHQL_URL` to the correct value on
  *  GitHub Enterprise Server; this is only the fallback for a caller that does not supply one. */
 const DEFAULT_GRAPHQL_BASE = "https://api.github.com/graphql";
+
+/** Whether `requestUrl`'s retry loop should ever retry this response at all — a rate limit
+ *  (primary or secondary) or one of the retryable transient statuses. Split out of `requestUrl`
+ *  itself purely to keep that method's own branching within this file's complexity budget; the
+ *  condition is unchanged. */
+function isRetryableResponse(response: Response): boolean {
+  return RETRYABLE.has(response.status) || isSecondaryRateLimit(response);
+}
+
+/** Whether this retryable response is the ambiguous-write 5xx band `requestUrl`'s own doc comment
+ *  describes: `429` and a secondary rate limit are never ambiguous, since GitHub rejected the
+ *  request before it reached application logic, regardless of method. */
+function isAmbiguousWrite5xxResponse(response: Response): boolean {
+  return (
+    response.status !== 429 && !isSecondaryRateLimit(response) && RETRYABLE.has(response.status)
+  );
+}
+
+/** The headers every request carries, plus `content-type` only when there is a body to describe —
+ *  split out of `requestUrl` for the same complexity-budget reason as the two functions above. */
+function requestHeaders(token: string, init: RequestInit): Record<string, string> {
+  return {
+    authorization: `Bearer ${token}`,
+    accept: "application/vnd.github+json",
+    "x-github-api-version": "2022-11-28",
+    "user-agent": "keiko-for-quality",
+    ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
+  };
+}
 
 export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
   private readonly apiBase: string;
@@ -333,22 +445,32 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     this.graphqlBase = graphqlBase;
   }
 
-  private async requestUrl(url: string, init: RequestInit = {}): Promise<Response> {
+  /**
+   * `retryAmbiguous5xx` (default `true`, unchanged behavior for every existing caller): whether a
+   * 500/502/503/504 — as opposed to `429` or a secondary-rate-limit `403`, which are pre-processing
+   * rejections the request never reached application logic for — may be retried at all.
+   *
+   * A 5xx on a READ is unambiguous to retry: nothing was written, so repeating it costs nothing but
+   * time. A 5xx on a WRITE (creating a comment, say) is a genuinely different risk: the server may
+   * have already applied the write and failed only while sending the response back, and retrying
+   * would then create a SECOND comment for the one finding. `429`/secondary-`403` never carry this
+   * risk regardless of method — GitHub rejects those before the request reaches application logic —
+   * so they stay retryable unconditionally; only the pass-or-fail-silently 5xx band is caller-decided.
+   * The caller (not this method) is who knows whether a given call is a write worth refusing to
+   * blindly repeat — see `createReviewComment`/`createIssueComment` for the two that set it `false`.
+   */
+  private async requestUrl(
+    url: string,
+    init: RequestInit = {},
+    { retryAmbiguous5xx = true }: { readonly retryAmbiguous5xx?: boolean } = {},
+  ): Promise<Response> {
     let lastStatus = 0;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      const response = await fetch(url, {
-        ...init,
-        headers: {
-          authorization: `Bearer ${this.token}`,
-          accept: "application/vnd.github+json",
-          "x-github-api-version": "2022-11-28",
-          "user-agent": "keiko-for-quality",
-          ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
-        },
-      });
+      const response = await fetch(url, { ...init, headers: requestHeaders(this.token, init) });
       if (response.ok) return response;
       lastStatus = response.status;
-      if (!RETRYABLE.has(response.status) && !isSecondaryRateLimit(response)) {
+      if (!isRetryableResponse(response)) throw new GitHubApiError(response.status);
+      if (!retryAmbiguous5xx && isAmbiguousWrite5xxResponse(response)) {
         throw new GitHubApiError(response.status);
       }
       // Linear backoff is the default: the ordinary retryable cases are transient, and a reviewer
@@ -359,12 +481,20 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     throw new GitHubApiError(lastStatus);
   }
 
-  private async request(path: string, init: RequestInit = {}): Promise<Response> {
-    return this.requestUrl(`${this.apiBase}${path}`, init);
+  private async request(
+    path: string,
+    init: RequestInit = {},
+    options?: { readonly retryAmbiguous5xx?: boolean },
+  ): Promise<Response> {
+    return this.requestUrl(`${this.apiBase}${path}`, init, options);
   }
 
-  private async json(path: string, init?: RequestInit): Promise<unknown> {
-    const response = await this.request(path, init);
+  private async json(
+    path: string,
+    init?: RequestInit,
+    options?: { readonly retryAmbiguous5xx?: boolean },
+  ): Promise<unknown> {
+    const response = await this.request(path, init, options);
     return await response.json();
   }
 
@@ -422,6 +552,10 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     number: number,
     comments: readonly ReviewComment[],
   ): Promise<ReviewComment[]> {
+    // Nothing for the walk below to attach state to — skip the GraphQL round trip entirely rather
+    // than pay for it and immediately discard the result. A fresh pull request with zero review
+    // comments yet is exactly this case, and `listReviewComments` reaches it on every such run.
+    if (comments.length === 0) return [];
     const overlays = await this.fetchThreadOverlays(ref, number);
     if (overlays.size === 0) return [...comments];
     return comments.map((comment) => {
@@ -469,6 +603,94 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     return overlays;
   }
 
+  /**
+   * A second, separate walk of the same GraphQL connection `fetchThreadOverlays` reads, rather than
+   * threading `identity` and a body predicate through that general-purpose method: the two answer
+   * different questions for different callers (every comment's dedup-relevant state, versus which
+   * threads a cleanup pass should mutate), and `fetchThreadOverlays` runs on the hot dedup-prefetch
+   * path this method must never affect the shape or cost of. The duplicated pagination shell is a
+   * dozen identical lines, not a design this file has any other copy of to drift from.
+   */
+  private async fetchResolvableNoticeThreadIds(
+    ref: RepoRef,
+    number: number,
+    identity: string,
+    isNoticeBody: (body: string) => boolean,
+  ): Promise<readonly string[]> {
+    const ids: string[] = [];
+    try {
+      let cursor: string | null = null;
+      for (let page = 1; page <= 20; page += 1) {
+        const raw = (await this.graphqlJson(RESOLVED_THREADS_QUERY, {
+          owner: ref.owner,
+          repo: ref.repo,
+          number,
+          cursor,
+        })) as ReviewThreadsResponse;
+        const threads = reviewThreadsPage(raw);
+        if (threads === undefined) break;
+        collectResolvableNoticeThreadIds(threads.nodes ?? [], identity, isNoticeBody, ids);
+        const next = nextThreadsCursor(threads);
+        if (next === undefined) break;
+        cursor = next;
+      }
+    } catch {
+      // Best-effort, same posture as `fetchThreadOverlays`: whatever this pass found before the
+      // failure is discarded rather than acted on half-way — the next run tries again from scratch.
+      return [];
+    }
+    return ids;
+  }
+
+  /** One `resolveReviewThread` mutation. `false` on any failure — malformed response, GraphQL
+   *  `errors`, a thrown request error — never thrown, so one bad id cannot stop the rest of the
+   *  batch `resolveSupersededOwnNotices` is working through. */
+  private async resolveThread(threadId: string): Promise<boolean> {
+    try {
+      const raw = (await this.graphqlJson(RESOLVE_REVIEW_THREAD_MUTATION, {
+        threadId,
+      })) as ResolveReviewThreadResponse;
+      if (raw.errors !== undefined) return false;
+      return raw.data?.resolveReviewThread?.thread?.isResolved === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Resolves every one of this reviewer's own superseded incomplete-review notices on the pull
+   * request — see `collectResolvableNoticeThreadIds` for exactly what "superseded" means and why a
+   * finding thread can never qualify.
+   *
+   * Why this belongs on the client rather than being folded into `applyThreadOverlays`'s existing
+   * walk: this is the one method on this class that WRITES rather than reads, and it is reached from
+   * a different place in the review pipeline (once, after a run's own outcome is already decided)
+   * than the read-only dedup prefetch (before every publish decision, and the only path a local,
+   * publication-free run ever takes). Keeping it a separate, explicitly-named call is what lets a
+   * caller decide when a mutation is appropriate instead of one firing implicitly inside a read.
+   *
+   * Best-effort end to end, matching the class's posture everywhere else a GraphQL lookup feeds
+   * something that is never load-bearing for review correctness: a failed lookup or a failed resolve
+   * costs this run a stale thread staying open one push longer, never a failed review. Returns both
+   * how many resolutions were attempted and how many actually succeeded, purely for diagnostics — no
+   * caller branches on either. The split matters because `resolveThread`'s own catch collapses a
+   * failed mutation to the same `false` a thread that just wasn't resolved would produce: `attempted`
+   * is the only way a caller can tell "nothing needed resolving" apart from "every attempt failed."
+   */
+  public async resolveSupersededOwnNotices(
+    ref: RepoRef,
+    number: number,
+    identity: string,
+    isNoticeBody: (body: string) => boolean,
+  ): Promise<{ readonly attempted: number; readonly resolved: number }> {
+    const ids = await this.fetchResolvableNoticeThreadIds(ref, number, identity, isNoticeBody);
+    let resolved = 0;
+    for (const threadId of ids) {
+      if (await this.resolveThread(threadId)) resolved += 1;
+    }
+    return { attempted: ids.length, resolved };
+  }
+
   public async createReviewComment(
     ref: RepoRef,
     number: number,
@@ -489,9 +711,12 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
         payload.start_side = input.side ?? "RIGHT";
       }
     }
+    // A 5xx lost after the write already succeeded must not be retried into a second, duplicate
+    // finding comment for the same defect — see `requestUrl`'s own doc comment.
     const created = (await this.json(
       `/repos/${ref.owner}/${ref.repo}/pulls/${String(number)}/comments`,
       { method: "POST", body: JSON.stringify(payload) },
+      { retryAmbiguous5xx: false },
     )) as Record<string, unknown>;
     return toReviewComment(created);
   }
@@ -535,9 +760,13 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     number: number,
     body: string,
   ): Promise<IssueComment> {
+    // Same reasoning as `createReviewComment`: a lost 5xx response must not be retried into a
+    // second summary comment — the marker-based upsert a future run relies on would only ever find
+    // and update ONE of the two, leaving a stale duplicate on the pull request permanently.
     const created = (await this.json(
       `/repos/${ref.owner}/${ref.repo}/issues/${String(number)}/comments`,
       { method: "POST", body: JSON.stringify({ body }) },
+      { retryAmbiguous5xx: false },
     )) as Record<string, unknown>;
     return toIssueComment(created);
   }

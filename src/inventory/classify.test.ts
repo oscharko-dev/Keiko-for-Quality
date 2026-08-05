@@ -150,6 +150,20 @@ describe("classify", () => {
       const result = classify(compiled, change({ path: "src/a.ts", newMode: MODE_SYMLINK }));
       expect(result).toEqual({ kind: "symlink-pointer", critical: true });
     });
+
+    // The one combination #38 found untested: `critical: true` paired specifically with
+    // `submodule-pointer`, not with `symlink-pointer` (the only kind the earlier test above pins).
+    // `isReviewable` (below) does not honor this flag the way it honors a critical symlink's — a
+    // gitlink SHA is not a blob this repository's object store holds — but the classification
+    // itself must still report the fact accurately for `criticalPointerCount` (inventory.ts) to
+    // read downstream.
+    it("marks a submodule pointer over a deletion-critical path as critical", () => {
+      const result = classify(
+        compiled,
+        change({ path: "tests/vendor", oldMode: MODE_SUBMODULE, newMode: MODE_SUBMODULE }),
+      );
+      expect(result).toEqual({ kind: "submodule-pointer", critical: true });
+    });
   });
 
   describe("mechanically-clean: the pure-rename downgrade", () => {
@@ -254,6 +268,23 @@ describe("toItem", () => {
       compiled,
       change({ path: "src/sub", oldMode: MODE_SUBMODULE, newMode: MODE_SUBMODULE }),
     );
+    expect(item.reviewable).toBe(false);
+  });
+
+  // The companion to the test above, pinning the direction #37/#38 found untested: `critical`
+  // stays `true` — the classification itself is unchanged — but `reviewable` stays `false`
+  // regardless, unlike a critical symlink-pointer's identical-looking flag. A gitlink SHA is not a
+  // blob this repository's object store holds, so making this `reviewable` the way `isReviewable`
+  // already does for `symlink-pointer` would be architecturally wrong, not a fix — the signal
+  // belongs in `criticalPointerCount` (inventory.ts) instead. Written out so a future change to
+  // `isReviewable` cannot silently start requiring engine coverage of an unreadable gitlink
+  // without a red test.
+  it("still does not require engine coverage for a CRITICAL submodule pointer", () => {
+    const item = toItem(
+      compiled,
+      change({ path: "tests/vendor", oldMode: MODE_SUBMODULE, newMode: MODE_SUBMODULE }),
+    );
+    expect(item.classification).toEqual({ kind: "submodule-pointer", critical: true });
     expect(item.reviewable).toBe(false);
   });
 

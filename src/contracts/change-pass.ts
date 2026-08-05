@@ -82,6 +82,19 @@ const MAX_PASS_FINDINGS = 10;
  */
 const SCAN_WINDOW = 400;
 
+/**
+ * The same source-size bound `shape-gate.ts` and `pin-desync.ts` each already enforce, duplicated
+ * here rather than imported — both siblings' own constants are module-private, and this module's
+ * own header states the zero-imports discipline `corpus/run.mjs` depends on for loading it directly
+ * under Node's type stripping. Without it, a single crafted or merely enormous file could force
+ * `extractDeclarations`'s per-declaration scan to repeat its `SCAN_WINDOW`-bounded search across
+ * every line of an effectively unbounded source — the two other gates already close this exact
+ * shape on the same trust boundary (candidate-controlled diff content), and this was the one
+ * sibling that had not yet.
+ */
+const MAX_SOURCE_CHARS = 2_000_000;
+const MAX_SOURCE_LINES = 4000;
+
 // ---------------------------------------------------------------------------------------------
 // Tolerant line-scanning declaration extraction.
 //
@@ -263,9 +276,14 @@ function tryExtractOne(lines: readonly string[], i: number): Extracted | undefin
   );
 }
 
-/** One file's exported declaration signatures, capped at `MAX_DECLARATIONS_PER_FILE`. */
+/** One file's exported declaration signatures, capped at `MAX_DECLARATIONS_PER_FILE`. Degrades to
+ *  no declarations at all — never a crash, never an unbounded scan — for a source past
+ *  `MAX_SOURCE_CHARS`/`MAX_SOURCE_LINES`, mirroring `shape-gate.ts`'s identical degradation on the
+ *  same two bounds. */
 function extractDeclarations(source: string): { texts: string[]; overflow: number } {
+  if (source.length > MAX_SOURCE_CHARS) return { texts: [], overflow: 0 };
   const lines = source.split("\n");
+  if (lines.length > MAX_SOURCE_LINES) return { texts: [], overflow: 0 };
   const found: string[] = [];
   let i = 0;
   while (i < lines.length) {

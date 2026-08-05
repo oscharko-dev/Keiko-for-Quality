@@ -175,7 +175,13 @@ comment carrying a valid-looking marker and silence a real finding.
 3. Store its id and private key as `KFQ_APP_ID` and `KFQ_APP_PRIVATE_KEY`.
 
 Without them the action falls back to `github_token` and posts as the shared Actions identity. It
-works; it is weaker; the fallback exists so you can try the reviewer before registering an App.
+works; it is weaker; the fallback exists so you can try the reviewer before registering an App. The
+weakening now costs more than deduplication: this reviewer also resolves its own past
+"incomplete review" notices once a later push supersedes them (see [Automatic
+cleanup](#automatic-cleanup) below), and that cleanup is a GitHub thread-resolution WRITE, not a
+read-only suppression check — it runs only when the identity is provably exclusive (a GitHub App),
+never under the shared fallback, where this run cannot prove a matching comment was actually its
+own.
 
 ### Deduplication
 
@@ -200,8 +206,16 @@ answer to, checked in three stages:
    characters once signature lines (an automation footer, a `Co-Authored-By:` trailer) are stripped —
    never a bare "resolved" click with no reply, or a resolve with no reply at all. Counted separately
    as `dedup.dispositioned` so it is never confused with the two stages above.
+4. **Outdated recurrence.** The similarity stage above needs a trustworthy line anchor, and an
+   _outdated_ thread — one whose diff hunk a later push moved — no longer has one, so it is invisible
+   to that stage the same way a resolved one is. Left uncaught, one still-open, unfixed defect
+   re-filed itself as a brand-new blocking conversation on every push that merely touched its file.
+   This stage suppresses a candidate against a still-open, outdated conversation on a body-similarity
+   match alone, at a higher bar than the similarity stage's own (no location left to narrow on, so
+   the body carries the whole decision) — never against a genuinely resolved thread, which keeps
+   stage 3's contract intact. Counted as `publish.finding_suppressed_outdated_recurrence`.
 
-A fourth suppression runs earlier, and independently of those three, inside a single run. When the
+A fifth suppression runs earlier, and independently of those four, inside a single run. When the
 model describes one defect twice in one pass, the near-duplicates are clustered against each other —
 after sanitization, before any of the stages above — and only the best-articulated instance of each
 cluster goes on to those stages; a suppressed member never reaches them at all. No cross-run stage
@@ -221,6 +235,27 @@ would be noise, not signal. Resolution state, and — for a genuinely resolved t
 reply's author and body, come from a best-effort GraphQL lookup the `Pull requests` permission above
 already covers; if a token or platform cannot answer it, every conversation is simply treated as
 open, which is exactly how deduplication behaved before this lookup existed.
+
+### Automatic cleanup
+
+Branch protection can require every conversation resolved before merge. An "this change was not
+fully reviewed" notice from an earlier, incomplete run is not exempt — and once a later push
+produces a fresh, complete assessment, the old notice is not merely stale, it is actively wrong, yet
+nothing resolved it automatically. Left alone, that is a human hand-resolving a bot's own mistake on
+every pull request that ever truncated once.
+
+At the end of every run, the reviewer resolves its own past incomplete-review notices whose target
+commit GitHub has marked outdated — a later push moved the hunk they anchored, so the commit they
+describe is no longer the head under review. It never resolves a **finding**: a finding is an open
+question for a human, and auto-resolving one would defeat the entire point of raising it. Detection
+is a fixed, product-controlled sentence no model output can produce, so it can never mistake a
+genuine finding for a notice.
+
+This is a GitHub thread-resolution **write**, not a read-only suppression check, so it runs only
+under a provably exclusive identity — the GitHub App, never the shared `github_token` fallback (see
+[The bot identity](#the-bot-identity) above). It never affects this run's own completeness: a failed
+cleanup pass costs the next push one more stale thread to resolve by hand, exactly as if this
+feature did not exist, never a failed review.
 
 ### The run-summary comment
 

@@ -42,15 +42,23 @@ export async function resolveReviewPair(
  *
  * Ordinarily the classification's `kind` is the whole story. `mechanically-clean` is the one kind
  * with more than one reason today, so its bucket carries the reason too — an operator reading
- * `mechanically_clean_pure_rename` learns what was skipped without opening the run. The diagnostics
- * sink's own key format (`^[a-z][a-z0-9_]{0,39}$`, no dots) is why the separator is `_` rather than
- * the `.` a nested name might suggest.
+ * `mechanically_clean_pure_rename` learns what was skipped without opening the run. `submodule-
+ * pointer` gets the same split for the opposite reason (#37): a critical and a non-critical bump
+ * used to land in the identical `submodule_pointer` bucket, so a supply-chain-relevant pin change
+ * — one on a path the profile's own `deletionCritical`/`reviewRelevant` calls out — was invisible
+ * next to an inert vendor submodule bump. The diagnostics sink's own key format
+ * (`^[a-z][a-z0-9_]{0,39}$`, no dots) is why the separator is `_` rather than the `.` a nested name
+ * might suggest.
  */
 function bucketKey(item: InventoryItem): string {
   const kind = item.classification.kind.replaceAll("-", "_");
-  return item.classification.kind === "mechanically-clean"
-    ? `${kind}_${item.classification.reason.replaceAll("-", "_")}`
-    : kind;
+  if (item.classification.kind === "mechanically-clean") {
+    return `${kind}_${item.classification.reason.replaceAll("-", "_")}`;
+  }
+  if (item.classification.kind === "submodule-pointer" && item.classification.critical) {
+    return `${kind}_critical`;
+  }
+  return kind;
 }
 
 function countByKind(items: readonly InventoryItem[]): Record<string, number> {
@@ -86,6 +94,23 @@ export function mechanicallyCleanPaths(inventory: Inventory): readonly string[] 
  */
 export function excludedPathCount(inventory: Inventory): number {
   return inventory.items.filter((item) => item.classification.kind === "excluded").length;
+}
+
+/**
+ * Count of submodule-pointer bumps on a path the profile's own `deletionCritical` or
+ * `reviewRelevant` rules call out (#37).
+ *
+ * A gitlink SHA is not a blob this repository's object store holds, so this deliberately does not
+ * make these items `reviewable` the way a critical symlink-pointer is — there is nothing for the
+ * engine to read. This exists purely so the fact stays visible: a critical submodule bump is a
+ * candidate CONTRIBUTING.md's threat model names by name (a dependency pin loosened or replaced),
+ * and without a distinct count it was absorbed into the same silent remainder as an inert vendor
+ * submodule bump.
+ */
+export function criticalPointerCount(inventory: Inventory): number {
+  return inventory.items.filter(
+    (item) => item.classification.kind === "submodule-pointer" && item.classification.critical,
+  ).length;
 }
 
 export async function buildInventory(

@@ -59,8 +59,15 @@ export interface SummarySourceReport {
   readonly excludedPaths: number;
   /** Paths downgraded to mechanically-clean — never sent to the engine. */
   readonly mechanicallyClean: number;
+  /** Submodule-pointer bumps on a critical path — see `ReviewReport.criticalPointers` (review.ts)
+   *  for the full rationale. */
+  readonly criticalPointers: number;
   /** Cache-eligible paths a stored entry answered instead of the engine. Always 0 when inert. */
   readonly cacheHits: number;
+  /** Of the cache misses, how many were specifically a content match the changed-path-set shape
+   *  invalidated — see `ReviewReport.contextInvalidated` (review.ts) for the full rationale.
+   *  Always 0 when inert. */
+  readonly contextInvalidated: number;
   /** Absent on a run that never reached publication — see `EMPTY_PUBLISH_OUTCOME` below. */
   readonly publish?: PublishOutcome;
 }
@@ -143,6 +150,7 @@ const EMPTY_PUBLISH_OUTCOME: PublishOutcome = {
   rejectedSanitization: 0,
   rejectedPlacement: 0,
   readbackFailures: 0,
+  apiFailures: 0,
 };
 
 /**
@@ -165,7 +173,9 @@ export function buildSummaryReport(
     reviewablePaths: report.reviewablePaths,
     excludedPaths: report.excludedPaths,
     mechanicallyClean: report.mechanicallyClean,
+    criticalPointers: report.criticalPointers,
     cacheHits: report.cacheHits,
+    contextInvalidated: report.contextInvalidated,
     freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits),
     findingsPublished: publish.published,
     // Unlike the four counts below, this one stays optional on `PublishOutcome` even once `publish`
@@ -178,6 +188,14 @@ export function buildSummaryReport(
     suppressedDispositioned: publish.suppressedDispositioned,
     // Same optional-field fallback as `suppressedIntraRun` above, for the same reason.
     suppressedRecurrence: publish.suppressedRecurrence ?? 0,
+    // The four counters `publicationDegraded` (review.ts) actually decides on — see
+    // `SummaryCounts`'s own doc comment. `apiFailures` alone needs the same optional-field
+    // fallback as `suppressedIntraRun`/`suppressedRecurrence` above; the other three have always
+    // been non-optional on `PublishOutcome`.
+    rejectedSanitization: publish.rejectedSanitization,
+    rejectedPlacement: publish.rejectedPlacement,
+    readbackFailures: publish.readbackFailures,
+    apiFailures: publish.apiFailures ?? 0,
   };
   return {
     outcome: report.outcome,

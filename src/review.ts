@@ -45,6 +45,7 @@ import { describePinDesync, detectPinDesync } from "./contracts/pin-desync.js";
 import type { InventoryItem } from "./inventory/classify.js";
 import {
   buildInventory,
+  criticalPointerCount,
   excludedPathCount,
   mechanicallyCleanPaths,
   resolveReviewPair,
@@ -63,6 +64,7 @@ import {
   type PublishContext,
   type PublishOutcome,
 } from "./publish/publisher.js";
+import { isIncompleteNoticeBody } from "./publish/presentation.js";
 
 export interface ReviewRequest {
   readonly client: GitHubClient;
@@ -76,6 +78,15 @@ export interface ReviewRequest {
   readonly profile: CompiledProfile;
   readonly guidelines: GuidelineIndex;
   readonly identity: string;
+  /**
+   * Whether `identity` is provably exclusive to this reviewer (`action/identity.ts`'s own field of
+   * the identical name — mirrored here rather than importing the action-layer type, the same
+   * boundary `client`/every other GitHub-specific field on this request already crosses). Gates
+   * `resolveSupersededOwnNotices` in `performReview`'s own `finally` block below: a WRITE against
+   * another author's content is not a risk the read-only dedup/suppression paths take on a shared
+   * identity, and must not start being one just because a cleanup feature reuses the same login.
+   */
+  readonly identityExclusive: boolean;
   readonly env: NodeJS.ProcessEnv;
   readonly pathValue: string;
   /**
@@ -150,11 +161,29 @@ export interface ReviewReport {
   readonly excludedPaths: number;
   /** Paths downgraded to mechanically-clean (a pure rename today) — never sent to the engine. */
   readonly mechanicallyClean: number;
+  /**
+   * Submodule-pointer bumps on a path the profile's own `deletionCritical`/`reviewRelevant` rules
+   * call out (#37) — content the engine structurally cannot review (a gitlink SHA is not a blob
+   * this repository's object store holds) on a path the consumer told the profile mattered. Never
+   * affects `outcome`: this is honest reporting of a fact the classifier already knows, not a new
+   * completeness requirement.
+   */
+  readonly criticalPointers: number;
   readonly publish?: PublishOutcome;
   /** Cache-eligible paths a stored entry answered instead of the engine. Always 0 when inert. */
   readonly cacheHits: number;
   /** Cache-eligible paths that were sent to the engine anyway. Always 0 when inert. */
   readonly cacheMisses: number;
+  /**
+   * Of `cacheMisses`, how many were specifically a content match `prPathSetDigest` refused to
+   * replay because the pull request's changed-path-set shape moved since the entry was written
+   * (v0.10.0, issue #50) — distinct from a miss whose content was simply never reviewed before.
+   * Computed and diagnosed (`cache.context_invalidated`) since that feature shipped, but never
+   * surfaced anywhere an operator could see it without reading the raw diagnostics stream — this is
+   * the exact cost of the path-set-shape invalidation rule, made visible on the one report built
+   * for that purpose. Always 0 when inert.
+   */
+  readonly contextInvalidated: number;
   /** How many new-or-refreshed entries `updatedCacheStore` carries over what was read in. */
   readonly cacheAppended: number;
   /** Present only for a `complete` outcome with the feature enabled — the store to write back. */
@@ -495,12 +524,16 @@ function itemIndex(inventory: Inventory): ReadonlyMap<string, InventoryItem> {
  */
 function inventoryCounts(
   inventory: Inventory,
-): Pick<ReviewReport, "inventorySize" | "reviewablePaths" | "excludedPaths" | "mechanicallyClean"> {
+): Pick<
+  ReviewReport,
+  "inventorySize" | "reviewablePaths" | "excludedPaths" | "mechanicallyClean" | "criticalPointers"
+> {
   return {
     inventorySize: inventory.items.length,
     reviewablePaths: inventory.reviewablePaths.size,
     excludedPaths: excludedPathCount(inventory),
     mechanicallyClean: mechanicallyCleanPaths(inventory).length,
+    criticalPointers: criticalPointerCount(inventory),
   };
 }
 
@@ -574,8 +607,25 @@ interface IncompleteCause {
   readonly counts?: Readonly<Record<string, number>>;
 }
 
-function cacheCounts(memo: MemoContext): { cacheHits: number; cacheMisses: number } {
-  return { cacheHits: memo.hits.size, cacheMisses: memo.eligiblePaths.size - memo.hits.size };
+function cacheCounts(memo: MemoContext): {
+  cacheHits: number;
+  cacheMisses: number;
+  contextInvalidated: number;
+} {
+  return {
+    cacheHits: memo.hits.size,
+    cacheMisses: memo.eligiblePaths.size - memo.hits.size,
+    contextInvalidated: memo.contextInvalidated,
+  };
+}
+
+/** `cacheCounts`, narrowed to the two fields `LocalReviewReport` actually declares — that type
+ *  predates `contextInvalidated` and stays without it deliberately (issue #95's local-runs-never-
+ *  feed-CI invariant scopes what a local report needs to know to its own consumer, the CLI, which
+ *  has no run-summary comment for the field to inform). */
+function localCacheCounts(memo: MemoContext): { cacheHits: number; cacheMisses: number } {
+  const { cacheHits, cacheMisses } = cacheCounts(memo);
+  return { cacheHits, cacheMisses };
 }
 
 /**
@@ -753,6 +803,34 @@ async function settleIncomplete(
   };
 }
 
+interface EngineBudget {
+  readonly excluded: readonly string[];
+  readonly allottedBudget: number;
+}
+
+/**
+ * The one unioned exclude list (mechanically-clean paths union cache hits) through the one
+ * threading point v0.8.0 built — cache hits are never a second, parallel exclude channel alongside
+ * the mechanically-clean one — plus the allotment computed from it. Split out of `executeEngine`
+ * purely to keep that function's own line budget; the same `excluded` set feeds both the real
+ * dispatch and this formula, so the estimate and the dispatch always agree on what "excluded"
+ * means this run.
+ */
+function computeEngineBudget(
+  request: PipelineRequest,
+  inventory: Inventory,
+  memo: MemoContext,
+): EngineBudget {
+  const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
+  const excludedSet = new Set(excluded);
+  const allottedBudget = computeAllottedBudget(
+    request.config.tokenBudget,
+    dispatchedPathCount(inventory, excludedSet),
+    reviewableChangedLines(inventory, excludedSet),
+  );
+  return { excluded, allottedBudget };
+}
+
 async function executeEngine(
   request: PipelineRequest,
   inventory: Inventory,
@@ -763,19 +841,13 @@ async function executeEngine(
   const workspace = await mkdtemp(join(tmpdir(), "kfq-engine-bin-"));
   try {
     const engine = await acquireEngine(workspace, diagnostics);
-    // One unioned exclude list through the one threading point v0.8.0 built — cache hits are never
-    // a second, parallel exclude channel alongside the mechanically-clean one. Reused for the
-    // allotment formula too (below), so the estimate and the real dispatch always agree on what
-    // "excluded" means this run.
-    const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
-    const excludedSet = new Set(excluded);
-    const allottedBudget = computeAllottedBudget(
-      request.config.tokenBudget,
-      dispatchedPathCount(inventory, excludedSet),
-      reviewableChangedLines(inventory, excludedSet),
-    );
+    const { excluded, allottedBudget } = computeEngineBudget(request, inventory, memo);
     ledger.allotted = allottedBudget;
-    const { result: parsed, engineTokens } = await runEngineWithOneResume(
+    const {
+      result: parsed,
+      engineTokens,
+      alreadyReviewedPaths,
+    } = await runEngineWithOneResume(
       {
         binaryPath: engine.binaryPath,
         repositoryPath: request.repositoryPath,
@@ -797,7 +869,15 @@ async function executeEngine(
       diagnostics,
     );
     ledger.classify += classifyTokens;
-    return settle(inventory, classified, request.profile, request.config, memo.hitPaths);
+    // Widened, never replaced: `alreadyReviewedPaths` (empty except after a resume that narrowed
+    // its own dispatch — see `ResumeOutcome`'s doc comment) tells `settle()` those paths are
+    // covered by the FIRST attempt, not by the returned result's own coverage, exactly the same
+    // "covered by other means" contract `memo.hitPaths` already establishes for a cache hit.
+    const memoizedForSettlement =
+      alreadyReviewedPaths.length === 0
+        ? memo.hitPaths
+        : new Set([...memo.hitPaths, ...alreadyReviewedPaths]);
+    return settle(inventory, classified, request.profile, request.config, memoizedForSettlement);
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -827,6 +907,34 @@ function classifyDeps(request: PipelineRequest): ClassifyEndpoint | undefined {
 const MAX_GATE_FINDINGS = 8;
 
 /**
+ * A per-run cache of `readTextAtCommit` results, shared by every deterministic gate below AND by
+ * `collectChangePassFindings` (#33) — its own model-facing pass reads the identical head-side text
+ * for any reviewable file that also matches a declared contract pair or carries a duplicate pin, a
+ * third independent git subprocess for content the gate collectors already fetched.
+ *
+ * The contract-pair comparison and the pin-desync scan both read the SAME (commit, path) text for
+ * any item that happens to match a declared pair AND carry a duplicate pin — two independent git
+ * subprocess spawns for identical content, on every run that has both. Keyed by `${commit}:${path}`
+ * rather than blob id: a gate reads by commit+path (the identity these checks reason in), not by
+ * blob, and the two happen to coincide here only because neither check's caller has a blob handy at
+ * the point it decides what to read.
+ */
+type BlobTextCache = Map<string, string | undefined>;
+
+async function readTextAtCommitCached(
+  cache: BlobTextCache,
+  ctx: GitContext,
+  commit: CommitSha,
+  path: string,
+): Promise<string | undefined> {
+  const key = `${commit}:${path}`;
+  if (cache.has(key)) return cache.get(key);
+  const text = await readTextAtCommit(ctx, commit, path);
+  cache.set(key, text);
+  return text;
+}
+
+/**
  * The deterministic contract gate (issue #80, technique D): for every profile-declared contract
  * pair whose `paths` side changed in this pull request, read both sides at the reviewed head and
  * compare same-named flat interfaces member by member. No model, no tokens, no opinion — a firing
@@ -836,30 +944,83 @@ const MAX_GATE_FINDINGS = 8;
  * to be part of the diff a review comment can attach to, and it is also where the author who broke
  * the contract is currently looking. Like the change-level pass, gate findings never enter the
  * review-cache store — they derive from two files, and a store entry must re-derive from one.
+ *
+ * Pin-desync runs FIRST, ahead of the contract-pairs loop below: the two checks share one
+ * `MAX_GATE_FINDINGS` budget, and pin-desync is the cheaper, unconfigured, historically-motivating
+ * check (see its own doc comment) — a busy contract-pair loop must not be able to starve it
+ * entirely just by matching first. Both checks share `blobCache`, so an item pin-desync already
+ * read that also matches a declared pair costs the contract-pairs loop a cache lookup, not a
+ * second git subprocess.
  */
+/**
+ * Items outer, matching pairs inner (#27): each item's own head/base text is read at most once
+ * regardless of how many declared pairs match it — a matcher only decides WHICH counterparts to
+ * compare against, never how many times this item's own content is fetched. Split out of
+ * `collectGateFindings` purely for that function's own complexity/line budget; mutates `findings`
+ * in place, matching `collectPinDesyncFindings`'s own calling convention. Returns how many (item,
+ * pair) comparisons actually ran.
+ */
+async function compareMatchedPairs(
+  blobCache: BlobTextCache,
+  ctx: GitContext,
+  request: PipelineRequest,
+  inventory: Inventory,
+  pairs: NonNullable<CompiledProfile["contractPairs"]>,
+  findings: EngineFinding[],
+): Promise<number> {
+  let compared = 0;
+  for (const item of inventory.items) {
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    if (!item.reviewable) continue;
+    const matched = pairs.filter((pair) => pair.matcher.matches(item.path as string));
+    if (matched.length === 0) continue;
+    const path = item.path as string;
+    const left = await readTextAtCommitCached(blobCache, ctx, request.head, path);
+    if (left === undefined) continue;
+    // Only needed by the union check, which asks what this change ADDED — a member present in both
+    // versions was never widened by this pull request. Absent for an added file, which correctly
+    // leaves the union check with nothing to compare. Reads from `oldPath` when this item is a
+    // rename: the base version lived under the old name, and reading `path` there would ask git
+    // for a blob that, at that commit, never existed under the new one.
+    const leftBase = await readTextAtCommitCached(
+      blobCache,
+      ctx,
+      request.base,
+      (item.oldPath ?? item.path) as string,
+    );
+    for (const pair of matched) {
+      compared += await compareAgainstCounterparts(
+        blobCache,
+        ctx,
+        request.head,
+        item,
+        pair,
+        left,
+        leftBase,
+        findings,
+      );
+      if (findings.length >= MAX_GATE_FINDINGS) break;
+    }
+  }
+  return compared;
+}
+
 async function collectGateFindings(
   request: PipelineRequest,
   inventory: Inventory,
   diagnostics: Diagnostics,
+  // Shared with `collectChangePassFindings` at the one caller (`publishSettledFindings`/
+  // `completeLocalReport`) that runs both against the same head — see `BlobTextCache`'s own doc
+  // comment (#33). Defaulted rather than required so the two incomplete-settlement call sites,
+  // which never pair with a change-pass call, do not need to construct a Map they would never share.
+  blobCache: BlobTextCache = new Map(),
 ): Promise<readonly EngineFinding[]> {
   const pairs = request.profile.contractPairs ?? [];
   const ctx = gitContext(request);
   const findings: EngineFinding[] = [];
-  let compared = 0;
-  for (const pair of pairs) {
-    for (const item of inventory.items) {
-      if (!item.reviewable || !pair.matcher.matches(item.path as string)) continue;
-      compared += await compareAgainstCounterparts(
-        ctx,
-        request.base,
-        request.head,
-        item,
-        pair,
-        findings,
-      );
-    }
-  }
-  const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings);
+  const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings, blobCache);
+  const compared = await compareMatchedPairs(blobCache, ctx, request, inventory, pairs, findings);
+
   if (pairs.length === 0 && findings.length === 0 && pinDesyncs === 0) return [];
   diagnostics.record("contracts.gate", {
     headSha: request.head,
@@ -878,43 +1039,73 @@ async function collectGateFindings(
  * places, where the change moved one and left the other behind.
  *
  * Unlike the shape gate above it needs no declared pair — both declarations live in the same file,
- * and the base version is what proves they were meant to agree. It runs over every modified
- * reviewable path for that reason, and its cost is two blob reads and a text scan per file, no
- * model involvement at all.
+ * and the base version is what proves they were meant to agree. It runs over every modified OR
+ * renamed-with-real-edits reviewable path for that reason, and its cost is two blob reads and a
+ * text scan per file, no model involvement at all.
  *
  * It exists because this reviewer measurably missed exactly this on a production pull request that
  * advanced a pinned action's sha and left the variable declaring the same sha untouched — silently
  * disabling the consumer's own review store — while two other reviewers caught it. A per-file diff
  * review cannot see it: the changed line is correct in isolation, and the stale one did not change.
+ *
+ * `"R"` (v0.13.0) joins `"M"`: a rename with real content edits carries exactly the same "old
+ * version proves what the two declarations were meant to agree on" evidence a modification does —
+ * excluding it silently lost the check's own signal for any file whose rename this pull request
+ * also touched. The base-side read follows `item.oldPath`, since the base version lived under the
+ * old name; the head-side read and the published finding both stay on `item.path`, the file's
+ * current name and the only one a review comment can anchor a still-open diff to.
  */
+/**
+ * Pushes one gate finding per pin-desync detected between `base` and `head` for this item,
+ * stopping at `MAX_GATE_FINDINGS`. Split out of `collectPinDesyncFindings` purely for that
+ * function's own complexity budget. Returns how many were actually pushed.
+ */
+function pushPinDesyncFindings(
+  findings: EngineFinding[],
+  item: InventoryItem,
+  path: string,
+  base: string,
+  head: string,
+): number {
+  let found = 0;
+  for (const desync of detectPinDesync(base, head)) {
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    findings.push({
+      path: item.path,
+      content: describePinDesync(desync, path),
+      startLine: 0,
+      endLine: 0,
+      category: "bug",
+      severity: "high",
+    });
+    found += 1;
+  }
+  return found;
+}
+
 async function collectPinDesyncFindings(
   ctx: GitContext,
   request: PipelineRequest,
   inventory: Inventory,
   findings: EngineFinding[],
+  blobCache: BlobTextCache,
 ): Promise<number> {
   let found = 0;
   for (const item of inventory.items) {
-    // Modified only: an added file has no base to disagree with, and a deleted one declares
-    // nothing any more.
-    if (!item.reviewable || item.status !== "M") continue;
+    // An added file has no base to disagree with, and a deleted one declares nothing any more —
+    // only a real edit, in place or under a new name, can leave one declaration stale.
+    if (!item.reviewable || (item.status !== "M" && item.status !== "R")) continue;
     if (findings.length >= MAX_GATE_FINDINGS) break;
     const path = item.path as string;
-    const base = await readTextAtCommit(ctx, request.base, path);
-    const head = await readTextAtCommit(ctx, request.head, path);
+    const base = await readTextAtCommitCached(
+      blobCache,
+      ctx,
+      request.base,
+      (item.oldPath ?? item.path) as string,
+    );
+    const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
     if (base === undefined || head === undefined) continue;
-    for (const desync of detectPinDesync(base, head)) {
-      if (findings.length >= MAX_GATE_FINDINGS) break;
-      findings.push({
-        path: item.path,
-        content: describePinDesync(desync, path),
-        startLine: 0,
-        endLine: 0,
-        category: "bug",
-        severity: "high",
-      });
-      found += 1;
-    }
+    found += pushPinDesyncFindings(findings, item, path, base, head);
   }
   return found;
 }
@@ -958,25 +1149,29 @@ function pushGateFindings<T>(
   return false;
 }
 
-/** One changed file against one pair's counterparts; returns how many comparisons actually ran. */
+/**
+ * One changed file against one pair's counterparts; returns how many comparisons actually ran.
+ *
+ * `left`/`leftBase` are read once by the caller (`collectGateFindings`) and passed in rather than
+ * re-read here — an item matching more than one declared pair used to pay for its own head/base
+ * content once per matching pair, all identical reads. `right` (a counterpart, not this item) is
+ * still read here, through the shared cache, since which counterparts get read depends on which
+ * pair is being compared right now.
+ */
 async function compareAgainstCounterparts(
+  blobCache: BlobTextCache,
   ctx: GitContext,
-  base: CommitSha,
   head: CommitSha,
   item: InventoryItem,
   pair: { readonly counterparts: readonly string[] },
+  left: string,
+  leftBase: string | undefined,
   findings: EngineFinding[],
 ): Promise<number> {
   const path = item.path as string;
-  const left = await readTextAtCommit(ctx, head, path);
-  if (left === undefined) return 0;
-  // Only needed by the union check, which asks what this change ADDED — a member present in both
-  // versions was never widened by this pull request and is not this review's question. Absent for
-  // an added file, which correctly leaves the union check with nothing to compare.
-  const leftBase = await readTextAtCommit(ctx, base, path);
   let compared = 0;
   for (const counterpart of pair.counterparts) {
-    const right = await readTextAtCommit(ctx, head, counterpart);
+    const right = await readTextAtCommitCached(blobCache, ctx, head, counterpart);
     if (right === undefined) continue;
     compared += 1;
     // `compareDeclaredContracts`, not `compareContracts`: the profile named these two files as
@@ -1023,6 +1218,9 @@ async function collectChangePassFindings(
   inventory: Inventory,
   ledger: SpendLedger,
   diagnostics: Diagnostics,
+  // See `BlobTextCache`'s own doc comment (#33) for why this is shared with `collectGateFindings`
+  // at their one common caller rather than each spawning its own git subprocess for the same text.
+  blobCache: BlobTextCache = new Map(),
 ): Promise<readonly EngineFinding[]> {
   if (request.config.crossArtifactPass !== true) return [];
   const deps = classifyDeps(request);
@@ -1041,7 +1239,7 @@ async function collectChangePassFindings(
   const files: ChangedFile[] = [];
   for (const item of inventory.items) {
     if (!item.reviewable) continue;
-    const source = await readTextAtCommit(ctx, request.head, item.path as string);
+    const source = await readTextAtCommitCached(blobCache, ctx, request.head, item.path as string);
     if (source !== undefined) files.push({ path: item.path as string, source });
   }
   const { findings, tokens } = await runChangePass(files, deps);
@@ -1140,12 +1338,28 @@ const RESUME_FLOOR_FRACTION = 0.25;
 
 /**
  * Exactly one bounded resume (#57). A run that ends without a usable success — the process threw,
- * or the result reports a non-success status — is re-invoked once, and the second outcome stands
- * whatever it is. One, not N: an unbounded retry converts a provider outage into a doubled bill,
- * and the measured failure mode this closes is a per-file subtask spiral that stops the whole
- * run after finding nothing (production Keiko#2963 paid its 44 files twice for exactly this; the
- * corpus reproduced the same signature four times before the session log named it). A second
- * failure settles incomplete precisely as it did before the resume existed.
+ * or the result reports a non-success status — is re-invoked once. One, not N: an unbounded retry
+ * converts a provider outage into a doubled bill, and the measured failure mode this closes is a
+ * per-file subtask spiral that stops the whole run after finding nothing (production Keiko#2963
+ * paid its 44 files twice for exactly this; the corpus reproduced the same signature four times
+ * before the session log named it).
+ *
+ * The second attempt's status, coverage, and tokens stand — that part of "the second outcome
+ * stands" is unchanged. What is no longer discarded is the first attempt's own paid-for work: the
+ * resumed invocation excludes every path the first attempt already produced a finding for (the
+ * same evidentiary bar `settle.ts`'s `memoizablePaths` uses — a finding proves the file was
+ * opened), so the resume spends its budget only on ground genuinely still unreviewed, and those
+ * carried-forward findings are folded into the returned result rather than silently re-paid for or
+ * lost (see `mergeResumedResult`). A first attempt whose process THREW rather than returning a
+ * parseable result has nothing to carry forward or exclude — `firstResult` stays `undefined` for
+ * that case, and the resume dispatches everything, exactly as before.
+ *
+ * A second attempt that itself throws no longer takes the whole run down with it: when a
+ * `firstResult` exists to fall back to, `engine.resume_failed` is recorded and that result stands
+ * on its own, non-success status and all — a genuinely worse outcome than a completed resume, but
+ * a strictly better one than losing every fact the first attempt established. A second failure
+ * with no `firstResult` (the first attempt itself threw) still propagates exactly as before: there
+ * is nothing to fall back to, so `settleOrReport`'s own catch is the correct place for it to land.
  *
  * A first attempt that already reports ITS OWN budget exceeded gets no resume at all: the
  * resume's budget can only be carved from what the first attempt left (see
@@ -1159,10 +1373,86 @@ const RESUME_FLOOR_FRACTION = 0.25;
  * attempt, so it is exactly that attempt's own total — never a guess at what a second would have
  * cost.
  */
+/**
+ * `alreadyReviewedPaths` is the fact `executeEngine` needs and this function alone can produce: the
+ * paths a resumed dispatch was deliberately NOT asked to cover, because the first attempt already
+ * proved it opened them. `mergeResumedResult` restores their FINDINGS to the returned result, but
+ * the returned `EngineResult`'s own `coverage`/`filesReviewed` still comes from whichever attempt's
+ * dispatch produced it — narrower than the full inventory by exactly this set. Without surfacing it,
+ * `settle()` (which never sees `runEngineWithOneResume`'s internals) would expect the returned
+ * result to account for paths it was told to skip, and report a coverage gap that is not real. Empty
+ * on every path where no resume narrowed anything: a same-first-attempt success, a skipped resume,
+ * and the resume-failed fallback (which returns the FIRST attempt's own, self-consistent result,
+ * whose own coverage already accounts for everything IT dispatched).
+ */
+interface ResumeOutcome {
+  readonly result: EngineResult;
+  readonly engineTokens: number;
+  readonly alreadyReviewedPaths: readonly string[];
+}
+
+/**
+ * The resumed dispatch itself, plus its own failure fallback — split out of
+ * `runEngineWithOneResume` purely for that function's own line budget; the two try blocks share no
+ * mutable state beyond what is passed in here. See `runEngineWithOneResume`'s own doc comment for
+ * why a second failure with a `firstResult` to fall back to no longer takes the whole run down.
+ */
+async function attemptResume(
+  options: EngineRunOptions,
+  diagnostics: Diagnostics,
+  remaining: number,
+  firstAttemptTokens: number,
+  firstResult: EngineResult | undefined,
+  alreadyReviewedPaths: readonly string[],
+): Promise<ResumeOutcome> {
+  try {
+    // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
+    // would replay itself byte-for-byte — measured, not hypothesized (the seeded verification
+    // spiral failed 2/2 where the unseeded one failed ~1/4). Varying exactly one bit of entropy on
+    // the one bounded retry is what turns it into a second opinion. `mechanicallyCleanPaths` is
+    // widened, never replaced: the resume must still skip everything the first dispatch already
+    // excluded (renames, cache hits) on top of what the first ATTEMPT now proves was reviewed.
+    const second = await runEngine(
+      {
+        ...options,
+        samplingSeed: RESUME_SEED,
+        allottedBudget: remaining,
+        mechanicallyCleanPaths: [...options.mechanicallyCleanPaths, ...alreadyReviewedPaths],
+      },
+      diagnostics,
+    );
+    const parsedSecond = parseEngineResult(second.stdout);
+    const merged =
+      firstResult === undefined
+        ? parsedSecond
+        : mergeResumedResult(firstResult, parsedSecond, alreadyReviewedPaths);
+    return {
+      result: merged,
+      engineTokens: firstAttemptTokens + parsedSecond.totalTokens,
+      alreadyReviewedPaths,
+    };
+  } catch (error) {
+    // Mirrors the first attempt's own rescue above: only a genuine `EngineRunError` (spawn/timeout/
+    // nonzero-exit) is ever caught here, never a `ValidationError` from a malformed-but-successfully
+    // -spawned second result — reject-rather-than-repair applies to the second attempt exactly as
+    // much as the first, and a malformed result is not evidence the first attempt's own findings
+    // are still trustworthy. Rethrown, too, when there is nothing to fall back to: a first attempt
+    // that itself threw leaves `firstResult` undefined, and the caller's own handling of that case
+    // is unchanged from before this fallback existed.
+    if (!(error instanceof EngineRunError) || firstResult === undefined) throw error;
+    diagnostics.record("engine.resume_failed", { counts: { spent: firstAttemptTokens } });
+    // The returned result is `firstResult` UNCHANGED — its own coverage already accounts for
+    // everything IT dispatched, so there is nothing narrower than usual for `settle()` to be told
+    // about here (unlike the merged-success path above, whose returned coverage comes from the
+    // SECOND attempt's narrower dispatch).
+    return { result: firstResult, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
+  }
+}
+
 async function runEngineWithOneResume(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
-): Promise<{ result: EngineResult; engineTokens: number }> {
+): Promise<ResumeOutcome> {
   // The resume runs on what the first attempt left, floored at RESUME_FLOOR_FRACTION of THIS
   // review's own allotment (see that constant's own comment) rather than a literal whole-review
   // ceiling held across attempts — that claim was never actually true of the old flat floor either.
@@ -1172,11 +1462,22 @@ async function runEngineWithOneResume(
   // Same honesty as the allotment above: a thrown first attempt leaves no parsed result behind,
   // so it contributes nothing measured to the total rather than a guess.
   let firstAttemptTokens = 0;
+  // The first attempt's own parsed result, kept so a second-attempt failure or a resumed dispatch
+  // has something real to fall back to or exclude from — see this function's own doc comment.
+  // `undefined` means there is nothing to fall back to: either no resume is needed (the first
+  // attempt succeeded, which returns directly below) or the first attempt itself threw.
+  let firstResult: EngineResult | undefined;
+  // Paths the resumed dispatch must skip because the first attempt already opened them and
+  // produced a finding — computed once, alongside `firstResult`, from the same evidence.
+  let alreadyReviewedPaths: readonly string[] = [];
   try {
     const first = await runEngine(options, diagnostics);
     const parsed = parseEngineResult(first.stdout);
-    if (parsed.status === "success") return { result: parsed, engineTokens: parsed.totalTokens };
+    if (parsed.status === "success") {
+      return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
+    }
     firstAttemptTokens = parsed.totalTokens;
+    firstResult = parsed;
     // No second opinion for a first attempt that already reports its budget exceeded (see this
     // function's own doc comment). It gets its own code rather than borrowing one: `resumed_once`
     // means a resume ran, and an absent line would leave an operator unable to tell a run that
@@ -1186,8 +1487,14 @@ async function runEngineWithOneResume(
       diagnostics.record("engine.resume_skipped_budget_exceeded", {
         counts: { spent: firstAttemptTokens, allotted: options.allottedBudget },
       });
-      return { result: parsed, engineTokens: firstAttemptTokens };
+      return { result: parsed, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
     }
+    // The same bar `memoizablePaths` (engine/settle.ts) uses: a finding proves the engine opened
+    // the file, unless the manifest says that same file's review itself failed, in which case the
+    // finding might be a partial verdict from before the failure and the path is not safe to skip.
+    alreadyReviewedPaths = parsed.findings
+      .filter((f) => !parsed.coverage.failed.some((c) => c.path === f.path))
+      .map((f) => f.path as string);
     remaining = clamp(
       options.allottedBudget - parsed.totalTokens,
       Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION),
@@ -1198,16 +1505,38 @@ async function runEngineWithOneResume(
     if (!(error instanceof EngineRunError)) throw error;
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   }
-  // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
-  // would replay itself byte-for-byte — measured, not hypothesized (the seeded verification
-  // spiral failed 2/2 where the unseeded one failed ~1/4). Varying exactly one bit of entropy on
-  // the one bounded retry is what turns it into a second opinion.
-  const second = await runEngine(
-    { ...options, samplingSeed: RESUME_SEED, allottedBudget: remaining },
+  return attemptResume(
+    options,
     diagnostics,
+    remaining,
+    firstAttemptTokens,
+    firstResult,
+    alreadyReviewedPaths,
   );
-  const parsedSecond = parseEngineResult(second.stdout);
-  return { result: parsedSecond, engineTokens: firstAttemptTokens + parsedSecond.totalTokens };
+}
+
+/**
+ * Folds a resumed dispatch's own outcome together with the findings the first attempt already
+ * earned for the paths it excluded — `status`, `terminalState`, `coverage`, `budgetExceeded`, and
+ * `totalTokens` all come from `second` alone, since that is what actually governs whether the run
+ * as a whole is complete or incomplete; only the finding LIST gains back what the first attempt
+ * already paid to produce and the resume was deliberately told not to re-open.
+ *
+ * Without this, excluding `excludedPaths` from the resumed dispatch (the cost fix this pairs with)
+ * would silently convert real, already-paid-for findings into an invisible false-clean the moment
+ * the resumed dispatch's own coverage no longer mentions those paths at all — worse than the
+ * double-spend it replaces, because a double-spend at least kept the findings.
+ */
+function mergeResumedResult(
+  first: EngineResult,
+  second: EngineResult,
+  excludedPaths: readonly string[],
+): EngineResult {
+  if (excludedPaths.length === 0) return second;
+  const carried = new Set(excludedPaths);
+  const carriedFindings = first.findings.filter((f) => carried.has(f.path as string));
+  if (carriedFindings.length === 0) return second;
+  return { ...second, findings: [...carriedFindings, ...second.findings] };
 }
 
 /** True when publication itself failed in a way that means the change was not fully reviewed. */
@@ -1460,9 +1789,20 @@ function finalizeCacheStore(
     pathSetDigest: memo.pathSetDigest,
     config: request.config,
   });
-  if (newEntries.length === 0) return { store: request.cacheStore, appended: 0 };
+  // This run's own hits, carried alongside the freshly-built entries so `appendEntries`' existing
+  // key-match-and-promote logic (`review-cache.ts`) covers them too — a same-key entry is treated as
+  // "freshly confirmed, move to newest" whether it arrived here as newly-reviewed or as a replay.
+  // Without this, retention (`RETENTION.maxEntries`, oldest-evicted-first) is ordered by WRITE
+  // recency alone: a file reviewed once and replayed from cache on every push since ages out and is
+  // evicted exactly as if it had never been touched again, while a file that happens to get a fresh
+  // WRITE (any change, anywhere, invalidating its content key) keeps resetting its own clock. Genuine
+  // USE recency is what retention is supposed to approximate.
+  const touched = [...memo.hits.values()];
+  if (newEntries.length === 0 && touched.length === 0) {
+    return { store: request.cacheStore, appended: 0 };
+  }
   return {
-    store: appendEntries(request.cacheStore, newEntries, RETENTION),
+    store: appendEntries(request.cacheStore, [...newEntries, ...touched], RETENTION),
     appended: newEntries.length,
   };
 }
@@ -1475,11 +1815,29 @@ function finalizeCacheStore(
  * recorded (see `settleIncomplete`'s own doc comment for the general "every caller funnels through
  * here" contract this keeps).
  */
+/**
+ * The one narrow gap the incomplete-never-clean rule left open: the ENGINE's own verdict was
+ * `complete` — every reviewable path really was covered, and `settlement.findings` is real, fully
+ * earned model output — degraded publication is a delivery failure on top of a genuinely complete
+ * review, not evidence the review itself fell short. Discarding the cache write here meant a single
+ * placement rejection or read-back failure on ONE finding cost the ENTIRE review's worth of
+ * memoization, and every retry re-paid the full engine spend for ground that was never actually in
+ * question — the same "real, already-paid-for work must not be silently lost" principle the
+ * `review-cache.ts` module doc states for a truncated run, applied to the one settlement path that
+ * had been quietly exempt from it.
+ *
+ * Reuses the identical happy-path call (`publishSettledFindings`'s own `finalizeCacheStore(...,
+ * findingsForStorage(settlement.findings, auditedByOriginal))`) rather than threading anything
+ * through `settleIncomplete`'s own `covered`/`batch` machinery, which exists for the DIFFERENT
+ * truncated-engine-run shape and would re-publish findings this function's caller already attempted.
+ */
 async function reportDegradedPublication(
   run: ReviewRun,
   inventory: Inventory,
   memo: MemoContext,
   publish: PublishOutcome,
+  settlement: Extract<Settlement, { status: "complete" }>,
+  auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>,
 ): Promise<ReviewReport> {
   const report = await settleIncomplete(
     run,
@@ -1490,7 +1848,71 @@ async function reportDegradedPublication(
     },
     memo,
   );
-  return { ...report, publish };
+  const finalized = finalizeCacheStore(
+    run.request,
+    inventory,
+    memo,
+    findingsForStorage(settlement.findings, auditedByOriginal),
+  );
+  return {
+    ...report,
+    publish,
+    cacheAppended: finalized?.appended ?? report.cacheAppended,
+    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
+  };
+}
+
+/**
+ * The v0.13.0 staleness recheck's own abandon branch. Called immediately before `publishAudited`,
+ * after gate collection (free) and the change-level pass (which just spent real model tokens) have
+ * already run — checking any earlier would leave a push that lands DURING that collection free to
+ * sail through to publication unchecked. Every check like this needs its own copy rather than one
+ * shared guard: the pull request's head can move at any point across a review that takes minutes
+ * end to end. Split out purely for `publishSettledFindings`'s own line budget. `undefined` means
+ * the head was still current and publication should proceed.
+ */
+async function abandonStalePublish(
+  run: ReviewRun,
+  inventory: Inventory,
+  memo: MemoContext,
+  settlement: Extract<Settlement, { status: "complete" }>,
+): Promise<ReviewReport | undefined> {
+  const stale = await abandonIfStale(run, inventory, memo);
+  if (stale === undefined) return undefined;
+  // The engine's own verdict here was already `complete` — every reviewable path was covered, and
+  // `settlement.findings` is real, fully earned model output. The head moving between the engine
+  // finishing and this check is a fact about the PULL REQUEST, not about the blobs this run
+  // actually reviewed: a review-cache entry is keyed by blob content, not by head sha, so what was
+  // just paid for stays exactly as replayable as if this run had reached publication. Unaudited
+  // (`settlement.findings` directly, not `findingsForStorage`'s audited form) because this path
+  // never reaches `publishAudited` at all — there is nothing audited to prefer. Never `merged`,
+  // deliberately: gate and change-pass findings derive from more than one file's content and must
+  // never enter a store keyed for one, the same rule `publishSettledFindings`'s own caching later
+  // in that function already follows for the happy path.
+  const finalized = finalizeCacheStore(run.request, inventory, memo, settlement.findings);
+  return {
+    ...stale,
+    cacheAppended: finalized?.appended ?? stale.cacheAppended,
+    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
+  };
+}
+
+/**
+ * Only THIS run's model output is eligible for the audit — the engine's own findings plus the
+ * change-level pass's, never a cache hit's replayed findings, which `mergeHitFindings` appended
+ * without cloning them (see `publishAudited`'s doc comment for why that makes reference identity
+ * sound here). Change-pass findings are fresh model output like any other and audit the same way.
+ * Shared by `publishSettledFindings` and `completeLocalReport`, which assemble this identically.
+ */
+function combineSettledFindings(
+  settlement: Extract<Settlement, { status: "complete" }>,
+  memo: MemoContext,
+  gate: readonly EngineFinding[],
+  changePass: readonly EngineFinding[],
+): { readonly merged: readonly EngineFinding[]; readonly fresh: ReadonlySet<EngineFinding> } {
+  const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
+  const fresh: ReadonlySet<EngineFinding> = new Set([...settlement.findings, ...changePass]);
+  return { merged, fresh };
 }
 
 async function publishSettledFindings(
@@ -1500,26 +1922,25 @@ async function publishSettledFindings(
   memo: MemoContext,
   startedAt: number,
 ): Promise<ReviewReport> {
-  const gate = await collectGateFindings(run.request, inventory, run.diagnostics);
+  // Shared across both collectors (#33) — see `BlobTextCache`'s own doc comment.
+  const blobCache: BlobTextCache = new Map();
+  const gate = await collectGateFindings(run.request, inventory, run.diagnostics, blobCache);
   const changePass = await collectChangePassFindings(
     run.request,
     inventory,
     run.ledger,
     run.diagnostics,
+    blobCache,
   );
-  const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
-  // Only THIS run's model output is eligible for the audit — the engine's own findings plus the
-  // change-level pass's, never a cache hit's replayed findings, which `mergeHitFindings` appended
-  // without cloning them (see `publishAudited`'s doc comment for why that makes reference identity
-  // sound here). Change-pass findings are fresh model output like any other and audit the same way.
-  const freshEngineFindings: ReadonlySet<EngineFinding> = new Set([
-    ...settlement.findings,
-    ...changePass,
-  ]);
+  const combined = combineSettledFindings(settlement, memo, gate, changePass);
+
+  const stale = await abandonStalePublish(run, inventory, memo, settlement);
+  if (stale !== undefined) return stale;
+
   const { outcome: publish, auditedByOriginal } = await publishAudited(
     run,
     publishContextFor(run.request, inventory),
-    { findings: merged, fresh: freshEngineFindings },
+    { findings: combined.merged, fresh: combined.fresh },
   );
 
   // A finding the reviewer found but could not publish is a finding the consumer never saw. The
@@ -1531,7 +1952,7 @@ async function publishSettledFindings(
   // it means for their coverage rather than which internal step noticed. The diagnostic keeps its
   // name and its per-attempt breakdown; only the settlement reason moved family.
   if (publicationDegraded(publish)) {
-    return reportDegradedPublication(run, inventory, memo, publish);
+    return reportDegradedPublication(run, inventory, memo, publish, settlement, auditedByOriginal);
   }
 
   run.diagnostics.record("settlement.complete", {
@@ -1562,6 +1983,7 @@ function emptyReviewReport(inventory: Inventory): ReviewReport {
     ...inventoryCounts(inventory),
     cacheHits: 0,
     cacheMisses: 0,
+    contextInvalidated: 0,
     cacheAppended: 0,
   };
 }
@@ -1662,6 +2084,52 @@ export async function performReview(
         },
       });
     }
+    // Cleanup, not review: resolves this reviewer's own past incomplete-review notices whose target
+    // commit is no longer HEAD, so the "every conversation resolved" branch protection AGENTS.md
+    // documents (see its "Landing changes here" section) does not force a human to hand-resolve a
+    // notice that a later run — this one or an earlier one — already superseded. Deliberately
+    // unconditional on the outcome above: whether this run completed, settled incomplete, or was
+    // abandoned because a newer head already exists, a THREAD about an OLDER head being outdated is
+    // a fact about that thread alone, established by GitHub, not by anything this run decided.
+    //
+    // Gated on `identityExclusive` (v0.13.0): every OTHER use of `request.identity` in this pipeline
+    // is a read-only match against `identity` for suppression/deduplication, where the worst case of
+    // a shared, non-exclusive login (the plain-token fallback, `github-actions[bot]`) is a missed
+    // suppression — already documented in `action/identity.ts` as "a real weakening," accepted
+    // there. Resolving a GitHub thread is a WRITE, and under a shared login this run cannot prove
+    // the matching comment was actually authored by ITSELF rather than some other workflow sharing
+    // the same fallback identity. Skipping the mutation entirely under a non-exclusive identity
+    // costs exactly what every other failure mode of this feature already costs — one more stale
+    // thread for the next push, or a human, to resolve by hand — never a wrong resolution.
+    if (request.identityExclusive) {
+      // `GitHubClient`'s own implementation never throws — every failure inside it, at either the
+      // lookup or the mutation, is already caught and folded into a lower resolved count. This
+      // `try` is defense in depth, not a hedge against a known gap: `ReviewCommentApi` is an
+      // interface, so nothing STRUCTURALLY stops a different implementer (a test double, a future
+      // alternative client) from rejecting, and cleanup must not be the thing that turns a
+      // genuinely successful review into a failed one just because it ran last, in the same
+      // `finally` that reports `run.spend`.
+      try {
+        const { attempted, resolved } = await request.client.resolveSupersededOwnNotices(
+          request.ref,
+          request.pullNumber,
+          request.identity,
+          isIncompleteNoticeBody,
+        );
+        // Gated on `attempted`, not `resolved`: a run where every attempt failed (a token missing
+        // the mutation permission, say) must still leave a trace distinguishable from a run with
+        // nothing to resolve at all — both produced `resolved === 0` before this counted `attempted`.
+        if (attempted > 0) {
+          diagnostics.record("cleanup.superseded_notices_resolved", {
+            headSha: request.head,
+            counts: { attempted, resolved },
+          });
+        }
+      } catch {
+        // Nothing to report: a failed cleanup pass costs the next push one more stale thread to
+        // resolve by hand, never a failed review.
+      }
+    }
   }
 }
 
@@ -1734,20 +2202,33 @@ async function performReviewInner(
   // real findings directly through `publishSettledFindings`, which never calls `settleIncomplete` on
   // its happy path.
   if (settlement.status === "incomplete") {
+    // The deterministic gates cost no model tokens and depend on nothing the engine settlement
+    // decided — a coverage gap or a budget overrun says nothing about whether a declared contract
+    // pair drifted or a pin desynced, so there is no reason an incomplete run should forgo the one
+    // check class that costs it nothing to run. Merged into `findings` only, exactly like the
+    // complete path (`publishSettledFindings` below) — never into `fresh`, since a gate finding is
+    // deterministic prose this reviewer generated, not model output the classification audit has
+    // anything to adjudicate about.
+    const gate = await collectGateFindings(run.request, inventory, run.diagnostics);
     return settleIncomplete(
       run,
       inventory,
       { reason: settlement.reason },
       memo,
       {
-        findings: mergeHitFindings(settlement.findings, memo.hits),
+        findings: [...mergeHitFindings(settlement.findings, memo.hits), ...gate],
         fresh: new Set(settlement.findings),
       },
       verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths : undefined,
     );
   }
-  const postRun = await abandonIfStale(run, inventory, memo);
-  if (postRun !== undefined) return postRun;
+  // The staleness recheck for THIS branch lives inside `publishSettledFindings` itself now (v0.13.0)
+  // — immediately before the one call it actually protects, `publishAudited`, rather than here. Gate
+  // and change-pass collection sit between this point and that call, and neither is free: the
+  // change-level pass spends real model tokens. Checking here caught the head moving before this
+  // function was ENTERED, but a push landing during gate/change-pass collection itself sailed
+  // through unchecked all the way to publication — a real, if narrow, gap the move closes without
+  // changing what the check itself does.
   return publishSettledFindings(run, inventory, settlement, memo, started);
 }
 
@@ -1895,7 +2376,7 @@ async function localIncompleteReport(
     engineVersion: run.engineVersion,
     // An incomplete outcome never writes a store back (`finalizeCacheStore`'s admission rule), but
     // the hit/miss counts are facts about what was attempted, memo or not.
-    ...(memo === undefined ? { cacheHits: 0, cacheMisses: 0 } : cacheCounts(memo)),
+    ...(memo === undefined ? { cacheHits: 0, cacheMisses: 0 } : localCacheCounts(memo)),
   };
 }
 
@@ -1948,22 +2429,22 @@ async function completeLocalReport(
   settlement: Extract<Settlement, { status: "complete" }>,
   memo: MemoContext,
 ): Promise<LocalReviewReport> {
-  const gate = await collectGateFindings(run.request, inventory, run.diagnostics);
+  // Shared across both collectors (#33) — same reasoning as `publishSettledFindings`'s identical
+  // pairing.
+  const blobCache: BlobTextCache = new Map();
+  const gate = await collectGateFindings(run.request, inventory, run.diagnostics, blobCache);
   const changePass = await collectChangePassFindings(
     run.request,
     inventory,
     run.ledger,
     run.diagnostics,
+    blobCache,
   );
-  const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
-  const freshEngineFindings: ReadonlySet<EngineFinding> = new Set([
-    ...settlement.findings,
-    ...changePass,
-  ]);
+  const combined = combineSettledFindings(settlement, memo, gate, changePass);
 
   const reported = await localFindings(run, inventory, {
-    findings: merged,
-    fresh: freshEngineFindings,
+    findings: combined.merged,
+    fresh: combined.fresh,
   });
   // Identical admission call to the action path's: only a complete outcome reaches this function,
   // and what is stored is the AUDITED form of the engine's own findings (never a gate or
@@ -1986,7 +2467,7 @@ async function completeLocalReport(
     },
     ruleDigest: run.ruleDigest,
     engineVersion: run.engineVersion,
-    ...cacheCounts(memo),
+    ...localCacheCounts(memo),
     ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
   };
 }
@@ -2046,12 +2527,16 @@ async function localSettleReport(
     const reviewed = verdictsSurviveIncompleteness(settlement.reason)
       ? settlement.coveredPaths.size + memo.hitPaths.size
       : memo.hitPaths.size;
+    // Same reasoning as `performReviewInner`'s identical branch: the deterministic gates cost no
+    // model tokens and depend on nothing the engine settlement decided, so an incomplete run still
+    // gets their coverage. Merged into `findings` only, never `fresh`.
+    const gate = await collectGateFindings(run.request, inventory, run.diagnostics);
     return localIncompleteReport(
       run,
       inventory,
       settlement.reason,
       {
-        findings: mergeHitFindings(settlement.findings, memo.hits),
+        findings: [...mergeHitFindings(settlement.findings, memo.hits), ...gate],
         fresh: new Set(settlement.findings),
       },
       reviewed,

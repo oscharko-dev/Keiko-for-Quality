@@ -499,7 +499,15 @@ function sanitizeOne(
   const sanitized = sanitizeFindingBody(finding.content);
   if (!sanitized.ok) {
     counters.rejectedSanitization += 1;
-    diagnostics.record("publish.finding_rejected_sanitization", { headSha: context.headSha });
+    // `sanitized.reason` is a closed, product-defined enum (`RejectionReason`, sanitize.ts) — never
+    // candidate/model content — so recording it costs nothing under the diagnostics sink's
+    // redaction posture, and gives an operator the one fact the bare count above could not: WHICH
+    // of the sanitizer's checks is actually firing. Mirrors `tallyPlacementAttempts`'s identical
+    // count-by-key shape a few dozen lines below.
+    diagnostics.record("publish.finding_rejected_sanitization", {
+      headSha: context.headSha,
+      counts: { [sanitized.reason]: 1 },
+    });
     return undefined;
   }
   // A neutralized body is a finding the reviewer would have DISCARDED before v0.12.0, and
@@ -606,10 +614,25 @@ function clusterIntraRunDuplicates(
 ): IntraRunClusterResult {
   const clusters: Cluster[] = [];
   for (const candidate of candidates) {
+    // Every member, not just the current representative: the representative can change as a
+    // cluster grows (`isBetterRepresentative` below), and comparing only against whichever member
+    // happens to hold that role right now lets a real duplicate of an EARLIER, since-demoted
+    // member dodge suppression the moment a later member takes over as representative.
+    // `areIntraRunDuplicates` is symmetric, so this only widens what a cluster can absorb, never
+    // narrows it. Bounded by the same finding-count ceiling `settle.ts` already enforces before
+    // any of this runs, so the worst case (candidates × members-so-far, up from candidates ×
+    // clusters) stays a small constant multiple of it, not an unbounded blowup.
+    // Every member, not just the current representative: the representative can change as a
+    // cluster grows (`isBetterRepresentative` below), and comparing only against whichever member
+    // happens to hold that role right now lets a real duplicate of an EARLIER, since-demoted
+    // member dodge suppression the moment a later member takes over as representative.
+    // `areIntraRunDuplicates` is symmetric, so this only widens what a cluster can absorb, never
+    // narrows it. Bounded by the same finding-count ceiling `settle.ts` already enforces before
+    // any of this runs, so the worst case (candidates × members-so-far, up from candidates ×
+    // clusters) stays a small constant multiple of it, not an unbounded blowup.
     const cluster = clusters.find((existing) =>
-      areIntraRunDuplicates(
-        toCandidateForDedup(candidate),
-        toCandidateForDedup(existing.representative),
+      existing.members.some((member) =>
+        areIntraRunDuplicates(toCandidateForDedup(candidate), toCandidateForDedup(member)),
       ),
     );
     if (cluster === undefined) {
