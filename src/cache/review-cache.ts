@@ -91,14 +91,41 @@ import type { EngineFinding } from "../engine/result.js";
 /**
  * The store schema this module reads and writes. Bump on any incompatible shape change.
  *
- * v2 (v0.10.0, issue #50) added `prPathSetDigest` to every entry. There is deliberately no
- * migration: a store still carrying the retired v1 marker fails this exact-match check the same
- * way any other unrecognised schema does, and the run starts from an empty store. Memoization is a
- * pure optimization layer, so losing one session's worth of entries costs only re-review spend,
- * never coverage — see this module's own "why an incomplete run must never write an entry"
- * reasoning above for the sibling case this mirrors.
+ * v2 (v0.10.0, issue #50) added `prPathSetDigest` to every entry. v3 adds `semantics` — see
+ * `PUBLICATION_SEMANTICS` directly below for what it buys. There is deliberately no migration: a
+ * store still carrying a retired marker fails this exact-match check the same way any other
+ * unrecognised schema does, and the run starts from an empty store. Memoization is a pure
+ * optimization layer, so losing one session's worth of entries costs only re-review spend, never
+ * coverage — see this module's own "why an incomplete run must never write an entry" reasoning
+ * above for the sibling case this mirrors.
  */
-export const SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v2";
+export const SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
+
+/**
+ * Which release of the publication contract produced an entry's finding list.
+ *
+ * The six key inputs prove a file's content, rule, engine and model were identical across two runs.
+ * They say nothing about the wrapper that turns an engine finding into a published comment — and a
+ * wrapper release can change that without touching one byte of the key material. v0.15.0's diff-echo
+ * rejection is the worked example: replaying a v0.14.0 entry under v0.15.0 would publish a body the
+ * current sanitizer refuses, which is exactly the "publish something no one reviewed" outcome
+ * `src/publish/sanitize.ts` exists to prevent.
+ *
+ * The consumer used to solve this by folding the action's commit sha into the artifact name, which
+ * is correct and far too coarse: it discards every entry on every release, whether or not anything
+ * about publication moved. Measured on oscharko-dev/Keiko — four pins in 33 hours, four total store
+ * resets across every open pull request, against a cache-hit rate of 9% on large runs. Partitioning
+ * belongs where the knowledge is: this product knows whether a release changed publication, and the
+ * consumer cannot.
+ *
+ * **Bump this — and only this — when a release changes what a stored finding list would publish
+ * today versus when it was written.** That means `src/publish/sanitize.ts` (a new or altered
+ * rejection), `src/publish/presentation.ts` (the composed body), or `src/engine/settle.ts` (which
+ * paths may be memoized at all). Everything else — dispatch, budgeting, diagnostics, the corpus,
+ * this file's own bounds — leaves it alone, and a release that leaves it alone keeps every entry
+ * every open pull request has accumulated.
+ */
+export const PUBLICATION_SEMANTICS = "v0.15.0-diff-echo";
 
 declare const cacheBrand: unique symbol;
 type CacheBrand<T, B extends string> = T & { readonly [cacheBrand]: B };
@@ -238,6 +265,12 @@ export interface CacheEntry {
    * file's top-of-file comment for the full reasoning.
    */
   readonly prPathSetDigest: Sha256;
+  /**
+   * The publication contract in force when this entry was written (v3). Like `prPathSetDigest`, it
+   * is deliberately not part of `key`: a replay must satisfy content AND publication independently,
+   * and keeping them separate is what lets a mismatch drop one entry instead of the whole store.
+   */
+  readonly semantics: string;
   readonly modelId: ModelId;
   readonly protocol: Protocol;
   /** Same shape as `EngineFinding`. An empty list is a real, deliberate negative — not an omission. */
@@ -302,10 +335,14 @@ const ENTRY_KEYS = [
   "ruleDigest",
   "engineDigest",
   "prPathSetDigest",
+  "semantics",
   "modelId",
   "protocol",
   "findings",
 ] as const;
+
+/** Bounds `semantics` the same way `modelId` is bounded: free-form, but not unbounded or hostile. */
+const MAX_SEMANTICS_CHARS = 64;
 
 /**
  * Parses and re-validates one entry, then re-derives its key from its own stored digests.
@@ -338,6 +375,9 @@ function parseEntry(value: unknown, index: number): CacheEntry {
     asString(object.prPathSetDigest, `${scope}.prPathSetDigest`, 64),
     `${scope}.prPathSetDigest`,
   );
+  // Validated but never re-derived, for the same reason `prPathSetDigest` is not: it records the
+  // wrapper that wrote the entry, which nothing in the entry's own content determines.
+  const entrySemantics = asString(object.semantics, `${scope}.semantics`, MAX_SEMANTICS_CHARS);
   const model = modelId(
     asString(object.modelId, `${scope}.modelId`, PARSE_LIMITS.maxModelIdChars),
     `${scope}.modelId`,
@@ -356,6 +396,7 @@ function parseEntry(value: unknown, index: number): CacheEntry {
     ruleDigest: rule,
     engineDigest: engine,
     prPathSetDigest: pathSet,
+    semantics: entrySemantics,
     modelId: model,
     protocol: proto,
     findings: parseFindings(object.findings, `${scope}.findings`),
@@ -418,6 +459,24 @@ export function readStore(text: string): ReadResult {
   }
 }
 
+/**
+ * Drops the entries a different publication contract wrote, keeping everything else.
+ *
+ * This is the whole point of storing `semantics` per entry rather than partitioning the store by
+ * release: a wrapper release that changed sanitization invalidates what that release would publish
+ * differently, and nothing else. The store keeps its identity, so the entries an open pull request
+ * accumulated over a week survive a release that did not touch publication.
+ *
+ * Applied at lookup time rather than at parse time, and the difference matters. `readStore` rejects
+ * a store it cannot trust *structurally*; an entry from another contract is perfectly well-formed
+ * and simply must not be replayed by this build. Conflating the two would make an ordinary release
+ * look like a corrupt store in the diagnostics, which is the opposite of what an operator needs.
+ */
+export function entriesUnderCurrentSemantics(store: CacheStore): CacheStore {
+  const kept = store.entries.filter((entry) => entry.semantics === PUBLICATION_SEMANTICS);
+  return kept.length === store.entries.length ? store : { ...store, entries: kept };
+}
+
 export function lookup(store: CacheStore, key: CacheKey): CacheEntry | undefined {
   return store.entries.find((entry) => entry.key === key);
 }
@@ -455,6 +514,7 @@ function canonicalEntry(entry: CacheEntry): Record<string, unknown> {
     ruleDigest: entry.ruleDigest,
     engineDigest: entry.engineDigest,
     prPathSetDigest: entry.prPathSetDigest,
+    semantics: entry.semantics,
     modelId: entry.modelId,
     protocol: entry.protocol,
     findings: entry.findings.map(canonicalFinding),
