@@ -638,8 +638,19 @@ function compareMembers(name: string, left: FlatInterface, right: FlatInterface)
  * module's header comment for why type text is opaque by design.
  */
 export function compareContracts(left: string, right: string): readonly ShapeMismatch[] {
-  const leftInterfaces = extractFlatInterfaces(left);
-  const rightInterfaces = extractFlatInterfaces(right);
+  return compareSameName(extractFlatInterfaces(left), extractFlatInterfaces(right));
+}
+
+/**
+ * `compareContracts`'s own same-name loop, taking already-extracted interface maps rather than raw
+ * source — the shared core `compareDeclaredContracts` below reuses so a pair matched on a declared
+ * profile pairing extracts each side's flat interfaces exactly once, not once for this check and
+ * again for its own positional fallback.
+ */
+function compareSameName(
+  leftInterfaces: ReadonlyMap<string, FlatInterface>,
+  rightInterfaces: ReadonlyMap<string, FlatInterface>,
+): ShapeMismatch[] {
   const mismatches: ShapeMismatch[] = [];
   for (const [name, leftInterface] of leftInterfaces) {
     const rightInterface = rightInterfaces.get(name);
@@ -679,11 +690,14 @@ export function compareContracts(left: string, right: string): readonly ShapeMis
  * behaviour.
  */
 export function compareDeclaredContracts(left: string, right: string): readonly ShapeMismatch[] {
-  const sameName = compareContracts(left, right);
-  if (sameName.length > 0) return sameName;
-
+  // Extracted once, here, and reused for both the same-name check and the positional fallback below
+  // — `compareContracts` re-extracting from raw source would parse each side twice for a pair this
+  // function already has to look at once itself.
   const leftInterfaces = extractFlatInterfaces(left);
   const rightInterfaces = extractFlatInterfaces(right);
+  const sameName = compareSameName(leftInterfaces, rightInterfaces);
+  if (sameName.length > 0) return sameName;
+
   if (leftInterfaces.size !== 1 || rightInterfaces.size !== 1) return [];
 
   // Two steps, not one nested pattern: destructuring straight through to `[[name, iface]] = map`
