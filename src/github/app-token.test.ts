@@ -26,7 +26,7 @@ const { sleepCalls, sleepStub } = vi.hoisted(() => {
   const sleepCalls: number[] = [];
   return {
     sleepCalls,
-    sleepStub: (ms: number) => {
+    sleepStub: (ms: number): Promise<void> => {
       sleepCalls.push(ms);
       return Promise.resolve();
     },

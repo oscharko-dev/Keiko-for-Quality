@@ -53,7 +53,10 @@ const { EngineRunError } = await import("./engine/run.js");
  * that instance alone.
  */
 beforeEach(() => {
-  vi.spyOn(GitHubClient.prototype, "resolveSupersededOwnNotices").mockResolvedValue(0);
+  vi.spyOn(GitHubClient.prototype, "resolveSupersededOwnNotices").mockResolvedValue({
+    attempted: 0,
+    resolved: 0,
+  });
 });
 
 /**
@@ -1063,7 +1066,7 @@ describe("performReview: review-cache memoization end to end", () => {
       const request = { ...baseRequest(undefined), identityExclusive: false };
       const cleanupSpy = vi
         .spyOn(request.client, "resolveSupersededOwnNotices")
-        .mockResolvedValue(0);
+        .mockResolvedValue({ attempted: 0, resolved: 0 });
 
       const report = await performReview(request, createSilentDiagnostics());
 
@@ -1079,7 +1082,7 @@ describe("performReview: review-cache memoization end to end", () => {
       const request = baseRequest(undefined);
       const cleanupSpy = vi
         .spyOn(request.client, "resolveSupersededOwnNotices")
-        .mockResolvedValue(0);
+        .mockResolvedValue({ attempted: 0, resolved: 0 });
 
       const report = await performReview(request, createSilentDiagnostics());
 
@@ -1116,7 +1119,7 @@ describe("performReview: review-cache memoization end to end", () => {
       vi.spyOn(request.client, "createReviewComment").mockRejectedValue(new GitHubApiError(422));
       const cleanupSpy = vi
         .spyOn(request.client, "resolveSupersededOwnNotices")
-        .mockResolvedValue(0);
+        .mockResolvedValue({ attempted: 0, resolved: 0 });
 
       const report = await performReview(request, createSilentDiagnostics());
 
@@ -1134,7 +1137,7 @@ describe("performReview: review-cache memoization end to end", () => {
       });
       const cleanupSpy = vi
         .spyOn(request.client, "resolveSupersededOwnNotices")
-        .mockResolvedValue(0);
+        .mockResolvedValue({ attempted: 0, resolved: 0 });
 
       const report = await performReview(request, createSilentDiagnostics());
 
@@ -1142,13 +1145,16 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
     });
 
-    it("records a diagnostic only when at least one notice was actually resolved", async () => {
+    it("records a diagnostic with both counts when notices were resolved", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
 
       const request = baseRequest(undefined);
-      vi.spyOn(request.client, "resolveSupersededOwnNotices").mockResolvedValue(3);
+      vi.spyOn(request.client, "resolveSupersededOwnNotices").mockResolvedValue({
+        attempted: 3,
+        resolved: 3,
+      });
 
       const diagnostics = createSilentDiagnostics();
       await performReview(request, diagnostics);
@@ -1156,7 +1162,31 @@ describe("performReview: review-cache memoization end to end", () => {
       const record = diagnostics
         .drain()
         .find((r) => r.code === "cleanup.superseded_notices_resolved");
-      expect(record?.counts).toStrictEqual({ resolved: 3 });
+      expect(record?.counts).toStrictEqual({ attempted: 3, resolved: 3 });
+    });
+
+    // The reason `attempted` gates the diagnostic instead of `resolved`: a token missing the
+    // resolve-thread permission fails every mutation, and that must not read the same as "there
+    // was nothing to resolve" — the two are operationally distinct (a persistent, fixable failure
+    // versus a healthy no-op) and both produced `resolved === 0` before this count existed.
+    it("records a diagnostic when every attempted resolution failed, distinguishing it from nothing to resolve", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const request = baseRequest(undefined);
+      vi.spyOn(request.client, "resolveSupersededOwnNotices").mockResolvedValue({
+        attempted: 2,
+        resolved: 0,
+      });
+
+      const diagnostics = createSilentDiagnostics();
+      await performReview(request, diagnostics);
+
+      const record = diagnostics
+        .drain()
+        .find((r) => r.code === "cleanup.superseded_notices_resolved");
+      expect(record?.counts).toStrictEqual({ attempted: 2, resolved: 0 });
     });
 
     it("records nothing when there was nothing to resolve", async () => {
@@ -1165,7 +1195,10 @@ describe("performReview: review-cache memoization end to end", () => {
       runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
 
       const request = baseRequest(undefined);
-      vi.spyOn(request.client, "resolveSupersededOwnNotices").mockResolvedValue(0);
+      vi.spyOn(request.client, "resolveSupersededOwnNotices").mockResolvedValue({
+        attempted: 0,
+        resolved: 0,
+      });
 
       const diagnostics = createSilentDiagnostics();
       await performReview(request, diagnostics);
@@ -1439,18 +1472,20 @@ describe("performReview: review-cache memoization end to end", () => {
       // comment's OWN body (carrying the real marker `publishComposedFinding` embeds) is what a
       // real GitHub read-back would return, which is what makes `verifyPublication` pass.
       const posted: ReviewComment[] = [];
-      vi.spyOn(request.client, "createReviewComment").mockImplementation((_ref, _num, input) => {
-        const comment: ReviewComment = {
-          id: posted.length + 1,
-          body: input.body,
-          path: input.path,
-          authorLogin: "keiko-for-quality[bot]",
-          commitId: input.commitId,
-          url: "https://example.test/c",
-        };
-        posted.push(comment);
-        return Promise.resolve(comment);
-      });
+      const createSpy = vi
+        .spyOn(request.client, "createReviewComment")
+        .mockImplementation((_ref, _num, input) => {
+          const comment: ReviewComment = {
+            id: posted.length + 1,
+            body: input.body,
+            path: input.path,
+            authorLogin: "keiko-for-quality[bot]",
+            commitId: input.commitId,
+            url: "https://example.test/c",
+          };
+          posted.push(comment);
+          return Promise.resolve(comment);
+        });
       vi.spyOn(request.client, "getReviewComment").mockImplementation((_ref, id) =>
         Promise.resolve(posted[id - 1]!),
       );
@@ -1461,7 +1496,7 @@ describe("performReview: review-cache memoization end to end", () => {
       // path is exactly `unreviewedByEngine` minus what dispatch actually covered — the coverage
       // math still closes. The finding itself reached publication, proving it was not dropped.
       expect(report.outcome).toBe("complete");
-      expect(request.client.createReviewComment).toHaveBeenCalledTimes(1);
+      expect(createSpy).toHaveBeenCalledTimes(1);
     });
 
     it("does not carry forward a finding on a path the manifest itself reports as failed", async () => {

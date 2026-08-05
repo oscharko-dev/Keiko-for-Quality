@@ -188,7 +188,7 @@ describe("acquireEngine: streaming size enforcement", () => {
    *  through the fast-path check unbounded. */
   function dishonestResponse(actual: Buffer, declaredBytes: number): Response {
     const stream = new ReadableStream<Uint8Array>({
-      start(controller) {
+      start(controller): void {
         controller.enqueue(new Uint8Array(actual));
         controller.close();
       },

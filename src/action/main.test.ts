@@ -514,6 +514,19 @@ describe("runAction: writing the store back", () => {
 
     expect(await readOutputs(env)).toMatchObject({ cache_hits: "3", cache_misses: "2" });
   });
+
+  // The one cache-miss reason a consumer can act on without touching the reviewed files: the
+  // pull request's own path set moved, not the file's bytes. Wired from the same report field
+  // `cacheCounts`/`SummarySourceReport` already surface, not recomputed here.
+  it("wires cache_context_invalidated from the report into the action outputs", async () => {
+    performReviewMock.mockResolvedValue(report({ contextInvalidated: 4 }));
+    const env = await baseEnv({ reviewStorePath: join(dir, "does-not-exist.json") });
+    const diagnostics = createDiagnostics(() => undefined);
+
+    await runAction(env, diagnostics);
+
+    expect(await readOutputs(env)).toMatchObject({ cache_context_invalidated: "4" });
+  });
 });
 
 /**

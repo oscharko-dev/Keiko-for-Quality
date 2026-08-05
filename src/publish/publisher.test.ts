@@ -103,8 +103,11 @@ class FakeApi implements ReviewCommentApi {
 
   /** Never exercised by this suite — the cleanup pass is a `review.ts`-level concern (`review.test.ts`
    *  covers it), never reached from anything `publisher.ts` itself calls. */
-  public resolveSupersededOwnNotices(): Promise<number> {
-    return Promise.resolve(0);
+  public resolveSupersededOwnNotices(): Promise<{
+    readonly attempted: number;
+    readonly resolved: number;
+  }> {
+    return Promise.resolve({ attempted: 0, resolved: 0 });
   }
 }
 
@@ -884,7 +887,7 @@ describe("intra-run deduplication (v0.12.0)", () => {
       `counters. ${sharedSnippetAB} ${sharedSnippetBC}`;
     const bodyC =
       `This is a totally different observation about something else entirely unrelated. ` +
-      `${sharedSnippetBC}`;
+      sharedSnippetBC;
 
     const outcome = await publishFindings(
       context,

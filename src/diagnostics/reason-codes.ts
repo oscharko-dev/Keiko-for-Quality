@@ -201,8 +201,11 @@ export const REASON_CODES = [
   // Superseded-notice cleanup: this reviewer's own past incomplete-review notices, resolved because
   // a later push moved the hunk they anchored (`github/client.ts`'s `resolveSupersededOwnNotices`).
   // Never affects completeness — a resolved GitHub thread is not a claim about review coverage, only
-  // about whether an operator still has to look at it. Recorded only when `resolved > 0`, the same
-  // "only when something happened" posture `run.spend` takes.
+  // about whether an operator still has to look at it. Recorded only when `attempted > 0`, the same
+  // "only when something happened" posture `run.spend` takes — but `attempted` rather than
+  // `resolved`, so a run where every mutation failed (a token missing the resolve-thread permission,
+  // say) still leaves `counts: { attempted: N, resolved: 0 }` distinguishable, across runs, from a
+  // run with nothing to resolve at all, which never records this code.
   "cleanup.superseded_notices_resolved",
 ] as const;
 

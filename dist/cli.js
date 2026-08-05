@@ -332,18 +332,6 @@ function serializeStore(store) {
   });
 }
 
-// src/config/guidelines.ts
-var MAX_DOCUMENTS = 8;
-function parseGuidelinePaths(raw, field = "guidelines") {
-  const paths = raw.split(/[\n,]/).map((entry) => entry.trim()).filter((entry) => entry !== "");
-  if (paths.length > MAX_DOCUMENTS) throw new ValidationError(field);
-  for (const path of paths) {
-    if (path.startsWith("/") || path.includes("\\")) throw new ValidationError(field);
-    if (path.split("/").includes("..")) throw new ValidationError(field);
-  }
-  return { paths };
-}
-
 // src/core/glob.ts
 var REGEXP_SPECIALS = /* @__PURE__ */ new Set([
   ".",
@@ -593,6 +581,19 @@ function compileProfile(profile) {
 }
 function loadReviewProfile(text, field = "profile") {
   return compileProfile(parseReviewProfile(parseJson(text, field), field));
+}
+
+// src/config/guidelines.ts
+var MAX_DOCUMENTS = 8;
+function parseGuidelinePaths(raw, field = "guidelines") {
+  const paths = raw.split(/[\n,]/).map((entry) => entry.trim()).filter((entry) => entry !== "");
+  if (paths.length > MAX_DOCUMENTS) throw new ValidationError(field);
+  for (const path of paths) {
+    if (path.startsWith("/") || path.includes("\\")) throw new ValidationError(field);
+    if (path.split("/").includes("..")) throw new ValidationError(field);
+    if (path.length > MAX_INSTRUCTION_PATH_LENGTH) throw new ValidationError(field);
+  }
+  return { paths };
 }
 
 // src/config/runtime.ts
@@ -848,7 +849,7 @@ function incomplete(mode, reason, findings, counts = {}, covered = NO_COVERED_PA
 }
 var NO_COVERED_PATHS = /* @__PURE__ */ new Set();
 function verdictsSurviveIncompleteness(reason) {
-  return reason === "settlement.incomplete.budget_exceeded" || reason === "settlement.incomplete.coverage_gap";
+  return reason === "settlement.incomplete.budget_exceeded" || reason === "settlement.incomplete.coverage_gap" || reason === "settlement.incomplete.publication_degraded";
 }
 function coveredPaths(result) {
   const covered = /* @__PURE__ */ new Set();
@@ -1254,6 +1255,11 @@ var REASON_CODES = [
   // Publication
   "publish.identity_resolved",
   "publish.identity_unresolved",
+  // `resolveIdentity` THREW rather than returning `undefined` (v0.13.0) — a `mintInstallationToken`
+  // failure (malformed PEM, network blip, App not installed), distinct from the ordinary
+  // no-credential-configured case `identity_unresolved` already names. `main.ts`'s own catch
+  // records this before rethrowing, so the failure is not just a generic `run.failed`.
+  "publish.identity_mint_failed",
   "publish.finding_published",
   "publish.finding_suppressed_duplicate",
   // Suppressed by the phrasing-independent similarity gate (Keiko-for-Quality#38) rather than an
@@ -1305,6 +1311,11 @@ var REASON_CODES = [
   "cache.store_loaded",
   "cache.store_rejected",
   "cache.store_write_failed",
+  // The action's own final output write failed (v0.13.0) — `$GITHUB_OUTPUT` unwritable, a full
+  // disk. Mirrors `cache.store_write_failed`'s own posture: a delivery-mechanism failure at the
+  // very last step must not retroactively turn a completed, already-published review into an
+  // undiagnosable total failure (`main.ts`'s own try/catch around `writeOutputs`).
+  "outputs.write_failed",
   "cache.hits",
   // A content-key match a stored entry's own `prPathSetDigest` refused to replay because the pull
   // request's changed-file set moved since that entry was written (v0.10.0, issue #50). Distinct
@@ -1323,9 +1334,16 @@ var REASON_CODES = [
   "classify.audited",
   // Bounded resume (#57, v0.11.0): the engine run ended without a usable success — a thrown run
   // error or a non-success status — and was re-invoked exactly once. Emitted at most once per
-  // review; a second failure settles incomplete exactly as before, so "incomplete never reads
-  // as clean" survives the resume.
+  // review; "incomplete never reads as clean" survives the resume regardless of which of the two
+  // outcomes below follows it.
   "engine.resumed_once",
+  // The resumed attempt ITSELF threw (v0.13.0) — a second timeout, spawn failure, or nonzero exit,
+  // the same failure classes the resume exists to recover from, recurring on attempt two. Falls
+  // back to the first attempt's own result (its status, coverage, and findings) rather than losing
+  // every fact that attempt established: `settle()` still gets real data to judge, even though the
+  // run is very likely to settle incomplete on it. `counts.spent` is the first attempt's own token
+  // total — the only spend this outcome has anything measured to report.
+  "engine.resume_failed",
   // The resume that deliberately did NOT happen (v0.12.0): the first attempt reported its budget
   // exhausted, and a second attempt cannot review more of a change than the budget allows — it can
   // only re-pay for what the first one already did and settle incomplete anyway. Recorded rather
@@ -1359,8 +1377,11 @@ var REASON_CODES = [
   // Superseded-notice cleanup: this reviewer's own past incomplete-review notices, resolved because
   // a later push moved the hunk they anchored (`github/client.ts`'s `resolveSupersededOwnNotices`).
   // Never affects completeness — a resolved GitHub thread is not a claim about review coverage, only
-  // about whether an operator still has to look at it. Recorded only when `resolved > 0`, the same
-  // "only when something happened" posture `run.spend` takes.
+  // about whether an operator still has to look at it. Recorded only when `attempted > 0`, the same
+  // "only when something happened" posture `run.spend` takes — but `attempted` rather than
+  // `resolved`, so a run where every mutation failed (a token missing the resolve-thread permission,
+  // say) still leaves `counts: { attempted: N, resolved: 0 }` distinguishable, across runs, from a
+  // run with nothing to resolve at all, which never records this code.
   "cleanup.superseded_notices_resolved"
 ];
 var REASON_CODE_SET = new Set(REASON_CODES);
@@ -1584,7 +1605,7 @@ import { join as join3 } from "node:path";
 
 // src/cache/memoize.ts
 function isCacheEligible(item) {
-  return item.classification.kind === "reviewed" && (item.status === "M" || item.status === "A") && item.baseBlob !== void 0 && item.headBlob !== void 0;
+  return item.classification.kind === "reviewed" && (item.status === "M" || item.status === "A" || item.status === "R") && item.baseBlob !== void 0 && item.headBlob !== void 0;
 }
 function pathSetToken(item) {
   const path = item.path;
@@ -1636,7 +1657,9 @@ function combinedExcludes(mechanicallyClean, hitPaths) {
 }
 function mergeHitFindings(engineFindings, hits) {
   if (hits.size === 0) return engineFindings;
-  const cached = [...hits.values()].flatMap((entry) => entry.findings);
+  const cached = [...hits.entries()].flatMap(
+    ([path, entry]) => entry.findings.map((finding) => ({ ...finding, path: repoPath(path) }))
+  );
   return [...engineFindings, ...cached];
 }
 function findingsByPath(findings) {
@@ -1740,13 +1763,34 @@ function reportDownloadFailed(diagnostics, version) {
   diagnostics.record("engine.acquire.download_failed", { version });
   throw new AcquisitionError("engine.acquire.download_failed");
 }
+async function readBounded(response) {
+  const reader = response.body?.getReader();
+  if (reader === void 0) return void 0;
+  const chunks = [];
+  let total = 0;
+  try {
+    for (; ; ) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_BINARY_BYTES) {
+        await reader.cancel();
+        return void 0;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks);
+}
 async function download(url, diagnostics, version) {
   const response = await fetch(url, { redirect: "follow" });
   if (!response.ok) reportDownloadFailed(diagnostics, version);
   const declared = Number(response.headers.get("content-length") ?? "0");
   if (declared > MAX_BINARY_BYTES) reportDownloadFailed(diagnostics, version);
-  const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.byteLength === 0 || bytes.byteLength > MAX_BINARY_BYTES) {
+  const bytes = await readBounded(response);
+  if (bytes === void 0 || bytes.byteLength === 0) {
     reportDownloadFailed(diagnostics, version);
   }
   return bytes;
@@ -1883,6 +1927,7 @@ function withoutTrailingSlashes(value) {
   while (end > 0 && value[end - 1] === "/") end -= 1;
   return value.slice(0, end);
 }
+var REQUEST_TIMEOUT_MS = 45e3;
 async function requestPair(prompt, deps, seed) {
   const doFetch = deps.fetchImpl ?? fetch;
   try {
@@ -1904,7 +1949,8 @@ async function requestPair(prompt, deps, seed) {
         // Generous on purpose: reasoning models spend tokens before the final channel, and a cap
         // that starves the final answer reads exactly like non-compliance.
         max_completion_tokens: 4e3
-      })
+      }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
     });
     if (!response.ok) return { pair: void 0, tokens: 0, transportOk: false };
     const body = await response.json();
@@ -2702,6 +2748,8 @@ var MAX_SUMMARY_CHARS = 6e3;
 var MAX_TYPE_ALIAS_CHARS = 200;
 var MAX_PASS_FINDINGS = 10;
 var SCAN_WINDOW = 400;
+var MAX_SOURCE_CHARS = 2e6;
+var MAX_SOURCE_LINES = 4e3;
 var INTERFACE_START = /^\s*export\s+interface\s+([A-Za-z_$][\w$]*)/;
 var TYPE_ALIAS_START = /^\s*export\s+type\s+([A-Za-z_$][\w$]*)\s*=\s*(\S.*)?$/;
 var FUNCTION_START = /^\s*export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/;
@@ -2804,7 +2852,9 @@ function tryExtractOne(lines, i) {
   return tryExtractInterface(lines, i) ?? tryExtractTypeAlias(lines, i) ?? tryExtractFunction(lines, i) ?? tryExtractConst(lines, i);
 }
 function extractDeclarations(source) {
+  if (source.length > MAX_SOURCE_CHARS) return { texts: [], overflow: 0 };
   const lines = source.split("\n");
+  if (lines.length > MAX_SOURCE_LINES) return { texts: [], overflow: 0 };
   const found = [];
   let i = 0;
   while (i < lines.length) {
@@ -2985,7 +3035,7 @@ async function runChangePass(files, deps) {
 var MAX_INTERFACES = 200;
 var MAX_UNIONS = 200;
 var MAX_LINES = 4e3;
-var MAX_SOURCE_CHARS = 2e6;
+var MAX_SOURCE_CHARS2 = 2e6;
 var WHITESPACE = /\s/;
 var QUOTES = /* @__PURE__ */ new Set(['"', "'", "`"]);
 var OPENERS = /* @__PURE__ */ new Set(["{", "(", "["]);
@@ -3231,7 +3281,7 @@ function extractOneInterface(source, header) {
 }
 function extractFlatInterfaces(source) {
   const empty = /* @__PURE__ */ new Map();
-  if (source.length > MAX_SOURCE_CHARS || source.split("\n").length > MAX_LINES) return empty;
+  if (source.length > MAX_SOURCE_CHARS2 || source.split("\n").length > MAX_LINES) return empty;
   const headers = matchAllHeaders(source);
   if (headers.length > MAX_INTERFACES) return empty;
   const result = /* @__PURE__ */ new Map();
@@ -3243,7 +3293,7 @@ function extractFlatInterfaces(source) {
 }
 function extractStringUnions(source) {
   const empty = /* @__PURE__ */ new Map();
-  if (source.length > MAX_SOURCE_CHARS || source.split("\n").length > MAX_LINES) return empty;
+  if (source.length > MAX_SOURCE_CHARS2 || source.split("\n").length > MAX_LINES) return empty;
   const headers = matchAllUnionHeaders(source);
   if (headers.length > MAX_UNIONS) return empty;
   const result = /* @__PURE__ */ new Map();
@@ -3281,9 +3331,7 @@ function compareMembers(name, left, right) {
   }
   return out;
 }
-function compareContracts(left, right) {
-  const leftInterfaces = extractFlatInterfaces(left);
-  const rightInterfaces = extractFlatInterfaces(right);
+function compareSameName(leftInterfaces, rightInterfaces) {
   const mismatches = [];
   for (const [name, leftInterface] of leftInterfaces) {
     const rightInterface = rightInterfaces.get(name);
@@ -3293,10 +3341,10 @@ function compareContracts(left, right) {
   return mismatches;
 }
 function compareDeclaredContracts(left, right) {
-  const sameName = compareContracts(left, right);
-  if (sameName.length > 0) return sameName;
   const leftInterfaces = extractFlatInterfaces(left);
   const rightInterfaces = extractFlatInterfaces(right);
+  const sameName = compareSameName(leftInterfaces, rightInterfaces);
+  if (sameName.length > 0) return sameName;
   if (leftInterfaces.size !== 1 || rightInterfaces.size !== 1) return [];
   const [leftEntry] = leftInterfaces;
   const [rightEntry] = rightInterfaces;
@@ -3320,7 +3368,7 @@ function countLiteralMentions(source, literal) {
   return countOccurrences(source, `"${literal}"`) + countOccurrences(source, `'${literal}'`);
 }
 function findUncoveredUnionMembers(baseSource, headSource, counterpartSource) {
-  if (counterpartSource.length > MAX_SOURCE_CHARS) return [];
+  if (counterpartSource.length > MAX_SOURCE_CHARS2) return [];
   const baseUnions = extractStringUnions(baseSource);
   const headUnions = extractStringUnions(headSource);
   const gaps = [];
@@ -3369,7 +3417,7 @@ function describeUnionGap(gap, changedPath, counterpartPath) {
 // src/contracts/pin-desync.ts
 var MAX_LINES2 = 4e3;
 var MAX_PIN_SITES = 200;
-var MAX_SOURCE_CHARS2 = 2e6;
+var MAX_SOURCE_CHARS3 = 2e6;
 var SHA_SOURCE = String.raw`\b[0-9a-f]{40}\b`;
 var USES_PREFIX = /\buses\s*:\s*["']?[^\s"'@]+@$/;
 var ASSIGNMENT_PREFIX = /[A-Za-z_$][\d.-]*\s*[:=]\s*["'`]?$/;
@@ -3411,7 +3459,7 @@ function collectPinSites(lines) {
   return out;
 }
 function findPinSites(source) {
-  if (source.length > MAX_SOURCE_CHARS2) return [];
+  if (source.length > MAX_SOURCE_CHARS3) return [];
   const lines = source.split("\n");
   if (lines.length > MAX_LINES2) return [];
   const sites = collectPinSites(lines);
@@ -3614,8 +3662,12 @@ async function buildInventory(ctx, profile, pair, renamePercent, diagnostics) {
 var MIN_SUBSTANTIVE_CHARS = 80;
 var FOOTER_LINE = /^\s*(?:🤖\s*)?(?:generated with|co-authored-by:)/i;
 var HTML_COMMENT = /<!--[\s\S]*?-->/g;
+var MAX_INPUT_CHARS = 2e4;
+function clip(text) {
+  return text.length > MAX_INPUT_CHARS ? text.slice(0, MAX_INPUT_CHARS) : text;
+}
 function substantiveText(body) {
-  return body.replace(HTML_COMMENT, " ").split("\n").filter((line) => !FOOTER_LINE.test(line)).join("\n").replace(/\s+/g, " ").trim();
+  return clip(body).replace(HTML_COMMENT, " ").split("\n").filter((line) => !FOOTER_LINE.test(line)).join("\n").replace(/\s+/g, " ").trim();
 }
 function isSubstantiveDisposition(lastReply, identity) {
   if (lastReply === void 0) return false;
@@ -3656,7 +3708,7 @@ var MIN_SHARED_TOKENS = 4;
 var RECURRENCE_THRESHOLD = 0.7;
 var MIN_RECURRENCE_SHARED_TOKENS = 8;
 var MIN_SHARED_SNIPPET_CHARS = 24;
-var MAX_INPUT_CHARS = 2e4;
+var MAX_INPUT_CHARS2 = 2e4;
 var STOPWORDS = /* @__PURE__ */ new Set([
   "the",
   "and",
@@ -3691,11 +3743,11 @@ var STOPWORDS = /* @__PURE__ */ new Set([
   "your",
   "you"
 ]);
-function clip(text) {
-  return text.length > MAX_INPUT_CHARS ? text.slice(0, MAX_INPUT_CHARS) : text;
+function clip2(text) {
+  return text.length > MAX_INPUT_CHARS2 ? text.slice(0, MAX_INPUT_CHARS2) : text;
 }
 function codeBlocks(text) {
-  const matches = clip(text).match(/```[\s\S]*?```/g) ?? [];
+  const matches = clip2(text).match(/```[\s\S]*?```/g) ?? [];
   return new Set(
     matches.map((block) => block.replace(/\s+/g, " ").trim()).filter((block) => block.length >= MIN_SHARED_SNIPPET_CHARS)
   );
@@ -3709,7 +3761,7 @@ function shareCodeBlock(a, b) {
   return false;
 }
 function tokenize(text) {
-  const withoutCode = clip(text).replace(/```[\s\S]*?```/g, " ");
+  const withoutCode = clip2(text).replace(/```[\s\S]*?```/g, " ");
   const words = normalizeUnicodeText(withoutCode).replace(/[^\p{L}\p{N}]+/gu, " ").split(" ").filter((word) => word.length >= 3 && !STOPWORDS.has(word));
   return new Set(words);
 }
@@ -3722,7 +3774,7 @@ function tokenOverlap(a, b) {
   return { score: smaller === 0 ? 0 : shared / smaller, shared };
 }
 function stripComposedArtifacts(body) {
-  return clip(body).replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
+  return clip2(body).replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
 }
 function similarByContent(a, b) {
   if (shareCodeBlock(a, b)) return true;
@@ -3863,7 +3915,10 @@ function sanitizeOne(context, finding, counters, diagnostics) {
   const sanitized = sanitizeFindingBody(finding.content);
   if (!sanitized.ok) {
     counters.rejectedSanitization += 1;
-    diagnostics.record("publish.finding_rejected_sanitization", { headSha: context.headSha });
+    diagnostics.record("publish.finding_rejected_sanitization", {
+      headSha: context.headSha,
+      counts: { [sanitized.reason]: 1 }
+    });
     return void 0;
   }
   counters.neutralized += sanitized.neutralized ?? 0;
@@ -3891,9 +3946,8 @@ function clusterIntraRunDuplicates(candidates) {
   const clusters = [];
   for (const candidate of candidates) {
     const cluster = clusters.find(
-      (existing) => areIntraRunDuplicates(
-        toCandidateForDedup(candidate),
-        toCandidateForDedup(existing.representative)
+      (existing) => existing.members.some(
+        (member) => areIntraRunDuplicates(toCandidateForDedup(candidate), toCandidateForDedup(member))
       )
     );
     if (cluster === void 0) {
@@ -4035,7 +4089,15 @@ var INERT_MEMO = {
 };
 var EMPTY_BATCH = { findings: [], fresh: /* @__PURE__ */ new Set() };
 function cacheCounts(memo) {
-  return { cacheHits: memo.hits.size, cacheMisses: memo.eligiblePaths.size - memo.hits.size };
+  return {
+    cacheHits: memo.hits.size,
+    cacheMisses: memo.eligiblePaths.size - memo.hits.size,
+    contextInvalidated: memo.contextInvalidated
+  };
+}
+function localCacheCounts(memo) {
+  const { cacheHits, cacheMisses } = cacheCounts(memo);
+  return { cacheHits, cacheMisses };
 }
 function prepareMemoization(request, inventory, diagnostics) {
   if (request.cacheStore === void 0) return INERT_MEMO;
@@ -4069,19 +4131,27 @@ function prepareMemoization(request, inventory, diagnostics) {
   });
   return memo;
 }
+function computeEngineBudget(request, inventory, memo) {
+  const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
+  const excludedSet = new Set(excluded);
+  const allottedBudget = computeAllottedBudget(
+    request.config.tokenBudget,
+    dispatchedPathCount(inventory, excludedSet),
+    reviewableChangedLines(inventory, excludedSet)
+  );
+  return { excluded, allottedBudget };
+}
 async function executeEngine(request, inventory, memo, ledger, diagnostics) {
   const workspace = await mkdtemp2(join3(tmpdir2(), "kfq-engine-bin-"));
   try {
     const engine = await acquireEngine(workspace, diagnostics);
-    const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
-    const excludedSet = new Set(excluded);
-    const allottedBudget = computeAllottedBudget(
-      request.config.tokenBudget,
-      dispatchedPathCount(inventory, excludedSet),
-      reviewableChangedLines(inventory, excludedSet)
-    );
+    const { excluded, allottedBudget } = computeEngineBudget(request, inventory, memo);
     ledger.allotted = allottedBudget;
-    const { result: parsed, engineTokens } = await runEngineWithOneResume(
+    const {
+      result: parsed,
+      engineTokens,
+      alreadyReviewedPaths
+    } = await runEngineWithOneResume(
       {
         binaryPath: engine.binaryPath,
         repositoryPath: request.repositoryPath,
@@ -4103,7 +4173,8 @@ async function executeEngine(request, inventory, memo, ledger, diagnostics) {
       diagnostics
     );
     ledger.classify += classifyTokens;
-    return settle(inventory, classified, request.profile, request.config, memo.hitPaths);
+    const memoizedForSettlement = alreadyReviewedPaths.length === 0 ? memo.hitPaths : /* @__PURE__ */ new Set([...memo.hitPaths, ...alreadyReviewedPaths]);
+    return settle(inventory, classified, request.profile, request.config, memoizedForSettlement);
   } finally {
     await rm3(workspace, { recursive: true, force: true });
   }
@@ -4115,25 +4186,52 @@ function classifyDeps(request) {
   return { endpoint: request.config.endpoint, token, model: request.config.model };
 }
 var MAX_GATE_FINDINGS = 8;
+async function readTextAtCommitCached(cache, ctx, commit, path) {
+  const key = `${commit}:${path}`;
+  if (cache.has(key)) return cache.get(key);
+  const text = await readTextAtCommit(ctx, commit, path);
+  cache.set(key, text);
+  return text;
+}
+async function compareMatchedPairs(blobCache, ctx, request, inventory, pairs, findings) {
+  let compared = 0;
+  for (const item of inventory.items) {
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    if (!item.reviewable) continue;
+    const matched = pairs.filter((pair) => pair.matcher.matches(item.path));
+    if (matched.length === 0) continue;
+    const path = item.path;
+    const left = await readTextAtCommitCached(blobCache, ctx, request.head, path);
+    if (left === void 0) continue;
+    const leftBase = await readTextAtCommitCached(
+      blobCache,
+      ctx,
+      request.base,
+      item.oldPath ?? item.path
+    );
+    for (const pair of matched) {
+      compared += await compareAgainstCounterparts(
+        blobCache,
+        ctx,
+        request.head,
+        item,
+        pair,
+        left,
+        leftBase,
+        findings
+      );
+      if (findings.length >= MAX_GATE_FINDINGS) break;
+    }
+  }
+  return compared;
+}
 async function collectGateFindings(request, inventory, diagnostics) {
   const pairs = request.profile.contractPairs ?? [];
   const ctx = gitContext(request);
   const findings = [];
-  let compared = 0;
-  for (const pair of pairs) {
-    for (const item of inventory.items) {
-      if (!item.reviewable || !pair.matcher.matches(item.path)) continue;
-      compared += await compareAgainstCounterparts(
-        ctx,
-        request.base,
-        request.head,
-        item,
-        pair,
-        findings
-      );
-    }
-  }
-  const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings);
+  const blobCache = /* @__PURE__ */ new Map();
+  const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings, blobCache);
+  const compared = await compareMatchedPairs(blobCache, ctx, request, inventory, pairs, findings);
   if (pairs.length === 0 && findings.length === 0 && pinDesyncs === 0) return [];
   diagnostics.record("contracts.gate", {
     headSha: request.head,
@@ -4146,27 +4244,37 @@ async function collectGateFindings(request, inventory, diagnostics) {
   });
   return findings;
 }
-async function collectPinDesyncFindings(ctx, request, inventory, findings) {
+function pushPinDesyncFindings(findings, item, path, base, head) {
+  let found = 0;
+  for (const desync of detectPinDesync(base, head)) {
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    findings.push({
+      path: item.path,
+      content: describePinDesync(desync, path),
+      startLine: 0,
+      endLine: 0,
+      category: "bug",
+      severity: "high"
+    });
+    found += 1;
+  }
+  return found;
+}
+async function collectPinDesyncFindings(ctx, request, inventory, findings, blobCache) {
   let found = 0;
   for (const item of inventory.items) {
-    if (!item.reviewable || item.status !== "M") continue;
+    if (!item.reviewable || item.status !== "M" && item.status !== "R") continue;
     if (findings.length >= MAX_GATE_FINDINGS) break;
     const path = item.path;
-    const base = await readTextAtCommit(ctx, request.base, path);
-    const head = await readTextAtCommit(ctx, request.head, path);
+    const base = await readTextAtCommitCached(
+      blobCache,
+      ctx,
+      request.base,
+      item.oldPath ?? item.path
+    );
+    const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
     if (base === void 0 || head === void 0) continue;
-    for (const desync of detectPinDesync(base, head)) {
-      if (findings.length >= MAX_GATE_FINDINGS) break;
-      findings.push({
-        path: item.path,
-        content: describePinDesync(desync, path),
-        startLine: 0,
-        endLine: 0,
-        category: "bug",
-        severity: "high"
-      });
-      found += 1;
-    }
+    found += pushPinDesyncFindings(findings, item, path, base, head);
   }
   return found;
 }
@@ -4184,14 +4292,11 @@ function pushGateFindings(findings, path, items, describe) {
   }
   return false;
 }
-async function compareAgainstCounterparts(ctx, base, head, item, pair, findings) {
+async function compareAgainstCounterparts(blobCache, ctx, head, item, pair, left, leftBase, findings) {
   const path = item.path;
-  const left = await readTextAtCommit(ctx, head, path);
-  if (left === void 0) return 0;
-  const leftBase = await readTextAtCommit(ctx, base, path);
   let compared = 0;
   for (const counterpart of pair.counterparts) {
-    const right = await readTextAtCommit(ctx, head, counterpart);
+    const right = await readTextAtCommitCached(blobCache, ctx, head, counterpart);
     if (right === void 0) continue;
     compared += 1;
     const mismatches = compareDeclaredContracts(left, right);
@@ -4266,20 +4371,50 @@ async function repairEngineFindings(parsed, request, diagnostics) {
 }
 var RESUME_SEED = 43;
 var RESUME_FLOOR_FRACTION = 0.25;
+async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths) {
+  try {
+    const second = await runEngine(
+      {
+        ...options2,
+        samplingSeed: RESUME_SEED,
+        allottedBudget: remaining,
+        mechanicallyCleanPaths: [...options2.mechanicallyCleanPaths, ...alreadyReviewedPaths]
+      },
+      diagnostics
+    );
+    const parsedSecond = parseEngineResult(second.stdout);
+    const merged = firstResult === void 0 ? parsedSecond : mergeResumedResult(firstResult, parsedSecond, alreadyReviewedPaths);
+    return {
+      result: merged,
+      engineTokens: firstAttemptTokens + parsedSecond.totalTokens,
+      alreadyReviewedPaths
+    };
+  } catch (error) {
+    if (!(error instanceof EngineRunError) || firstResult === void 0) throw error;
+    diagnostics.record("engine.resume_failed", { counts: { spent: firstAttemptTokens } });
+    return { result: firstResult, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
+  }
+}
 async function runEngineWithOneResume(options2, diagnostics) {
   let remaining = options2.allottedBudget;
   let firstAttemptTokens = 0;
+  let firstResult;
+  let alreadyReviewedPaths = [];
   try {
     const first = await runEngine(options2, diagnostics);
     const parsed = parseEngineResult(first.stdout);
-    if (parsed.status === "success") return { result: parsed, engineTokens: parsed.totalTokens };
+    if (parsed.status === "success") {
+      return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
+    }
     firstAttemptTokens = parsed.totalTokens;
+    firstResult = parsed;
     if (parsed.budgetExceeded) {
       diagnostics.record("engine.resume_skipped_budget_exceeded", {
         counts: { spent: firstAttemptTokens, allotted: options2.allottedBudget }
       });
-      return { result: parsed, engineTokens: firstAttemptTokens };
+      return { result: parsed, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
     }
+    alreadyReviewedPaths = parsed.findings.filter((f) => !parsed.coverage.failed.some((c) => c.path === f.path)).map((f) => f.path);
     remaining = clamp(
       options2.allottedBudget - parsed.totalTokens,
       Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION),
@@ -4290,12 +4425,21 @@ async function runEngineWithOneResume(options2, diagnostics) {
     if (!(error instanceof EngineRunError)) throw error;
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   }
-  const second = await runEngine(
-    { ...options2, samplingSeed: RESUME_SEED, allottedBudget: remaining },
-    diagnostics
+  return attemptResume(
+    options2,
+    diagnostics,
+    remaining,
+    firstAttemptTokens,
+    firstResult,
+    alreadyReviewedPaths
   );
-  const parsedSecond = parseEngineResult(second.stdout);
-  return { result: parsedSecond, engineTokens: firstAttemptTokens + parsedSecond.totalTokens };
+}
+function mergeResumedResult(first, second, excludedPaths) {
+  if (excludedPaths.length === 0) return second;
+  const carried = new Set(excludedPaths);
+  const carriedFindings = first.findings.filter((f) => carried.has(f.path));
+  if (carriedFindings.length === 0) return second;
+  return { ...second, findings: [...carriedFindings, ...second.findings] };
 }
 var AUDIT_RESERVE_PER_FINDING = 2e3;
 var NO_AUDITED = /* @__PURE__ */ new Map();
@@ -4363,9 +4507,12 @@ function finalizeCacheStore(request, inventory, memo, engineFindings, restrictTo
     pathSetDigest: memo.pathSetDigest,
     config: request.config
   });
-  if (newEntries.length === 0) return { store: request.cacheStore, appended: 0 };
+  const touched = [...memo.hits.values()];
+  if (newEntries.length === 0 && touched.length === 0) {
+    return { store: request.cacheStore, appended: 0 };
+  }
   return {
-    store: appendEntries(request.cacheStore, newEntries, RETENTION),
+    store: appendEntries(request.cacheStore, [...newEntries, ...touched], RETENTION),
     appended: newEntries.length
   };
 }
@@ -4444,7 +4591,7 @@ async function localIncompleteReport(run2, inventory, reason, batch, reviewed, m
     engineVersion: run2.engineVersion,
     // An incomplete outcome never writes a store back (`finalizeCacheStore`'s admission rule), but
     // the hit/miss counts are facts about what was attempted, memo or not.
-    ...memo === void 0 ? { cacheHits: 0, cacheMisses: 0 } : cacheCounts(memo)
+    ...memo === void 0 ? { cacheHits: 0, cacheMisses: 0 } : localCacheCounts(memo)
   };
 }
 async function localSettleOrReport(run2, inventory, memo) {
@@ -4506,7 +4653,7 @@ async function completeLocalReport(run2, inventory, settlement, memo) {
     },
     ruleDigest: run2.ruleDigest,
     engineVersion: run2.engineVersion,
-    ...cacheCounts(memo),
+    ...localCacheCounts(memo),
     ...finalized === void 0 ? {} : { updatedCacheStore: finalized.store }
   };
 }
@@ -4539,12 +4686,13 @@ async function localResolveInventory(run2) {
 async function localSettleReport(run2, inventory, settlement, memo, started) {
   if (settlement.status === "incomplete") {
     const reviewed = verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths.size + memo.hitPaths.size : memo.hitPaths.size;
+    const gate = await collectGateFindings(run2.request, inventory, run2.diagnostics);
     return localIncompleteReport(
       run2,
       inventory,
       settlement.reason,
       {
-        findings: mergeHitFindings(settlement.findings, memo.hits),
+        findings: [...mergeHitFindings(settlement.findings, memo.hits), ...gate],
         fresh: new Set(settlement.findings)
       },
       reviewed,

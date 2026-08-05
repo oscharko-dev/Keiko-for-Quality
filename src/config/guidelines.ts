@@ -1,4 +1,5 @@
 import { ValidationError } from "../core/brands.js";
+import { MAX_INSTRUCTION_PATH_LENGTH } from "./profile.js";
 
 /**
  * Where this repository keeps its written engineering rules.
@@ -42,6 +43,10 @@ export function parseGuidelinePaths(raw: string, field = "guidelines"): Guidelin
   for (const path of paths) {
     if (path.startsWith("/") || path.includes("\\")) throw new ValidationError(field);
     if (path.split("/").includes("..")) throw new ValidationError(field);
+    // Every sibling path field rendered into the same rule prompt already bounds its length —
+    // `contractPairs[].paths`, `pathInstructions[].paths` — and this one had not, despite being the
+    // same kind of value: a repository path, from the same untrusted `guidelines` action input.
+    if (path.length > MAX_INSTRUCTION_PATH_LENGTH) throw new ValidationError(field);
   }
   return { paths };
 }

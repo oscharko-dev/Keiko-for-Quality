@@ -10,6 +10,13 @@ import { parseGuidelinePaths } from "./guidelines.js";
  */
 const MAX_DOCUMENTS = 8;
 
+/**
+ * Restated for the same reason as `MAX_DOCUMENTS` above: `guidelines.ts` imports this from
+ * `profile.ts` (`MAX_INSTRUCTION_PATH_LENGTH`) rather than defining its own, but a test that
+ * imports it too would follow the constant wherever it moves and never pin the boundary.
+ */
+const MAX_PATH_LENGTH = 512;
+
 /** `count` well-formed repository-relative paths, in the newline form both entry points hand over. */
 function documents(count: number): string {
   return Array.from({ length: count }, (_, i) => `docs/rule-${String(i + 1)}.md`).join("\n");
@@ -58,6 +65,14 @@ describe("parseGuidelinePaths", () => {
     it(`accepts exactly ${String(MAX_DOCUMENTS)} paths — the cap is a maximum, not one below it`, () => {
       expect(parseGuidelinePaths(documents(MAX_DOCUMENTS)).paths).toHaveLength(MAX_DOCUMENTS);
     });
+
+    // The accepting half of the per-path length cap, mirroring the per-count case just above: the
+    // cap is a maximum, not one below it.
+    it(`accepts a path exactly ${String(MAX_PATH_LENGTH)} characters long`, () => {
+      const path = `docs/${"r".repeat(MAX_PATH_LENGTH - 8)}.md`;
+      expect(path).toHaveLength(MAX_PATH_LENGTH);
+      expect(parseGuidelinePaths(path).paths).toEqual([path]);
+    });
   });
 
   describe("what it rejects, so a named path cannot leave the checkout", () => {
@@ -101,6 +116,16 @@ describe("parseGuidelinePaths", () => {
     it("rejects a `..` segment, leading or interior", () => {
       expect(() => parseGuidelinePaths("../outside-the-repo.md")).toThrow(ValidationError);
       expect(() => parseGuidelinePaths("docs/../../outside-the-repo.md")).toThrow(ValidationError);
+    });
+
+    // guidelines.ts:49. Every sibling path field rendered into the same rule prompt already bounds
+    // its length (`contractPairs[].paths`, `pathInstructions[].paths` in profile.ts) — this is the
+    // only line that catches an oversized one here, and none of the three checks above it do: the
+    // path below is neither absolute, backslashed, nor traversing.
+    it(`rejects a path over ${String(MAX_PATH_LENGTH)} characters`, () => {
+      const path = `docs/${"r".repeat(MAX_PATH_LENGTH - 7)}.md`;
+      expect(path.length).toBeGreaterThan(MAX_PATH_LENGTH);
+      expect(() => parseGuidelinePaths(path)).toThrow(ValidationError);
     });
 
     // No caller overrides `field` today — cli.ts:428, main.ts:309 and corpus/real-diffs.mjs:223

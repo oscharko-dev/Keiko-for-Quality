@@ -115,7 +115,7 @@ export interface ReviewCommentApi {
     number: number,
     identity: string,
     isNoticeBody: (body: string) => boolean,
-  ): Promise<number>;
+  ): Promise<{ readonly attempted: number; readonly resolved: number }>;
 }
 
 /**
@@ -398,6 +398,35 @@ function nextThreadsCursor(page: ReviewThreadsPage): string | undefined {
  *  GitHub Enterprise Server; this is only the fallback for a caller that does not supply one. */
 const DEFAULT_GRAPHQL_BASE = "https://api.github.com/graphql";
 
+/** Whether `requestUrl`'s retry loop should ever retry this response at all — a rate limit
+ *  (primary or secondary) or one of the retryable transient statuses. Split out of `requestUrl`
+ *  itself purely to keep that method's own branching within this file's complexity budget; the
+ *  condition is unchanged. */
+function isRetryableResponse(response: Response): boolean {
+  return RETRYABLE.has(response.status) || isSecondaryRateLimit(response);
+}
+
+/** Whether this retryable response is the ambiguous-write 5xx band `requestUrl`'s own doc comment
+ *  describes: `429` and a secondary rate limit are never ambiguous, since GitHub rejected the
+ *  request before it reached application logic, regardless of method. */
+function isAmbiguousWrite5xxResponse(response: Response): boolean {
+  return (
+    response.status !== 429 && !isSecondaryRateLimit(response) && RETRYABLE.has(response.status)
+  );
+}
+
+/** The headers every request carries, plus `content-type` only when there is a body to describe —
+ *  split out of `requestUrl` for the same complexity-budget reason as the two functions above. */
+function requestHeaders(token: string, init: RequestInit): Record<string, string> {
+  return {
+    authorization: `Bearer ${token}`,
+    accept: "application/vnd.github+json",
+    "x-github-api-version": "2022-11-28",
+    "user-agent": "keiko-for-quality",
+    ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
+  };
+}
+
 export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
   private readonly apiBase: string;
   private readonly token: string;
@@ -437,27 +466,11 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
   ): Promise<Response> {
     let lastStatus = 0;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      const response = await fetch(url, {
-        ...init,
-        headers: {
-          authorization: `Bearer ${this.token}`,
-          accept: "application/vnd.github+json",
-          "x-github-api-version": "2022-11-28",
-          "user-agent": "keiko-for-quality",
-          ...(init.body !== undefined ? { "content-type": "application/json" } : {}),
-        },
-      });
+      const response = await fetch(url, { ...init, headers: requestHeaders(this.token, init) });
       if (response.ok) return response;
       lastStatus = response.status;
-      if (!RETRYABLE.has(response.status) && !isSecondaryRateLimit(response)) {
-        throw new GitHubApiError(response.status);
-      }
-      if (
-        !retryAmbiguous5xx &&
-        !isSecondaryRateLimit(response) &&
-        response.status !== 429 &&
-        RETRYABLE.has(response.status)
-      ) {
+      if (!isRetryableResponse(response)) throw new GitHubApiError(response.status);
+      if (!retryAmbiguous5xx && isAmbiguousWrite5xxResponse(response)) {
         throw new GitHubApiError(response.status);
       }
       // Linear backoff is the default: the ordinary retryable cases are transient, and a reviewer
@@ -658,21 +671,24 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
    *
    * Best-effort end to end, matching the class's posture everywhere else a GraphQL lookup feeds
    * something that is never load-bearing for review correctness: a failed lookup or a failed resolve
-   * costs this run a stale thread staying open one push longer, never a failed review. Returns the
-   * count actually resolved, purely for diagnostics — no caller branches on it.
+   * costs this run a stale thread staying open one push longer, never a failed review. Returns both
+   * how many resolutions were attempted and how many actually succeeded, purely for diagnostics — no
+   * caller branches on either. The split matters because `resolveThread`'s own catch collapses a
+   * failed mutation to the same `false` a thread that just wasn't resolved would produce: `attempted`
+   * is the only way a caller can tell "nothing needed resolving" apart from "every attempt failed."
    */
   public async resolveSupersededOwnNotices(
     ref: RepoRef,
     number: number,
     identity: string,
     isNoticeBody: (body: string) => boolean,
-  ): Promise<number> {
+  ): Promise<{ readonly attempted: number; readonly resolved: number }> {
     const ids = await this.fetchResolvableNoticeThreadIds(ref, number, identity, isNoticeBody);
     let resolved = 0;
     for (const threadId of ids) {
       if (await this.resolveThread(threadId)) resolved += 1;
     }
-    return resolved;
+    return { attempted: ids.length, resolved };
   }
 
   public async createReviewComment(

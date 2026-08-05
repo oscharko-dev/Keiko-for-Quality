@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import type { ReadableStreamDefaultReader } from "node:stream/web";
 
 import type { sha256 } from "../core/brands.js";
 import type { Diagnostics } from "../diagnostics/sink.js";
@@ -45,7 +46,10 @@ function reportDownloadFailed(diagnostics: Diagnostics, version: EnginePin["vers
  * response, via the caller's own `reader === undefined` check.
  */
 async function readBounded(response: Response): Promise<Buffer | undefined> {
-  const reader = response.body?.getReader();
+  // undici's `Response.body` is `ReadableStream<R = any>` with no way for this project's
+  // DOM-less `lib` to infer `R`, so `getReader()` would otherwise resolve every chunk to `any` —
+  // this cast is the only place that assumption lives, rather than every use of `value` below.
+  const reader = response.body?.getReader() as ReadableStreamDefaultReader<Uint8Array> | undefined;
   if (reader === undefined) return undefined;
   const chunks: Uint8Array[] = [];
   let total = 0;

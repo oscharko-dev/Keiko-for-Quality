@@ -92,9 +92,9 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    const resolved = await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody);
+    const outcome = await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody);
 
-    expect(resolved).toBe(1);
+    expect(outcome).toStrictEqual({ attempted: 1, resolved: 1 });
     expect(calls[1]?.query).toContain("resolveReviewThread");
     expect(calls[1]?.variables).toStrictEqual({ threadId: "PRRT_1" });
   });
@@ -113,9 +113,9 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    const resolved = await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody);
+    const outcome = await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody);
 
-    expect(resolved).toBe(0);
+    expect(outcome).toStrictEqual({ attempted: 0, resolved: 0 });
     expect(calls).toHaveLength(1); // the list query only — no mutation was ever attempted
   });
 
@@ -133,7 +133,10 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toBe(0);
+    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+      attempted: 0,
+      resolved: 0,
+    });
   });
 
   /**
@@ -160,7 +163,10 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toBe(0);
+    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+      attempted: 0,
+      resolved: 0,
+    });
   });
 
   it("does not resolve a notice-shaped thread authored by someone else", async () => {
@@ -179,7 +185,10 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toBe(0);
+    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+      attempted: 0,
+      resolved: 0,
+    });
   });
 
   it("finds its own notice anywhere in the thread's comments, not only the first", async () => {
@@ -204,7 +213,10 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toBe(1);
+    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+      attempted: 1,
+      resolved: 1,
+    });
   });
 
   it("follows GraphQL pagination and resolves matching threads on every page", async () => {
@@ -241,7 +253,10 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toBe(2);
+    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+      attempted: 2,
+      resolved: 2,
+    });
   });
 
   it("counts only the mutations that actually report resolved, continuing past one that fails", async () => {
@@ -268,18 +283,22 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    // One of two mutations failed; the other still ran and counted — a per-thread failure must not
-    // abandon the rest of the batch, the same containment posture `publisher.ts`'s `executeOne` uses.
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toBe(1);
+    // Two of two were attempted; one of two mutations failed and the other still ran and counted —
+    // a per-thread failure must not abandon the rest of the batch, the same containment posture
+    // `publisher.ts`'s `executeOne` uses.
+    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+      attempted: 2,
+      resolved: 1,
+    });
   });
 
-  it("degrades to zero, without throwing, when the thread lookup itself fails", async () => {
+  it("degrades to zero attempted, without throwing, when the thread lookup itself fails", async () => {
     globalThis.fetch = (() => Promise.resolve(new Response("", { status: 403 }))) as typeof fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    await expect(client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).resolves.toBe(
-      0,
-    );
+    await expect(
+      client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody),
+    ).resolves.toStrictEqual({ attempted: 0, resolved: 0 });
   });
 
   it("never resolves a thread with no comment at all authored by this reviewer", async () => {
@@ -296,6 +315,9 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toBe(0);
+    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+      attempted: 0,
+      resolved: 0,
+    });
   });
 });
