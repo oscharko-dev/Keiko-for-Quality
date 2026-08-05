@@ -121,7 +121,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
+        # `--repo` is load-bearing, not decoration: this job deliberately has no checkout — it only
+        # downloads the staged artifact — and `gh` otherwise infers the target repository from the
+        # working directory's git remote, which does not exist here ("fatal: not a git repository").
+        # Naming the repository explicitly is the right fix rather than adding a checkout: cloning
+        # the whole tree to give `gh` a git context it only needs for one string would undo the
+        # point of splitting this job off in the first place.
+        #
+        # v0.14.0 shipped this job without it and the upload failed on the real release. The
+        # workflow_dispatch rehearsal path cannot catch that class of bug — this step is gated on
+        # `github.event_name == 'release'`, so a dry run never executes it.
+        #
         # --clobber makes a re-run of this workflow against the same release idempotent (a
         # transient failure after this point should not require deleting a partial upload by
         # hand); contents: write is already scoped to only this job, the one step that needs it.
-        run: gh release upload "$TAG" release-assets/keiko-cli.js release-assets/sha256sum.txt --clobber
+        run: |
+          gh release upload "$TAG" \
+            release-assets/keiko-cli.js release-assets/sha256sum.txt \
+            --repo "$GITHUB_REPOSITORY" --clobber
