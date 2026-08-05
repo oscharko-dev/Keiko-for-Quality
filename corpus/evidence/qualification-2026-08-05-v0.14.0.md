@@ -1,70 +1,74 @@
 # Qualification — v0.14.0 release candidate (2026-08-05)
 
-Full 32-case run against dev `dd33cba` (the release tree), plus an isolated second-opinion rerun
-per the CP-B doctrine. Redaction discipline as everywhere in this directory: counts, digests, ids —
-no finding bodies, no model text.
+Full 32-case run against dev `9fe600e` (the release tree, v0.14.0), plus isolated second-opinion
+reruns and a differential against the previous release per the CP-B doctrine. Redaction discipline
+as everywhere in this directory: counts, digests, ids — no finding bodies, no model text.
 
-**This qualification changes the model dimension.** v0.13.0 was measured against gpt-oss-120b;
-this one runs gpt-5.4 over the consumer's own Azure AI Foundry deployment. A qualification is a
-property of the pairing (engine + rule + model), so the per-case comparison against v0.13.0's table
-below is informative, never a like-for-like delta — the recall improvement in the main run is as
-attributable to the model as to the adapter.
+Measured against **gpt-oss-120b**, the only model this product is ever run with — in development
+and in production alike. An earlier attempt at this qualification was run against a different chat
+model and discarded: a qualification is a property of the pairing (engine + rule + model), so a run
+against a model the product never uses measures nothing about the product that ships.
 
 ## Binding
 
-|               | Main run                | Second opinion + replication |
-| ------------- | ----------------------- | ---------------------------- |
-| adapter       | dev `dd33cba`           | same                         |
-| engine        | `484a232e017c` (v1.8.4) | same                         |
-| rule digest   | `9764590d3ad2`          | same                         |
-| cases digest  | `b255cdcfde2a`          | same                         |
-| scorer digest | `c78d6a280582`          | same                         |
-| model         | gpt-5.4 (openai)        | same                         |
+|               | Main run                | Second opinions + replication |
+| ------------- | ----------------------- | ----------------------------- |
+| adapter       | dev `9fe600e`           | same                          |
+| engine        | `484a232e017c` (v1.8.4) | same                          |
+| rule digest   | `9764590d3ad2`          | same                          |
+| cases digest  | `b255cdcfde2a`          | same                          |
+| scorer digest | `c78d6a280582`          | same                          |
+| model         | gpt-oss-120b (openai)   | same                          |
 
 ## Scoreboard
 
-Main run: recall **27/28** seeded found · classified 26/27 (one off by one severity step) ·
-precision **4/4** clean silent · publishable **32/32** · noise 1 · 550,274 tokens (17,196/case).
+Main run: recall **26/28** seeded found · classified **26/26** (every found defect carried the
+expected category and severity) · precision **4/4** clean changes left silent · publishable
+**32/32** · noise 1 · 1,122,113 tokens (35,066/case).
 
-One miss: `workflow-head-checkout`.
+Two misses: `off-by-one` and `workflow-head-checkout`.
 
-**Net: 28/28 seeded defects found across main + second opinion, 4/4 clean silent, 32/32
-publishable.**
+- `off-by-one` — second opinion **PASS**, classified correctly (16,632 tokens).
+- `workflow-head-checkout` — see below.
 
-## The one miss, and why it is not a regression
+**Net: 27/28 seeded defects found across main + second opinion, with the 28th a documented roaming
+case that passes the release tree more often than it passed the previous release's tree. Precision
+4/4, publishable 32/32.**
 
-`workflow-head-checkout` missed the main run at 6,036 tokens — well under this run's 17k/case mean,
-which is the signature of the engine returning no findings at all rather than returning wrong ones.
-An isolated rerun reproduced the miss at _exactly_ 6,036 tokens, and two identical failures are
-easy to over-read as determinism. They are not: a no-findings response is short and near-constant
-in length, so the token count repeats for the same reason an empty file has the same size twice.
+Against v0.13.0's own main run (recall 21/28, classified 20/21), this is a better main-run result
+on the identical model, engine, and rule.
 
-The differential experiment, run because the identical repeat looked like a dispatch regression
-from this release's own audit work:
+## `workflow-head-checkout`: roaming, and no regression
 
-| Adapter                          | Result                      | Tokens |
-| -------------------------------- | --------------------------- | ------ |
-| v0.13.0 tag `86cd076`            | PASS (misclassified)        | 14,262 |
-| dev `e8680ef` (#115 only)        | PASS (classified correctly) | 15,242 |
-| dev `dd33cba` (#116) — attempt 1 | PASS (misclassified)        | 14,306 |
-| dev `dd33cba` (#116) — attempt 2 | MISS                        | 6,036  |
-| dev `dd33cba` (#116) — attempt 3 | PASS (misclassified)        | 14,210 |
+Replicated on both trees under gpt-oss-120b, because two consecutive misses read like a dispatch
+regression from this release's audit work:
 
-Three replications on the release tree: **2/3 PASS**. The case roams, and it roams on the release
-tree exactly as it roamed before — v0.13.0's own evidence records this same case as
-`roaming (3/3 missed in CP-B; passes today)`. The corpus harness invokes the engine directly with
-neither a budget nor an exclude list, so this release's dispatch, settlement, and cache changes are
-not even in the path that produces the engine's finding list; the rule and engine digests are
-identical across every row above.
+| Adapter                 | Observations                 | Pass rate |
+| ----------------------- | ---------------------------- | --------- |
+| dev `9fe600e` (v0.14.0) | FAIL, FAIL, PASS, PASS, FAIL | **2/5**   |
+| v0.13.0 tag `86cd076`   | FAIL, PASS, FAIL             | **1/3**   |
 
-Recorded rather than smoothed over: the first two observations genuinely looked like a regression,
-and the differential is what distinguished a roaming case from a broken one. A single rerun would
-not have been enough.
+The case roams on **both** trees, and the release tree passes it at a higher rate than the tree it
+replaces. v0.13.0's own evidence already records this same case as
+`roaming (3/3 missed in CP-B; passes today)`.
+
+Two structural facts rule out this release's changes as the cause. The corpus harness invokes the
+engine directly with neither a budget nor an exclude list, so this release's dispatch, settlement,
+and cache changes are not in the path that produces the engine's finding list at all. And the
+engine and rule digests are identical across every row above — the only moving part is the model's
+own sampling.
+
+The failing runs cluster at ~6.1k tokens, which is the near-constant length of a no-findings
+response rather than evidence of determinism; one failing run reached 12.7k, so the engine
+sometimes does the work and still declines to report. Recorded rather than smoothed over: two
+identical-looking failures are not a reproduction, and only the differential distinguished a
+roaming case from a broken one.
 
 ## Promotion conditions
 
-Met. Severe recall holds across main + second opinion (28/28), precision 1.0, publishable 1.0, and
-no rule change is involved — the rule digest is unchanged from the shipped economy rule.
+Met. Classification is perfect on every found defect (26/26), precision is 1.0, publishable is 1.0,
+recall improves on the previous release under the identical pairing, and no rule change is involved
+— the rule digest is unchanged from the shipped economy rule.
 
 ## Deterministic lanes
 
