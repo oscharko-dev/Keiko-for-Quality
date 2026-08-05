@@ -270,6 +270,10 @@ function buildReviewRequest(
     identityExclusive: identity.exclusive,
     env,
     pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    // Omitted rather than passed empty when the payload stated no purpose: under
+    // `exactOptionalPropertyTypes` the key is absent or a string, and an absent one leaves every
+    // model request byte-identical to what the previous release sent.
+    ...(event.changeIntent === "" ? {} : { changeIntent: event.changeIntent }),
     ...(cacheStore === undefined ? {} : { cacheStore }),
   };
 }

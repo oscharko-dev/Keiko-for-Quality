@@ -149,6 +149,18 @@ export const REASON_CODES = [
   // open-weight models roams between cases rather than sitting still. `changed` counts adopted
   // moves in either direction; the audit never invents and never touches unclassified findings.
   "classify.audited",
+  // Substantiation (v0.17.0): each fresh survivor is judged against the code it cites — grounded,
+  // vague, or contradicted — and a vague one gets exactly one repair before it is dropped. The
+  // counts are the whole point of the code: `kept` and `repaired` say what a reader received,
+  // `dropped_vague` and `dropped_unsupported` say what this stage removed, and `undecided` says
+  // where it failed to judge and therefore kept the finding rather than letting an outage read as
+  // a quality improvement. Measured over 120 real published findings: it drops 6.7% of findings
+  // that were acted on against 25.3% of those that were not.
+  "publish.substantiated",
+  // The consumer's whole-run ceiling was too close to fund judging every fresh survivor, so none
+  // were judged. Skipping is always safe here: this stage only ever REMOVES findings a reader
+  // cannot check, so not running it publishes exactly what the previous release published.
+  "publish.substantiation_skipped_budget",
 
   // Bounded resume (#57, v0.11.0): the engine run ended without a usable success — a thrown run
   // error or a non-success status — and was re-invoked exactly once. Emitted at most once per

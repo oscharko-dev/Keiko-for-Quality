@@ -200,6 +200,60 @@ export async function loadConfig(path: string): Promise<string> {
     ],
   },
   {
+    // The only case graded on the SHAPE of its finding, not just its presence (see
+    // `requiresTriggeringCondition` in corpus/run.mjs). The defect is deliberately one whose
+    // correctness question is entirely a question about a circumstance: `parseRetryAfter` returns
+    // seconds for a bare number and milliseconds for a date, and the caller now feeds both into a
+    // `setTimeout` that expects milliseconds. Nothing is wrong on the common path — a numeric
+    // `Retry-After` of 120 becomes a 120ms wait instead of two minutes ONLY when the header is the
+    // numeric form, which is exactly the condition a reader has to be told to check.
+    //
+    // "Convert the parsed value to milliseconds" is a true sentence and an unusable review: it does
+    // not say when the code is wrong, so the reader has to re-derive the whole argument to decide
+    // whether to act. Production measured 21.7% of our findings stating such a condition against
+    // Codex's 63.1%, alongside a 23% versus 64% rate of findings actually acted on. This case is
+    // where that gap is allowed to fail a run.
+    //
+    // `src/retry-after.ts` rides along as unchanged context (base === head), the pattern PR #127
+    // and #128 established: the verdict depends on what the helper returns, and a reviewer who
+    // cannot read it will go looking — the spiral those two pull requests diagnosed.
+    id: "unevidenced-claim",
+    defect: { file: "src/backoff.ts", category: "bug", severity: "high" },
+    about: "a unit mismatch that only bites on one of the header's two legal forms",
+    anchors: ["millisecond*", "second*", "unit*", "retry-after", "1000"],
+    requiresTriggeringCondition: true,
+    files: [
+      {
+        path: "src/retry-after.ts",
+        base: `export function parseRetryAfter(header: string): number {
+  const seconds = Number(header);
+  if (Number.isInteger(seconds)) return seconds;
+  return Math.max(0, Date.parse(header) - Date.now());
+}
+`,
+        head: `export function parseRetryAfter(header: string): number {
+  const seconds = Number(header);
+  if (Number.isInteger(seconds)) return seconds;
+  return Math.max(0, Date.parse(header) - Date.now());
+}
+`,
+      },
+      {
+        path: "src/backoff.ts",
+        base: `export async function waitForRetry(header: string): Promise<void> {
+  const delay = parseRetryAfter(header);
+  await new Promise((resolve) => setTimeout(resolve, delay * 1000));
+}
+`,
+        head: `export async function waitForRetry(header: string): Promise<void> {
+  const delay = parseRetryAfter(header);
+  await new Promise((resolve) => setTimeout(resolve, delay));
+}
+`,
+      },
+    ],
+  },
+  {
     id: "off-by-one",
     // Corrected: `lastN(items, 10)` on three items silently returns all three instead of erroring.
     // Wrong behaviour on a reachable path — high by the same rubric.

@@ -65,6 +65,7 @@ import {
   type PublishOutcome,
 } from "./publish/publisher.js";
 import { isIncompleteNoticeBody } from "./publish/presentation.js";
+import { substantiate } from "./publish/substantiate.js";
 
 export interface ReviewRequest {
   readonly client: GitHubClient;
@@ -77,6 +78,14 @@ export interface ReviewRequest {
   readonly config: RuntimeConfig;
   readonly profile: CompiledProfile;
   readonly guidelines: GuidelineIndex;
+  /**
+   * What the pull request says it is for — title and description, as the author wrote them.
+   *
+   * Absent for the local CLI, which reviews a commit pair with no pull request behind it. Reaches
+   * the model through `model-proxy.ts` rather than the rule text, because the rule digest keys the
+   * review cache and a per-pull-request rule would make every cache entry unique to one.
+   */
+  readonly changeIntent?: string;
   readonly identity: string;
   /**
    * Whether `identity` is provably exclusive to this reviewer (`action/identity.ts`'s own field of
@@ -125,6 +134,16 @@ interface PipelineRequest {
   readonly guidelines: GuidelineIndex;
   readonly env: NodeJS.ProcessEnv;
   readonly pathValue: string;
+  /**
+   * What the pull request says it is for — title and description, as the author wrote them.
+   *
+   * Absent by default and absent for the local CLI, which has no pull request to read one from.
+   * Threaded to `model-proxy.ts` rather than into the rule text, and that placement is the whole
+   * design: `promptIdentityDigest` hashes the rule document into the review cache's key, so a
+   * per-pull-request rule would make every cache entry unique to one pull request and destroy
+   * memoization across the repository. The proxy rewrites the wire body without touching the digest.
+   */
+  readonly changeIntent?: string;
   /**
    * The parsed review-cache store, already read by the caller (v0.9.0). `undefined` — not an empty
    * store — is what disables the feature entirely: every code path below only branches on this
@@ -857,6 +876,7 @@ async function executeEngine(
         guidelines: request.guidelines,
         env: request.env,
         pathValue: request.pathValue,
+        ...(request.changeIntent === undefined ? {} : { changeIntent: request.changeIntent }),
         allottedBudget,
         mechanicallyCleanPaths: excluded,
       },
@@ -1640,6 +1660,163 @@ async function auditFreshSurvivors(
   return byOriginal;
 }
 
+/**
+ * What one substantiation pass may cost per finding: the judge, one repair, and one re-judge.
+ * Measured over 120 real published findings at 1,777 tokens each end to end, so this reserves
+ * roughly three times what the average actually spends — the guard exists to keep a nearly spent
+ * budget from starting work it cannot finish, not to price the common case.
+ */
+const SUBSTANTIATE_RESERVE_PER_FINDING = 6_000;
+
+/** What the substantiation stage changed: which survivors leave, and which carry a rewritten body. */
+interface SubstantiationResult {
+  readonly dropped: ReadonlySet<EngineFinding>;
+  readonly repaired: ReadonlyMap<EngineFinding, EngineFinding>;
+}
+
+/** Every skip path returns this — nothing dropped, nothing rewritten, publication unchanged. */
+const NO_SUBSTANTIATION: SubstantiationResult = { dropped: new Set(), repaired: new Map() };
+
+/**
+ * How much of the file around a finding the judge is shown. Enough that a guard, an early return,
+ * or the caller two lines up is visible; far short of the whole file, because the question is
+ * whether the CLAIM is checkable against what it cites, and a judge handed everything starts
+ * reviewing at review prices.
+ */
+const HUNK_CONTEXT_LINES = 12;
+
+/**
+ * Reads the code each fresh survivor sits on, once, through the same per-run cache the
+ * deterministic gates already populate — so a finding on a file a gate has read costs no second
+ * git subprocess.
+ *
+ * Pre-fetched into a map rather than read lazily inside `substantiate`, which keeps that module
+ * free of git and of async I/O: it takes a plain synchronous reader, so every one of its branches
+ * is exercised by a test with no filesystem at all.
+ */
+async function hunksForSurvivors(
+  run: PipelineRun,
+  fresh: readonly PlannedFinding[],
+): Promise<ReadonlyMap<string, string>> {
+  const cache: BlobTextCache = new Map();
+  const ctx = gitContext(run.request);
+  const hunks = new Map<string, string>();
+  for (const survivor of fresh) {
+    const finding = survivor.finding;
+    const path = finding.path as string;
+    const key = `${path}:${String(finding.startLine)}`;
+    if (hunks.has(key)) continue;
+    const text = await readTextAtCommitCached(cache, ctx, run.request.head, path);
+    if (text === undefined) continue;
+    const lines = text.split("\n");
+    const from = Math.max(0, finding.startLine - HUNK_CONTEXT_LINES - 1);
+    const to = Math.min(lines.length, finding.endLine + HUNK_CONTEXT_LINES);
+    // Absolute line numbers inline, not a bare slice. The finding cites a line, and a slice with no
+    // positions makes the judge match on text alone. Lu et al. 2025 (arXiv:2505.17928) ablate the
+    // three options on an otherwise identical pipeline: no position at all scores CPI1 12.21,
+    // RELATIVE positions score 9.50 — worse than nothing — and inline absolute numbers score 17.51.
+    // The middle result is why this is written out rather than left to judgement later.
+    hunks.set(
+      key,
+      lines
+        .slice(from, to)
+        .map((line, offset) => `${String(from + offset + 1)}| ${line}`)
+        .join("\n"),
+    );
+  }
+  return hunks;
+}
+
+/**
+ * Judges the fresh survivors, and repairs the ones whose defect is real but unstated.
+ *
+ * Placed beside `auditFreshSurvivors` and on the same cohort for the same reason: after
+ * `planPublication` has decided what a reader will actually see, so a suppressed duplicate never
+ * costs a judge call, and never on a replayed cache hit, which was judged on the run that stored it.
+ *
+ * Measured over 120 real published findings with their own anchor hunks: 81.7% kept, 15.0% dropped
+ * as contradicted by the code they cite, 3.3% dropped as unstateable after one repair. Against
+ * production's own outcome — did anyone touch the line afterwards — it drops 6.7% of the findings
+ * that WERE acted on and 25.3% of those that were not, a factor of 3.8 in the right direction.
+ *
+ * Skipping is always safe here, and that asymmetry is deliberate: this stage removes findings a
+ * reader cannot check, so failing to run it publishes exactly what v0.16.0 published.
+ */
+async function substantiateFreshSurvivors(
+  run: PipelineRun,
+  fresh: readonly PlannedFinding[],
+): Promise<SubstantiationResult> {
+  if (fresh.length === 0) return NO_SUBSTANTIATION;
+  const deps = classifyDeps(run.request);
+  if (deps === undefined) return NO_SUBSTANTIATION;
+
+  // Same ceiling and same argument as `auditFreshSurvivors`: the consumer's whole-run budget, not
+  // the engine's size-scaled allotment, which a run that dispatches everything up front legally
+  // overshoots.
+  const remaining = run.request.config.tokenBudget - run.ledger.engine - run.ledger.classify;
+  if (remaining < SUBSTANTIATE_RESERVE_PER_FINDING * fresh.length) {
+    run.diagnostics.record("publish.substantiation_skipped_budget", {
+      headSha: run.request.head,
+      counts: { skipped: fresh.length, remaining },
+    });
+    return NO_SUBSTANTIATION;
+  }
+
+  const hunks = await hunksForSurvivors(run, fresh);
+  const judgeable = fresh.map((survivor) => ({
+    path: survivor.finding.path as string,
+    content: survivor.finding.content,
+    startLine: survivor.finding.startLine,
+    endLine: survivor.finding.endLine,
+    original: survivor.finding,
+  }));
+
+  const outcome = await substantiate(
+    judgeable,
+    (finding) => hunks.get(`${finding.path}:${String(finding.startLine)}`) ?? "",
+    deps,
+  );
+  run.ledger.classify += outcome.tokens;
+  run.diagnostics.record("publish.substantiated", {
+    counts: {
+      kept: outcome.findings.length,
+      repaired: outcome.repaired,
+      dropped_vague: outcome.droppedVague,
+      dropped_unsupported: outcome.droppedUnsupported,
+      dropped_nitpick: outcome.droppedNitpick,
+      undecided: outcome.undecided,
+      tokens: outcome.tokens,
+    },
+  });
+
+  return partitionSubstantiated(judgeable, outcome.findings);
+}
+
+/**
+ * Two explicit sets, not one map that means "kept" by presence.
+ *
+ * A finding this stage left untouched must NOT enter a substitution map: `substituteAudited` looks
+ * survivors up by object identity, so replacing every survivor with an identical copy would make
+ * the audit's own lookup — which keys on the ORIGINAL object — miss all of them. Measured as the
+ * audit silently failing to apply to anything at all.
+ */
+function partitionSubstantiated(
+  judged: readonly { readonly original: EngineFinding; readonly content: string }[],
+  kept: readonly { readonly original: EngineFinding; readonly content: string }[],
+): SubstantiationResult {
+  const survived = new Set(kept.map((entry) => entry.original));
+  const dropped = new Set(
+    judged.filter((entry) => !survived.has(entry.original)).map((entry) => entry.original),
+  );
+  const repaired = new Map<EngineFinding, EngineFinding>();
+  for (const entry of kept) {
+    if (entry.content !== entry.original.content) {
+      repaired.set(entry.original, { ...entry.original, content: entry.content });
+    }
+  }
+  return { dropped, repaired };
+}
+
 /** `publishAudited`'s result: the outcome `executePublication` produced, plus which fresh survivors
  *  were actually audited, so a caller can decide what the review cache should remember for each. */
 interface AuditedPublication {
@@ -1689,10 +1866,29 @@ async function planAndAudit(
 }> {
   const plan = await planPublication(context, batch.findings, run.diagnostics, prefetch);
   const fresh = plan.survivors.filter((survivor) => batch.fresh.has(survivor.finding));
-  const auditedByOriginal = await auditFreshSurvivors(run, fresh);
+  // Substantiation runs FIRST and the order is load-bearing: it can drop a survivor, and auditing a
+  // finding this stage is about to remove spends 1-3 model calls on an opinion nobody will read.
+  const substantiated = await substantiateFreshSurvivors(run, fresh);
+  const survivingFresh = fresh.filter((survivor) => !substantiated.dropped.has(survivor.finding));
+  const auditedByOriginal = await auditFreshSurvivors(run, survivingFresh);
+
+  // Both maps key on the ORIGINAL finding and are merged before EITHER is applied, because
+  // `substituteAudited` looks a survivor up by the object it currently carries: substituting twice
+  // in sequence leaves the second lookup searching for an identity the first one already replaced,
+  // and the audit then silently fails to apply to any repaired finding. Repair changes the body,
+  // the audit changes the classification, and a finding that got both carries both.
+  const combined = new Map<EngineFinding, EngineFinding>(substantiated.repaired);
+  for (const [original, audited] of auditedByOriginal) {
+    const base = combined.get(original) ?? original;
+    combined.set(original, { ...base, category: audited.category, severity: audited.severity });
+  }
+
   return {
     plan,
-    survivors: substituteAudited(plan.survivors, auditedByOriginal),
+    survivors: substituteAudited(
+      plan.survivors.filter((survivor) => !substantiated.dropped.has(survivor.finding)),
+      combined,
+    ),
     auditedByOriginal,
   };
 }

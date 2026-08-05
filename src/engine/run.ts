@@ -36,6 +36,8 @@ export interface EngineRunOptions {
   readonly guidelines: GuidelineIndex;
   readonly env: NodeJS.ProcessEnv;
   readonly pathValue: string;
+  /** The pull request's stated purpose, forwarded to the proxy — see `ModelProxyOptions`. */
+  readonly changeIntent?: string;
   /**
    * The size-scaled per-run ceiling passed to the engine's own `--max-tokens-budget`.
    *
@@ -194,6 +196,10 @@ async function startProxyIfNeeded(
     temperature: REVIEW_TEMPERATURE,
     seed: options.samplingSeed ?? REVIEW_SEED,
     promptCacheKey: promptCacheKeyForRule(ruleDigest),
+    // Conditional, not `changeIntent: options.changeIntent`: under `exactOptionalPropertyTypes` an
+    // optional field may be absent or a string, never an explicit `undefined`. Absent is also what
+    // keeps every body byte-identical for a caller that has no pull request to read an intent from.
+    ...(options.changeIntent === undefined ? {} : { changeIntent: options.changeIntent }),
   });
 }
 
