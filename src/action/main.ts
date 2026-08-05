@@ -252,6 +252,7 @@ function buildReviewRequest(
     profile,
     guidelines,
     identity: identity.login,
+    identityExclusive: identity.exclusive,
     env,
     pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     ...(cacheStore === undefined ? {} : { cacheStore }),

@@ -271,6 +271,7 @@ describe("performReview: review-cache memoization end to end", () => {
       profile: PROFILE,
       guidelines: { paths: [] },
       identity: "keiko-for-quality[bot]",
+      identityExclusive: true,
       env: {},
       pathValue: process.env.PATH ?? "/usr/bin:/bin",
       ...(cacheStore === undefined ? {} : { cacheStore }),
@@ -523,6 +524,7 @@ describe("performReview: review-cache memoization end to end", () => {
         profile,
         guidelines: { paths: [] },
         identity: "keiko-for-quality[bot]",
+        identityExclusive: true,
         env: {},
         pathValue: process.env.PATH ?? "/usr/bin:/bin",
       };
@@ -584,6 +586,7 @@ describe("performReview: review-cache memoization end to end", () => {
         profile: PROFILE,
         guidelines: { paths: [] },
         identity: "keiko-for-quality[bot]",
+        identityExclusive: true,
         env: {},
         pathValue: process.env.PATH ?? "/usr/bin:/bin",
       };
@@ -670,6 +673,7 @@ describe("performReview: review-cache memoization end to end", () => {
         profile: PROFILE,
         guidelines: { paths: [] },
         identity: "keiko-for-quality[bot]",
+        identityExclusive: true,
         env: {},
         pathValue: process.env.PATH ?? "/usr/bin:/bin",
         cacheStore: store,
@@ -1043,6 +1047,30 @@ describe("performReview: review-cache memoization end to end", () => {
   });
 
   describe("performReview: superseded-notice cleanup (v0.13.0)", () => {
+    /**
+     * The identity-exclusivity gate: resolving a GitHub thread is a WRITE, and under a shared,
+     * non-exclusive login (the plain-token fallback) this run cannot prove the matching comment was
+     * actually authored by ITSELF rather than some other workflow sharing the same fallback
+     * identity. Every other use of `identity` in this pipeline is a read-only suppression match,
+     * where a shared identity is already an accepted, documented weakening — this is the one place
+     * that is not true, and the mutation must not even be attempted.
+     */
+    it("never calls resolveSupersededOwnNotices when the identity is not exclusive", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const request = { ...baseRequest(undefined), identityExclusive: false };
+      const cleanupSpy = vi
+        .spyOn(request.client, "resolveSupersededOwnNotices")
+        .mockResolvedValue(0);
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(cleanupSpy).not.toHaveBeenCalled();
+    });
+
     it("calls resolveSupersededOwnNotices with this run's own ref/pull/identity on a complete run", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
@@ -2520,6 +2548,7 @@ describe("performReview: review-cache memoization end to end", () => {
         profile: PROFILE,
         guidelines: { paths: [] },
         identity: "keiko-for-quality[bot]",
+        identityExclusive: true,
         env: { MODEL_TOKEN: "fake-token" },
         pathValue: process.env.PATH ?? "/usr/bin:/bin",
         ...(cacheStore === undefined ? {} : { cacheStore }),
@@ -3071,6 +3100,7 @@ describe("performReview: review-cache memoization end to end", () => {
             profile: PROFILE,
             guidelines: { paths: [] },
             identity: "keiko-for-quality[bot]",
+            identityExclusive: true,
             env: {},
             pathValue: process.env.PATH ?? "/usr/bin:/bin",
           };

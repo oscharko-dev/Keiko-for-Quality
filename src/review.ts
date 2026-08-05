@@ -77,6 +77,15 @@ export interface ReviewRequest {
   readonly profile: CompiledProfile;
   readonly guidelines: GuidelineIndex;
   readonly identity: string;
+  /**
+   * Whether `identity` is provably exclusive to this reviewer (`action/identity.ts`'s own field of
+   * the identical name — mirrored here rather than importing the action-layer type, the same
+   * boundary `client`/every other GitHub-specific field on this request already crosses). Gates
+   * `resolveSupersededOwnNotices` in `performReview`'s own `finally` block below: a WRITE against
+   * another author's content is not a risk the read-only dedup/suppression paths take on a shared
+   * identity, and must not start being one just because a cleanup feature reuses the same login.
+   */
+  readonly identityExclusive: boolean;
   readonly env: NodeJS.ProcessEnv;
   readonly pathValue: string;
   /**
@@ -1959,32 +1968,41 @@ export async function performReview(
     // unconditional on the outcome above: whether this run completed, settled incomplete, or was
     // abandoned because a newer head already exists, a THREAD about an OLDER head being outdated is
     // a fact about that thread alone, established by GitHub, not by anything this run decided.
-    // `resolveSupersededOwnNotices` is best-effort end to end (`github/client.ts`) and never throws,
-    // so it cannot turn a successful review into a failed one, or mask a genuine failure above with
-    // its own.
-    // `GitHubClient`'s own implementation never throws — every failure inside it, at either the
-    // lookup or the mutation, is already caught and folded into a lower resolved count. This
-    // `try` is defense in depth, not a hedge against a known gap: `ReviewCommentApi` is an
-    // interface, so nothing STRUCTURALLY stops a different implementer (a test double, a future
-    // alternative client) from rejecting, and cleanup must not be the thing that turns a genuinely
-    // successful review into a failed one just because it ran last, in the same `finally` that
-    // reports `run.spend`.
-    try {
-      const staleNoticesResolved = await request.client.resolveSupersededOwnNotices(
-        request.ref,
-        request.pullNumber,
-        request.identity,
-        isIncompleteNoticeBody,
-      );
-      if (staleNoticesResolved > 0) {
-        diagnostics.record("cleanup.superseded_notices_resolved", {
-          headSha: request.head,
-          counts: { resolved: staleNoticesResolved },
-        });
+    //
+    // Gated on `identityExclusive` (v0.13.0): every OTHER use of `request.identity` in this pipeline
+    // is a read-only match against `identity` for suppression/deduplication, where the worst case of
+    // a shared, non-exclusive login (the plain-token fallback, `github-actions[bot]`) is a missed
+    // suppression — already documented in `action/identity.ts` as "a real weakening," accepted
+    // there. Resolving a GitHub thread is a WRITE, and under a shared login this run cannot prove
+    // the matching comment was actually authored by ITSELF rather than some other workflow sharing
+    // the same fallback identity. Skipping the mutation entirely under a non-exclusive identity
+    // costs exactly what every other failure mode of this feature already costs — one more stale
+    // thread for the next push, or a human, to resolve by hand — never a wrong resolution.
+    if (request.identityExclusive) {
+      // `GitHubClient`'s own implementation never throws — every failure inside it, at either the
+      // lookup or the mutation, is already caught and folded into a lower resolved count. This
+      // `try` is defense in depth, not a hedge against a known gap: `ReviewCommentApi` is an
+      // interface, so nothing STRUCTURALLY stops a different implementer (a test double, a future
+      // alternative client) from rejecting, and cleanup must not be the thing that turns a
+      // genuinely successful review into a failed one just because it ran last, in the same
+      // `finally` that reports `run.spend`.
+      try {
+        const staleNoticesResolved = await request.client.resolveSupersededOwnNotices(
+          request.ref,
+          request.pullNumber,
+          request.identity,
+          isIncompleteNoticeBody,
+        );
+        if (staleNoticesResolved > 0) {
+          diagnostics.record("cleanup.superseded_notices_resolved", {
+            headSha: request.head,
+            counts: { resolved: staleNoticesResolved },
+          });
+        }
+      } catch {
+        // Nothing to report: a failed cleanup pass costs the next push one more stale thread to
+        // resolve by hand, never a failed review.
       }
-    } catch {
-      // Nothing to report: a failed cleanup pass costs the next push one more stale thread to
-      // resolve by hand, never a failed review.
     }
   }
 }
