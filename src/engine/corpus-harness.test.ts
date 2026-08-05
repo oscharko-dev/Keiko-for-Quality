@@ -30,6 +30,13 @@ describe("corpus harness startup", () => {
       env: {
         // A real executable the binding can hash; with zero selected cases it is never spawned.
         OCR_BINARY: process.execPath,
+        // The harness's second startup precondition, alongside OCR_BINARY: this project measures
+        // only against the pinned model (AGENTS.md), and `run.mjs` refuses to start otherwise. Set
+        // here for the same reason OCR_BINARY is — the script requires it, so a test of startup
+        // must supply it. Restated as a literal rather than imported from
+        // `corpus/qualification-model.mjs`: this pin is the kind a test should hold independently,
+        // so that changing the constant fails here and has to be done on purpose.
+        OCR_LLM_MODEL: "gpt-oss-120b",
         PATH: process.env.PATH ?? "",
       },
     });
@@ -37,6 +44,38 @@ describe("corpus harness startup", () => {
     expect(result.stdout).toContain("binding");
     expect(result.stderr).toContain("NO CASES SELECTED");
     expect(result.status).toBe(2);
+  });
+
+  /**
+   * The pinned-model rule, proved against the real script rather than only against its helper.
+   * `corpus/qualification-model.test.mjs` covers the decision function; this covers the wiring —
+   * that `run.mjs` actually consults it, and does so before anything can cost money.
+   *
+   * The failure it guards against is precisely the one that happened: on 2026-08-05 a full 32-case
+   * qualification ran against `gpt-5.4` because that model was listed first in a consumer's gateway
+   * config, producing a plausible, fully green report that measured nothing about the reviewer that
+   * ships. Nothing in the repository stopped it. This is what stops it now.
+   */
+  it("refuses to start against a model this project does not measure against", () => {
+    const script = fileURLToPath(new URL("../../corpus/run.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, "--only", "off-by-one"], {
+      cwd: fileURLToPath(new URL("../..", import.meta.url)),
+      encoding: "utf8",
+      timeout: 60_000,
+      env: {
+        OCR_BINARY: process.execPath,
+        // A real, capable chat model — refused not because it is bad, but because it is not the
+        // one this project's evidence is measured against.
+        OCR_LLM_MODEL: "gpt-5.4",
+        PATH: process.env.PATH ?? "",
+      },
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("gpt-5.4");
+    expect(result.stderr).toContain("gpt-oss-120b");
+    // Refused at startup, before rule generation and before any case could reach the endpoint —
+    // the binding line is never even printed.
+    expect(result.stdout).not.toContain("binding");
   });
 
   // The same startup guarantee for the real-diffs harness, which carried the second instance of

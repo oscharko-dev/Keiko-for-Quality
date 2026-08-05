@@ -45,6 +45,33 @@ required exercises the corpus at all, and `npm run verify` locally is the only p
 guaranteed to run. Read the `verify` job named in the `dist/index.js` section below the same way:
 that is the CI job, not the script.
 
+## Every live run this project makes uses `gpt-oss-120b`
+
+Qualification runs, corpus runs, live telemetry, and the reviews this product publishes on its own
+consumer repository all run against **`gpt-oss-120b`** over an OpenAI-compatible endpoint. Not as a
+default to be overridden when something else is convenient — as the pinned dimension of every
+measurement this repository records.
+
+Read the scope precisely, because it is narrow. This is **not** a claim that the product only works
+with one model: `model_id` is a consumer input, the protocol adapter supports openai and anthropic,
+and what any other consumer configures is their decision and none of this repository's business.
+The rule binds what **we** measure and what **we** deploy, nothing else.
+
+Why it is a rule rather than a habit: a qualification is a property of the _pairing_ — engine, rule
+text, and model together. Recall and precision measured against a model this project does not run
+say nothing about the reviewer that ships, so a run against the wrong model is not a slightly-less
+useful measurement, it is not a measurement. On 2026-08-05 a full 32-case v0.14.0 qualification was
+run against a different chat model, at real cost, purely because that model happened to be listed
+first in a consumer's gateway config; the correct model was already named in the previous release's
+own evidence file. That run was discarded and redone. Nothing in this repository stopped it,
+which is why this section exists.
+
+In practice: set `OCR_LLM_MODEL=gpt-oss-120b` explicitly before any `npm run corpus` or
+`corpus:real`, and never infer the model from the ordering in a config file. `qualify.yml` pins it
+for the scheduled run so the weekly re-qualification cannot drift; `corpus/run.mjs` refuses a
+different model unless the caller sets `OCR_ALLOW_MODEL_DEVIATION=1`, which exists for a deliberate
+cross-model experiment and records itself in the run's own binding line.
+
 ## The rule text and the sanitizer must move together
 
 `src/engine/rule-file.ts`'s `CATCH_ALL_RULE` tells the model what it may write. `src/publish/
