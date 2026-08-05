@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { buildBinding } from "./binding.mjs";
 import { classifyMeasurement } from "./measurement.mjs";
 import { FIXED_PATH } from "./fixed-path.mjs";
+import { engineArguments, engineEvidence, skipRetryAfterBudgetStop } from "./engine-invocation.mjs";
 import { checkQualificationModel, DEVIATION_ENV } from "./qualification-model.mjs";
 import { CASES } from "./cases.mjs";
 // Rule generation and the .js→.ts resolve hook live in rule-source.mjs so node --test can cover
@@ -426,7 +427,7 @@ async function planCaseFindings(testCase, findings) {
   return await planPublication(context, findings, createSilentDiagnostics(), EMPTY_PREFETCH);
 }
 
-async function runEngine(dir, seed = 42) {
+async function runEngine(dir, seed = 42, budgetTokens = undefined) {
   const home = mkdtempSync(join(tmpdir(), "kfq-home-"));
   // The production sampling pin (src/engine/model-proxy.ts, temperature 0) — the corpus measures
   // the pipeline that ships, and the pin is precisely what makes "twice in a row" meaningful.
@@ -436,8 +437,7 @@ async function runEngine(dir, seed = 42) {
     seed,
   });
   try {
-    const args = ["review", "--from", "HEAD~1", "--to", "HEAD", "--format", "json"];
-    args.push("--rule", RULE);
+    const args = engineArguments(RULE, budgetTokens);
     const { stdout } = await execFileAsync(BINARY, args, {
       cwd: dir,
       encoding: "utf8",
@@ -469,20 +469,30 @@ async function runEngine(dir, seed = 42) {
  * did not complete before stopping" after ~30 LLM rounds) that hits roughly a quarter of runs on
  * two specific cases; a second failure scores as the error it is.
  */
-async function runEngineWithOneResume(dir) {
+async function runEngineWithOneResume(dir, budgetTokens = undefined) {
   let result;
   try {
-    result = await runEngine(dir);
+    result = await runEngine(dir, 42, budgetTokens);
   } catch {
     // Seed 43, mirroring the shipped resume: pinned sampling replays a deterministic failure
-    // byte-for-byte, so the one retry varies exactly that one bit of entropy.
-    return await runEngine(dir, 43);
+    // byte-for-byte, so the one retry varies exactly that one bit of entropy. The budget rides
+    // along unchanged, as production's own thrown-first-attempt path keeps the full allotment —
+    // a throw left nothing measured to subtract.
+    return await runEngine(dir, 43, budgetTokens);
   }
+  // Mirror of production's engine.resume_skipped_budget_exceeded (src/review.ts): a budget-stopped
+  // attempt is never re-run — the retry below fires on any non-success status, which a budget stop
+  // is, and without this guard a budgeted case would spend its budget twice and grade only the
+  // second truncation. See skipRetryAfterBudgetStop for why it gates on the case being budgeted.
+  if (skipRetryAfterBudgetStop(result, budgetTokens)) return result;
   // Production's second trigger, mirrored: the engine reports a failed run as
   // {"status":"failed"} on EXIT CODE ZERO, which resolves here — without this check the corpus
-  // measured one attempt where production makes two. (The budget half of the shipped resume has
-  // no corpus analogue: corpus runs are deliberately unbudgeted.)
-  if (result?.status !== "success") return await runEngine(dir, 43);
+  // measured one attempt where production makes two. (Corpus runs are deliberately unbudgeted —
+  // the recorded measurement basis of every qualification — EXCEPT where a case declares
+  // `budgetTokens` explicitly: the budget-pressure precision cases exist to reproduce the
+  // condition production actually fails under, and for exactly those cases the budget half of the
+  // shipped resume is mirrored too, by the skip above.)
+  if (result?.status !== "success") return await runEngine(dir, 43, budgetTokens);
   return result;
 }
 
@@ -629,6 +639,10 @@ function scoreOne(testCase, result, plan) {
   const base = {
     id: testCase.id,
     findings: rejectedSanitization > 0 ? rawFindings : published,
+    // The engine facts a budget-pressure case is actionable through (see engine-invocation.mjs) —
+    // additive report key; check-qualification.mjs and measurement.mjs read only id/pass/rejected
+    // and kind/tokens respectively, so an old report and a new one parse identically.
+    engine: engineEvidence(result),
     tokens,
     rejectedSanitization,
     suppressedIntraRun,
@@ -702,7 +716,7 @@ for (const testCase of cases) {
     // in any of the four git calls, and a throw outside would abort the whole run and leak the
     // directory it had already created.
     dir = buildRepo(testCase);
-    result = await runEngineWithOneResume(dir);
+    result = await runEngineWithOneResume(dir, testCase.budgetTokens);
     await repairFindings(result);
     // Merged AFTER classification repair/audit, at the same point production's
     // `publishSettledFindings` merges `collectGateFindings`'s output into what gets published — so a
@@ -744,6 +758,23 @@ for (const testCase of cases) {
         `        ${tag}${String(f.severity)}/${String(f.category)}  ${String(f.path)}  ${first.slice(0, 78)}`,
       );
     }
+    if (testCase.budgetTokens !== undefined) {
+      // Counts only, matching the redaction discipline everywhere else in this log. The WARNING
+      // marks an instrument failure, not a review failure: a budgeted case that never hit its
+      // budget measured a different condition than it claims to, and a fake pass must be visible
+      // in the run it happened in rather than discovered in a later argument about the numbers.
+      const e = scored.engine;
+      console.log(
+        `        budget  allotted ${String(testCase.budgetTokens)}, spent ${String(e.total_tokens)},` +
+          ` files_reviewed ${String(e.files_reviewed)}, budget_exceeded ${String(e.budget_exceeded)}`,
+      );
+      if (!e.budget_exceeded) {
+        console.warn(
+          `WARNING  ${testCase.id}  budgeted case finished without budget_exceeded — the pressure` +
+            ` this case exists to apply never arrived; treat its verdict as unmeasured`,
+        );
+      }
+    }
   } catch (error) {
     // The report is published — the scheduled job pastes it into a GitHub issue — so `detail`
     // carries a fixed phrase, not the thrown text. A raw error string reaches for whatever was in
@@ -760,6 +791,7 @@ for (const testCase of cases) {
       // cost before the throw. `result` is `undefined` when `buildRepo` or the engine invocation
       // itself is what threw — there was nothing to spend yet, and 0 is the honest answer there too.
       tokens: result?.summary?.total_tokens ?? 0,
+      engine: result === undefined ? null : engineEvidence(result),
       rejectedSanitization: 0,
       suppressedIntraRun: 0,
     });

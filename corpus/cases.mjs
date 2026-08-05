@@ -55,6 +55,16 @@
  * taken together — it represents the counterpart artifact (a client type, a twin validator, a
  * consumer predicate) that a per-file reviewer has no architectural reason to open. Whether it gets
  * opened anyway is exactly what these cases measure.
+ *
+ * `budgetTokens` (2026-08-05 optimization wave, cycle 2) opts a case into a budgeted, sequential
+ * engine invocation (`--max-tokens-budget N --concurrency 1` — see `engine-invocation.mjs` for why
+ * both flags travel together). Absent, the invocation is byte-identical to what this harness has
+ * always built, which is what keeps every recorded qualification's measurement basis intact.
+ * It exists because production produced its false positives under
+ * `settlement.incomplete.budget_exceeded` across 38 files while every single-file clean case
+ * passes at full budget — precision has to be measured under the condition it actually fails in.
+ * For a budgeted case the run's own budget line and the report's `engine` evidence are part of the
+ * result: a budgeted case that never hit its budget measured nothing and says so as a WARNING.
  */
 
 const CHECKOUT_V4_2_0 = "11bd71901bbe5b1630ceea73d27597364c9af683";
@@ -1357,6 +1367,400 @@ describe("cache", () => {
   it("does not carry a memoized answer across cases", async () => {
     const { lookup } = await import("./cache.js");
     expect(lookup("b")).toBe(lookup("b"));
+  });
+});
+`,
+      },
+    ],
+  },
+
+  {
+    id: "budget-starved-clean-neighbours",
+    defect: null,
+    budgetTokens: 25_000,
+    // The condition production actually fails under, reproduced (2026-08-05 wave, cycle 2). Every
+    // single-file clean case above passes at full budget, yet production published its false
+    // positives — "import missing" with the import on line 1, "literal not in the union" with the
+    // union two lines up — under settlement.incomplete.budget_exceeded across 38 files. Five
+    // files, every one correct, every one a bait for a published false-positive class, under a
+    // 25k budget.
+    //
+    // What calibrating this case MEASURED about the pinned engine (v1.8.4, gpt-oss-120b, two runs
+    // plus a discriminating third) — recorded here because the flag's own help text
+    // ("dispatch stops once exceeded") predicts none of it:
+    //   budget 25k  -> files_reviewed 5, spent 273k and 341k. The budget stopped no file.
+    //   budget 1    -> files_reviewed 5, spent 0, status "budget_exceeded", manifest absent,
+    //                  coverage null. Zero LLM calls, yet every file counted as reviewed.
+    // So the engine's budget gates individual LLM CALLS, not file dispatches; a task whose calls
+    // are blocked finishes empty and still increments files_reviewed, and a budget-stopped run
+    // reports no per-path coverage at all. Three product consequences, each load-bearing for the
+    // adapter: files_reviewed is meaningless under a budget stop, per-path coverage cannot be
+    // recovered from the engine, and the real spend can overshoot the flag by an order of
+    // magnitude (production's +21% on Keiko#2970 was the same mechanism at a larger budget).
+    //
+    // The case therefore measures exactly one thing, and keeps measuring it: under call blockade
+    // — some tasks mid-reasoning, some starved — the reviewer must stay silent on correct code.
+    // Both calibration runs passed. It stays in the corpus as the precision guard for that
+    // condition; the cost half of the finding is the adapter's to fix (tranche dispatch), not a
+    // property this fixture can assert.
+    //
+    // Strictly additive, like the five cases above and for the recorded reason: base and head are
+    // byte-identical except for one appended hunk per file, so silence is the only defensible
+    // answer, and any finding under pressure is the failure this case exists to catch. An
+    // incomplete, budget-stopped settlement is the EXPECTED outcome, not an error.
+    about: "five correct files under a budget that tears mid-run",
+    files: [
+      {
+        path: "src/trace-context.ts",
+        base: `import { randomUUID } from "node:crypto";
+
+/** Correlation ids for request tracing. The prefix names the subsystem that opened the trace. */
+export interface TraceContext {
+  readonly id: string;
+  readonly subsystem: string;
+  readonly startedAtMs: number;
+}
+
+const SUBSYSTEMS = new Set(["ingest", "review", "publish", "settle"]);
+
+export function isKnownSubsystem(name: string): boolean {
+  return SUBSYSTEMS.has(name);
+}
+
+export function traceContext(subsystem: string, nowMs: number): TraceContext {
+  if (!isKnownSubsystem(subsystem)) {
+    throw new RangeError("unknown subsystem");
+  }
+  return { id: subsystem + "-" + randomUUID().slice(0, 8), subsystem, startedAtMs: nowMs };
+}
+
+export function ageMs(context: TraceContext, nowMs: number): number {
+  return Math.max(0, nowMs - context.startedAtMs);
+}
+
+export function describeTrace(context: TraceContext): string {
+  return context.subsystem + " trace " + context.id;
+}
+
+export function isExpired(context: TraceContext, nowMs: number, ttlMs: number): boolean {
+  return ageMs(context, nowMs) > ttlMs;
+}
+
+export function renewIfExpired(
+  context: TraceContext,
+  nowMs: number,
+  ttlMs: number,
+): TraceContext {
+  if (!isExpired(context, nowMs, ttlMs)) return context;
+  return traceContext(context.subsystem, nowMs);
+}
+`,
+        head: `import { randomUUID } from "node:crypto";
+
+/** Correlation ids for request tracing. The prefix names the subsystem that opened the trace. */
+export interface TraceContext {
+  readonly id: string;
+  readonly subsystem: string;
+  readonly startedAtMs: number;
+}
+
+const SUBSYSTEMS = new Set(["ingest", "review", "publish", "settle"]);
+
+export function isKnownSubsystem(name: string): boolean {
+  return SUBSYSTEMS.has(name);
+}
+
+export function traceContext(subsystem: string, nowMs: number): TraceContext {
+  if (!isKnownSubsystem(subsystem)) {
+    throw new RangeError("unknown subsystem");
+  }
+  return { id: subsystem + "-" + randomUUID().slice(0, 8), subsystem, startedAtMs: nowMs };
+}
+
+export function ageMs(context: TraceContext, nowMs: number): number {
+  return Math.max(0, nowMs - context.startedAtMs);
+}
+
+export function describeTrace(context: TraceContext): string {
+  return context.subsystem + " trace " + context.id;
+}
+
+export function isExpired(context: TraceContext, nowMs: number, ttlMs: number): boolean {
+  return ageMs(context, nowMs) > ttlMs;
+}
+
+export function renewIfExpired(
+  context: TraceContext,
+  nowMs: number,
+  ttlMs: number,
+): TraceContext {
+  if (!isExpired(context, nowMs, ttlMs)) return context;
+  return traceContext(context.subsystem, nowMs);
+}
+
+/** A short-lived child id for one hop inside an existing trace. */
+export function hopId(context: TraceContext): string {
+  return context.id + "." + randomUUID().slice(0, 8);
+}
+`,
+      },
+      {
+        path: "src/trust-mode.ts",
+        base: `/** How strictly the reviewer treats a workspace it has not seen before. */
+export type TrustMode = "strict" | "lenient";
+
+export interface TrustDecision {
+  readonly mode: TrustMode;
+  readonly decidedAtMs: number;
+}
+
+export function decide(mode: TrustMode, nowMs: number): TrustDecision {
+  return { mode, decidedAtMs: nowMs };
+}
+
+export function isStrict(decision: TrustDecision): boolean {
+  return decision.mode === "strict";
+}
+
+export function describeMode(mode: TrustMode): string {
+  if (mode === "strict") return "every path is checked before use";
+  return "known-safe paths skip the recheck";
+}
+
+export function stricter(a: TrustMode, b: TrustMode): TrustMode {
+  if (a === "strict" || b === "strict") return "strict";
+  return "lenient";
+}
+
+export function ageOfDecisionMs(decision: TrustDecision, nowMs: number): number {
+  return Math.max(0, nowMs - decision.decidedAtMs);
+}
+`,
+        head: `/** How strictly the reviewer treats a workspace it has not seen before. */
+export type TrustMode = "strict" | "lenient";
+
+export interface TrustDecision {
+  readonly mode: TrustMode;
+  readonly decidedAtMs: number;
+}
+
+export function decide(mode: TrustMode, nowMs: number): TrustDecision {
+  return { mode, decidedAtMs: nowMs };
+}
+
+export function isStrict(decision: TrustDecision): boolean {
+  return decision.mode === "strict";
+}
+
+export function describeMode(mode: TrustMode): string {
+  if (mode === "strict") return "every path is checked before use";
+  return "known-safe paths skip the recheck";
+}
+
+export function stricter(a: TrustMode, b: TrustMode): TrustMode {
+  if (a === "strict" || b === "strict") return "strict";
+  return "lenient";
+}
+
+export function ageOfDecisionMs(decision: TrustDecision, nowMs: number): number {
+  return Math.max(0, nowMs - decision.decidedAtMs);
+}
+
+/** The complement of isStrict, named so call sites read as policy rather than negation. */
+export function isLenient(decision: TrustDecision): boolean {
+  return decision.mode === "lenient";
+}
+`,
+      },
+      {
+        path: "src/event-envelope.ts",
+        base: `/**
+ * The envelope every event carries.
+ *
+ * Pinned. Consumers reject any other value, so this moves only in a coordinated release — never
+ * as a side effect of an unrelated change in this file.
+ */
+const SCHEMA_VERSION = "1";
+
+export interface EventEnvelope {
+  readonly schemaVersion: string;
+  readonly kind: string;
+  readonly atMs: number;
+}
+
+export function envelope(kind: string, atMs: number): EventEnvelope {
+  if (kind === "") throw new RangeError("event kind is empty");
+  return { schemaVersion: SCHEMA_VERSION, kind, atMs };
+}
+
+export function isCurrentSchema(candidate: { readonly schemaVersion: string }): boolean {
+  return candidate.schemaVersion === SCHEMA_VERSION;
+}
+
+export function describeEnvelope(event: EventEnvelope): string {
+  return event.kind + " (schema " + event.schemaVersion + ")";
+}
+
+export function olderThan(event: EventEnvelope, nowMs: number, maxAgeMs: number): boolean {
+  return nowMs - event.atMs > maxAgeMs;
+}
+`,
+        head: `/**
+ * The envelope every event carries.
+ *
+ * Pinned. Consumers reject any other value, so this moves only in a coordinated release — never
+ * as a side effect of an unrelated change in this file.
+ */
+const SCHEMA_VERSION = "1";
+
+export interface EventEnvelope {
+  readonly schemaVersion: string;
+  readonly kind: string;
+  readonly atMs: number;
+}
+
+export function envelope(kind: string, atMs: number): EventEnvelope {
+  if (kind === "") throw new RangeError("event kind is empty");
+  return { schemaVersion: SCHEMA_VERSION, kind, atMs };
+}
+
+export function isCurrentSchema(candidate: { readonly schemaVersion: string }): boolean {
+  return candidate.schemaVersion === SCHEMA_VERSION;
+}
+
+export function describeEnvelope(event: EventEnvelope): string {
+  return event.kind + " (schema " + event.schemaVersion + ")";
+}
+
+export function olderThan(event: EventEnvelope, nowMs: number, maxAgeMs: number): boolean {
+  return nowMs - event.atMs > maxAgeMs;
+}
+
+/** The pinned value itself, for callers that render compatibility errors. */
+export function pinnedSchemaVersion(): string {
+  return SCHEMA_VERSION;
+}
+`,
+      },
+      {
+        path: "src/workspace-layout.ts",
+        base: `import { join } from "node:path";
+
+/** Where one workspace keeps its derived artifacts. All layout decisions live here. */
+export interface WorkspaceLayout {
+  readonly root: string;
+}
+
+export function layout(root: string): WorkspaceLayout {
+  if (root === "") throw new RangeError("workspace root is empty");
+  return { root };
+}
+
+export function cacheDir(ws: WorkspaceLayout): string {
+  return join(ws.root, ".cache");
+}
+
+export function evidenceDir(ws: WorkspaceLayout): string {
+  return join(ws.root, "evidence");
+}
+
+export function reportPath(ws: WorkspaceLayout, name: string): string {
+  if (name.includes("/") || name.includes("..")) {
+    throw new RangeError("report name must be a bare file name");
+  }
+  return join(evidenceDir(ws), name);
+}
+
+export function describeLayout(ws: WorkspaceLayout): string {
+  return "workspace at " + ws.root;
+}
+`,
+        head: `import { join } from "node:path";
+
+/** Where one workspace keeps its derived artifacts. All layout decisions live here. */
+export interface WorkspaceLayout {
+  readonly root: string;
+}
+
+export function layout(root: string): WorkspaceLayout {
+  if (root === "") throw new RangeError("workspace root is empty");
+  return { root };
+}
+
+export function cacheDir(ws: WorkspaceLayout): string {
+  return join(ws.root, ".cache");
+}
+
+export function evidenceDir(ws: WorkspaceLayout): string {
+  return join(ws.root, "evidence");
+}
+
+export function reportPath(ws: WorkspaceLayout, name: string): string {
+  if (name.includes("/") || name.includes("..")) {
+    throw new RangeError("report name must be a bare file name");
+  }
+  return join(evidenceDir(ws), name);
+}
+
+export function describeLayout(ws: WorkspaceLayout): string {
+  return "workspace at " + ws.root;
+}
+
+/** The lock file the staging step holds while it rewrites the cache. */
+export function lockPath(ws: WorkspaceLayout): string {
+  return join(cacheDir(ws), "staging.lock");
+}
+`,
+      },
+      {
+        path: "src/redact-model-id.test.ts",
+        base: `import { describe, expect, it } from "vitest";
+
+import { redactModelId } from "./redact-model-id.js";
+
+/**
+ * The deployment suffix after "#" is operator-private; the family before it is not. This suite is
+ * the proof the redaction holds — a claim that it leaks must contend with these passing cases.
+ */
+describe("redactModelId", () => {
+  it("keeps the family and drops the deployment suffix", () => {
+    expect(redactModelId("oss-family-120b#dep_9f3a")).toBe("oss-family-120b");
+  });
+
+  it("returns a bare family unchanged", () => {
+    expect(redactModelId("oss-family-120b")).toBe("oss-family-120b");
+  });
+
+  it("drops everything after the first separator, however many follow", () => {
+    expect(redactModelId("oss-family-120b#dep_9f3a#extra")).toBe("oss-family-120b");
+  });
+});
+`,
+        head: `import { describe, expect, it } from "vitest";
+
+import { redactModelId } from "./redact-model-id.js";
+
+/**
+ * The deployment suffix after "#" is operator-private; the family before it is not. This suite is
+ * the proof the redaction holds — a claim that it leaks must contend with these passing cases.
+ */
+describe("redactModelId", () => {
+  it("keeps the family and drops the deployment suffix", () => {
+    expect(redactModelId("oss-family-120b#dep_9f3a")).toBe("oss-family-120b");
+  });
+
+  it("returns a bare family unchanged", () => {
+    expect(redactModelId("oss-family-120b")).toBe("oss-family-120b");
+  });
+
+  it("drops everything after the first separator, however many follow", () => {
+    expect(redactModelId("oss-family-120b#dep_9f3a#extra")).toBe("oss-family-120b");
+  });
+});
+
+describe("redactModelId on empty input", () => {
+  it("returns the empty string rather than throwing", () => {
+    expect(redactModelId("")).toBe("");
   });
 });
 `,
