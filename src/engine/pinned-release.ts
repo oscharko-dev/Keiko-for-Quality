@@ -20,7 +20,6 @@ export interface PlatformPin {
 export interface EnginePin {
   readonly engine: string;
   readonly version: VersionTag;
-  readonly releaseUrl: string;
   readonly platforms: Readonly<Record<string, PlatformPin>>;
 }
 
@@ -29,7 +28,6 @@ const VERSION = versionTag("v1.8.4");
 export const ENGINE_PIN: EnginePin = {
   engine: "alibaba/open-code-review",
   version: VERSION,
-  releaseUrl: `https://github.com/alibaba/open-code-review/releases/tag/${VERSION}`,
   platforms: {
     "linux-x64": {
       asset: "opencodereview-linux-amd64",

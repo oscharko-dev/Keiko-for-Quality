@@ -91,8 +91,4 @@ export class GlobSet {
   public matches(path: string): boolean {
     return this.matchers.some((matcher) => matcher.test(path));
   }
-
-  public get size(): number {
-    return this.matchers.length;
-  }
 }

@@ -6,7 +6,23 @@ export interface ResolvedIdentity {
   readonly client: GitHubClient;
   /** The login GitHub will attribute this reviewer's comments to. */
   readonly login: string;
-  readonly usedApp: boolean;
+  /**
+   * True only when `login` is provably exclusive to this reviewer — nothing else in the
+   * repository can author a comment under it. The App branch is always exclusive (an
+   * installation's own identity). The plain-token branch is exclusive only when
+   * `resolveViewerLogin` actually resolved a distinct login for the configured token; the
+   * documented fallback (`github-actions[bot]`, the shared login every default-`GITHUB_TOKEN`
+   * workflow in the repository authors under) is exactly the shared-identity case this flag exists
+   * to distinguish.
+   *
+   * Read-only findings (suppression, deduplication) already tolerate a shared identity — the worst
+   * case is a missed suppression, which the module doc above already names as "a real weakening."
+   * A WRITE against another author's content is a different class of risk: resolving a thread this
+   * reviewer did not actually author would be acting on someone else's conversation under an
+   * identity this run cannot prove is exclusively its own. See `resolveSupersededOwnNotices`'s own
+   * caller in `review.ts` for the one place this flag gates something.
+   */
+  readonly exclusive: boolean;
 }
 
 /**
@@ -54,7 +70,7 @@ export async function resolveIdentity(
     return {
       client: buildClient(apiBase, minted.token, env),
       login: minted.login,
-      usedApp: true,
+      exclusive: true,
     };
   }
 
@@ -65,7 +81,10 @@ export async function resolveIdentity(
   }
 
   const client = buildClient(apiBase, token, env);
-  const login = (await client.resolveViewerLogin()) ?? "github-actions[bot]";
+  // Exclusive only when the token's own viewer login actually resolved — the fallback below is the
+  // shared login every default-`GITHUB_TOKEN` workflow in the repository authors under.
+  const resolvedLogin = await client.resolveViewerLogin();
+  const login = resolvedLogin ?? "github-actions[bot]";
   diagnostics.record("publish.identity_resolved");
-  return { client, login, usedApp: false };
+  return { client, login, exclusive: resolvedLogin !== undefined };
 }

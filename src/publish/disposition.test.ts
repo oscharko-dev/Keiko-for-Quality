@@ -83,4 +83,18 @@ describe("isSubstantiveDisposition", () => {
   it("is false for an empty reply body", () => {
     expect(isSubstantiveDisposition(reply({ body: "" }), IDENTITY)).toBe(false);
   });
+
+  /**
+   * A thread's last reply is candidate-influenced content — anyone who can comment can shape what
+   * this function scans — and `HTML_COMMENT`'s `[\s\S]*?` is the same unanchored-scan shape
+   * `similarity.ts`'s own bound exists for. This pins that a degenerate, comment-free body of
+   * realistic hostile size still evaluates promptly rather than reading as evidence the bound is
+   * missing (a hang here would fail the test file's own timeout, not this assertion).
+   */
+  it("evaluates promptly against a large, comment-free reply instead of scanning it unbounded", () => {
+    const hostile = "x".repeat(500_000);
+    const started = performance.now();
+    expect(isSubstantiveDisposition(reply({ body: hostile }), IDENTITY)).toBe(true);
+    expect(performance.now() - started).toBeLessThan(1000);
+  });
 });

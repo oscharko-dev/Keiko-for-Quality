@@ -135,6 +135,29 @@ function isChatCompletionsPath(path: string): boolean {
 }
 
 /**
+ * The upstream base with every trailing slash removed, so the request path appended after it cannot
+ * produce a doubled separator.
+ *
+ * A tail walk rather than the `/\/+$/` replace this used to be. An unanchored quantifier followed by
+ * `$` is the textbook super-linear pattern (Sonar S8786): the match is retried from every position
+ * in the string, so a base ending in a long run of slashes costs quadratic time. The loop is linear
+ * and returns the identical string for every input, because `replace` acts on the FIRST match and
+ * the first (indeed only) place `/\/+$/` can match is the start of the maximal trailing run:
+ * `https://h/v1//` → `https://h/v1`, `https://h/v1` unchanged, `///` → `` (empty), `` → ``. It is
+ * the same remedy `sanitize.ts` applied to its own super-linear fence matcher — state the rule
+ * directly instead of asking a regex engine to backtrack into it.
+ *
+ * Duplicated rather than shared with `classify.ts`, which carries the identical helper: both modules
+ * are loaded directly by `corpus/run.mjs` under Node's type stripping, which is why neither may take
+ * a relative import (see each file's own header).
+ */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end -= 1;
+  return value.slice(0, end);
+}
+
+/**
  * `pinSampling`'s result. `cacheKeyInjected` is distinct from "was injection requested": a
  * malformed or non-object body falls through untouched even when the caller asked for the key, and
  * the self-healing retry below must know which one actually happened — only a request that truly
@@ -337,7 +360,7 @@ async function forward(
     // response back.
     const isChatCompletions = isChatCompletionsPath(path);
     countRequest(usage, isChatCompletions);
-    const url = `${options.upstreamUrl.replace(/\/+$/, "")}${path}`;
+    const url = `${withoutTrailingSlashes(options.upstreamUrl)}${path}`;
     const upstream = await fetchWithCacheKeyFallback(
       doFetch,
       url,
@@ -373,6 +396,24 @@ async function forward(
   }
 }
 
+/**
+ * `server.close()` as a promise, resolving once the listener is down.
+ *
+ * A named helper rather than the two further function literals this used to nest inside
+ * `startModelProxy`'s listen callback, which reached six levels deep (Sonar S2004). The captured
+ * state is unchanged — `server` was closed over there and is passed in here, from the same scope —
+ * and the close callback still ignores its optional error argument on purpose: "the listener was
+ * already gone" is the state the caller asked for either way, and the proxy's whole lifetime is one
+ * engine invocation.
+ */
+function closeServer(server: Server): Promise<void> {
+  return new Promise<void>((done) => {
+    server.close(() => {
+      done();
+    });
+  });
+}
+
 export function startModelProxy(options: ModelProxyOptions): Promise<ModelProxy> {
   const usage: MutableUsage = {
     requests: 0,
@@ -400,12 +441,7 @@ export function startModelProxy(options: ModelProxyOptions): Promise<ModelProxy>
       }
       resolve({
         url: `http://127.0.0.1:${String(address.port)}`,
-        close: () =>
-          new Promise<void>((done) => {
-            server.close(() => {
-              done();
-            });
-          }),
+        close: () => closeServer(server),
         usage: () => ({ ...usage }),
       });
     });

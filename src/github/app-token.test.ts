@@ -1,5 +1,5 @@
 import { createVerify, generateKeyPairSync } from "node:crypto";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { createAppJwt, mintInstallationToken } from "./app-token.js";
 
@@ -16,7 +16,23 @@ import { createAppJwt, mintInstallationToken } from "./app-token.js";
  * fixture key committed to disk — and reused across tests, since RSA-SHA256 signing (PKCS#1 v1.5, not
  * randomized PSS padding) is deterministic for the same key and input, which several tests below rely
  * on directly to recompute the exact JWT a given call must have used.
+ *
+ * `node:timers/promises` is mocked the same way `github/client.test.ts` mocks it for the identical
+ * reason: `apiJson`'s retry loop (v0.13.0) really does call `setTimeout`-backed `delay` between
+ * attempts, and without this a retry test would wait out the real linear backoff (seconds) instead
+ * of completing instantly.
  */
+const { sleepCalls, sleepStub } = vi.hoisted(() => {
+  const sleepCalls: number[] = [];
+  return {
+    sleepCalls,
+    sleepStub: (ms: number): Promise<void> => {
+      sleepCalls.push(ms);
+      return Promise.resolve();
+    },
+  };
+});
+vi.mock("node:timers/promises", () => ({ setTimeout: sleepStub }));
 
 let privateKeyPem: string;
 let publicKeyPem: string;
@@ -195,6 +211,10 @@ const REPO = "widget";
 describe("mintInstallationToken", () => {
   const originalFetch = globalThis.fetch;
 
+  beforeEach(() => {
+    sleepCalls.length = 0;
+  });
+
   afterEach(() => {
     globalThis.fetch = originalFetch;
   });
@@ -261,10 +281,19 @@ describe("mintInstallationToken", () => {
       expect(calls).toHaveLength(2);
     });
 
-    it("fails the way the module fails on a non-OK token-exchange response, after all three calls were attempted", async () => {
+    /**
+     * A 500 is retryable (v0.13.0) — the retry loop `github/client.ts`'s `requestUrl` already
+     * applies to every other GitHub API call this reviewer makes. The token exchange call itself
+     * now retries up to `MAX_ATTEMPTS` (3) times before giving up, so the fixture scripts three
+     * consecutive 500s for it, and the total call count is 2 (slug + installation) + 3 (the
+     * exhausted retry loop) = 5.
+     */
+    it("retries the token-exchange call up to three times before failing, after all attempts were exhausted", async () => {
       const { fetch: stub, calls } = scriptedFetch([
         jsonResponse({ slug: "keiko-for-quality" }),
         jsonResponse({ id: 555 }),
+        jsonResponse({}, 500),
+        jsonResponse({}, 500),
         jsonResponse({}, 500),
       ]);
       globalThis.fetch = stub;
@@ -274,7 +303,50 @@ describe("mintInstallationToken", () => {
       );
 
       expect(error.message).toBe("github app api 500");
+      expect(calls).toHaveLength(5);
+      // Linear backoff, no `retry-after` header on any of the three 500s — the loop sleeps after
+      // every attempt including the last, since it does not know attempt 3 is the final one until
+      // the FOURTH loop condition check fails.
+      expect(sleepCalls).toEqual([1000, 2000, 3000]);
+    });
+
+    it("recovers from a transient 500 on the token-exchange call without failing the mint", async () => {
+      const { fetch: stub, calls } = scriptedFetch([
+        jsonResponse({ slug: "keiko-for-quality" }),
+        jsonResponse({ id: 555 }),
+        jsonResponse({}, 500),
+        jsonResponse({ token: "ghs_minted", expires_at: "2026-01-01T00:00:00Z" }),
+      ]);
+      globalThis.fetch = stub;
+
+      const identity = await mintInstallationToken(
+        API_BASE,
+        APP_ID,
+        privateKeyPem,
+        OWNER,
+        REPO,
+        NOW,
+      );
+
+      expect(identity.token).toBe("ghs_minted");
+      expect(calls).toHaveLength(4);
+    });
+
+    it("does not retry a 404 on the token-exchange call — the same unretryable status the earlier stages already pin", async () => {
+      const { fetch: stub, calls } = scriptedFetch([
+        jsonResponse({ slug: "keiko-for-quality" }),
+        jsonResponse({ id: 555 }),
+        jsonResponse({}, 404),
+      ]);
+      globalThis.fetch = stub;
+
+      const error = await captureRejection(
+        mintInstallationToken(API_BASE, APP_ID, privateKeyPem, OWNER, REPO, NOW),
+      );
+
+      expect(error.message).toBe("github app api 404");
       expect(calls).toHaveLength(3);
+      expect(sleepCalls).toEqual([]);
     });
   });
 

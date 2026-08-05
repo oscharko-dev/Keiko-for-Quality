@@ -170,8 +170,14 @@ test("compareBaselineVersions orders numerically, not lexically", () => {
   const v9 = parseBaselineFilename("arena-baseline-v0.9.10.json");
   const v10 = parseBaselineFilename("arena-baseline-v0.10.0.json");
   assert.ok(compareBaselineVersions(v9, v10) < 0, "0.9.10 must sort before 0.10.0");
+  // The sanity check reads the two versions off the parsed objects instead of repeating them as
+  // string literals. Comparing two literals is a tautology — it stays green even if
+  // `parseBaselineFilename` stopped producing these versions at all, which is precisely the failure
+  // this pair of assertions is supposed to be able to catch. Reading `v10.version`/`v9.version`
+  // ties the "plain strings get it backwards" claim to the same two values
+  // `compareBaselineVersions` was just handed on the line above.
   assert.ok(
-    "0.10.0" < "0.9.10",
+    v10.version < v9.version,
     "sanity check: plain string comparison really does get this backwards",
   );
 });
@@ -306,11 +312,6 @@ test("renderDeltaSection says there is nothing to compare with fewer than two ba
   const summary = summarizeBaseline("v0.11.0", BASELINE_V0_11_0);
   const section = renderDeltaSection([summary]);
   assert.match(section, /nothing to compare/);
-  assert.equal(
-    renderDeltaSection([]),
-    renderDeltaSection([]),
-    "stays a pure function of its input",
-  );
 });
 
 test("renderDeltaSection renders one subsection per bot with the signed movement", () => {
@@ -336,7 +337,12 @@ test("renderTrendReport assembles a baseline section per input plus the delta se
   const v10Index = report.indexOf("### v0.10.0");
   const v11Index = report.indexOf("### v0.11.0");
   const deltaIndex = report.indexOf("## Cross-baseline deltas");
-  assert.ok(v10Index !== -1 && v11Index !== -1 && deltaIndex !== -1);
+  // One assertion per section: the ordering assertions below are only meaningful once each section
+  // is known to be present, and a single `&&` over all three would report "a section is missing"
+  // without saying which one.
+  assert.notEqual(v10Index, -1, "the v0.10.0 baseline section is rendered");
+  assert.notEqual(v11Index, -1, "the v0.11.0 baseline section is rendered");
+  assert.notEqual(deltaIndex, -1, "the cross-baseline delta section is rendered");
   assert.ok(v10Index < v11Index, "baselines render oldest first");
   assert.ok(v11Index < deltaIndex, "the delta section follows every baseline table");
 });

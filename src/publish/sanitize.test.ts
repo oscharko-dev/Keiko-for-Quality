@@ -312,7 +312,7 @@ describe("neutralization (turning a reversible formatting slip into inline code)
     // that only fits by construction.
     it("rejects a body that only exceeds 8000 characters because neutralization added backticks", () => {
       const body = `${"x".repeat(7996)} @a`;
-      expect(body.length).toBe(7999);
+      expect(body).toHaveLength(7999);
       expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "too_long" });
     });
 
@@ -321,6 +321,26 @@ describe("neutralization (turning a reversible formatting slip into inline code)
       const result = sanitizeFindingBody(body);
       expect(result.ok).toBe(true);
       if (result.ok) expect(result.neutralized).toBe(1);
+    });
+
+    /**
+     * The bound is ALSO checked before neutralization, and this is what that buys. A long run of
+     * identifier characters is the worst case for `LINK_NEUTRALIZE` and `GENERIC_HEAD`, which are
+     * quadratic in scan restarts (their doc comments record why every reformulation that removes
+     * the restart also changes what they match). Every other pattern in the module runs against
+     * input an earlier check has already bounded; without the early return these two ran at
+     * whatever length the engine emitted, and this body would take minutes rather than the
+     * milliseconds the reject-first path costs.
+     *
+     * The ceiling is a regression pin, not a benchmark — bounded work, not a millisecond figure —
+     * and the assertion above it is the one that matters: the verdict is unchanged, because
+     * neutralization only ever adds characters, so nothing over the bound can come back under it.
+     */
+    it("rejects an over-long body without letting the neutralization scan see it", () => {
+      const hostile = "a".repeat(100_000);
+      const started = performance.now();
+      expect(sanitizeFindingBody(hostile)).toEqual({ ok: false, reason: "too_long" });
+      expect(performance.now() - started).toBeLessThan(1000);
     });
   });
 

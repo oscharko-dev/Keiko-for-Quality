@@ -68,8 +68,10 @@ function report(overrides: Partial<ReviewReport> = {}): ReviewReport {
     reviewablePaths: 6,
     excludedPaths: 3,
     mechanicallyClean: 1,
+    criticalPointers: 0,
     cacheHits: 2,
     cacheMisses: 4,
+    contextInvalidated: 0,
     cacheAppended: 0,
     publish: {
       published: 2,
@@ -242,6 +244,7 @@ describe("buildSummaryReport", () => {
       excludedPaths: 30,
       mechanicallyClean: 10,
       cacheHits: 12,
+      contextInvalidated: 3,
       publish: {
         published: 2,
         suppressed: 4,
@@ -249,9 +252,10 @@ describe("buildSummaryReport", () => {
         suppressedExactDuplicate: 1,
         suppressedSimilar: 2,
         suppressedDispositioned: 1,
-        rejectedSanitization: 0,
-        rejectedPlacement: 0,
-        readbackFailures: 0,
+        rejectedSanitization: 5,
+        rejectedPlacement: 6,
+        readbackFailures: 7,
+        apiFailures: 8,
       },
     });
     const summary = buildSummaryReport(runInput({ report: r }), []);
@@ -261,11 +265,19 @@ describe("buildSummaryReport", () => {
     expect(summary.counts.excludedPaths).toBe(r.excludedPaths);
     expect(summary.counts.mechanicallyClean).toBe(r.mechanicallyClean);
     expect(summary.counts.cacheHits).toBe(r.cacheHits);
+    expect(summary.counts.contextInvalidated).toBe(r.contextInvalidated);
     expect(summary.counts.findingsPublished).toBe(r.publish?.published);
     expect(summary.counts.suppressedIntraRun).toBe(r.publish?.suppressedIntraRun);
     expect(summary.counts.suppressedExactDuplicate).toBe(r.publish?.suppressedExactDuplicate);
     expect(summary.counts.suppressedSimilar).toBe(r.publish?.suppressedSimilar);
     expect(summary.counts.suppressedDispositioned).toBe(r.publish?.suppressedDispositioned);
+    // The four counters that actually decide complete vs. incomplete (`publicationDegraded`,
+    // review.ts) — previously computed but never surfaced on the one comment meant to answer
+    // "what happened this run" without a log.
+    expect(summary.counts.rejectedSanitization).toBe(r.publish?.rejectedSanitization);
+    expect(summary.counts.rejectedPlacement).toBe(r.publish?.rejectedPlacement);
+    expect(summary.counts.readbackFailures).toBe(r.publish?.readbackFailures);
+    expect(summary.counts.apiFailures).toBe(r.publish?.apiFailures);
   });
 
   it("derives freshlyReviewed as the one arithmetic step: reviewablePaths minus cacheHits", () => {
@@ -287,6 +299,10 @@ describe("buildSummaryReport", () => {
     expect(summary.counts.suppressedExactDuplicate).toBe(0);
     expect(summary.counts.suppressedSimilar).toBe(0);
     expect(summary.counts.suppressedDispositioned).toBe(0);
+    expect(summary.counts.rejectedSanitization).toBe(0);
+    expect(summary.counts.rejectedPlacement).toBe(0);
+    expect(summary.counts.readbackFailures).toBe(0);
+    expect(summary.counts.apiFailures).toBe(0);
   });
 
   /**
@@ -300,6 +316,11 @@ describe("buildSummaryReport", () => {
   it("defaults suppressedIntraRun to zero when publish is present but omits the optional field", () => {
     const summary = buildSummaryReport(runInput(), []);
     expect(summary.counts.suppressedIntraRun).toBe(0);
+  });
+
+  it("defaults apiFailures to zero when publish is present but omits the optional field", () => {
+    const summary = buildSummaryReport(runInput(), []);
+    expect(summary.counts.apiFailures).toBe(0);
   });
 
   it("carries the reason code only for an incomplete outcome", () => {
@@ -333,6 +354,25 @@ describe("buildSummaryReport", () => {
       diagnostics.record("engine.run.completed", { counts: { bytes: 500, budget: 1_200_000 } });
       const summary = buildSummaryReport(runInput(), diagnostics.drain());
       expect(summary.budget).toEqual({ allotted: 1_200_000, spent: undefined });
+    });
+
+    /**
+     * A resumed run emits `engine.run.completed` once per attempt, and the second attempt's budget
+     * is the remainder carved out of the first's. Reading the last one reported that remainder as
+     * the whole run's ceiling next to a cumulative `spent`, which is how production came to publish
+     * "80000 allotted, 3562109 reported" for a run whose real allotment was 2.97M
+     * (`corpus/evidence/live-telemetry-2026-08-04-keiko-2981-double-run.md`).
+     */
+    it("reports the first attempt's allotment, not a resume's carved-out remainder", () => {
+      const diagnostics = createDiagnostics(() => undefined);
+      diagnostics.record("engine.run.completed", { counts: { bytes: 500, budget: 2_970_000 } });
+      diagnostics.record("engine.resumed_once", { counts: { remaining: 80_000 } });
+      diagnostics.record("engine.run.completed", { counts: { bytes: 400, budget: 80_000 } });
+      diagnostics.record("run.spend", {
+        counts: { engine: 3_562_109, classify: 0, total: 3_562_109 },
+      });
+      const summary = buildSummaryReport(runInput(), diagnostics.drain());
+      expect(summary.budget).toEqual({ allotted: 2_970_000, spent: 3_562_109 });
     });
 
     it("reads the reported spend from run.spend's own counts.total field", () => {

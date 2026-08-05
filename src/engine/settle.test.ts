@@ -35,6 +35,18 @@ const CONFIG: RuntimeConfig = {
 
 const SHA = commitSha("a".repeat(40));
 
+/** One well-formed finding anchored at `path` — the shape `parseFindings` produces. */
+function finding(path: string): EngineResult["findings"][number] {
+  return {
+    path: repoPath(path),
+    content: "Close the handle.",
+    startLine: 1,
+    endLine: 1,
+    severity: "high",
+    category: "bug",
+  };
+}
+
 function inventory(paths: readonly string[]): Inventory {
   return {
     pair: { base: SHA, head: SHA, mergeBase: SHA },
@@ -375,6 +387,82 @@ describe("counted settlement (no manifest)", () => {
       expect(outcome.counts.reviewed).toBe(1);
       expect(outcome.counts.expected).toBe(2);
     }
+  });
+
+  /**
+   * The production case, pinned. `--max-tokens-budget` makes the engine stop dispatching and exit
+   * non-`success`, so a budget stop arrives carrying BOTH facts — and the status check used to run
+   * first and claim it. Every incomplete run on oscharko-dev/Keiko#2970 and #2981 was this shape:
+   * `budget_exceeded` true in the same result that reported a failed status, published as
+   * `engine_status_not_success`, which named the symptom and hid the one cause the consumer could
+   * have acted on.
+   */
+  it.each(["skipped", "failed", "unknown"] as const)(
+    "reports the budget stop, not status %s, when the result carries both",
+    (status) => {
+      const outcome = settle(
+        inventory(["src/a.ts", "src/b.ts"]),
+        released({ status, filesReviewed: 1, budgetExceeded: true, totalTokens: 3_843_796 }),
+        PROFILE,
+        CONFIG,
+      );
+      expect(outcome).toMatchObject({
+        status: "incomplete",
+        mode: "counted",
+        reason: "settlement.incomplete.budget_exceeded",
+      });
+      if (outcome.status === "incomplete") expect(outcome.counts.tokens).toBe(3_843_796);
+    },
+  );
+
+  /**
+   * And the half that makes the next push cheaper: the reason code above is the one
+   * `verdictsSurviveIncompleteness` admits, and the covered set it carries is what the review
+   * cache may write. Without a manifest the engine names no covered path at all, so a finding's
+   * own path is the only identity available — see `memoizablePaths`.
+   */
+  it("carries a truncated run's finding paths as memoizable coverage", () => {
+    const outcome = settle(
+      inventory(["src/a.ts", "src/b.ts"]),
+      released({ status: "failed", budgetExceeded: true, findings: [finding("src/a.ts")] }),
+      PROFILE,
+      CONFIG,
+    );
+    expect(outcome.status).toBe("incomplete");
+    if (outcome.status !== "incomplete") return;
+    expect([...outcome.coveredPaths]).toEqual(["src/a.ts"]);
+  });
+
+  /**
+   * The one path a finding does NOT prove: a file whose review fell over partway may have filed one
+   * finding and missed three, so freezing that as its verdict is the laundering `review-cache.ts`
+   * warns about. Reconciled mode, because only a manifest can report a failed coverage entry.
+   */
+  it("refuses to memoize a finding's path when the manifest failed that path", () => {
+    const outcome = settle(
+      inventory(["src/a.ts", "src/b.ts"]),
+      result({
+        terminalState: "partial",
+        budgetExceeded: true,
+        findings: [finding("src/a.ts")],
+        coverage: {
+          selected: [{ path: "src/a.ts" }],
+          completed: [],
+          reused: [],
+          failed: [{ path: "src/a.ts" }],
+          waived: [],
+        },
+      }),
+      PROFILE,
+      CONFIG,
+    );
+    expect(outcome).toMatchObject({
+      status: "incomplete",
+      mode: "reconciled",
+      reason: "settlement.incomplete.budget_exceeded",
+    });
+    if (outcome.status !== "incomplete") return;
+    expect([...outcome.coveredPaths]).toEqual([]);
   });
 
   it("still enforces the warning allowlist", () => {

@@ -187,6 +187,102 @@ function readAtHead(dir, path) {
 }
 
 /**
+ * One gate finding, in the exact shape this harness has always produced.
+ *
+ * Fixed `bug`/`high` at line 0 is production's own shape for a gate finding
+ * (`collectGateFindings` / `collectPinDesyncFindings`, src/review.ts): the gate speaks only about
+ * declarations it fully parsed, so its category and severity are certain before any model sees them
+ * — which is why the main loop below merges these findings AFTER classification repair and audit.
+ * `gate: true` is this harness's own marker, not a production field — see `computeGateFindings`
+ * below.
+ */
+function gateFinding(file, content) {
+  return {
+    path: file.path,
+    content,
+    startLine: 0,
+    endLine: 0,
+    category: "bug",
+    severity: "high",
+    gate: true,
+  };
+}
+
+/**
+ * One changed file against one pair's counterparts, mirroring `compareAgainstCounterparts`
+ * (src/review.ts): `compareDeclaredContracts` (not `compareContracts`: the profile named the two
+ * files counterparts, so the positional fallback is the declaration's own meaning) plus the
+ * union-coverage check, in that order, over each counterpart in turn.
+ *
+ * This harness ran only the older same-name comparison until the v0.13.0 qualification measured the
+ * gap: all three cross-artifact fixtures MISSED here while the product's own wiring would have
+ * published every one of them. The scorer digest recorded in each binding is what separates
+ * measurements taken before and after this alignment.
+ */
+function computeCounterpartFindings(dir, pair, file, left) {
+  const findings = [];
+  for (const counterpart of pair.counterparts) {
+    const right = readAtHead(dir, counterpart);
+    if (right === undefined) continue;
+    for (const mismatch of compareDeclaredContracts(left, right)) {
+      findings.push(gateFinding(file, describeMismatch(mismatch, file.path, counterpart)));
+    }
+    for (const gap of findUncoveredUnionMembers(file.base, left, right)) {
+      findings.push(gateFinding(file, describeUnionGap(gap, file.path, counterpart)));
+    }
+  }
+  return findings;
+}
+
+/**
+ * The pair-declared half of the gate: every profile-declared pair against every file this case
+ * changed, pair outer and changed file inner — the order `collectGateFindings` (src/review.ts)
+ * walks them, and the order `computeGateFindings`'s caller merges into `result.comments`.
+ *
+ * The head-side read happens only after the glob match, so a file no pair claims costs this half of
+ * the gate no git call. That is a property of this function, not of the gate: `computePinDesyncFindings`
+ * below is pair-independent and reads every changed file regardless.
+ *
+ * The inner results are appended one at a time rather than spread into `push`. The extracted
+ * helper accumulates across ALL of a pair's counterparts, so the spread's argument count would be
+ * the summed finding count rather than one counterpart's — and past the engine's argument ceiling
+ * that throws where the single-finding `push` this replaced simply returned. Unreachable with the
+ * committed fixtures, but the harness must not acquire a size limit the code it measures does not
+ * have.
+ */
+function computePairFindings(dir, changed) {
+  const findings = [];
+  for (const pair of CONTRACT_PAIRS) {
+    for (const file of changed) {
+      if (!pair.matcher.matches(file.path)) continue;
+      const left = readAtHead(dir, file.path);
+      if (left === undefined) continue;
+      for (const finding of computeCounterpartFindings(dir, pair, file, left)) {
+        findings.push(finding);
+      }
+    }
+  }
+  return findings;
+}
+
+/**
+ * Pin-desync — pair-independent, modified files only, mirroring `collectPinDesyncFindings`
+ * (src/review.ts). `file.base` stands in for production's base-side blob read: cases.mjs carries
+ * both revisions in memory, so only the head side needs a git call here.
+ */
+function computePinDesyncFindings(dir, changed) {
+  const findings = [];
+  for (const file of changed) {
+    const head = readAtHead(dir, file.path);
+    if (head === undefined) continue;
+    for (const desync of detectPinDesync(file.base, head)) {
+      findings.push(gateFinding(file, describePinDesync(desync, file.path)));
+    }
+  }
+  return findings;
+}
+
+/**
  * The deterministic contract gate (issue #80 technique D), mirrored from `collectGateFindings` /
  * `compareAgainstCounterparts` in src/review.ts: for every profile-declared contract pair whose
  * `paths` glob matches a file this CASE actually changed — `base !== head` is the corpus's own
@@ -200,54 +296,15 @@ function readAtHead(dir, path) {
  * `compareAgainstCounterparts`'s own doc comment for why. `gate: true` is this harness's own
  * marker, not a production field: it is how the per-case console output below tells a gate finding
  * from a model finding at a glance; `scoreOne` never reads it.
+ *
+ * The two halves are collected separately and concatenated in the order production merges them —
+ * every declared pair first, then pin-desync. Production threads ONE array through both halves so
+ * that its shared `MAX_GATE_FINDINGS` bound can stop either of them; this harness applies no such
+ * bound, so each half returning its own list yields the identical findings in the identical order.
  */
 function computeGateFindings(dir, testCase) {
   const changed = testCase.files.filter((file) => file.base !== file.head);
-  const findings = [];
-  const push = (file, content) => {
-    findings.push({
-      path: file.path,
-      content,
-      startLine: 0,
-      endLine: 0,
-      category: "bug",
-      severity: "high",
-      gate: true,
-    });
-  };
-  // Pair-declared checks — `compareDeclaredContracts` (not `compareContracts`: the profile named
-  // the two files counterparts, so the positional fallback is the declaration's own meaning) plus
-  // the union-coverage check, exactly as `compareAgainstCounterparts` runs them in src/review.ts.
-  // This harness ran only the older same-name comparison until the v0.13.0 qualification measured
-  // the gap: all three cross-artifact fixtures MISSED here while the product's own wiring would
-  // have published every one of them. The scorer digest recorded in each binding is what separates
-  // measurements taken before and after this alignment.
-  for (const pair of CONTRACT_PAIRS) {
-    for (const file of changed) {
-      if (!pair.matcher.matches(file.path)) continue;
-      const left = readAtHead(dir, file.path);
-      if (left === undefined) continue;
-      for (const counterpart of pair.counterparts) {
-        const right = readAtHead(dir, counterpart);
-        if (right === undefined) continue;
-        for (const mismatch of compareDeclaredContracts(left, right)) {
-          push(file, describeMismatch(mismatch, file.path, counterpart));
-        }
-        for (const gap of findUncoveredUnionMembers(file.base, left, right)) {
-          push(file, describeUnionGap(gap, file.path, counterpart));
-        }
-      }
-    }
-  }
-  // Pin-desync — pair-independent, modified files only, mirroring `collectPinDesyncFindings`.
-  for (const file of changed) {
-    const head = readAtHead(dir, file.path);
-    if (head === undefined) continue;
-    for (const desync of detectPinDesync(file.base, head)) {
-      push(file, describePinDesync(desync, file.path));
-    }
-  }
-  return findings;
+  return [...computePairFindings(dir, changed), ...computePinDesyncFindings(dir, changed)];
 }
 
 /**
@@ -430,7 +487,10 @@ async function repairFindings(result) {
   const audited = await auditClassification(repaired.findings, deps);
   result.comments = audited.findings;
   const total = (result.summary?.total_tokens ?? 0) + repaired.tokens + audited.tokens;
-  result.summary = { ...(result.summary ?? {}), total_tokens: total };
+  // Spread straight from `result.summary`: an absent (or null) summary spreads to nothing, which is
+  // what the `?? {}` this used to carry already produced — every other key the engine reported is
+  // carried over, and only `total_tokens` is replaced, exactly as before.
+  result.summary = { ...result.summary, total_tokens: total };
 }
 
 /**
@@ -510,7 +570,10 @@ function anchorPattern(anchor) {
   if (cached !== undefined) return cached;
   const isPrefix = anchor.endsWith("*");
   const literal = (isPrefix ? anchor.slice(0, -1) : anchor).toLowerCase();
-  const escaped = literal.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // `String.raw` rather than "\\$&": both spell the same three characters — a literal backslash
+  // followed by the `$&` whole-match reference `replace` expands — and the raw form is the one that
+  // cannot be misread as escaping the `$`.
+  const escaped = literal.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
   const right = isPrefix ? "" : "(?![a-z0-9])";
   const pattern = new RegExp(`(?<![a-z0-9])${escaped}${right}`);
   ANCHOR_CACHE.set(anchor, pattern);
@@ -612,12 +675,18 @@ function scoreOne(testCase, result, plan) {
 const results = [];
 for (const testCase of cases) {
   let dir;
+  // Hoisted out of the try, not declared inside it: a throw in `computeGateFindings`,
+  // `planCaseFindings`, or anything else after the model already ran must still leave the catch
+  // block able to read the real spend `result.summary.total_tokens` already carries by that
+  // point — a `const` scoped to the try block would put it out of reach and force the catch back
+  // to a hardcoded 0, discarding tokens that were genuinely spent.
+  let result;
   try {
     // Inside the try, not before it: `buildRepo` can throw in `mkdtemp`, in either `writeTree`, or
     // in any of the four git calls, and a throw outside would abort the whole run and leak the
     // directory it had already created.
     dir = buildRepo(testCase);
-    const result = await runEngineWithOneResume(dir);
+    result = await runEngineWithOneResume(dir);
     await repairFindings(result);
     // Merged AFTER classification repair/audit, at the same point production's
     // `publishSettledFindings` merges `collectGateFindings`'s output into what gets published — so a
@@ -671,7 +740,10 @@ for (const testCase of cases) {
       detail: "the harness threw while running this case",
       findings: [],
       rejected: [],
-      tokens: 0,
+      // The one fact still known even when the plan/gate stage fails: what the model call already
+      // cost before the throw. `result` is `undefined` when `buildRepo` or the engine invocation
+      // itself is what threw — there was nothing to spend yet, and 0 is the honest answer there too.
+      tokens: result?.summary?.total_tokens ?? 0,
       rejectedSanitization: 0,
       suppressedIntraRun: 0,
     });

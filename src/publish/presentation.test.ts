@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { commitSha, versionTag } from "../core/brands.js";
+import { commitSha, repoPath, versionTag } from "../core/brands.js";
 import type { ReasonCode } from "../diagnostics/reason-codes.js";
 import {
   composeFindingBody,
   composeIncompleteNotice,
   composeSummaryBody,
+  isIncompleteNoticeBody,
   splitTitle,
   type SummaryCounts,
   type SummaryReport,
@@ -146,6 +147,73 @@ describe("composeIncompleteNotice", () => {
   });
 });
 
+describe("isIncompleteNoticeBody", () => {
+  it("recognises a body this module's own composer produced", () => {
+    const notice = composeIncompleteNotice("settlement.incomplete.budget_exceeded", MARKER);
+    expect(isIncompleteNoticeBody(notice)).toBe(true);
+  });
+
+  it.each([
+    "settlement.incomplete.coverage_gap",
+    "settlement.incomplete.schema_rejected",
+    "settlement.incomplete.engine_status_not_success",
+  ])("recognises a notice regardless of which reason code it carries (%s)", (reason) => {
+    expect(isIncompleteNoticeBody(composeIncompleteNotice(reason, MARKER))).toBe(true);
+  });
+
+  /**
+   * The property `resolveSupersededOwnNotices` (`github/client.ts`) depends on entirely: a finding
+   * this reviewer published — real model prose, any category, any severity — must never satisfy this
+   * predicate, or the cleanup feature would resolve an open question a human still has to act on
+   * instead of a stale, superseded statement.
+   */
+  it.each(["bug", "security", "performance", "maintainability", "test", "documentation", "other"])(
+    "never recognises a finding body, category %s",
+    (category) => {
+      const finding = composeFindingBody(
+        "The retry loop never resets its attempt counter.",
+        MARKER,
+        {
+          path: repoPath("src/retry.ts"),
+          line: 12,
+          severity: "high",
+          category,
+        },
+      );
+      expect(isIncompleteNoticeBody(finding)).toBe(false);
+    },
+  );
+
+  it("does not recognise arbitrary prose that happens to mention the product name", () => {
+    expect(isIncompleteNoticeBody("Keiko for Quality found a real defect here.")).toBe(false);
+  });
+
+  it("does not recognise the empty string", () => {
+    expect(isIncompleteNoticeBody("")).toBe(false);
+  });
+
+  /**
+   * #42: the sentence alone used to be the whole check, and it is PUBLIC, product-controlled text —
+   * visible in every published comment, in README.md, and in the committed dist/index.js — so
+   * anyone can reproduce it verbatim without ever having been this reviewer. A body carrying the
+   * exact sentence but no marker at all (a contributor quoting the notice in a reply, say) must no
+   * longer qualify, since `resolveSupersededOwnNotices` treats a match here as license to mutate
+   * the thread.
+   */
+  it("no longer recognises the sentence alone, without a marker", () => {
+    const quoted =
+      "As mentioned above, Keiko for Quality could not complete its review. Reason code: `x`.";
+    expect(isIncompleteNoticeBody(quoted)).toBe(false);
+  });
+
+  it("does not recognise the sentence next to a malformed marker (wrong hex length)", () => {
+    const malformed =
+      "Keiko for Quality could not complete its review. Reason code: `x`.\n" +
+      `<!-- keiko-for-quality:v1:${"a".repeat(31)} -->`;
+    expect(isIncompleteNoticeBody(malformed)).toBe(false);
+  });
+});
+
 describe("composeSummaryBody", () => {
   const HEAD = commitSha("a".repeat(40));
   const OTHER_HEAD = commitSha("b".repeat(40));
@@ -155,13 +223,20 @@ describe("composeSummaryBody", () => {
     reviewablePaths: 30,
     excludedPaths: 8,
     mechanicallyClean: 4,
+    criticalPointers: 1,
     cacheHits: 5,
+    contextInvalidated: 2,
     freshlyReviewed: 25,
     findingsPublished: 3,
     suppressedIntraRun: 0,
     suppressedExactDuplicate: 1,
     suppressedSimilar: 2,
     suppressedDispositioned: 0,
+    suppressedRecurrence: 6,
+    rejectedSanitization: 7,
+    rejectedPlacement: 8,
+    readbackFailures: 9,
+    apiFailures: 10,
   };
 
   function summaryReport(overrides: Partial<SummaryReport> = {}): SummaryReport {
@@ -255,13 +330,22 @@ describe("composeSummaryBody", () => {
       expect(body).toContain("| Reviewable | 30 |");
       expect(body).toContain("| Excluded | 8 |");
       expect(body).toContain("| Mechanically clean | 4 |");
+      expect(body).toContain("| Critical pointer changes (content not reviewable) | 1 |");
       expect(body).toContain("| Replayed from cache | 5 |");
+      expect(body).toContain("| Cache miss (path-set shape changed) | 2 |");
       expect(body).toContain("| Freshly reviewed | 25 |");
       expect(body).toContain("| Findings published | 3 |");
       expect(body).toContain("| Suppressed (intra-run duplicate) | 0 |");
       expect(body).toContain("| Suppressed (exact duplicate) | 1 |");
       expect(body).toContain("| Suppressed (similar) | 2 |");
       expect(body).toContain("| Suppressed (dispositioned) | 0 |");
+      expect(body).toContain("| Suppressed (outdated recurrence) | 6 |");
+      // The four counters `publicationDegraded` (review.ts) actually decides complete-vs-incomplete
+      // on — previously computed but never surfaced on this comment.
+      expect(body).toContain("| Rejected (sanitization) | 7 |");
+      expect(body).toContain("| Rejected (placement) | 8 |");
+      expect(body).toContain("| Read-back failures | 9 |");
+      expect(body).toContain("| API failures | 10 |");
     });
 
     // Keiko-for-Quality#50's visibility requirement: replay staleness and dedup behaviour must stay

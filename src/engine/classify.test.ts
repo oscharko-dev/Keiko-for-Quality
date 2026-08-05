@@ -171,6 +171,22 @@ describe("repairClassification", () => {
     expect(outcome).toMatchObject({ repaired: 0, failed: 1, tokens: 0 });
   });
 
+  /**
+   * A hung endpoint must not block the whole run indefinitely — the same "failed attempt, not a
+   * crash" degradation the transport-error test above pins, but for the specific failure shape a
+   * timeout produces: `AbortSignal.timeout` rejects the fetch with an `AbortError`, which the
+   * existing catch-all already treats identically to any other transport failure.
+   */
+  it("bounds the request with an abort signal, and treats an abort exactly like any other transport failure", async () => {
+    const fetchImpl: typeof fetch = (_input, init) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      const abortError = new DOMException("The operation was aborted.", "AbortError");
+      return Promise.reject(abortError);
+    };
+    const outcome = await repairClassification([finding()], { ...DEPS, fetchImpl });
+    expect(outcome).toMatchObject({ repaired: 0, failed: 1, tokens: 0 });
+  });
+
   it("repairs only the findings that need it in a mixed list", async () => {
     const { fetchImpl, calls } = fakeFetch([
       { status: 200, content: '{"category":"test","severity":"low"}', tokens: 50 },

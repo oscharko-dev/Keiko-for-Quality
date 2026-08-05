@@ -34,6 +34,24 @@ const FINDING_B: ReportFinding = {
   body: "This comment still describes the pre-neutralization behaviour; update it to match the current pass.",
 };
 
+/**
+ * The 0-anchor file-level sentinel (`isFileLevel` in types.ts, docs/local-report-schema.md).
+ *
+ * Included here because the two renderers translate this input DIFFERENTLY — JSON to `null`/`null`
+ * anchors, SARIF to a region-less location — so it is the one finding shape where a renderer could
+ * plausibly lose a finding rather than merely render it oddly. What each format renders it to is
+ * pinned in `json.test.ts` and `sarif.test.ts`; this file pins only that neither renderer drops it
+ * or disagrees about the settlement it arrives with.
+ */
+const FINDING_C: ReportFinding = {
+  path: "src/contracts/shape-gate.ts",
+  startLine: 0,
+  endLine: 0,
+  category: "maintainability",
+  severity: "medium",
+  body: "The declared counterpart no longer covers this file's added union member, so the pair has drifted apart.",
+};
+
 function baseInput(overrides: Partial<ReportInput> = {}): ReportInput {
   return {
     outcome: "complete",
@@ -50,6 +68,8 @@ const CASES: readonly ReportInput[] = [
   baseInput(),
   baseInput({ findings: [] }),
   baseInput({ findings: [FINDING_A] }),
+  baseInput({ findings: [FINDING_C] }),
+  baseInput({ findings: [FINDING_A, FINDING_B, FINDING_C] }),
   baseInput({ outcome: "incomplete", findings: [], reason: "settlement.incomplete.coverage_gap" }),
   baseInput({
     outcome: "incomplete",

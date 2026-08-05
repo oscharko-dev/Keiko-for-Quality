@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { resolveGhBinary } from "./arena-fetch.mjs";
+import { runGh } from "./arena-fetch.mjs";
+import { renderTable } from "./arena-lib.mjs";
 import { splitRepo } from "./arena.mjs";
 import { isReasonCode } from "../src/diagnostics/reason-codes.ts";
 
@@ -175,6 +175,17 @@ function findSettlement(records) {
 }
 
 /**
+ * The three-way outcome a settlement record decides: `"complete"`, `"incomplete"`, or `undefined`
+ * for the run that never reached a settlement decision at all (`findSettlement` found nothing).
+ * Extracted from `summarizeRun` so the "no record" case and the "which settlement" case read as two
+ * separate, flat questions rather than one conditional nested inside another.
+ */
+function outcomeOf(settlement) {
+  if (settlement === undefined) return undefined;
+  return settlement.code === SETTLEMENT_COMPLETE ? "complete" : "incomplete";
+}
+
+/**
  * Folds one run's diagnostic records into a flat, closed-vocabulary summary.
  *
  * Every field independently answers "did this run's log carry the diagnostic this field reads
@@ -190,12 +201,9 @@ function findSettlement(records) {
  */
 export function summarizeRun(records) {
   const settlement = findSettlement(records);
-  const outcome =
-    settlement === undefined
-      ? undefined
-      : settlement.code === SETTLEMENT_COMPLETE
-        ? "complete"
-        : "incomplete";
+  const outcome = outcomeOf(settlement);
+  // `outcome === "incomplete"` already implies `settlement !== undefined` (see `outcomeOf`), so
+  // reading `.code` here cannot be reached with no settlement record.
   const reason = outcome === "incomplete" ? settlement.code : undefined;
 
   const engineTokens = sumCount(records, RUN_SPEND, "engine");
@@ -362,12 +370,6 @@ function formatOutcome(run) {
   return run.outcome === "complete" ? "complete" : `incomplete (\`${run.reason}\`)`;
 }
 
-function renderTable(header, rows) {
-  const lines = [`| ${header.join(" | ")} |`, `| ${header.map(() => "---").join(" | ")} |`];
-  for (const row of rows) lines.push(`| ${row.join(" | ")} |`);
-  return lines.join("\n");
-}
-
 const RUN_METRIC_ROWS = [
   ["Engine tokens", (r) => formatValue(r.engineTokens)],
   ["Classify tokens", (r) => formatValue(r.classifyTokens)],
@@ -487,19 +489,6 @@ export function renderMarkdown(runs, agg) {
 // Impure: `gh` invocations and the CLI entry point. Thin and untested against the network — the
 // same boundary `corpus/arena.mjs` and `corpus/arena-trend.mjs` draw around their own `main`.
 // =================================================================================================
-
-let cachedGhBinary;
-
-/**
- * Runs `gh` at its resolved absolute path (cached after the first call), mirroring
- * `corpus/arena-fetch.mjs`'s own `runGh`: the full ambient environment, no credential to narrow
- * since this only ever reads data already visible to whoever runs it — workflow run metadata and
- * job logs of a repository they can already open in a browser.
- */
-function runGh(args) {
-  cachedGhBinary ??= resolveGhBinary();
-  return execFileSync(cachedGhBinary, args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-}
 
 /** Lists recent runs of one workflow, in the order `gh` itself returns them (newest first). */
 export function listWorkflowRuns(owner, repoName, workflow, limit, since, runGhImpl = runGh) {

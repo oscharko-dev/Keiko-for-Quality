@@ -142,6 +142,27 @@ function validPair(
   return { category, severity };
 }
 
+/**
+ * The endpoint base with every trailing slash removed, so the request path appended after it cannot
+ * produce a doubled separator.
+ *
+ * A tail walk rather than the `/\/+$/` replace this used to be. An unanchored quantifier followed by
+ * `$` is the textbook super-linear pattern (Sonar S8786): the match is retried from every position
+ * in the string, so an endpoint ending in a long run of slashes costs quadratic time. The loop is
+ * linear and returns the identical string for every input, because `replace` acts on the FIRST
+ * match and the first (indeed only) place `/\/+$/` can match is the start of the maximal trailing
+ * run: `https://h/v1//` → `https://h/v1`, `https://h/v1` unchanged, `///` → `` (empty), `` → ``.
+ *
+ * Duplicated rather than shared with `model-proxy.ts`, which carries the identical helper: both
+ * modules are loaded directly by `corpus/run.mjs` under Node's type stripping, which is why neither
+ * may take a relative import (see this file's header).
+ */
+function withoutTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === "/") end -= 1;
+  return value.slice(0, end);
+}
+
 interface AttemptResult {
   readonly pair: { category: string; severity: string } | undefined;
   readonly tokens: number;
@@ -155,6 +176,17 @@ interface AttemptResult {
   readonly transportOk: boolean;
 }
 
+/**
+ * Bounds one classify/audit call against a hung endpoint. Sized for what this call actually asks —
+ * one finding, two closed vocabularies, a ~200-token constrained prompt (see the module doc) — not
+ * for the engine's own `fileTimeoutSeconds`, which prices a full multi-turn file review. Generous
+ * enough that a genuinely slow but working response still completes; short enough that a stalled
+ * connection degrades to the existing "failed attempt, not a crash" outcome (`transportOk: false`)
+ * within the same run instead of blocking it indefinitely — this call sits inside `performReview`'s
+ * own critical path, both for the initial repair and for the publish-time audit.
+ */
+const REQUEST_TIMEOUT_MS = 45_000;
+
 async function requestPair(
   prompt: string,
   deps: ClassifyEndpoint,
@@ -162,7 +194,7 @@ async function requestPair(
 ): Promise<AttemptResult> {
   const doFetch = deps.fetchImpl ?? fetch;
   try {
-    const response = await doFetch(`${deps.endpoint.replace(/\/+$/, "")}/chat/completions`, {
+    const response = await doFetch(`${withoutTrailingSlashes(deps.endpoint)}/chat/completions`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -181,6 +213,7 @@ async function requestPair(
         // that starves the final answer reads exactly like non-compliance.
         max_completion_tokens: 4000,
       }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) return { pair: undefined, tokens: 0, transportOk: false };
     const body = (await response.json()) as {
@@ -253,18 +286,6 @@ export interface AuditOutcome<T extends ClassifiableFinding> {
   readonly tokens: number;
 }
 
-/**
- * Why an audit exists on top of the repair: repair only fills MISSING fields, and the measured
- * failure mode on open-weight models is different — the fields arrive, valid, and miscalibrated
- * by a learned triage habit. Across full corpus runs the miscalibration ROAMED (secret-in-log and
- * path-traversal one run, sql-string-concat and script-shell-injection the next), so no rule
- * sentence can chase it. What flipped it reliably — three out of three in isolation — was
- * removing the diff context that anchors the habit and asking the model to apply the written
- * ladder to its own finding text alone. That is what this does, for every classified finding:
- * one constrained call, both fields re-derived, the answer adopted in WHICHEVER direction it
- * moves. It never invents: an invalid or failed reply keeps the original classification, and
- * findings still missing their fields belong to the repair pass, not here.
- */
 /**
  * The ladder's fixed text, one line per measured miscalibration class. Lifted out of the prompt
  * builder so the list can grow with the corpus without growing the function past the size gate;
@@ -428,6 +449,20 @@ function majorityPair(
   return undefined;
 }
 
+/**
+ * Why an audit exists on top of the repair: repair only fills MISSING fields, and the measured
+ * failure mode on open-weight models is different — the fields arrive, valid, and miscalibrated
+ * by a learned triage habit. Across full corpus runs the miscalibration ROAMED (secret-in-log and
+ * path-traversal one run, sql-string-concat and script-shell-injection the next), so no rule
+ * sentence can chase it. What flipped it reliably — three out of three in isolation — was
+ * removing the diff context that anchors the habit and asking the model to apply the written
+ * ladder to its own finding text alone. That is what this does, for every classified finding: a
+ * constrained re-derivation of both fields from the finding text alone, escalating to the
+ * majority-of-three vote above when the first vote disagrees with the classification the finding
+ * already carries (`collectAuditVotes`), and the answer adopted in WHICHEVER direction it moves.
+ * It never invents: an invalid or failed reply keeps the original classification, and findings
+ * still missing their fields belong to the repair pass, not here.
+ */
 export async function auditClassification<T extends ClassifiableFinding>(
   findings: readonly T[],
   deps: ClassifyEndpoint,

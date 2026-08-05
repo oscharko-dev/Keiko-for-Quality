@@ -20,8 +20,14 @@ export function placementLadder(
   const base = { body: "", commitId: headSha, path: finding.path } as const;
   const fileLevel: ReviewCommentInput = { ...base };
 
-  // A deleted file has no right-hand side to anchor to, and GitHub rejects a line comment on it.
-  if (item?.classification.kind === "reviewed-as-deletion" || item?.status === "D") {
+  // A deleted file has no right-hand side to anchor to, and an unknown path was never part of the
+  // diff at all — GitHub rejects a line comment on either, on both sides, every time, so neither
+  // case has a line-level rung worth the round trip.
+  if (
+    item === undefined ||
+    item.classification.kind === "reviewed-as-deletion" ||
+    item.status === "D"
+  ) {
     return [fileLevel];
   }
 
@@ -36,6 +42,9 @@ export function placementLadder(
     side: "RIGHT",
     ...(startLine !== undefined ? { startLine } : {}),
   };
+  // An added file has no pre-image at all — the LEFT rung is a guaranteed 422 for every finding on
+  // one, not just an occasional miss, since GitHub has no deletion-side diff to anchor it to.
+  if (item.status === "A") return [right, fileLevel];
   const left: ReviewCommentInput = { ...base, line, side: "LEFT" };
   return [right, left, fileLevel];
 }

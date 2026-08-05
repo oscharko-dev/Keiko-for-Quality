@@ -12,10 +12,14 @@ section for prerequisites and trust posture. Do not restate either here.
 
 Issue #95 landed `performLocalReview` in `src/review.ts`, so the CLI runs a real review end to
 end, through the same shared pipeline `performReview` runs — same digest-pinned engine, same rule
-text, same settlement semantics. What has not landed is the other end of that sharing:
-`corpus/real-diffs.mjs` still drives the engine with its own harness code rather than
-`performLocalReview` (issue #99), so today a change to the shared pipeline is proven against the
-CLI and against the qualification corpus separately — not yet by one measurement covering both.
+text, same settlement semantics. Issue #99 landed the other end of that sharing:
+`corpus/real-diffs.mjs` now drives `performLocalReview` too, instead of hand-rolling its own engine
+invocation, so a change to the shared pipeline is proven by one measurement covering both the CLI
+and a real commit, not two separate ones. `corpus/run.mjs` (the seeded-defect qualification
+harness) still drives the engine through its own harness code — its own migration is a
+deliberately separate, not-yet-scoped decision, left alone so the qualification that shipped each
+release keeps the same measurement basis it was recorded under (see `corpus/run.mjs`'s own header
+comment).
 
 ## Two commands spend real money
 
@@ -26,11 +30,20 @@ Do not run either without the user's explicit go-ahead, and do not reach for one
 an ordinary change — the deterministic half of the corpus (inventory, placement, sanitization,
 settlement) already runs under `npm test`.
 
-The free half of the corpus is invisible to `verify` too: the hermetic `corpus/*.test.mjs` suites
-run under `node --test`, which only the coverage lane executes — `npm run verify` can be green over
-a red corpus test (it happened on #53: a green verify masked a defused pin until the direct run
-surfaced it). After touching anything under `corpus/`, run `node --test corpus/*.test.mjs`
-yourself before claiming green.
+The free half of the corpus is inside `verify`: `test:corpus` runs the hermetic `corpus/*.test.mjs`
+suites under `node --test`, in the chain between `npm test` and `build`, so a red corpus test fails
+the local bar and there is no separate run to remember. It has not always been in the chain: on #53
+a green verify masked a defused pin until a direct `node --test` run surfaced it, and closing that
+gap is what the step is in the chain for.
+
+What did not go away is a naming collision worth knowing before you trust a green CI page: the CI
+job named `verify` is not the script named `verify`. The job runs typecheck, lint, format check,
+`npm test` and `check:bundle` as separate steps, and `test:corpus` is not among them; the job that
+does execute the corpus suites is CI's `SonarCloud` job, through `test:coverage`, and it is skipped
+on pull requests from forks because a fork receives no secrets. So on a fork pull request nothing
+required exercises the corpus at all, and `npm run verify` locally is the only place it is
+guaranteed to run. Read the `verify` job named in the `dist/index.js` section below the same way:
+that is the CI job, not the script.
 
 ## The rule text and the sanitizer must move together
 
@@ -83,10 +96,10 @@ with the source that produced it. This exact miss has already cost a CI round in
   auto-merge is enabled, so arm it after opening the pull request and the platform integrates once
   the required checks are green and every conversation is resolved.
 - **`main` is the release line.** It advances only through a release pull request carrying `dev`'s
-  tree —
-  version bump, regenerated `dist/index.js`, and a fresh qualification-corpus run recorded in the
-  PR — and every merge to `main` is tagged `vX.Y.Z`. Consumers pin full tag SHAs, so `main` is the
-  audit trail ("every commit is a qualified release"), not a consumer surface. From the second release
+  tree — version bump, the README quickstart's `# vX.Y.Z` comment moved with it, regenerated
+  `dist/index.js`, and a fresh qualification-corpus run recorded in the PR — and every merge to
+  `main` is tagged `vX.Y.Z`. Consumers pin full tag SHAs, so `main` is the audit trail ("every
+  commit is a qualified release"), not a consumer surface. From the second release
   onward that pull request comes from a `release/vX.Y.Z` branch cut from `main`, not from `dev`
   directly: each release squash leaves a commit on `main` whose content already exists in `dev`'s
   own history, so git reports a conflict on files both sides touched since an older merge base.

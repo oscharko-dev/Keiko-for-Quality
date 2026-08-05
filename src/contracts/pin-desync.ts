@@ -112,8 +112,22 @@ const USES_PREFIX = /\buses\s*:\s*["']?[^\s"'@]+@$/;
  * (`ACTION_PIN=<sha>`), and a source-level constant (`const SHA = "<sha>"`). Checked only after the
  * `uses:` shape above and the comment check below both fail, so a real `uses:` pin is never
  * reclassified as a generic assignment merely because it also happens to look like one.
+ *
+ * The identifier's tail is `[\d.-]`, deliberately DISJOINT from the `[A-Za-z_$]` that opens it,
+ * rather than the fuller `[\w$.-]` that actually spells an identifier. This pattern is anchored only
+ * at its end, so it is retried at every position of a prefix that may be most of a
+ * 2,000,000-character line, and an opening class that its own tail also accepts let each of those
+ * positions re-scan the entire identifier run — quadratic (Sonar S8786), and reachable rather than
+ * theoretical: a 160,000-character line of `a`s took over twelve seconds under the old form and
+ * under a millisecond under this one. The disjoint tail costs nothing in reach, because all it does
+ * is move the match's start from the FIRST identifier character of a run to the LAST. Both forms
+ * then settle the same question — does the run immediately before the `:` or `=` contain an
+ * identifier-start character at all — because every character after a run's last `[A-Za-z_$]` is,
+ * by what "last" means, one of the leftovers `[\d.-]` and nothing else. Checked concretely:
+ * `ACTION_PIN:`, `KEY0:`, `const SHA =`, `$FOO=`, `a.b:`, `a1b2:` and `v1.2-rc3:` still classify
+ * as assignments; `123:`, `-1:` and `Reverts commit ` still classify as nothing at all.
  */
-const ASSIGNMENT_PREFIX = /[A-Za-z_$][\w$.-]*\s*[:=]\s*["'`]?$/;
+const ASSIGNMENT_PREFIX = /[A-Za-z_$][\d.-]*\s*[:=]\s*["'`]?$/;
 
 /**
  * Index of the earliest comment-opening marker (`#` or `//`) in `prefix`, or -1 when none precedes
@@ -164,11 +178,19 @@ function scanLine(shaPattern: RegExp, line: string, lineNumber: number, out: Pin
   return false;
 }
 
+/**
+ * Walks the file one line at a time with a single shared matcher. `scanLine`'s bail-out ends the
+ * WALK rather than returning early: both exits handed back the same `out` array, so the second
+ * `return` carried nothing a `break` does not (Sonar S3516, a function whose every path returns the
+ * same value). Where the bail-out happens is unchanged — the first line that pushes `out` past
+ * `MAX_PIN_SITES` is still the last line scanned, and `findPinSites` still discards that over-bound
+ * array whole rather than publishing a partial scan.
+ */
 function collectPinSites(lines: readonly string[]): readonly PinSite[] {
   const shaPattern = new RegExp(SHA_SOURCE, "gi");
   const out: PinSite[] = [];
   for (let i = 0; i < lines.length; i += 1) {
-    if (scanLine(shaPattern, lines[i] ?? "", i + 1, out)) return out;
+    if (scanLine(shaPattern, lines[i] ?? "", i + 1, out)) break;
   }
   return out;
 }
@@ -297,9 +319,13 @@ export function detectPinDesync(base: string, head: string): readonly PinDesync[
  * prematurely closing it. Duplicated from `publish/sanitize.ts`'s `escapeInline` in miniature rather
  * than imported — this module stays import-free by design, like `shape-gate.ts` (see this module's
  * header comment) — and this is the one place it composes text a human, not this gate, will read.
+ *
+ * The replacement is `String.raw` so the one backslash it inserts reads as one backslash in the
+ * source: it is the escape being added, not an escape of the literal. `$&` is the matched character
+ * put back after it; nothing here is a template substitution, which needs `${`.
  */
 function escapeForCodeSpan(text: string): string {
-  return text.replace(/[`\\]/g, "\\$&");
+  return text.replace(/[`\\]/g, String.raw`\$&`);
 }
 
 /**
@@ -313,7 +339,7 @@ function formatLineList(sites: readonly PinSite[]): string {
   const lines = [...new Set(sites.map((site) => site.line))].sort((a, b) => a - b);
   const label = lines.length === 1 ? "line" : "lines";
   if (lines.length <= 1) return `${label} ${String(lines[0] ?? "?")}`;
-  const last = lines[lines.length - 1] ?? "?";
+  const last = lines.at(-1) ?? "?";
   return `${label} ${lines.slice(0, -1).join(", ")} and ${String(last)}`;
 }
 

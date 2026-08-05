@@ -1,4 +1,5 @@
 import type { CommitSha } from "../core/brands.js";
+import type { ReasonCode } from "../diagnostics/reason-codes.js";
 import type { Diagnostics } from "../diagnostics/sink.js";
 import { FINDING_SEVERITIES } from "../engine/classify.js";
 import type { EngineFinding } from "../engine/result.js";
@@ -18,6 +19,7 @@ import { sanitizeFindingBody } from "./sanitize.js";
 import {
   areIntraRunDuplicates,
   findsDispositionedConversation,
+  findsOutdatedRecurrence,
   findsSimilarOpenConversation,
   type CandidateForDedup,
   type ExistingConversation,
@@ -61,7 +63,7 @@ function requireClient(context: PublishContext): ReviewCommentApi {
 
 export interface PublishOutcome {
   readonly published: number;
-  /** Total suppressed — the sum of the four fields below: an intra-run duplicate, plus the three
+  /** Total suppressed — the sum of the five fields below: an intra-run duplicate, plus the four
    *  ways a candidate can duplicate an already-published conversation. */
   readonly suppressed: number;
   /**
@@ -80,6 +82,14 @@ export interface PublishOutcome {
   /** Suppressed against a resolved thread with a substantive disposition reply (Keiko-for-Quality#64) —
    *  never against a bare resolve, which must keep a genuinely recurred defect publishable. */
   readonly suppressedDispositioned: number;
+  /**
+   * Suppressed as a restatement of a still-open conversation a push marked OUTDATED — the stage the
+   * three fields above structurally cannot reach, because each of them matches on a line anchor and
+   * an outdated thread no longer has a trustworthy one. See `similarity.ts`'s
+   * `findsOutdatedRecurrence`. Optional for the same `exactOptionalPropertyTypes` reason as
+   * `suppressedIntraRun`.
+   */
+  readonly suppressedRecurrence?: number;
   readonly rejectedSanitization: number;
   readonly rejectedPlacement: number;
   readonly readbackFailures: number;
@@ -160,6 +170,11 @@ function toExistingConversation(comment: ReviewComment, identity: string): Exist
     path: comment.path,
     authorLogin: comment.authorLogin,
     resolved: comment.resolved === true || comment.outdated === true,
+    // The fold above is kept, and this is the fact it destroys, carried alongside rather than
+    // recovered from it: a thread a push moved but nobody answered. `findsOutdatedRecurrence` is
+    // its only reader — see that function for why an outdated-only thread must suppress a repeat
+    // while a genuinely resolved one still must not.
+    outdatedOnly: comment.outdated === true && comment.resolved !== true,
     dispositioned: isSubstantiveDisposition(comment.lastReply, identity),
     body: comment.body,
     startLine: comment.startLine ?? comment.line,
@@ -249,6 +264,7 @@ interface Counters {
   suppressedExactDuplicate: number;
   suppressedSimilar: number;
   suppressedDispositioned: number;
+  suppressedRecurrence: number;
   rejectedSanitization: number;
   neutralized: number;
   rejectedPlacement: number;
@@ -267,6 +283,12 @@ interface Counters {
  * stage just excluded, but only those whose last reply was a substantive disposition rather than a
  * bare resolve — the case where someone actually decided the question, so a matching recurrence
  * should stop re-litigating it rather than republish.
+ *
+ * The recurrence stage runs last, and covers the threads none of the three above can see: the
+ * still-open ones a push marked outdated, whose stale line anchors put them out of reach of every
+ * location-matching stage here. It is ordered last because it is the only stage that decides
+ * without a location at all, so anything an anchored stage can settle should be settled there
+ * first.
  */
 function classifySuppression(
   finding: EngineFinding,
@@ -275,7 +297,7 @@ function classifySuppression(
   existingMarkers: ReadonlySet<string>,
   existingThreads: readonly ExistingConversation[],
   identity: string,
-): "exact" | "similar" | "dispositioned" | undefined {
+): "exact" | "similar" | "dispositioned" | "recurrence" | undefined {
   if (existingMarkers.has(marker)) return "exact";
   const candidate = {
     path: finding.path,
@@ -285,7 +307,36 @@ function classifySuppression(
   };
   if (findsSimilarOpenConversation(candidate, existingThreads, identity)) return "similar";
   if (findsDispositionedConversation(candidate, existingThreads, identity)) return "dispositioned";
+  if (findsOutdatedRecurrence(candidate, existingThreads, identity)) return "recurrence";
   return undefined;
+}
+
+/**
+ * The reason code each cross-run suppression stage reports under.
+ *
+ * `dedup.dispositioned` deliberately breaks the `publish.finding_suppressed_*` naming its two
+ * siblings share — see the code's own comment in `reason-codes.ts`: it answers "did someone already
+ * settle this" rather than "is this the same finding", a different question that earns its own
+ * top-level prefix.
+ *
+ * A `switch` over `classifySuppression`'s own closed union, not a chain of conditionals: every stage
+ * now names its code explicitly, and a fourth stage added to that union is a compile error here —
+ * where the nested ternary this replaces would have quietly reported it as `dedup.dispositioned`,
+ * which was merely the last branch's fallthrough rather than a decision about it.
+ */
+function suppressionCode(
+  suppression: "exact" | "similar" | "dispositioned" | "recurrence",
+): ReasonCode {
+  switch (suppression) {
+    case "exact":
+      return "publish.finding_suppressed_duplicate";
+    case "similar":
+      return "publish.finding_suppressed_similar";
+    case "dispositioned":
+      return "dedup.dispositioned";
+    case "recurrence":
+      return "publish.finding_suppressed_outdated_recurrence";
+  }
 }
 
 /** The placement ladder, composition, publication, and read-back for a finding past both dedup stages. */
@@ -395,6 +446,8 @@ export interface PlanCounters {
   readonly suppressedExactDuplicate: number;
   readonly suppressedSimilar: number;
   readonly suppressedDispositioned: number;
+  /** See `PublishOutcome.suppressedRecurrence` — optional for the identical reason. */
+  readonly suppressedRecurrence?: number;
   readonly rejectedSanitization: number;
   /** Markup rewrites the sanitizer applied instead of rejecting the body. Optional for the same
    *  backward-compatibility reason as the fields above. */
@@ -417,6 +470,7 @@ function emptyCounters(): Counters {
     suppressedExactDuplicate: 0,
     suppressedSimilar: 0,
     suppressedDispositioned: 0,
+    suppressedRecurrence: 0,
     rejectedSanitization: 0,
     neutralized: 0,
     rejectedPlacement: 0,
@@ -445,7 +499,15 @@ function sanitizeOne(
   const sanitized = sanitizeFindingBody(finding.content);
   if (!sanitized.ok) {
     counters.rejectedSanitization += 1;
-    diagnostics.record("publish.finding_rejected_sanitization", { headSha: context.headSha });
+    // `sanitized.reason` is a closed, product-defined enum (`RejectionReason`, sanitize.ts) — never
+    // candidate/model content — so recording it costs nothing under the diagnostics sink's
+    // redaction posture, and gives an operator the one fact the bare count above could not: WHICH
+    // of the sanitizer's checks is actually firing. Mirrors `tallyPlacementAttempts`'s identical
+    // count-by-key shape a few dozen lines below.
+    diagnostics.record("publish.finding_rejected_sanitization", {
+      headSha: context.headSha,
+      counts: { [sanitized.reason]: 1 },
+    });
     return undefined;
   }
   // A neutralized body is a finding the reviewer would have DISCARDED before v0.12.0, and
@@ -552,10 +614,25 @@ function clusterIntraRunDuplicates(
 ): IntraRunClusterResult {
   const clusters: Cluster[] = [];
   for (const candidate of candidates) {
+    // Every member, not just the current representative: the representative can change as a
+    // cluster grows (`isBetterRepresentative` below), and comparing only against whichever member
+    // happens to hold that role right now lets a real duplicate of an EARLIER, since-demoted
+    // member dodge suppression the moment a later member takes over as representative.
+    // `areIntraRunDuplicates` is symmetric, so this only widens what a cluster can absorb, never
+    // narrows it. Bounded by the same finding-count ceiling `settle.ts` already enforces before
+    // any of this runs, so the worst case (candidates × members-so-far, up from candidates ×
+    // clusters) stays a small constant multiple of it, not an unbounded blowup.
+    // Every member, not just the current representative: the representative can change as a
+    // cluster grows (`isBetterRepresentative` below), and comparing only against whichever member
+    // happens to hold that role right now lets a real duplicate of an EARLIER, since-demoted
+    // member dodge suppression the moment a later member takes over as representative.
+    // `areIntraRunDuplicates` is symmetric, so this only widens what a cluster can absorb, never
+    // narrows it. Bounded by the same finding-count ceiling `settle.ts` already enforces before
+    // any of this runs, so the worst case (candidates × members-so-far, up from candidates ×
+    // clusters) stays a small constant multiple of it, not an unbounded blowup.
     const cluster = clusters.find((existing) =>
-      areIntraRunDuplicates(
-        toCandidateForDedup(candidate),
-        toCandidateForDedup(existing.representative),
+      existing.members.some((member) =>
+        areIntraRunDuplicates(toCandidateForDedup(candidate), toCandidateForDedup(member)),
       ),
     );
     if (cluster === undefined) {
@@ -601,16 +678,24 @@ function planCrossRun(
   );
   if (suppression !== undefined) {
     counters.suppressed += 1;
-    if (suppression === "exact") counters.suppressedExactDuplicate += 1;
-    else if (suppression === "similar") counters.suppressedSimilar += 1;
-    else counters.suppressedDispositioned += 1;
-    const code =
-      suppression === "exact"
-        ? "publish.finding_suppressed_duplicate"
-        : suppression === "similar"
-          ? "publish.finding_suppressed_similar"
-          : "dedup.dispositioned";
-    diagnostics.record(code, { headSha: context.headSha });
+    // A switch over the same closed union `suppressionCode` walks, for the same reason: the
+    // `else` this replaces silently counted anything that was not "exact" or "similar" as a
+    // disposition, so a fourth stage would have been tallied under a third stage's name.
+    switch (suppression) {
+      case "exact":
+        counters.suppressedExactDuplicate += 1;
+        break;
+      case "similar":
+        counters.suppressedSimilar += 1;
+        break;
+      case "dispositioned":
+        counters.suppressedDispositioned += 1;
+        break;
+      case "recurrence":
+        counters.suppressedRecurrence += 1;
+        break;
+    }
+    diagnostics.record(suppressionCode(suppression), { headSha: context.headSha });
     return undefined;
   }
 
@@ -685,6 +770,7 @@ export async function planPublication(
       suppressedExactDuplicate: counters.suppressedExactDuplicate,
       suppressedSimilar: counters.suppressedSimilar,
       suppressedDispositioned: counters.suppressedDispositioned,
+      suppressedRecurrence: counters.suppressedRecurrence,
       rejectedSanitization: counters.rejectedSanitization,
       neutralized: counters.neutralized,
     },
@@ -765,6 +851,7 @@ export async function executePublication(
     suppressedSimilar: plan.counters.suppressedSimilar + counters.suppressedSimilar,
     suppressedDispositioned:
       plan.counters.suppressedDispositioned + counters.suppressedDispositioned,
+    suppressedRecurrence: (plan.counters.suppressedRecurrence ?? 0) + counters.suppressedRecurrence,
     rejectedSanitization: plan.counters.rejectedSanitization + counters.rejectedSanitization,
     rejectedPlacement: counters.rejectedPlacement,
     readbackFailures: counters.readbackFailures,

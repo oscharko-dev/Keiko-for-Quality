@@ -63,20 +63,39 @@ export interface ReportFinding {
    * 1-based, inclusive — with one carved-out sentinel: `0` on BOTH fields means a file-level
    * finding (the deterministic contract gates emit these; see docs/local-report-schema.md). The
    * renderers translate the sentinel — JSON to `null`, SARIF to a region-less location — so no
-   * consumer ever sees a literal 0.
+   * consumer ever sees a literal 0. Both ask `isFileLevel` below rather than re-testing the two
+   * fields themselves.
    */
   readonly startLine: number;
   /** 1-based, inclusive; equal to `startLine` for a single-line finding, `0` for file-level. */
   readonly endLine: number;
   /**
    * Absent when the finding stayed unclassified — a real state this pipeline refuses to paper
-   * over with a fabricated value (CONTRIBUTING.md). JSON omits the key; SARIF reports the
-   * `unclassified` rule and level `none`.
+   * over with a fabricated value (CONTRIBUTING.md). JSON renders the key as `null` rather than
+   * omitting it, so a consumer reading the field always finds it and never has to distinguish
+   * "unclassified" from "this writer is older than the field"; SARIF reports the `unclassified`
+   * rule and level `none`.
    */
   readonly category?: FindingCategory;
   readonly severity?: FindingSeverity;
   /** Sanitized Markdown. Rendered as-is: sanitization is this module's caller's responsibility. */
   readonly body: string;
+}
+
+/**
+ * The 0-anchor sentinel above, as one predicate: the single decision point both renderers share.
+ * The JSON `null`/`null` anchors and the SARIF region-less location are two renderings of THIS
+ * question, not two independent readings of the convention — which is what they were while the
+ * comparison was written out character-for-character in each renderer, where either copy could
+ * have drifted (to `<= 0`, or to testing `startLine` alone) with every test still green. Only the
+ * question lives here; each renderer keeps its own comment for why its format answers it the way
+ * it does, because that reasoning is format-specific and does not generalize.
+ *
+ * Takes the two anchors rather than a whole `ReportFinding` so anything holding a line range — a
+ * test, a later third renderer — can ask without assembling a finding around it.
+ */
+export function isFileLevel(finding: Pick<ReportFinding, "startLine" | "endLine">): boolean {
+  return finding.startLine === 0 && finding.endLine === 0;
 }
 
 /** Token/spend accounting for one run, as accumulated by the run ledger. */

@@ -67,6 +67,11 @@ export const REASON_CODES = [
   // Publication
   "publish.identity_resolved",
   "publish.identity_unresolved",
+  // `resolveIdentity` THREW rather than returning `undefined` (v0.13.0) — a `mintInstallationToken`
+  // failure (malformed PEM, network blip, App not installed), distinct from the ordinary
+  // no-credential-configured case `identity_unresolved` already names. `main.ts`'s own catch
+  // records this before rethrowing, so the failure is not just a generic `run.failed`.
+  "publish.identity_mint_failed",
   "publish.finding_published",
   "publish.finding_suppressed_duplicate",
   // Suppressed by the phrasing-independent similarity gate (Keiko-for-Quality#38) rather than an
@@ -79,6 +84,14 @@ export const REASON_CODES = [
   // above so an operator can tell "the model repeats itself within a run" from "a later run
   // repeated an earlier one": they call for different remedies.
   "publish.finding_suppressed_intra_run",
+  // Suppressed as a restatement of a still-open conversation a push marked OUTDATED — the one
+  // shape no other stage here can see, because an outdated thread's line anchor is stale and every
+  // sibling stage matches on location. Its own code rather than reusing `_similar` because it is
+  // the code that answers a specific operator question — "how much of this pull request's comment
+  // volume is one defect re-filed across pushes" — and because it is the only cross-run stage that
+  // decided without a location, which is exactly what someone auditing a false suppression needs to
+  // know first.
+  "publish.finding_suppressed_outdated_recurrence",
   "publish.finding_rejected_sanitization",
   "publish.finding_rejected_placement",
   "publish.readback_failed",
@@ -114,6 +127,11 @@ export const REASON_CODES = [
   "cache.store_loaded",
   "cache.store_rejected",
   "cache.store_write_failed",
+  // The action's own final output write failed (v0.13.0) — `$GITHUB_OUTPUT` unwritable, a full
+  // disk. Mirrors `cache.store_write_failed`'s own posture: a delivery-mechanism failure at the
+  // very last step must not retroactively turn a completed, already-published review into an
+  // undiagnosable total failure (`main.ts`'s own try/catch around `writeOutputs`).
+  "outputs.write_failed",
   "cache.hits",
   // A content-key match a stored entry's own `prPathSetDigest` refused to replay because the pull
   // request's changed-file set moved since that entry was written (v0.10.0, issue #50). Distinct
@@ -134,9 +152,16 @@ export const REASON_CODES = [
 
   // Bounded resume (#57, v0.11.0): the engine run ended without a usable success — a thrown run
   // error or a non-success status — and was re-invoked exactly once. Emitted at most once per
-  // review; a second failure settles incomplete exactly as before, so "incomplete never reads
-  // as clean" survives the resume.
+  // review; "incomplete never reads as clean" survives the resume regardless of which of the two
+  // outcomes below follows it.
   "engine.resumed_once",
+  // The resumed attempt ITSELF threw (v0.13.0) — a second timeout, spawn failure, or nonzero exit,
+  // the same failure classes the resume exists to recover from, recurring on attempt two. Falls
+  // back to the first attempt's own result (its status, coverage, and findings) rather than losing
+  // every fact that attempt established: `settle()` still gets real data to judge, even though the
+  // run is very likely to settle incomplete on it. `counts.spent` is the first attempt's own token
+  // total — the only spend this outcome has anything measured to report.
+  "engine.resume_failed",
 
   // The resume that deliberately did NOT happen (v0.12.0): the first attempt reported its budget
   // exhausted, and a second attempt cannot review more of a change than the budget allows — it can
@@ -172,6 +197,16 @@ export const REASON_CODES = [
   // tokens — the number that decides whether prefix caching is working at all, which no other
   // layer can see. Counts only, like every other record: the proxy never quotes what it forwards.
   "model.usage",
+
+  // Superseded-notice cleanup: this reviewer's own past incomplete-review notices, resolved because
+  // a later push moved the hunk they anchored (`github/client.ts`'s `resolveSupersededOwnNotices`).
+  // Never affects completeness — a resolved GitHub thread is not a claim about review coverage, only
+  // about whether an operator still has to look at it. Recorded only when `attempted > 0`, the same
+  // "only when something happened" posture `run.spend` takes — but `attempted` rather than
+  // `resolved`, so a run where every mutation failed (a token missing the resolve-thread permission,
+  // say) still leaves `counts: { attempted: N, resolved: 0 }` distinguishable, across runs, from a
+  // run with nothing to resolve at all, which never records this code.
+  "cleanup.superseded_notices_resolved",
 ] as const;
 
 export type ReasonCode = (typeof REASON_CODES)[number];
@@ -181,31 +216,3 @@ const REASON_CODE_SET: ReadonlySet<string> = new Set<string>(REASON_CODES);
 export function isReasonCode(value: string): value is ReasonCode {
   return REASON_CODE_SET.has(value);
 }
-
-/**
- * Operator guidance per code family. Kept coarse on purpose: a precise remediation string would
- * drift from the code that emits it, and a stale runbook is worse than a general one.
- */
-export const REASON_CODE_GUIDANCE: Readonly<Record<string, string>> = {
-  eligibility: "The head was not reviewed by policy. No action unless the policy is wrong.",
-  review_pair: "The base/head pair could not be resolved. Check that both commits are fetched.",
-  inventory: "A changed path had no classification. Extend the review profile to cover it.",
-  engine: "The engine could not be acquired or completed. Check the pin and the model endpoint.",
-  settlement: "The review did not complete. Treat the pull request as unreviewed.",
-  publish: "Findings could not be published. Check the App installation and its permissions.",
-  dedup:
-    "A finding was suppressed against a settled disposition rather than published. No action " +
-    "unless the disposition itself was wrong — reopen the original thread to contest it.",
-  config: "The supplied configuration was rejected. Compare it against the documented schema.",
-  run: "Run lifecycle marker.",
-  cache:
-    "The review store could not be read or written, or a save was skipped. Coverage is unaffected; only re-review cost is.",
-  model:
-    "Usage telemetry observed by the loopback proxy. No action; it exists so spend and cache " +
-    "behaviour are measured rather than assumed.",
-  contracts:
-    "Cross-artifact surface telemetry. No action unless a gate finding is wrong — then fix the " +
-    "declared pair in the profile, not the gate.",
-  classify:
-    "Classification repair or audit telemetry. No action; findings stay publishable either way.",
-};

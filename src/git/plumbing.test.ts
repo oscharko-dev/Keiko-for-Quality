@@ -29,6 +29,14 @@ let ctx: GitContext;
 let baseSha: string;
 let headSha: string;
 
+/**
+ * Twice `readTextAtCommit`'s 1 MiB cap, deliberately clear of it rather than sitting on the
+ * boundary — a blob of exactly the cap is still accepted, so a fixture sized at it would prove
+ * nothing about the rejection.
+ */
+const OVERSIZED_BLOB_BYTES = 2 * 1024 * 1024;
+const OVERSIZED_BLOB_PATH = "generated-bundle.js";
+
 function git(args: readonly string[], cwd: string): string {
   return execFileSync("git", args, {
     cwd,
@@ -56,6 +64,15 @@ beforeAll(async () => {
   await writeFile(join(repo, "src/remove.ts"), "export const gone = 1;\n");
   await writeFile(join(repo, "script.sh"), "#!/bin/sh\necho hi\n");
   await writeFile(join(repo, "image.bin"), Buffer.from([0, 1, 2, 0, 255, 3]));
+  // Committed at base and never touched again, on purpose: "reports every changed path exactly
+  // once" below asserts an exact seven-path list, and a file that also changed at head would join
+  // it. Added-in-base-only keeps this blob readable at a commit while staying out of base..head.
+  // Pure ASCII with newlines, so `readTextAtCommit` can only be rejecting it for its size — a NUL
+  // byte anywhere would let the binary check take the credit instead.
+  await writeFile(
+    join(repo, OVERSIZED_BLOB_PATH),
+    `${"x".repeat(63)}\n`.repeat(OVERSIZED_BLOB_BYTES / 64),
+  );
   git(["add", "-A"], repo);
   git(["commit", "-q", "-m", "base", "--no-gpg-sign"], repo);
   baseSha = git(["rev-parse", "HEAD"], repo).trim();
@@ -185,19 +202,16 @@ describe("listChanges", () => {
       expect(changes.find((c) => c.path === "src/keep.ts")?.changedLines).toBe(2);
     });
 
-    it("is zero for a binary change, where numstat reports `-` rather than a count", async () => {
+    // Three routes to the same answer, one body: git writes `-`/`-` for the binary change and a
+    // literal 0/0 for both the byte-identical rename and the mode-only change. Each row keeps its
+    // own name, so a regression still names the shape that broke rather than "one of three".
+    it.each([
+      ["a binary change, where numstat reports `-` rather than a count", "image.bin"],
+      ["a byte-identical rename", "src/new-name.ts"],
+      ["a mode-only change with no content edit", "script.sh"],
+    ])("is zero for %s", async (_name, path) => {
       const changes = await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
-      expect(changes.find((c) => c.path === "image.bin")?.changedLines).toBe(0);
-    });
-
-    it("is zero for a byte-identical rename", async () => {
-      const changes = await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
-      expect(changes.find((c) => c.path === "src/new-name.ts")?.changedLines).toBe(0);
-    });
-
-    it("is zero for a mode-only change with no content edit", async () => {
-      const changes = await listChanges(ctx, commitSha(baseSha), commitSha(headSha), 50);
-      expect(changes.find((c) => c.path === "script.sh")?.changedLines).toBe(0);
+      expect(changes.find((c) => c.path === path)?.changedLines).toBe(0);
     });
 
     it("counts a one-line addition and a one-line deletion", async () => {
@@ -220,6 +234,19 @@ describe("readTextAtCommit", () => {
 
   it("refuses binary content rather than hand it to a text-parsing caller", async () => {
     expect(await readTextAtCommit(ctx, commitSha(baseSha), "image.bin")).toBeUndefined();
+  });
+
+  it("refuses a blob past MAX_TEXT_BLOB_BYTES rather than return a truncated prefix", async () => {
+    // The cap is handed to `run` as its `maxBuffer`, so an oversized blob makes the read *fail*
+    // instead of arriving shortened, and the caught rejection turns into the same `undefined` an
+    // absent path yields. That is the outcome the shape gate needs: silence, never a prefix it
+    // would happily parse as if it were the whole file.
+    //
+    // Asserting the fixture's own size first is not ceremony — a typo in the path would return
+    // `undefined` too, so without this the case could pass while testing nothing.
+    const size = git(["cat-file", "-s", `${baseSha}:${OVERSIZED_BLOB_PATH}`], repo).trim();
+    expect(size).toBe(String(OVERSIZED_BLOB_BYTES));
+    expect(await readTextAtCommit(ctx, commitSha(baseSha), OVERSIZED_BLOB_PATH)).toBeUndefined();
   });
 });
 

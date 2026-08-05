@@ -1,4 +1,4 @@
-import { FINDING_CATEGORIES } from "./types.js";
+import { FINDING_CATEGORIES, isFileLevel } from "./types.js";
 import type { FindingCategory, FindingSeverity, ReportFinding, ReportInput } from "./types.js";
 
 /**
@@ -176,7 +176,7 @@ function toResult(finding: ReportFinding): SarifResult {
   // The 0-anchor sentinel (docs/local-report-schema.md): SARIF forbids `startLine: 0`, and an
   // artifact location WITHOUT a region is exactly "the file as a whole" — so a file-level finding
   // drops the region rather than smuggling an illegal or fabricated line number in.
-  const fileLevel = finding.startLine === 0 && finding.endLine === 0;
+  const fileLevel = isFileLevel(finding);
   return {
     ruleId:
       finding.category === undefined ? UNCLASSIFIED_RULE_ID : categoryRuleId(finding.category),
