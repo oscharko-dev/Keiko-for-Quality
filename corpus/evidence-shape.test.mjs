@@ -102,3 +102,33 @@ test("an absent or empty body is scored, not thrown on", () => {
   assert.equal(statesTriggeringCondition(null), false);
   assert.equal(statesTriggeringCondition(""), false);
 });
+
+/**
+ * The every-path branch the rule text grew on 2026-08-05. A defect that is wrong on all paths has
+ * no circumstance to name, and the rule now asks for that to be SAID ("on every call") rather than
+ * left silent — so a predicate blind to the phrasing would score a finding that followed the rule
+ * exactly as though it had ignored it. Adding these forms moved the production numbers by 0.3pp and
+ * 2.3pp and WIDENED the gap to 43.4pp, which is what a rare-but-valid form looks like; the
+ * discarded consequence predicate collapsed from 17.5pp to 4.9pp on the same treatment.
+ */
+test("saying the code is wrong on every path counts as naming the circumstance", () => {
+  assert.equal(
+    statesTriggeringCondition(
+      "**Pin this action to a full commit SHA.**\n\nOn every run, a tag is resolved fresh, so the " +
+        "reviewed bytes and the executed bytes stop being the same bytes.",
+    ),
+    true,
+  );
+  assert.equal(
+    statesTriggeringCondition("This helper rejects the value for all inputs, not only empty ones."),
+    true,
+  );
+});
+
+/** Silence about the condition is still silence — the branch is for saying it, not for omitting it. */
+test("a claim that simply never mentions when it applies is still unconditioned", () => {
+  assert.equal(
+    statesTriggeringCondition("**Rename the helper.** This change renames `foo` to `bar`."),
+    false,
+  );
+});
