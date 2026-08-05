@@ -831,6 +831,220 @@ function computeEngineBudget(
   return { excluded, allottedBudget };
 }
 
+/**
+ * How many files one engine invocation is handed, as a multiple of the configured concurrency.
+ *
+ * Exists because the engine's own `--max-tokens-budget` was measured (2026-08-05, the
+ * budget-starved-clean-neighbours calibration) to gate individual LLM calls, not file dispatches:
+ * a 25k budget reviewed all five files and spent 273k–341k, and a 1-token budget spent nothing yet
+ * still counted every file as reviewed. So the flag can neither bound this run's real spend nor
+ * say which files were actually seen. Dispatching in tranches restores both properties to the
+ * adapter, where they are decidable: real `total_tokens` is checked between tranches (bounding
+ * overshoot to roughly one tranche instead of the +21% a full run showed on Keiko#2970), and a
+ * stopped run's covered set is exact — tranche membership — instead of a count the engine
+ * fabricates under budget pressure.
+ *
+ * Two, not one: a tranche of exactly `concurrency` would leave workers idle the moment the
+ * fastest file finishes; twice that keeps the engine's own scheduler fed while still bounding the
+ * money one unchecked stretch can burn.
+ */
+const TRANCHE_CONCURRENCY_FACTOR = 2;
+
+interface TrancheOutcome {
+  readonly result: EngineResult;
+  readonly engineTokens: number;
+  readonly alreadyReviewedPaths: readonly string[];
+}
+
+/** The reviewable paths the engine will actually be dispatched for, in inventory order — the same
+ *  narrowing `dispatchedPathCount` applies, materialized as the list tranching needs. */
+function dispatchPaths(inventory: Inventory, excluded: ReadonlySet<string>): readonly string[] {
+  return [...inventory.reviewablePaths].filter((path) => !excluded.has(path));
+}
+
+/**
+ * Runs the engine over `paths` in bounded tranches, checking REAL spend between them.
+ *
+ * The single-tranche case is byte-compatible with the pre-tranche pipeline: one invocation, the
+ * same exclude list, the same result object straight through — every pull request small enough to
+ * fit one tranche behaves exactly as v0.14.0 did.
+ *
+ * Across multiple tranches, three rules decide everything:
+ *
+ * 1. **Real tokens, not the engine's flag.** After each tranche the accumulated `engineTokens` is
+ *    compared against the allotment; the next tranche is only dispatched with the remainder. This
+ *    is the adapter refusing to fund what the measured engine cannot refuse itself.
+ * 2. **A tranche the ENGINE budget-stopped is discarded whole.** Its tokens are counted (they were
+ *    spent), but its findings are dropped and its paths are not covered: a budget-stopped tranche
+ *    contains files whose review was cut mid-reasoning, and publishing a verdict from a half-read
+ *    file is exactly the false-positive class production measured at 18% precision ("the import is
+ *    missing" — it was above the part the model got to read). The corpus pins the model half of
+ *    that condition (budget-starved-clean-neighbours); this rule is the adapter half.
+ * 3. **A failed tranche ends the run with today's semantics.** Non-success without a budget stop
+ *    was a settlement-visible failure before tranching and stays one: the merged result carries
+ *    that status, findings collected so far survive into the incomplete settlement exactly as a
+ *    single failed run's do.
+ *
+ * The merged result reports `filesReviewed` as the adapter's own count of completed-tranche paths
+ * — honest by construction, unlike the engine's measured count-everything-under-budget-stop — and
+ * carries those paths in `coverage.completed`, which `memoizablePaths` (settle.ts) already reads,
+ * so a budget-stopped run's cache write covers every finished file, findings or not.
+ */
+async function runEngineInTranches(
+  base: Omit<EngineRunOptions, "allottedBudget" | "mechanicallyCleanPaths">,
+  paths: readonly string[],
+  excluded: readonly string[],
+  allottedBudget: number,
+  concurrency: number,
+  diagnostics: Diagnostics,
+): Promise<TrancheOutcome> {
+  const trancheSize = Math.max(1, concurrency) * TRANCHE_CONCURRENCY_FACTOR;
+  if (paths.length <= trancheSize) {
+    return runEngineWithOneResume(
+      { ...base, allottedBudget, mechanicallyCleanPaths: excluded },
+      diagnostics,
+    );
+  }
+  const tranches: string[][] = [];
+  for (let i = 0; i < paths.length; i += trancheSize)
+    tranches.push(paths.slice(i, i + trancheSize));
+
+  const acc = newTrancheAccumulator();
+  for (const [index, tranche] of tranches.entries()) {
+    const others = paths.filter((path) => !tranche.includes(path));
+    const outcome = await runEngineWithOneResume(
+      {
+        ...base,
+        allottedBudget: Math.max(1, allottedBudget - acc.engineTokens),
+        mechanicallyCleanPaths: [...excluded, ...others],
+      },
+      diagnostics,
+    );
+    if (absorbTranche(acc, outcome, tranche, allottedBudget, index === tranches.length - 1)) break;
+  }
+
+  if (acc.stopped === "adapter_budget" || acc.stopped === "engine_budget") {
+    diagnostics.record("engine.tranche_stopped", {
+      counts: {
+        tranches_total: tranches.length,
+        covered: acc.covered.length,
+        tokens: acc.engineTokens,
+      },
+    });
+  }
+  return mergeTranches(acc);
+}
+
+interface TrancheAccumulator {
+  readonly findings: EngineResult["findings"][number][];
+  readonly warnings: EngineResult["warnings"][number][];
+  readonly covered: string[];
+  readonly alreadyReviewed: string[];
+  engineTokens: number;
+  filesReviewed: number;
+  last: EngineResult | undefined;
+  stopped: "adapter_budget" | "engine_budget" | "tranche_failed" | undefined;
+}
+
+function newTrancheAccumulator(): TrancheAccumulator {
+  return {
+    findings: [],
+    warnings: [],
+    covered: [],
+    alreadyReviewed: [],
+    engineTokens: 0,
+    filesReviewed: 0,
+    last: undefined,
+    stopped: undefined,
+  };
+}
+
+/**
+ * Folds one tranche's outcome into the accumulator; `true` means stop dispatching.
+ *
+ * The three rules from `runEngineInTranches`' doc comment live here, in the order they must be
+ * applied: an engine-budget stop is absorbed as SPEND ONLY (rule 2 — its files were cut
+ * mid-reasoning, so neither its findings nor its paths may be believed), a non-success tranche
+ * keeps what it produced and ends the run (rule 3), and the adapter's own real-token check decides
+ * whether the next one is funded (rule 1).
+ */
+function absorbTranche(
+  acc: TrancheAccumulator,
+  outcome: TrancheOutcome,
+  tranche: readonly string[],
+  allottedBudget: number,
+  lastTranche: boolean,
+): boolean {
+  acc.engineTokens += outcome.engineTokens;
+  acc.last = outcome.result;
+  if (outcome.result.budgetExceeded) {
+    acc.stopped = "engine_budget";
+    return true;
+  }
+  acc.findings.push(...outcome.result.findings);
+  acc.warnings.push(...outcome.result.warnings);
+  acc.filesReviewed += outcome.result.filesReviewed;
+  acc.covered.push(...tranche);
+  acc.alreadyReviewed.push(...outcome.alreadyReviewedPaths);
+  if (outcome.result.status !== "success") {
+    acc.stopped = "tranche_failed";
+    return true;
+  }
+  if (!lastTranche && acc.engineTokens >= allottedBudget) {
+    acc.stopped = "adapter_budget";
+    return true;
+  }
+  return false;
+}
+
+/**
+ * The one `EngineResult` the rest of the pipeline sees.
+ *
+ * `filesReviewed` and `coverage.completed` are the ADAPTER's own count of finished-tranche paths,
+ * never the engine's: the engine was measured to count a file as reviewed even when its budget
+ * blocked every call for it (a 1-token budget reported five files and spent nothing), so its own
+ * numbers cannot be trusted to describe a truncated run.
+ */
+function mergeTranches(acc: TrancheAccumulator): TrancheOutcome {
+  // Cannot be undefined — the loop always runs at least once — but the type system cannot see it,
+  // and inventing a result would be worse than the redundant check.
+  if (acc.last === undefined) throw new Error("tranche dispatch ran zero tranches");
+  const last = acc.last;
+  const budgetStopped = acc.stopped === "adapter_budget" || acc.stopped === "engine_budget";
+  return {
+    result: {
+      manifestPresent: last.manifestPresent,
+      status: trancheStatus(acc.stopped, last.status),
+      filesReviewed: acc.filesReviewed,
+      schemaVersion: last.schemaVersion,
+      terminalState: last.terminalState,
+      coverage: {
+        selected: last.coverage.selected,
+        completed: acc.covered.map((path) => ({ path })),
+        reused: [],
+        failed: last.coverage.failed,
+        waived: [],
+      },
+      findings: acc.findings,
+      warnings: acc.warnings,
+      totalTokens: acc.engineTokens,
+      budgetExceeded: budgetStopped,
+    },
+    engineTokens: acc.engineTokens,
+    alreadyReviewedPaths: acc.alreadyReviewed,
+  };
+}
+
+/** A failed tranche keeps the engine's own status (rule 3 — today's semantics); a budget stop
+ *  reports `failed`, which is what `budgetDisqualifier` reads ahead of every status check. */
+function trancheStatus(
+  stopped: TrancheAccumulator["stopped"],
+  lastStatus: EngineResult["status"],
+): EngineResult["status"] {
+  if (stopped === undefined) return "success";
+  return stopped === "tranche_failed" ? lastStatus : "failed";
+}
+
 async function executeEngine(
   request: PipelineRequest,
   inventory: Inventory,
@@ -847,7 +1061,7 @@ async function executeEngine(
       result: parsed,
       engineTokens,
       alreadyReviewedPaths,
-    } = await runEngineWithOneResume(
+    } = await runEngineInTranches(
       {
         binaryPath: engine.binaryPath,
         repositoryPath: request.repositoryPath,
@@ -857,9 +1071,11 @@ async function executeEngine(
         guidelines: request.guidelines,
         env: request.env,
         pathValue: request.pathValue,
-        allottedBudget,
-        mechanicallyCleanPaths: excluded,
       },
+      dispatchPaths(inventory, new Set(excluded)),
+      excluded,
+      allottedBudget,
+      request.config.concurrency,
       diagnostics,
     );
     ledger.engine += engineTokens;
