@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { buildBinding } from "./binding.mjs";
 import { classifyMeasurement } from "./measurement.mjs";
 import { FIXED_PATH } from "./fixed-path.mjs";
+import { checkQualificationModel, DEVIATION_ENV } from "./qualification-model.mjs";
 import { CASES } from "./cases.mjs";
 // Rule generation and the .js→.ts resolve hook live in rule-source.mjs so node --test can cover
 // them in-process (this file is a script with top-level side effects and cannot be imported).
@@ -98,6 +99,21 @@ const BINARY = process.env.OCR_BINARY;
 if (!BINARY) {
   console.error("OCR_BINARY must point at the pinned engine binary");
   process.exit(2);
+}
+
+// Before anything spends a token: this project measures only against the pinned model (AGENTS.md).
+// Checked here rather than at the first model call so a wrong configuration costs nothing at all —
+// the failure this guards against already happened once and cost a full 32-case run.
+const modelCheck = checkQualificationModel(process.env);
+if (!modelCheck.ok) {
+  console.error(modelCheck.reason);
+  process.exit(2);
+}
+if (modelCheck.allowed) {
+  console.warn(
+    `${DEVIATION_ENV}=1 — measuring against a model this project does not run.\n` +
+      "  This run is a cross-model experiment, not a qualification.",
+  );
 }
 
 async function generateRuleFile() {

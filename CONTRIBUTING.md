@@ -33,6 +33,12 @@ These follow from what this product is, not from taste.
 - **A test must be able to fail.** Before trusting a test that guards a security property, break the
   property and confirm that exactly that test goes red. A test that passes either way proves
   nothing.
+- **Every live run we make uses `gpt-oss-120b`.** Qualifications, corpus runs, live telemetry, and
+  the reviews this product publishes on its own consumer repository. A qualification is a property
+  of the _pairing_ — engine, rule text, and model together — so numbers measured against a model we
+  do not run are not weaker evidence, they are none. This binds what **we** measure and deploy, and
+  says nothing about what a consumer configures: `model_id` is their input and their decision.
+  `corpus/run.mjs` enforces it; see AGENTS.md for the incident that turned it into a rule.
 
 ## Advancing the engine pin
 
