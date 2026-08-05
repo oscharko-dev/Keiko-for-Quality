@@ -10,6 +10,7 @@ import { buildBinding } from "./binding.mjs";
 import { classifyMeasurement } from "./measurement.mjs";
 import { FIXED_PATH } from "./fixed-path.mjs";
 import { engineArguments, engineEvidence, skipRetryAfterBudgetStop } from "./engine-invocation.mjs";
+import { evidenceShapeCounts } from "./evidence-shape.mjs";
 import { checkQualificationModel, DEVIATION_ENV } from "./qualification-model.mjs";
 import { CASES } from "./cases.mjs";
 // Rule generation and the .js→.ts resolve hook live in rule-source.mjs so node --test can cover
@@ -643,6 +644,13 @@ function scoreOne(testCase, result, plan) {
     // additive report key; check-qualification.mjs and measurement.mjs read only id/pass/rejected
     // and kind/tokens respectively, so an old report and a new one parse identically.
     engine: engineEvidence(result),
+    // How many published findings say WHEN the defect bites (see evidence-shape.mjs). Measured on
+    // production this separates us from the competitor bot more sharply than anything else in the
+    // prose — 21.7% against 63.1%, alongside a 23% against 64% rate of findings the author actually
+    // acted on. Reported, not graded: this run's numbers are the baseline a later cycle moves, and
+    // grading a corpus of 38 cases on a property measured over 850 real findings would read a
+    // handful of samples as a trend. Additive for the same reason `engine` is.
+    evidenceShape: evidenceShapeCounts(published.map((finding) => finding.content)),
     tokens,
     rejectedSanitization,
     suppressedIntraRun,
