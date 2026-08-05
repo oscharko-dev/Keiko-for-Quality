@@ -96,6 +96,15 @@ export interface EventContext {
   readonly head: CommitSha;
   readonly baseRef: string;
   readonly draft: boolean;
+  /**
+   * The pull request's title and description, joined — what the author says this change is for.
+   *
+   * Empty when the payload carries neither, which is the ordinary case for a bot-opened pull
+   * request with a title and no body, and which callers must treat as "no intent stated" rather
+   * than as an error. Candidate-controlled text; see `renderChangeIntent` (`engine/model-proxy.ts`)
+   * for the framing and bound it is given before any model sees it.
+   */
+  readonly changeIntent: string;
   readonly headRepoFullName: string | undefined;
   readonly action: string | undefined;
   readonly previousBaseRef: string | undefined;
@@ -124,6 +133,21 @@ function asRecord(value: unknown): Record<string, unknown> {
  * Both SHAs come from the webhook snapshot rather than from the checked-out repository, so the
  * review is bound to the state that triggered it even if the branch has moved since.
  */
+/**
+ * Joins the pull request's title and body into one block, or returns empty.
+ *
+ * Both fields are optional in the payload and `body` is explicitly nullable on GitHub's own schema,
+ * so a missing one is normal rather than a malformed event — this returns what it has instead of
+ * throwing, because a review with no stated intent is a review, and a failed parse would not be.
+ */
+function joinIntent(title: unknown, body: unknown): string {
+  const parts = [
+    typeof title === "string" ? title.trim() : "",
+    typeof body === "string" ? body.trim() : "",
+  ];
+  return parts.filter((part) => part !== "").join("\n\n");
+}
+
 export function parseEventContext(payload: unknown): EventContext {
   const root = asRecord(payload);
   // The activity type lives in the payload, not the environment: `GITHUB_EVENT_NAME` is
@@ -153,6 +177,7 @@ export function parseEventContext(payload: unknown): EventContext {
     head: commitSha(text(head.sha), "event.head.sha"),
     baseRef: text(base.ref),
     draft: pull.draft === true,
+    changeIntent: joinIntent(pull.title, pull.body),
     headRepoFullName: typeof headRepo.full_name === "string" ? headRepo.full_name : undefined,
     action: eventAction,
     previousBaseRef: typeof baseChange.from === "string" ? baseChange.from : undefined,

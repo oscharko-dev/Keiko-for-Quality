@@ -6270,6 +6270,13 @@ function text2(value) {
 function asRecord(value) {
   return typeof value === "object" && value !== null ? value : {};
 }
+function joinIntent(title, body) {
+  const parts = [
+    typeof title === "string" ? title.trim() : "",
+    typeof body === "string" ? body.trim() : ""
+  ];
+  return parts.filter((part) => part !== "").join("\n\n");
+}
 function parseEventContext(payload) {
   const root = asRecord(payload);
   const eventAction = typeof root.action === "string" ? root.action : void 0;
@@ -6297,6 +6304,7 @@ function parseEventContext(payload) {
     head: commitSha(text2(head.sha), "event.head.sha"),
     baseRef: text2(base.ref),
     draft: pull.draft === true,
+    changeIntent: joinIntent(pull.title, pull.body),
     headRepoFullName: typeof headRepo.full_name === "string" ? headRepo.full_name : void 0,
     action: eventAction,
     previousBaseRef: typeof baseChange.from === "string" ? baseChange.from : void 0,
@@ -6429,6 +6437,10 @@ function buildReviewRequest(event, identity, config, profile, guidelines, env, c
     identityExclusive: identity.exclusive,
     env,
     pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    // Omitted rather than passed empty when the payload stated no purpose: under
+    // `exactOptionalPropertyTypes` the key is absent or a string, and an absent one leaves every
+    // model request byte-identical to what the previous release sent.
+    ...event.changeIntent === "" ? {} : { changeIntent: event.changeIntent },
     ...cacheStore === void 0 ? {} : { cacheStore }
   };
 }

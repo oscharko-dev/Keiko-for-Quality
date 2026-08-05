@@ -198,3 +198,42 @@ describe("action inputs", () => {
     });
   });
 });
+
+/** `payload`'s overrides land at the root; the intent lives on `pull_request`, so it merges there. */
+function withPull(fields: Record<string, unknown>): Record<string, unknown> {
+  const base = payload();
+  return { ...base, pull_request: { ...(base.pull_request as object), ...fields } };
+}
+
+describe("change intent from the webhook payload", () => {
+  /**
+   * The model was never told what a change was for — no title, no description. This is the source
+   * end of that channel; `model-proxy.ts` is where it reaches the model, and the rule text is
+   * deliberately NOT the path, because the rule digest keys the review cache.
+   */
+  it("joins the title and the description into one stated purpose", () => {
+    const event = parseEventContext(
+      withPull({
+        title: "Restore the retry ceiling",
+        body: "Fixes #42. The cap was dropped in #40.",
+      }),
+    );
+
+    expect(event.changeIntent).toBe(
+      "Restore the retry ceiling\n\nFixes #42. The cap was dropped in #40.",
+    );
+  });
+
+  /** A bot-opened pull request with a title and no body is the ordinary case, not a malformed one. */
+  it("keeps the title alone when there is no description", () => {
+    expect(parseEventContext(withPull({ title: "Bump the pin", body: null })).changeIntent).toBe(
+      "Bump the pin",
+    );
+  });
+
+  /** No stated purpose is a review with no stated purpose — never a parse failure. */
+  it("reports an empty intent rather than throwing when the payload states none", () => {
+    expect(parseEventContext(payload()).changeIntent).toBe("");
+    expect(parseEventContext(withPull({ title: "   ", body: "  " })).changeIntent).toBe("");
+  });
+});

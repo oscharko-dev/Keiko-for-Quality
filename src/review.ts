@@ -78,6 +78,14 @@ export interface ReviewRequest {
   readonly config: RuntimeConfig;
   readonly profile: CompiledProfile;
   readonly guidelines: GuidelineIndex;
+  /**
+   * What the pull request says it is for — title and description, as the author wrote them.
+   *
+   * Absent for the local CLI, which reviews a commit pair with no pull request behind it. Reaches
+   * the model through `model-proxy.ts` rather than the rule text, because the rule digest keys the
+   * review cache and a per-pull-request rule would make every cache entry unique to one.
+   */
+  readonly changeIntent?: string;
   readonly identity: string;
   /**
    * Whether `identity` is provably exclusive to this reviewer (`action/identity.ts`'s own field of
