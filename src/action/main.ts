@@ -298,14 +298,24 @@ export async function runAction(
   if (!admit(env, event, diagnostics)) return undefined;
 
   const apiBase = env.GITHUB_API_URL ?? DEFAULT_API_BASE;
-  const identity = await resolveIdentity(
-    apiBase,
-    env,
-    event.owner,
-    event.repo,
-    diagnostics,
-    Math.floor(Date.now() / 1000),
-  );
+  let identity: ResolvedIdentity | undefined;
+  try {
+    identity = await resolveIdentity(
+      apiBase,
+      env,
+      event.owner,
+      event.repo,
+      diagnostics,
+      Math.floor(Date.now() / 1000),
+    );
+  } catch (error) {
+    // Mirrors the config-loading block below: a `mintInstallationToken` failure (a malformed PEM, a
+    // network blip, the App not installed on this repository) otherwise collapses into the same
+    // generic `run.failed` every other cause does, with nothing in the diagnostics stream to tell
+    // an operator this was an identity problem rather than, say, a config or an engine one.
+    diagnostics.record("publish.identity_mint_failed", { headSha: event.head });
+    throw error;
+  }
   if (identity === undefined) throw new Error("no posting identity configured");
 
   let config: RuntimeConfig;
@@ -349,7 +359,15 @@ export async function runAction(
     diagnostics,
   );
 
-  writeOutputs(env, reportOutputs(report, summaryCommentUrl, storeWritten));
+  try {
+    writeOutputs(env, reportOutputs(report, summaryCommentUrl, storeWritten));
+  } catch {
+    // Mirrors `saveCacheStore`'s own reasoning: a delivery-mechanism failure at the very last step
+    // — `$GITHUB_OUTPUT` unwritable, a disk full — must not retroactively turn a completed,
+    // already-published review into an undiagnosable total failure. The review already happened;
+    // only the action's own output plumbing failed to report it.
+    diagnostics.record("outputs.write_failed");
+  }
   return report;
 }
 

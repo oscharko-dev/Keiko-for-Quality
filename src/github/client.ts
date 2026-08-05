@@ -185,13 +185,32 @@ const MAX_RETRY_AFTER_SECONDS = 60;
  * a large or malformed value cannot stall the job far longer than the job itself is worth; a run that
  * would need to wait past the cap should fail and let the next trigger retry rather than block CI on
  * someone else's outage.
+ *
+ * GitHub reports two different rate limits through two different header shapes. The SECONDARY limit
+ * (rapid comment creation, exactly this client's own publish loop) sends `retry-after` directly —
+ * the fast path above. The PRIMARY limit (the account's overall request budget for the hour) sends
+ * no `retry-after` at all, only `x-ratelimit-remaining: 0` and `x-ratelimit-reset` (a Unix epoch
+ * second marking when the budget refills). Before this, a primary-limit 429 fell through to the
+ * linear backoff below — a few seconds — and burned all `MAX_ATTEMPTS` attempts against a limit
+ * that, unlike the secondary one, was never going to lift in seconds: the reset is typically
+ * minutes away. Reading `x-ratelimit-reset` is what gives this path the same real number the
+ * secondary path already had, capped by the identical `MAX_RETRY_AFTER_SECONDS` — past the cap this
+ * still fails fast rather than blocking the job, exactly as an unreadable `retry-after` already does.
  */
 function retryAfterMs(response: Response): number | undefined {
   const header = response.headers.get("retry-after");
-  if (header === null) return undefined;
-  const seconds = Number(header);
-  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-  return Math.min(seconds, MAX_RETRY_AFTER_SECONDS) * 1000;
+  if (header !== null) {
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds, MAX_RETRY_AFTER_SECONDS) * 1000;
+    }
+  }
+  if (response.headers.get("x-ratelimit-remaining") !== "0") return undefined;
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  if (!Number.isFinite(reset)) return undefined;
+  const secondsUntilReset = reset - Math.floor(Date.now() / 1000);
+  if (secondsUntilReset <= 0) return undefined;
+  return Math.min(secondsUntilReset, MAX_RETRY_AFTER_SECONDS) * 1000;
 }
 
 /**
@@ -397,7 +416,25 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     this.graphqlBase = graphqlBase;
   }
 
-  private async requestUrl(url: string, init: RequestInit = {}): Promise<Response> {
+  /**
+   * `retryAmbiguous5xx` (default `true`, unchanged behavior for every existing caller): whether a
+   * 500/502/503/504 — as opposed to `429` or a secondary-rate-limit `403`, which are pre-processing
+   * rejections the request never reached application logic for — may be retried at all.
+   *
+   * A 5xx on a READ is unambiguous to retry: nothing was written, so repeating it costs nothing but
+   * time. A 5xx on a WRITE (creating a comment, say) is a genuinely different risk: the server may
+   * have already applied the write and failed only while sending the response back, and retrying
+   * would then create a SECOND comment for the one finding. `429`/secondary-`403` never carry this
+   * risk regardless of method — GitHub rejects those before the request reaches application logic —
+   * so they stay retryable unconditionally; only the pass-or-fail-silently 5xx band is caller-decided.
+   * The caller (not this method) is who knows whether a given call is a write worth refusing to
+   * blindly repeat — see `createReviewComment`/`createIssueComment` for the two that set it `false`.
+   */
+  private async requestUrl(
+    url: string,
+    init: RequestInit = {},
+    { retryAmbiguous5xx = true }: { readonly retryAmbiguous5xx?: boolean } = {},
+  ): Promise<Response> {
     let lastStatus = 0;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       const response = await fetch(url, {
@@ -415,6 +452,14 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
       if (!RETRYABLE.has(response.status) && !isSecondaryRateLimit(response)) {
         throw new GitHubApiError(response.status);
       }
+      if (
+        !retryAmbiguous5xx &&
+        !isSecondaryRateLimit(response) &&
+        response.status !== 429 &&
+        RETRYABLE.has(response.status)
+      ) {
+        throw new GitHubApiError(response.status);
+      }
       // Linear backoff is the default: the ordinary retryable cases are transient, and a reviewer
       // that hammers a rate-limited API makes the consumer's situation worse, not better. A response
       // naming its own wait (the secondary rate limit's `retry-after`) overrides it instead.
@@ -423,12 +468,20 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     throw new GitHubApiError(lastStatus);
   }
 
-  private async request(path: string, init: RequestInit = {}): Promise<Response> {
-    return this.requestUrl(`${this.apiBase}${path}`, init);
+  private async request(
+    path: string,
+    init: RequestInit = {},
+    options?: { readonly retryAmbiguous5xx?: boolean },
+  ): Promise<Response> {
+    return this.requestUrl(`${this.apiBase}${path}`, init, options);
   }
 
-  private async json(path: string, init?: RequestInit): Promise<unknown> {
-    const response = await this.request(path, init);
+  private async json(
+    path: string,
+    init?: RequestInit,
+    options?: { readonly retryAmbiguous5xx?: boolean },
+  ): Promise<unknown> {
+    const response = await this.request(path, init, options);
     return await response.json();
   }
 
@@ -486,6 +539,10 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     number: number,
     comments: readonly ReviewComment[],
   ): Promise<ReviewComment[]> {
+    // Nothing for the walk below to attach state to — skip the GraphQL round trip entirely rather
+    // than pay for it and immediately discard the result. A fresh pull request with zero review
+    // comments yet is exactly this case, and `listReviewComments` reaches it on every such run.
+    if (comments.length === 0) return [];
     const overlays = await this.fetchThreadOverlays(ref, number);
     if (overlays.size === 0) return [...comments];
     return comments.map((comment) => {
@@ -638,9 +695,12 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
         payload.start_side = input.side ?? "RIGHT";
       }
     }
+    // A 5xx lost after the write already succeeded must not be retried into a second, duplicate
+    // finding comment for the same defect — see `requestUrl`'s own doc comment.
     const created = (await this.json(
       `/repos/${ref.owner}/${ref.repo}/pulls/${String(number)}/comments`,
       { method: "POST", body: JSON.stringify(payload) },
+      { retryAmbiguous5xx: false },
     )) as Record<string, unknown>;
     return toReviewComment(created);
   }
@@ -684,9 +744,13 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     number: number,
     body: string,
   ): Promise<IssueComment> {
+    // Same reasoning as `createReviewComment`: a lost 5xx response must not be retried into a
+    // second summary comment — the marker-based upsert a future run relies on would only ever find
+    // and update ONE of the two, leaving a stale duplicate on the pull request permanently.
     const created = (await this.json(
       `/repos/${ref.owner}/${ref.repo}/issues/${String(number)}/comments`,
       { method: "POST", body: JSON.stringify({ body }) },
+      { retryAmbiguous5xx: false },
     )) as Record<string, unknown>;
     return toIssueComment(created);
   }

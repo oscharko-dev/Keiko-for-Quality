@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -160,6 +160,44 @@ describe("runAction: invalid configuration", () => {
       "config.invalid",
     ]);
     expect(performReviewMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("runAction: identity resolution failure (v0.13.0)", () => {
+  it("records publish.identity_mint_failed before rethrowing, distinct from config.invalid", async () => {
+    const { resolveIdentity } = await import("./identity.js");
+    vi.mocked(resolveIdentity).mockRejectedValueOnce(new Error("malformed PEM"));
+    const env = await baseEnv();
+    const diagnostics = createDiagnostics(() => undefined);
+
+    await expect(runAction(env, diagnostics)).rejects.toThrow("malformed PEM");
+
+    expect(diagnostics.drain().map((r) => r.code)).toEqual([
+      "eligibility.accepted",
+      "publish.identity_mint_failed",
+    ]);
+    expect(performReviewMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("runAction: final output write failure (v0.13.0)", () => {
+  it("records outputs.write_failed instead of losing an already-completed review to a delivery failure", async () => {
+    performReviewMock.mockResolvedValue(report());
+    // A directory, not a file: `appendFileSync` throws EISDIR — a portable, permission-free way to
+    // force the exact failure shape `writeOutputs` can hit in production ($GITHUB_OUTPUT unwritable,
+    // a full disk), without needing filesystem permission tricks.
+    const outputDir = join(dir, "output-is-a-directory");
+    await mkdir(outputDir);
+    const env = await baseEnv();
+    env.GITHUB_OUTPUT = outputDir;
+    const diagnostics = createDiagnostics(() => undefined);
+
+    const result = await runAction(env, diagnostics);
+
+    // The review itself still completed and is still returned — only the delivery of its outputs
+    // failed, and that failure did not retroactively turn a successful run into a rejected one.
+    expect(result?.outcome).toBe("complete");
+    expect(diagnostics.drain().map((r) => r.code)).toContain("outputs.write_failed");
   });
 });
 

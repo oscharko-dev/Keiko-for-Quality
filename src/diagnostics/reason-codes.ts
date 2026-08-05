@@ -67,6 +67,11 @@ export const REASON_CODES = [
   // Publication
   "publish.identity_resolved",
   "publish.identity_unresolved",
+  // `resolveIdentity` THREW rather than returning `undefined` (v0.13.0) — a `mintInstallationToken`
+  // failure (malformed PEM, network blip, App not installed), distinct from the ordinary
+  // no-credential-configured case `identity_unresolved` already names. `main.ts`'s own catch
+  // records this before rethrowing, so the failure is not just a generic `run.failed`.
+  "publish.identity_mint_failed",
   "publish.finding_published",
   "publish.finding_suppressed_duplicate",
   // Suppressed by the phrasing-independent similarity gate (Keiko-for-Quality#38) rather than an
@@ -122,6 +127,11 @@ export const REASON_CODES = [
   "cache.store_loaded",
   "cache.store_rejected",
   "cache.store_write_failed",
+  // The action's own final output write failed (v0.13.0) — `$GITHUB_OUTPUT` unwritable, a full
+  // disk. Mirrors `cache.store_write_failed`'s own posture: a delivery-mechanism failure at the
+  // very last step must not retroactively turn a completed, already-published review into an
+  // undiagnosable total failure (`main.ts`'s own try/catch around `writeOutputs`).
+  "outputs.write_failed",
   "cache.hits",
   // A content-key match a stored entry's own `prPathSetDigest` refused to replay because the pull
   // request's changed-file set moved since that entry was written (v0.10.0, issue #50). Distinct

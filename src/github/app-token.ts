@@ -1,4 +1,5 @@
 import { createSign } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 
 /**
  * Mints a short-lived GitHub App installation token.
@@ -71,18 +72,57 @@ interface TokenResponse {
   readonly token?: unknown;
 }
 
+/**
+ * The identical retry/backoff policy `github/client.ts`'s `requestUrl` already applies to every
+ * OTHER GitHub API call this reviewer makes — duplicated here rather than imported, since
+ * `requestUrl` is a private `GitHubClient` method entangled with `this.token`, and sharing it
+ * cleanly would mean exporting the policy as its own module for one other caller. Before this, a
+ * transient 5xx or a routine rate limit during token minting failed the entire run outright, on the
+ * one call every other request in the run depends on completing first.
+ */
+const RETRYABLE: ReadonlySet<number> = new Set([429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = 3;
+const MAX_RETRY_AFTER_SECONDS = 60;
+
+function isSecondaryRateLimit(response: Response): boolean {
+  if (response.status !== 403) return false;
+  return (
+    response.headers.has("retry-after") || response.headers.get("x-ratelimit-remaining") === "0"
+  );
+}
+
+function retryAfterMs(response: Response): number | undefined {
+  const header = response.headers.get("retry-after");
+  if (header === null) return undefined;
+  const seconds = Number(header);
+  if (!Number.isFinite(seconds) || seconds < 0) return undefined;
+  return Math.min(seconds, MAX_RETRY_AFTER_SECONDS) * 1000;
+}
+
 async function apiJson(url: string, bearer: string, method = "GET"): Promise<unknown> {
-  const response = await fetch(url, {
-    method,
-    headers: {
-      authorization: `Bearer ${bearer}`,
-      accept: "application/vnd.github+json",
-      "x-github-api-version": "2022-11-28",
-      "user-agent": "keiko-for-quality",
-    },
-  });
-  if (!response.ok) throw new Error(`github app api ${String(response.status)}`);
-  return await response.json();
+  let lastStatus = 0;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    const response = await fetch(url, {
+      method,
+      headers: {
+        authorization: `Bearer ${bearer}`,
+        accept: "application/vnd.github+json",
+        "x-github-api-version": "2022-11-28",
+        "user-agent": "keiko-for-quality",
+      },
+    });
+    if (response.ok) return await response.json();
+    lastStatus = response.status;
+    // Every call this function ever makes — mint a JWT-authenticated app token, resolve an
+    // installation, exchange for an installation token — is a GET or a plain mint POST with no
+    // side-effect-ambiguity risk comparable to creating a comment, so retrying any of these three is
+    // unconditionally safe: there is nothing a retry could duplicate.
+    if (!RETRYABLE.has(response.status) && !isSecondaryRateLimit(response)) {
+      throw new Error(`github app api ${String(response.status)}`);
+    }
+    await delay(retryAfterMs(response) ?? attempt * 1000);
+  }
+  throw new Error(`github app api ${String(lastStatus)}`);
 }
 
 /**
