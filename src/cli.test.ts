@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CommitSha } from "./core/brands.js";
-import { serializeStore, type CacheStore } from "./cache/review-cache.js";
+import { serializeStore, type CacheStore, SUPPORTED_STORE_SCHEMA } from "./cache/review-cache.js";
 import type { GitContext } from "./git/plumbing.js";
 import type { CliArgs, LocalReviewReport, MainDeps } from "./cli.js";
 
@@ -820,7 +820,7 @@ describe("runCli", () => {
     });
 
     it("loads an existing valid store", async () => {
-      const store: CacheStore = { schemaVersion: "keiko-for-quality.review-cache/v2", entries: [] };
+      const store: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
       const storePath = join(repo, "store.json");
       await writeFile(storePath, serializeStore(store));
       const { deps, runLocalReview } = makeDeps({ argv: ["--store", storePath] });
@@ -832,7 +832,7 @@ describe("runCli", () => {
     it("writes the store back on a complete settlement", async () => {
       const storePath = join(repo, "store.json");
       const updated: CacheStore = {
-        schemaVersion: "keiko-for-quality.review-cache/v2",
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
         entries: [],
       };
       const { deps, runLocalReview } = makeDeps({ argv: ["--store", storePath] });
@@ -844,7 +844,7 @@ describe("runCli", () => {
     it("writes the store back on an incomplete settlement whose verdicts survive it", async () => {
       const storePath = join(repo, "store.json");
       const updated: CacheStore = {
-        schemaVersion: "keiko-for-quality.review-cache/v2",
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
         entries: [],
       };
       const { deps, runLocalReview } = makeDeps({ argv: ["--store", storePath] });
@@ -862,7 +862,7 @@ describe("runCli", () => {
     it("does not write the store back on an incomplete settlement whose reason does not survive it", async () => {
       const storePath = join(repo, "store.json");
       const updated: CacheStore = {
-        schemaVersion: "keiko-for-quality.review-cache/v2",
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
         entries: [],
       };
       const { deps, runLocalReview } = makeDeps({ argv: ["--store", storePath] });
@@ -880,7 +880,7 @@ describe("runCli", () => {
     it("does not write the store back on abandoned", async () => {
       const storePath = join(repo, "store.json");
       const updated: CacheStore = {
-        schemaVersion: "keiko-for-quality.review-cache/v2",
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
         entries: [],
       };
       const { deps, runLocalReview } = makeDeps({ argv: ["--store", storePath] });
