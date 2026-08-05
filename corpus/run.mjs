@@ -10,7 +10,7 @@ import { buildBinding } from "./binding.mjs";
 import { classifyMeasurement } from "./measurement.mjs";
 import { FIXED_PATH } from "./fixed-path.mjs";
 import { engineArguments, engineEvidence, skipRetryAfterBudgetStop } from "./engine-invocation.mjs";
-import { evidenceShapeCounts } from "./evidence-shape.mjs";
+import { evidenceShapeCounts, statesTriggeringCondition } from "./evidence-shape.mjs";
 import { checkQualificationModel, DEVIATION_ENV } from "./qualification-model.mjs";
 import { CASES } from "./cases.mjs";
 // Rule generation and the .js→.ts resolve hook live in rule-source.mjs so node --test can cover
@@ -693,6 +693,28 @@ function scoreOne(testCase, result, plan) {
     }
     const where = published.length === 0 ? "MISSED" : `MISSED (${String(noise)} other finding(s))`;
     return { ...base, kind: "recall", pass: false, noise, detail: where };
+  }
+
+  // Opt-in, and exactly one case sets it (`unevidenced-claim`). A finding that names the right
+  // defect but never says under what circumstance the code is wrong is a true sentence the reader
+  // still has to re-derive before acting — production measured 21.7% of our findings stating such a
+  // condition against a competitor's 63.1%, alongside 23% versus 64% actually acted on. Gating one
+  // purpose-built case on it turns that gap into something a run can fail, without re-basing the 38
+  // cases whose measurement basis predates the property: an unflagged case never reaches this
+  // branch, so every recorded qualification stays comparable.
+  if (testCase.requiresTriggeringCondition === true) {
+    const grounded = onDefect.filter((finding) =>
+      statesTriggeringCondition(String(finding.content)),
+    );
+    if (grounded.length === 0) {
+      return {
+        ...base,
+        kind: "recall",
+        pass: false,
+        noise,
+        detail: "UNEVIDENCED: found the defect but never states when the code is wrong",
+      };
+    }
   }
 
   const verdict = classify(testCase, onDefect);

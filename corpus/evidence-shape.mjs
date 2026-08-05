@@ -6,7 +6,7 @@
  * window, 23% of our findings were followed by a change to the line they sat on, against 64% of
  * Codex's. Looking for what differs in the prose turned up one property that survives scrutiny:
  *
- *     states a triggering condition     ours 21.7%     Codex 63.1%
+ *     states a triggering condition     ours 22.0%     Codex 65.4%
  *
  * Every Codex finding is written condition → mechanism → consequence → remedy; ours are written
  * remedy → description of the change. A reader can check whether a stated condition can occur. A
@@ -23,10 +23,18 @@
  *
  * The condition predicate was put through the same test and held:
  *
- *     sentence-anchored, as measured    21.7% / 63.1%    41.4pp
+ *     sentence-anchored only            21.7% / 63.1%    41.4pp
+ *     + the every-path forms (shipped)  22.0% / 65.4%    43.4pp
  *     only `When`/`If`                  17.9% / 56.4%    38.5pp
  *     plus `Given`/`Should`/`On`        25.4% / 65.4%    40.0pp
  *     no sentence anchor at all         66.1% / 84.4%    18.3pp
+ *
+ * The every-path forms ("on every call", "for all inputs") were added when the rule text grew a
+ * branch for them: a defect that is wrong on all paths has no circumstance to name, and the rule
+ * now asks for that to be SAID rather than left silent, so a predicate blind to it would score a
+ * finding that followed the rule exactly as though it had ignored it. Adding them moved the
+ * numbers by 0.3pp and 2.3pp and widened the gap, which is what a form being genuinely rare and
+ * genuinely valid looks like — unlike the consequence predicate, which collapsed.
  *
  * Every variant keeps a large gap, so the property is structural rather than lexical. That is the
  * whole argument for grading on it, and the reason the consequence half is absent instead of
@@ -61,7 +69,7 @@ function prose(body) {
  * condition under which the code is wrong. Those are different claims and only one is checkable.
  */
 export function statesTriggeringCondition(body) {
-  return /(^|[.!?]\s|\*\*\s*)(When|If|Once|After|While|Whenever|Because)\s+[a-z`]/mu.test(
+  return /(^|[.!?]\s|\*\*\s*)(When|If|Once|After|While|Whenever|Because)\s+[a-z`]|\b(on every (call|run|request|invocation)|for all inputs|on all paths|in every case)\b/imu.test(
     prose(body),
   );
 }
