@@ -1,6 +1,6 @@
 # Qualification — v0.14.0 release candidate (2026-08-05)
 
-Full 32-case run against dev `4ff8fbe` (the release tree, v0.14.0), plus isolated second-opinion
+Full 32-case run against dev `9fe600e` (the release tree, v0.14.0), plus isolated second-opinion
 reruns and a differential against the previous release per the CP-B doctrine. Redaction discipline
 as everywhere in this directory: counts, digests, ids — no finding bodies, no model text.
 
@@ -13,7 +13,7 @@ against a model the product never uses measures nothing about the product that s
 
 |               | Main run                | Second opinions + replication |
 | ------------- | ----------------------- | ----------------------------- |
-| adapter       | dev `4ff8fbe`           | same                          |
+| adapter       | dev `9fe600e`           | same                          |
 | engine        | `484a232e017c` (v1.8.4) | same                          |
 | rule digest   | `9764590d3ad2`          | same                          |
 | cases digest  | `b255cdcfde2a`          | same                          |
@@ -45,7 +45,7 @@ regression from this release's audit work:
 
 | Adapter                 | Observations                 | Pass rate |
 | ----------------------- | ---------------------------- | --------- |
-| dev `4ff8fbe` (v0.14.0) | FAIL, FAIL, PASS, PASS, FAIL | **2/5**   |
+| dev `9fe600e` (v0.14.0) | FAIL, FAIL, PASS, PASS, FAIL | **2/5**   |
 | v0.13.0 tag `86cd076`   | FAIL, PASS, FAIL             | **1/3**   |
 
 The case roams on **both** trees, and the release tree passes it at a higher rate than the tree it
