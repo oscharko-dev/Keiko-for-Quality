@@ -1076,10 +1076,43 @@ export function label(kind: string): string {
     ],
   },
   {
+    // The module under test is carried as unchanged context (base === head, so it is committed at
+    // both revisions and absent from the diff), and it is load-bearing. Without it this case spent
+    // most of its runs failing outright rather than passing: judging whether the ADDED assertion is
+    // correct means knowing whether `ratio` really throws RangeError on a zero denominator, so the
+    // reviewer went looking for `src/ratio.ts`, git answered `does not exist in 'HEAD'`, and the
+    // engine spiralled — ~24 tool calls and ~195k tokens before giving up with a non-zero exit, i.e.
+    // the "per-file subtask spiral" runEngineWithOneResume already documents. Measured on the
+    // v0.15.0 tree: 2/8 runs passed, and only because the model sometimes never asked. The case
+    // scored the corpus's own incoherent repository state, never the behaviour it names — no real
+    // pull request adds a test for a module the repository does not contain.
+    //
+    // Six sibling cases share the shape (a `*.test.ts` whose module is not in `files`) and pass
+    // reliably today, because their verdict is decidable from the diff alone: the seeded ones carry
+    // the defect INSIDE the test file. Left alone deliberately — this fix is built on the one case
+    // with failing evidence, and re-cutting six measurement bases on suspicion is the opposite of
+    // that discipline.
     id: "clean-added-test",
     defect: null,
     about: "a strengthened test suite",
     files: [
+      {
+        path: "src/ratio.ts",
+        base: `export function ratio(numerator: number, denominator: number): number {
+  if (denominator === 0) {
+    throw new RangeError("denominator must not be zero");
+  }
+  return numerator / denominator;
+}
+`,
+        head: `export function ratio(numerator: number, denominator: number): number {
+  if (denominator === 0) {
+    throw new RangeError("denominator must not be zero");
+  }
+  return numerator / denominator;
+}
+`,
+      },
       {
         path: "src/ratio.test.ts",
         base: `it("divides", () => {
