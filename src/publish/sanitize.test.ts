@@ -129,6 +129,77 @@ describe("sanitizeFindingBody", () => {
       expect(sanitizeFindingBody("a".repeat(8001))).toEqual({ ok: false, reason: "too_long" });
     });
   });
+
+  /**
+   * A body that is nothing but echoed diff lines is the model writing the hunk back instead of
+   * reviewing it. Two of the 127 findings published on the consumer's Keiko#2970 were exactly this
+   * shape, and both cleared every other check in this file. The fixtures below reproduce their
+   * STRUCTURE (marker, two-space code indentation, one statement), never the consumer's code.
+   */
+  describe("diff echoes (the model writing the hunk back)", () => {
+    it("rejects a single echoed removal line — the first real production shape", () => {
+      expect(sanitizeFindingBody("-  const total = sumOfParts(stageRoot);")).toEqual({
+        ok: false,
+        reason: "diff_echo",
+      });
+    });
+
+    it("rejects a single echoed addition line — the second real production shape", () => {
+      expect(
+        sanitizeFindingBody('+  const total = sumOfParts(joinPath(stageRoot, "payload"));'),
+      ).toEqual({ ok: false, reason: "diff_echo" });
+    });
+
+    it("rejects a multi-line body when every line is an echoed diff line", () => {
+      const body = [
+        "-  const value = readSetting(name);",
+        "+  const value = readSetting(name, fallback);",
+      ].join("\n");
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "diff_echo" });
+    });
+
+    // The false-positive risk this check is written around: a Markdown bullet is `- ` — marker,
+    // ONE space — while a diff line carrying indented code is marker plus the code's own leading
+    // whitespace. A prose bullet list must stay publishable.
+    it("never rejects a Markdown bullet list, which uses one space after the marker", () => {
+      const body = [
+        "- Restore the range check before dispatching the request.",
+        "- Reject the request when the header is absent.",
+      ].join("\n");
+      expect(sanitizeFindingBody(body)).toEqual({ ok: true, body });
+    });
+
+    // Even a bullet list whose lines mention code (parentheses) is prose, not an echo — the
+    // two-space requirement is what keeps it out, and this pins that boundary exactly.
+    it("never rejects a bullet list that references code in every line", () => {
+      const body = [
+        "- Call validate() before dispatch.",
+        "- Drop the fallback = null branch entirely.",
+      ].join("\n");
+      expect(sanitizeFindingBody(body)).toEqual({ ok: true, body });
+    });
+
+    it("never rejects a real finding that quotes a diff line inside prose", () => {
+      const body = [
+        "The staged inventory reads from the wrong directory after the rename.",
+        "",
+        "-  const actual = inventoryFiles(stageRoot);",
+        "",
+        "The replacement scans the payload root instead, so signing misses nothing.",
+      ].join("\n");
+      const result = sanitizeFindingBody(body);
+      expect(result.ok).toBe(true);
+    });
+
+    // Column-zero code escapes the check BY DESIGN: the gate prefers missing an echo to ever
+    // eating a real finding, and this pins that deliberate bound so a future "improvement" that
+    // widens the pattern has to reckon with the bullet-list risk documented in sanitize.ts.
+    it("does not reject column-zero code lines — the deliberate precision bound", () => {
+      const body = "+const total = sumOfParts(stageRoot);";
+      const result = sanitizeFindingBody(body);
+      expect(result.ok).toBe(true);
+    });
+  });
 });
 
 describe("code-region masking (the corpus-blocking html false positive)", () => {

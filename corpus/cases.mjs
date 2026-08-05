@@ -55,6 +55,16 @@
  * taken together — it represents the counterpart artifact (a client type, a twin validator, a
  * consumer predicate) that a per-file reviewer has no architectural reason to open. Whether it gets
  * opened anyway is exactly what these cases measure.
+ *
+ * `budgetTokens` (2026-08-05 optimization wave, cycle 2) opts a case into a budgeted, sequential
+ * engine invocation (`--max-tokens-budget N --concurrency 1` — see `engine-invocation.mjs` for why
+ * both flags travel together). Absent, the invocation is byte-identical to what this harness has
+ * always built, which is what keeps every recorded qualification's measurement basis intact.
+ * It exists because production produced its false positives under
+ * `settlement.incomplete.budget_exceeded` across 38 files while every single-file clean case
+ * passes at full budget — precision has to be measured under the condition it actually fails in.
+ * For a budgeted case the run's own budget line and the report's `engine` evidence are part of the
+ * result: a budgeted case that never hit its budget measured nothing and says so as a WARNING.
  */
 
 const CHECKOUT_V4_2_0 = "11bd71901bbe5b1630ceea73d27597364c9af683";
@@ -683,14 +693,43 @@ choose one on the caller's behalf.
     defect: { file: "src/capabilities.ts", category: "bug", severity: "high" },
     about: "an intentional empty selection is dropped from the update instead of sent explicitly",
     anchors: ["empty", "clear*", "omit*", "unset", "workfloweligiblemodelids", "partial"],
+    // `EligibilityUpdate` is declared here as unchanged context (present in both revisions, so it
+    // produces no hunk) because part of the verdict hangs on it: whether `return {}` is even legal,
+    // and whether dropping the field loses information, is a question about the field's optionality.
+    //
+    // Measured, and NOT the whole story. Undeclared: 1 of 3 runs passed, the survivor costing ~151k
+    // tokens, two runs dying in the subtask spiral. Declared: 3 of 6, one spiral, 79k–143k tokens.
+    // Real but partial — the declaration was worth keeping and was not the main cause.
+    //
+    // What remains is written in this case's own header and missing from its fixture: the defect is
+    // that "a preserve-existing merge ON THE RECEIVING END keeps the stale list". No receiving end
+    // exists here. Deciding whether the dropped field is a bug means knowing what the consumer does
+    // with an absent key, so the reviewer goes looking for a consumer the fixture never commits —
+    // ~100k tokens of searching for a 180-byte diff. Committing a consumer as context is the fix
+    // this points to; it is a larger intervention than a declaration and is deliberately left for
+    // its own measurement rather than bundled into a release. Until then the case roams, and the
+    // qualification records it as roaming instead of pretending otherwise.
+    //
+    // Twelve other cases reference a type they never declare and are left alone: theirs are opaque
+    // handles (`db: Db`, `client: Client`, `store: Store`) whose shape cannot change the verdict —
+    // nobody needs the definition of `Db` to see string-concatenated SQL. The distinction that
+    // matters is not "undeclared" but "undeclared AND decides the verdict".
     files: [
       {
         path: "src/capabilities.ts",
-        base: `export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
+        base: `export interface EligibilityUpdate {
+  workflowEligibleModelIds?: readonly string[];
+}
+
+export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
   return { workflowEligibleModelIds: selected };
 }
 `,
-        head: `export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
+        head: `export interface EligibilityUpdate {
+  workflowEligibleModelIds?: readonly string[];
+}
+
+export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
   if (selected.length === 0) return {};
   return { workflowEligibleModelIds: selected };
 }
@@ -1066,10 +1105,43 @@ export function label(kind: string): string {
     ],
   },
   {
+    // The module under test is carried as unchanged context (base === head, so it is committed at
+    // both revisions and absent from the diff), and it is load-bearing. Without it this case spent
+    // most of its runs failing outright rather than passing: judging whether the ADDED assertion is
+    // correct means knowing whether `ratio` really throws RangeError on a zero denominator, so the
+    // reviewer went looking for `src/ratio.ts`, git answered `does not exist in 'HEAD'`, and the
+    // engine spiralled — ~24 tool calls and ~195k tokens before giving up with a non-zero exit, i.e.
+    // the "per-file subtask spiral" runEngineWithOneResume already documents. Measured on the
+    // v0.15.0 tree: 2/8 runs passed, and only because the model sometimes never asked. The case
+    // scored the corpus's own incoherent repository state, never the behaviour it names — no real
+    // pull request adds a test for a module the repository does not contain.
+    //
+    // Six sibling cases share the shape (a `*.test.ts` whose module is not in `files`) and pass
+    // reliably today, because their verdict is decidable from the diff alone: the seeded ones carry
+    // the defect INSIDE the test file. Left alone deliberately — this fix is built on the one case
+    // with failing evidence, and re-cutting six measurement bases on suspicion is the opposite of
+    // that discipline.
     id: "clean-added-test",
     defect: null,
     about: "a strengthened test suite",
     files: [
+      {
+        path: "src/ratio.ts",
+        base: `export function ratio(numerator: number, denominator: number): number {
+  if (denominator === 0) {
+    throw new RangeError("denominator must not be zero");
+  }
+  return numerator / denominator;
+}
+`,
+        head: `export function ratio(numerator: number, denominator: number): number {
+  if (denominator === 0) {
+    throw new RangeError("denominator must not be zero");
+  }
+  return numerator / denominator;
+}
+`,
+      },
       {
         path: "src/ratio.test.ts",
         base: `it("divides", () => {
@@ -1156,6 +1228,603 @@ jobs:
         with:
           persist-credentials: false
       - run: npm ci --ignore-scripts && npm run build
+`,
+      },
+    ],
+  },
+
+  // ---------------------------------------------------------------------------------------------
+  // Precision cases derived from REAL false positives this reviewer published on its consumer's
+  // pull requests (Keiko#2985 and siblings, 2026-08-05). An external review of 49 findings across
+  // two pull requests scored this reviewer at 18% precision against 92% for two other bots — while
+  // this corpus reported 4/4 precision. Both numbers were correct: the corpus carried 28
+  // seeded-defect cases against 4 clean ones, and production is the opposite ratio. Precision was
+  // therefore measured on almost nothing, and the metric could not see the failure mode that
+  // actually mattered.
+  //
+  // Each case below reproduces one published false positive as the CORRECT code it was reported
+  // against. `defect: null` means the only passing answer is silence. They are deliberately small
+  // and self-evident: none of them requires taste or a judgement call, and a reviewer that speaks
+  // here has contradicted a fact visible in the diff it was given.
+  // ---------------------------------------------------------------------------------------------
+  {
+    id: "clean-import-present-above",
+    defect: null,
+    // Published three times on one pull request: "randomUUID is used but never imported", with a
+    // patch that would have added a SECOND import from "crypto" instead of "node:crypto". The
+    // import is on line 1 of the file the finding names. The added function sits below it and uses
+    // the same symbol, so a reviewer reading only the added hunk cannot see the import — which is
+    // exactly what an incomplete run produces.
+    //
+    // Strictly ADDITIVE on purpose: the existing function is byte-identical across base and head.
+    // A first draft changed `slice(0, 8)` to `slice(0, 12)` and was not clean at all — that alters
+    // every id this function hands out, which a reviewer may legitimately object to. `clean-refactor`
+    // documents the same trap: a clean case that is not clean scores a missed defect as a success.
+    about: "a used symbol whose import is present, above the added hunk",
+    files: [
+      {
+        path: "src/ids.ts",
+        base: `import { randomUUID } from "node:crypto";
+
+export function requestId(prefix: string): string {
+  return prefix + "-" + randomUUID().slice(0, 8);
+}
+`,
+        head: `import { randomUUID } from "node:crypto";
+
+export function requestId(prefix: string): string {
+  return prefix + "-" + randomUUID().slice(0, 8);
+}
+
+export function traceId(): string {
+  return "trace-" + randomUUID().slice(0, 8);
+}
+`,
+      },
+    ],
+  },
+  {
+    id: "clean-literal-is-in-union",
+    defect: null,
+    // Published twice: "this literal is not a member of the declared union". The union is declared
+    // at the top of the file and consists of exactly the two literals used. Nothing here requires
+    // inference — only reading the type that is in the same file.
+    //
+    // Additive: a new exported predicate beside an untouched one. A first draft added a REQUIRED
+    // parameter to the existing function, and the reviewer correctly called that a breaking API
+    // change — the fixture was the defect, not the reviewer.
+    about: "a literal that is a declared member of the union it is compared against",
+    files: [
+      {
+        path: "src/mode.ts",
+        base: `export type Mode = "strict" | "lenient";
+
+export function isStrict(mode: Mode): boolean {
+  return mode === "strict";
+}
+`,
+        head: `export type Mode = "strict" | "lenient";
+
+export function isStrict(mode: Mode): boolean {
+  return mode === "strict";
+}
+
+export function isLenient(mode: Mode): boolean {
+  return mode === "lenient";
+}
+`,
+      },
+    ],
+  },
+  {
+    id: "clean-test-asserts-the-opposite",
+    defect: null,
+    // Published twice as "Critical: modelId leaks secrets". The cited file is this test, and it
+    // asserts the exact opposite of the claim — and passes. Reporting a leak against a test that
+    // proves there is none is wrong-file attribution, and severity "Critical" made it worse: all
+    // five Critical findings on that pull request were false, which is what makes a severity
+    // signal worthless rather than merely noisy.
+    about: "a passing test that proves the property a false finding claims is broken",
+    files: [
+      {
+        path: "src/redact.test.ts",
+        base: `import { describe, expect, it } from "vitest";
+import { redactModelId } from "./redact.js";
+
+describe("redactModelId", () => {
+  it("keeps the family and drops the deployment secret", () => {
+    expect(redactModelId("gpt-oss-120b#dep_9f3a")).toBe("gpt-oss-120b");
+  });
+});
+`,
+        head: `import { describe, expect, it } from "vitest";
+import { redactModelId } from "./redact.js";
+
+describe("redactModelId", () => {
+  it("keeps the family and drops the deployment secret", () => {
+    expect(redactModelId("gpt-oss-120b#dep_9f3a")).toBe("gpt-oss-120b");
+  });
+
+  it("drops the secret however many separators follow it", () => {
+    expect(redactModelId("gpt-oss-120b#dep_9f3a#extra")).toBe("gpt-oss-120b");
+  });
+});
+`,
+      },
+    ],
+  },
+  {
+    id: "clean-schema-version-is-pinned",
+    defect: null,
+    // Published as "bump schemaVersion from 1 to 2". Applying it WOULD have been the breaking
+    // change the finding claimed to prevent: the comment directly above states that the version is
+    // pinned and that consumers reject anything else. A reviewer proposing a repair must read the
+    // constraint stated next to the value it wants to change.
+    //
+    // Additive: a new reader for the same pinned constant, with `envelope` untouched. A first draft
+    // widened `envelope`'s signature and return type, which is a breaking change of its own.
+    about: "a pinned schema version the surrounding comment forbids changing",
+    files: [
+      {
+        path: "src/event.ts",
+        base: `// Pinned. Consumers reject any other value, so this moves only in a coordinated release.
+const SCHEMA_VERSION = "1";
+
+export function envelope(kind: string): { schemaVersion: string; kind: string } {
+  return { schemaVersion: SCHEMA_VERSION, kind };
+}
+`,
+        head: `// Pinned. Consumers reject any other value, so this moves only in a coordinated release.
+const SCHEMA_VERSION = "1";
+
+export function envelope(kind: string): { schemaVersion: string; kind: string } {
+  return { schemaVersion: SCHEMA_VERSION, kind };
+}
+
+export function schemaVersion(): string {
+  return SCHEMA_VERSION;
+}
+`,
+      },
+    ],
+  },
+  {
+    id: "clean-reset-modules-is-load-bearing",
+    defect: null,
+    // Published as "remove the redundant vi.resetModules()". Removing it produces exactly the
+    // test bleeding the call prevents — the suite mutates a module-level cache, and the comment
+    // above the call says so. A finding that proposes deleting a guard must account for what the
+    // guard is guarding.
+    about: "a test reset whose removal would reintroduce state bleeding",
+    files: [
+      {
+        path: "src/cache.test.ts",
+        base: `import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// The module under test memoizes at module scope, so each case needs a fresh copy of it.
+beforeEach(() => {
+  vi.resetModules();
+});
+
+describe("cache", () => {
+  it("memoizes the first answer", async () => {
+    const { lookup } = await import("./cache.js");
+    expect(lookup("a")).toBe(lookup("a"));
+  });
+});
+`,
+        head: `import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// The module under test memoizes at module scope, so each case needs a fresh copy of it.
+beforeEach(() => {
+  vi.resetModules();
+});
+
+describe("cache", () => {
+  it("memoizes the first answer", async () => {
+    const { lookup } = await import("./cache.js");
+    expect(lookup("a")).toBe(lookup("a"));
+  });
+
+  it("does not carry a memoized answer across cases", async () => {
+    const { lookup } = await import("./cache.js");
+    expect(lookup("b")).toBe(lookup("b"));
+  });
+});
+`,
+      },
+    ],
+  },
+
+  {
+    id: "budget-starved-clean-neighbours",
+    defect: null,
+    budgetTokens: 25_000,
+    // The condition production actually fails under, reproduced (2026-08-05 wave, cycle 2). Every
+    // single-file clean case above passes at full budget, yet production published its false
+    // positives — "import missing" with the import on line 1, "literal not in the union" with the
+    // union two lines up — under settlement.incomplete.budget_exceeded across 38 files. Five
+    // files, every one correct, every one a bait for a published false-positive class, under a
+    // 25k budget.
+    //
+    // What calibrating this case MEASURED about the pinned engine (v1.8.4, gpt-oss-120b, two runs
+    // plus a discriminating third) — recorded here because the flag's own help text
+    // ("dispatch stops once exceeded") predicts none of it:
+    //   budget 25k  -> files_reviewed 5, spent 273k and 341k. The budget stopped no file.
+    //   budget 1    -> files_reviewed 5, spent 0, status "budget_exceeded", manifest absent,
+    //                  coverage null. Zero LLM calls, yet every file counted as reviewed.
+    // So the engine's budget gates individual LLM CALLS, not file dispatches; a task whose calls
+    // are blocked finishes empty and still increments files_reviewed, and a budget-stopped run
+    // reports no per-path coverage at all. Three product consequences, each load-bearing for the
+    // adapter: files_reviewed is meaningless under a budget stop, per-path coverage cannot be
+    // recovered from the engine, and the real spend can overshoot the flag by an order of
+    // magnitude (production's +21% on Keiko#2970 was the same mechanism at a larger budget).
+    //
+    // The case therefore measures exactly one thing, and keeps measuring it: under call blockade
+    // — some tasks mid-reasoning, some starved — the reviewer must stay silent on correct code.
+    // Both calibration runs passed. It stays in the corpus as the precision guard for that
+    // condition; the cost half of the finding is the adapter's to fix (tranche dispatch), not a
+    // property this fixture can assert.
+    //
+    // Strictly additive, like the five cases above and for the recorded reason: base and head are
+    // byte-identical except for one appended hunk per file, so silence is the only defensible
+    // answer, and any finding under pressure is the failure this case exists to catch. An
+    // incomplete, budget-stopped settlement is the EXPECTED outcome, not an error.
+    about: "five correct files under a budget that tears mid-run",
+    files: [
+      {
+        path: "src/trace-context.ts",
+        base: `import { randomUUID } from "node:crypto";
+
+/** Correlation ids for request tracing. The prefix names the subsystem that opened the trace. */
+export interface TraceContext {
+  readonly id: string;
+  readonly subsystem: string;
+  readonly startedAtMs: number;
+}
+
+const SUBSYSTEMS = new Set(["ingest", "review", "publish", "settle"]);
+
+export function isKnownSubsystem(name: string): boolean {
+  return SUBSYSTEMS.has(name);
+}
+
+export function traceContext(subsystem: string, nowMs: number): TraceContext {
+  if (!isKnownSubsystem(subsystem)) {
+    throw new RangeError("unknown subsystem");
+  }
+  return { id: subsystem + "-" + randomUUID().slice(0, 8), subsystem, startedAtMs: nowMs };
+}
+
+export function ageMs(context: TraceContext, nowMs: number): number {
+  return Math.max(0, nowMs - context.startedAtMs);
+}
+
+export function describeTrace(context: TraceContext): string {
+  return context.subsystem + " trace " + context.id;
+}
+
+export function isExpired(context: TraceContext, nowMs: number, ttlMs: number): boolean {
+  return ageMs(context, nowMs) > ttlMs;
+}
+
+export function renewIfExpired(
+  context: TraceContext,
+  nowMs: number,
+  ttlMs: number,
+): TraceContext {
+  if (!isExpired(context, nowMs, ttlMs)) return context;
+  return traceContext(context.subsystem, nowMs);
+}
+`,
+        head: `import { randomUUID } from "node:crypto";
+
+/** Correlation ids for request tracing. The prefix names the subsystem that opened the trace. */
+export interface TraceContext {
+  readonly id: string;
+  readonly subsystem: string;
+  readonly startedAtMs: number;
+}
+
+const SUBSYSTEMS = new Set(["ingest", "review", "publish", "settle"]);
+
+export function isKnownSubsystem(name: string): boolean {
+  return SUBSYSTEMS.has(name);
+}
+
+export function traceContext(subsystem: string, nowMs: number): TraceContext {
+  if (!isKnownSubsystem(subsystem)) {
+    throw new RangeError("unknown subsystem");
+  }
+  return { id: subsystem + "-" + randomUUID().slice(0, 8), subsystem, startedAtMs: nowMs };
+}
+
+export function ageMs(context: TraceContext, nowMs: number): number {
+  return Math.max(0, nowMs - context.startedAtMs);
+}
+
+export function describeTrace(context: TraceContext): string {
+  return context.subsystem + " trace " + context.id;
+}
+
+export function isExpired(context: TraceContext, nowMs: number, ttlMs: number): boolean {
+  return ageMs(context, nowMs) > ttlMs;
+}
+
+export function renewIfExpired(
+  context: TraceContext,
+  nowMs: number,
+  ttlMs: number,
+): TraceContext {
+  if (!isExpired(context, nowMs, ttlMs)) return context;
+  return traceContext(context.subsystem, nowMs);
+}
+
+/** A short-lived child id for one hop inside an existing trace. */
+export function hopId(context: TraceContext): string {
+  return context.id + "." + randomUUID().slice(0, 8);
+}
+`,
+      },
+      {
+        path: "src/trust-mode.ts",
+        base: `/** How strictly the reviewer treats a workspace it has not seen before. */
+export type TrustMode = "strict" | "lenient";
+
+export interface TrustDecision {
+  readonly mode: TrustMode;
+  readonly decidedAtMs: number;
+}
+
+export function decide(mode: TrustMode, nowMs: number): TrustDecision {
+  return { mode, decidedAtMs: nowMs };
+}
+
+export function isStrict(decision: TrustDecision): boolean {
+  return decision.mode === "strict";
+}
+
+export function describeMode(mode: TrustMode): string {
+  if (mode === "strict") return "every path is checked before use";
+  return "known-safe paths skip the recheck";
+}
+
+export function stricter(a: TrustMode, b: TrustMode): TrustMode {
+  if (a === "strict" || b === "strict") return "strict";
+  return "lenient";
+}
+
+export function ageOfDecisionMs(decision: TrustDecision, nowMs: number): number {
+  return Math.max(0, nowMs - decision.decidedAtMs);
+}
+`,
+        head: `/** How strictly the reviewer treats a workspace it has not seen before. */
+export type TrustMode = "strict" | "lenient";
+
+export interface TrustDecision {
+  readonly mode: TrustMode;
+  readonly decidedAtMs: number;
+}
+
+export function decide(mode: TrustMode, nowMs: number): TrustDecision {
+  return { mode, decidedAtMs: nowMs };
+}
+
+export function isStrict(decision: TrustDecision): boolean {
+  return decision.mode === "strict";
+}
+
+export function describeMode(mode: TrustMode): string {
+  if (mode === "strict") return "every path is checked before use";
+  return "known-safe paths skip the recheck";
+}
+
+export function stricter(a: TrustMode, b: TrustMode): TrustMode {
+  if (a === "strict" || b === "strict") return "strict";
+  return "lenient";
+}
+
+export function ageOfDecisionMs(decision: TrustDecision, nowMs: number): number {
+  return Math.max(0, nowMs - decision.decidedAtMs);
+}
+
+/** The complement of isStrict, named so call sites read as policy rather than negation. */
+export function isLenient(decision: TrustDecision): boolean {
+  return decision.mode === "lenient";
+}
+`,
+      },
+      {
+        path: "src/event-envelope.ts",
+        base: `/**
+ * The envelope every event carries.
+ *
+ * Pinned. Consumers reject any other value, so this moves only in a coordinated release — never
+ * as a side effect of an unrelated change in this file.
+ */
+const SCHEMA_VERSION = "1";
+
+export interface EventEnvelope {
+  readonly schemaVersion: string;
+  readonly kind: string;
+  readonly atMs: number;
+}
+
+export function envelope(kind: string, atMs: number): EventEnvelope {
+  if (kind === "") throw new RangeError("event kind is empty");
+  return { schemaVersion: SCHEMA_VERSION, kind, atMs };
+}
+
+export function isCurrentSchema(candidate: { readonly schemaVersion: string }): boolean {
+  return candidate.schemaVersion === SCHEMA_VERSION;
+}
+
+export function describeEnvelope(event: EventEnvelope): string {
+  return event.kind + " (schema " + event.schemaVersion + ")";
+}
+
+export function olderThan(event: EventEnvelope, nowMs: number, maxAgeMs: number): boolean {
+  return nowMs - event.atMs > maxAgeMs;
+}
+`,
+        head: `/**
+ * The envelope every event carries.
+ *
+ * Pinned. Consumers reject any other value, so this moves only in a coordinated release — never
+ * as a side effect of an unrelated change in this file.
+ */
+const SCHEMA_VERSION = "1";
+
+export interface EventEnvelope {
+  readonly schemaVersion: string;
+  readonly kind: string;
+  readonly atMs: number;
+}
+
+export function envelope(kind: string, atMs: number): EventEnvelope {
+  if (kind === "") throw new RangeError("event kind is empty");
+  return { schemaVersion: SCHEMA_VERSION, kind, atMs };
+}
+
+export function isCurrentSchema(candidate: { readonly schemaVersion: string }): boolean {
+  return candidate.schemaVersion === SCHEMA_VERSION;
+}
+
+export function describeEnvelope(event: EventEnvelope): string {
+  return event.kind + " (schema " + event.schemaVersion + ")";
+}
+
+export function olderThan(event: EventEnvelope, nowMs: number, maxAgeMs: number): boolean {
+  return nowMs - event.atMs > maxAgeMs;
+}
+
+/** The pinned value itself, for callers that render compatibility errors. */
+export function pinnedSchemaVersion(): string {
+  return SCHEMA_VERSION;
+}
+`,
+      },
+      {
+        path: "src/workspace-layout.ts",
+        base: `import { join } from "node:path";
+
+/** Where one workspace keeps its derived artifacts. All layout decisions live here. */
+export interface WorkspaceLayout {
+  readonly root: string;
+}
+
+export function layout(root: string): WorkspaceLayout {
+  if (root === "") throw new RangeError("workspace root is empty");
+  return { root };
+}
+
+export function cacheDir(ws: WorkspaceLayout): string {
+  return join(ws.root, ".cache");
+}
+
+export function evidenceDir(ws: WorkspaceLayout): string {
+  return join(ws.root, "evidence");
+}
+
+export function reportPath(ws: WorkspaceLayout, name: string): string {
+  if (name.includes("/") || name.includes("..")) {
+    throw new RangeError("report name must be a bare file name");
+  }
+  return join(evidenceDir(ws), name);
+}
+
+export function describeLayout(ws: WorkspaceLayout): string {
+  return "workspace at " + ws.root;
+}
+`,
+        head: `import { join } from "node:path";
+
+/** Where one workspace keeps its derived artifacts. All layout decisions live here. */
+export interface WorkspaceLayout {
+  readonly root: string;
+}
+
+export function layout(root: string): WorkspaceLayout {
+  if (root === "") throw new RangeError("workspace root is empty");
+  return { root };
+}
+
+export function cacheDir(ws: WorkspaceLayout): string {
+  return join(ws.root, ".cache");
+}
+
+export function evidenceDir(ws: WorkspaceLayout): string {
+  return join(ws.root, "evidence");
+}
+
+export function reportPath(ws: WorkspaceLayout, name: string): string {
+  if (name.includes("/") || name.includes("..")) {
+    throw new RangeError("report name must be a bare file name");
+  }
+  return join(evidenceDir(ws), name);
+}
+
+export function describeLayout(ws: WorkspaceLayout): string {
+  return "workspace at " + ws.root;
+}
+
+/** The lock file the staging step holds while it rewrites the cache. */
+export function lockPath(ws: WorkspaceLayout): string {
+  return join(cacheDir(ws), "staging.lock");
+}
+`,
+      },
+      {
+        path: "src/redact-model-id.test.ts",
+        base: `import { describe, expect, it } from "vitest";
+
+import { redactModelId } from "./redact-model-id.js";
+
+/**
+ * The deployment suffix after "#" is operator-private; the family before it is not. This suite is
+ * the proof the redaction holds — a claim that it leaks must contend with these passing cases.
+ */
+describe("redactModelId", () => {
+  it("keeps the family and drops the deployment suffix", () => {
+    expect(redactModelId("oss-family-120b#dep_9f3a")).toBe("oss-family-120b");
+  });
+
+  it("returns a bare family unchanged", () => {
+    expect(redactModelId("oss-family-120b")).toBe("oss-family-120b");
+  });
+
+  it("drops everything after the first separator, however many follow", () => {
+    expect(redactModelId("oss-family-120b#dep_9f3a#extra")).toBe("oss-family-120b");
+  });
+});
+`,
+        head: `import { describe, expect, it } from "vitest";
+
+import { redactModelId } from "./redact-model-id.js";
+
+/**
+ * The deployment suffix after "#" is operator-private; the family before it is not. This suite is
+ * the proof the redaction holds — a claim that it leaks must contend with these passing cases.
+ */
+describe("redactModelId", () => {
+  it("keeps the family and drops the deployment suffix", () => {
+    expect(redactModelId("oss-family-120b#dep_9f3a")).toBe("oss-family-120b");
+  });
+
+  it("returns a bare family unchanged", () => {
+    expect(redactModelId("oss-family-120b")).toBe("oss-family-120b");
+  });
+
+  it("drops everything after the first separator, however many follow", () => {
+    expect(redactModelId("oss-family-120b#dep_9f3a#extra")).toBe("oss-family-120b");
+  });
+});
+
+describe("redactModelId on empty input", () => {
+  it("returns the empty string rather than throwing", () => {
+    expect(redactModelId("")).toBe("");
+  });
+});
 `,
       },
     ],

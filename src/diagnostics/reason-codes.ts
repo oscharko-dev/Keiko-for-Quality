@@ -206,6 +206,13 @@ export const REASON_CODES = [
   // `resolved`, so a run where every mutation failed (a token missing the resolve-thread permission,
   // say) still leaves `counts: { attempted: N, resolved: 0 }` distinguishable, across runs, from a
   // run with nothing to resolve at all, which never records this code.
+  // Tranche dispatch (2026-08-05 wave, cycle 3): the run stopped dispatching further tranches —
+  // either the adapter's own real-token check tripped between tranches, or the engine reported its
+  // budget flag inside one (whose findings are then discarded whole; see runEngineInTranches in
+  // review.ts for why a budget-stopped tranche is spent-but-not-believed). Counts carry
+  // tranches_run/tranches_total/covered/tokens so an operator can see how far the run got and what
+  // the stop preserved, without any per-file content.
+  "engine.tranche_stopped",
   "cleanup.superseded_notices_resolved",
 ] as const;
 

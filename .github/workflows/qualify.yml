@@ -77,8 +77,14 @@ jobs:
           OCR_REPORT: ${{ runner.temp }}/report.json
           OCR_LLM_URL: ${{ secrets.KFQ_QUALIFY_MODEL_ENDPOINT }}
           OCR_LLM_TOKEN: ${{ secrets.KFQ_QUALIFY_MODEL_TOKEN }}
-          OCR_LLM_MODEL: ${{ vars.KFQ_QUALIFY_MODEL_ID }}
-          OCR_USE_ANTHROPIC: ${{ vars.KFQ_QUALIFY_MODEL_PROTOCOL == 'anthropic' }}
+          # Literal, not a repository variable (AGENTS.md, "Every live run this project makes uses
+          # gpt-oss-120b"): re-qualification exists to answer whether the pairing consumers run
+          # still holds, and a variable is a second place that pairing can be changed — silently,
+          # by someone who never opened this file. `corpus/run.mjs` refuses anything else anyway;
+          # naming it here means the scheduled run cannot even reach that refusal by drifting.
+          # The endpoint and token stay secrets: those are deployment facts, not the pairing.
+          OCR_LLM_MODEL: gpt-oss-120b
+          OCR_USE_ANTHROPIC: "false"
         # A case can fail without the thresholds failing, so the runner's exit code is not the
         # verdict — `check-qualification.mjs` is. Exit 1 means exactly that and is tolerated;
         # anything else is the harness itself dying, and swallowing that would let the next step
