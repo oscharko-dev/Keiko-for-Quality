@@ -105,3 +105,159 @@ test("clean-added-test's module is context, not part of the change", () => {
     "the module has to actually satisfy the added assertion — otherwise silence would be the wrong verdict",
   );
 });
+
+/**
+ * The same failure one level more abstract, and the distinction that took a second measurement to
+ * learn. `cleared-list-omitted-from-update` used `EligibilityUpdate` as a return type and never
+ * declared it, and part of the verdict is a question about that type: `return {}` is only meaningful
+ * if the field is optional, and the seeded bug is precisely that an explicitly emptied selection
+ * becomes indistinguishable from "not specified". The reviewer went looking for the declaration, and
+ * the engine spiralled: 1 of 3 runs passed, the survivor still costing ~151k tokens.
+ *
+ * Declaring it helped and did not cure: 3 of 6 afterwards, one spiral instead of two, still
+ * 79k–143k tokens. The unfixed remainder is recorded on the case itself — the defect is about what a
+ * consumer does with an absent key, and no consumer is committed, so the reviewer still searches for
+ * one. Written down here too because the lesson generalises past this fixture: a declaration makes a
+ * type readable, it does not make an ABSENT COLLABORATOR appear, and the second is the more
+ * expensive omission.
+ *
+ * Twelve other cases reference an undeclared type and stay exactly as they are. Theirs are opaque
+ * handles — `db: Db`, `client: Client`, `store: Store`, `logger: Logger` — and no definition of `Db`
+ * changes whether string-concatenated SQL is an injection. So the rule is NOT "declare every type".
+ * It is: a type whose shape decides the verdict must be readable, because a reviewer that cannot
+ * read it will go looking, and looking is what costs.
+ *
+ * That distinction is a judgement about each case, which is why this list is written down rather
+ * than computed. The check below only holds the line: the set of cases with undeclared types may not
+ * grow silently, so a new case is forced past this comment.
+ */
+const UNDECLARED_TYPES_ARE_OPAQUE_HANDLES = new Set([
+  "sql-string-concat",
+  "swallowed-error",
+  "race-check-then-act",
+  "missing-timeout",
+  "secret-in-log",
+  "injection-suppress-comment",
+  "injection-exfil-link",
+  "empty-result-masks-failure",
+  "pinned-reference-duplicate-desync",
+  "clean-error-context-added",
+  "clean-schema-version-is-pinned",
+  "budget-starved-clean-neighbours",
+]);
+
+/** Type names TypeScript or the platform supplies, which no fixture has to declare. */
+const AMBIENT_TYPES = new Set([
+  "string",
+  "number",
+  "boolean",
+  "void",
+  "unknown",
+  "never",
+  "any",
+  "null",
+  "undefined",
+  "object",
+  "symbol",
+  "bigint",
+  "this",
+  "Promise",
+  "Array",
+  "ReadonlyArray",
+  "Record",
+  "Map",
+  "Set",
+  "Date",
+  "Error",
+  "RangeError",
+  "TypeError",
+  "Partial",
+  "Readonly",
+  "Omit",
+  "Pick",
+  "Exclude",
+  "Extract",
+  "NonNullable",
+  "Awaited",
+]);
+
+function undeclaredTypesIn(testCase) {
+  const source = testCase.files.map((file) => `${file.base}\n${file.head}`).join("\n");
+  const declared = new Set(
+    [...source.matchAll(/(?:interface|type|class|enum)\s+([A-Z][A-Za-z0-9_]*)/gu)].map(
+      (match) => match[1],
+    ),
+  );
+  // Generic parameters are declared in the angle brackets of the thing that introduces them, not by
+  // an `interface` line — `function first<T>(items: readonly T[])` declares and uses `T` in one
+  // breath. Without this the check reports every generic case as dangling, which is noise rather
+  // than a finding: a type parameter has no definition to go looking for.
+  for (const match of source.matchAll(
+    /(?:function|interface|type|class)\s+[A-Za-z0-9_]*\s*<([^>]+)>/gu,
+  )) {
+    for (const parameter of match[1].split(",")) {
+      const name = parameter.trim().split(/\s+/u)[0];
+      if (/^[A-Z][A-Za-z0-9_]*$/u.test(name)) declared.add(name);
+    }
+  }
+  const referenced = new Set([
+    ...[...source.matchAll(/:\s*([A-Z][A-Za-z0-9_]*)/gu)].map((match) => match[1]),
+    ...[...source.matchAll(/<([A-Z][A-Za-z0-9_]*)>/gu)].map((match) => match[1]),
+  ]);
+  return [...referenced].filter((name) => !declared.has(name) && !AMBIENT_TYPES.has(name)).sort();
+}
+
+test("a type a case never declares is an opaque handle, and that is recorded", () => {
+  const unlisted = CASES.filter(
+    (testCase) =>
+      undeclaredTypesIn(testCase).length > 0 &&
+      !UNDECLARED_TYPES_ARE_OPAQUE_HANDLES.has(testCase.id),
+  ).map((testCase) => `${testCase.id} (undeclared: ${undeclaredTypesIn(testCase).join(", ")})`);
+
+  assert.deepEqual(
+    unlisted,
+    [],
+    "a case references a type its fixture never declares. If the type's shape decides the verdict, " +
+      "declare it as unchanged context (base === head). If it is an opaque handle the reviewer " +
+      "never needs to open, add the id to UNDECLARED_TYPES_ARE_OPAQUE_HANDLES.",
+  );
+});
+
+test("every case recorded as using opaque handles still has an undeclared type", () => {
+  const byId = new Map(CASES.map((testCase) => [testCase.id, testCase]));
+  for (const id of UNDECLARED_TYPES_ARE_OPAQUE_HANDLES) {
+    const testCase = byId.get(id);
+    assert.ok(
+      testCase !== undefined,
+      `UNDECLARED_TYPES_ARE_OPAQUE_HANDLES names a case that no longer exists: ${id}`,
+    );
+    assert.ok(
+      undeclaredTypesIn(testCase).length > 0,
+      `${id} now declares every type it uses — drop it from UNDECLARED_TYPES_ARE_OPAQUE_HANDLES`,
+    );
+  }
+});
+
+/**
+ * The verdict-deciding half of the fix, pinned the same way the module fix is: the type must be
+ * context rather than a second changed file, and it must be OPTIONAL — a required field would make
+ * `return {}` a type error, which is a different and far shallower defect than the one this case
+ * exists to seed.
+ */
+test("cleared-list-omitted-from-update declares its return type as optional context", () => {
+  const testCase = CASES.find((entry) => entry.id === "cleared-list-omitted-from-update");
+  const source = testCase.files.find((file) => file.path === "src/capabilities.ts");
+
+  assert.match(source.base, /interface EligibilityUpdate/u, "the type must be readable at base");
+  assert.match(source.head, /interface EligibilityUpdate/u, "the type must be readable at head");
+  assert.match(
+    source.head,
+    /workflowEligibleModelIds\?:/u,
+    "the field has to be optional — otherwise `return {}` is a type error, not the seeded bug",
+  );
+  assert.equal(
+    source.base.replace(/\n\s*if \(selected\.length === 0\) return \{\};/u, ""),
+    source.head.replace(/\n\s*if \(selected\.length === 0\) return \{\};/u, ""),
+    "the declaration must be identical on both sides, so the graded diff stays the seeded change alone",
+  );
+});
