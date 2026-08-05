@@ -867,6 +867,31 @@ function classifyDeps(request: PipelineRequest): ClassifyEndpoint | undefined {
 const MAX_GATE_FINDINGS = 8;
 
 /**
+ * A per-run cache of `readTextAtCommit` results, shared by every deterministic gate below.
+ *
+ * The contract-pair comparison and the pin-desync scan both read the SAME (commit, path) text for
+ * any item that happens to match a declared pair AND carry a duplicate pin — two independent git
+ * subprocess spawns for identical content, on every run that has both. Keyed by `${commit}:${path}`
+ * rather than blob id: a gate reads by commit+path (the identity these checks reason in), not by
+ * blob, and the two happen to coincide here only because neither check's caller has a blob handy at
+ * the point it decides what to read.
+ */
+type BlobTextCache = Map<string, string | undefined>;
+
+async function readTextAtCommitCached(
+  cache: BlobTextCache,
+  ctx: GitContext,
+  commit: CommitSha,
+  path: string,
+): Promise<string | undefined> {
+  const key = `${commit}:${path}`;
+  if (cache.has(key)) return cache.get(key);
+  const text = await readTextAtCommit(ctx, commit, path);
+  cache.set(key, text);
+  return text;
+}
+
+/**
  * The deterministic contract gate (issue #80, technique D): for every profile-declared contract
  * pair whose `paths` side changed in this pull request, read both sides at the reviewed head and
  * compare same-named flat interfaces member by member. No model, no tokens, no opinion — a firing
@@ -876,6 +901,13 @@ const MAX_GATE_FINDINGS = 8;
  * to be part of the diff a review comment can attach to, and it is also where the author who broke
  * the contract is currently looking. Like the change-level pass, gate findings never enter the
  * review-cache store — they derive from two files, and a store entry must re-derive from one.
+ *
+ * Pin-desync runs FIRST, ahead of the contract-pairs loop below: the two checks share one
+ * `MAX_GATE_FINDINGS` budget, and pin-desync is the cheaper, unconfigured, historically-motivating
+ * check (see its own doc comment) — a busy contract-pair loop must not be able to starve it
+ * entirely just by matching first. Both checks share `blobCache`, so an item pin-desync already
+ * read that also matches a declared pair costs the contract-pairs loop a cache lookup, not a
+ * second git subprocess.
  */
 async function collectGateFindings(
   request: PipelineRequest,
@@ -885,21 +917,47 @@ async function collectGateFindings(
   const pairs = request.profile.contractPairs ?? [];
   const ctx = gitContext(request);
   const findings: EngineFinding[] = [];
+  const blobCache: BlobTextCache = new Map();
+  const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings, blobCache);
+
+  // Items outer, matching pairs inner (#27): each item's own head/base text is read at most once
+  // regardless of how many declared pairs match it — a matcher only decides WHICH counterparts to
+  // compare against, never how many times this item's own content is fetched.
   let compared = 0;
-  for (const pair of pairs) {
-    for (const item of inventory.items) {
-      if (!item.reviewable || !pair.matcher.matches(item.path as string)) continue;
+  for (const item of inventory.items) {
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    if (!item.reviewable) continue;
+    const matched = pairs.filter((pair) => pair.matcher.matches(item.path as string));
+    if (matched.length === 0) continue;
+    const path = item.path as string;
+    const left = await readTextAtCommitCached(blobCache, ctx, request.head, path);
+    if (left === undefined) continue;
+    // Only needed by the union check, which asks what this change ADDED — a member present in both
+    // versions was never widened by this pull request. Absent for an added file, which correctly
+    // leaves the union check with nothing to compare. Reads from `oldPath` when this item is a
+    // rename: the base version lived under the old name, and reading `path` there would ask git
+    // for a blob that, at that commit, never existed under the new one.
+    const leftBase = await readTextAtCommitCached(
+      blobCache,
+      ctx,
+      request.base,
+      (item.oldPath ?? item.path) as string,
+    );
+    for (const pair of matched) {
       compared += await compareAgainstCounterparts(
+        blobCache,
         ctx,
-        request.base,
         request.head,
         item,
         pair,
+        left,
+        leftBase,
         findings,
       );
+      if (findings.length >= MAX_GATE_FINDINGS) break;
     }
   }
-  const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings);
+
   if (pairs.length === 0 && findings.length === 0 && pinDesyncs === 0) return [];
   diagnostics.record("contracts.gate", {
     headSha: request.head,
@@ -918,30 +976,43 @@ async function collectGateFindings(
  * places, where the change moved one and left the other behind.
  *
  * Unlike the shape gate above it needs no declared pair — both declarations live in the same file,
- * and the base version is what proves they were meant to agree. It runs over every modified
- * reviewable path for that reason, and its cost is two blob reads and a text scan per file, no
- * model involvement at all.
+ * and the base version is what proves they were meant to agree. It runs over every modified OR
+ * renamed-with-real-edits reviewable path for that reason, and its cost is two blob reads and a
+ * text scan per file, no model involvement at all.
  *
  * It exists because this reviewer measurably missed exactly this on a production pull request that
  * advanced a pinned action's sha and left the variable declaring the same sha untouched — silently
  * disabling the consumer's own review store — while two other reviewers caught it. A per-file diff
  * review cannot see it: the changed line is correct in isolation, and the stale one did not change.
+ *
+ * `"R"` (v0.13.0) joins `"M"`: a rename with real content edits carries exactly the same "old
+ * version proves what the two declarations were meant to agree on" evidence a modification does —
+ * excluding it silently lost the check's own signal for any file whose rename this pull request
+ * also touched. The base-side read follows `item.oldPath`, since the base version lived under the
+ * old name; the head-side read and the published finding both stay on `item.path`, the file's
+ * current name and the only one a review comment can anchor a still-open diff to.
  */
 async function collectPinDesyncFindings(
   ctx: GitContext,
   request: PipelineRequest,
   inventory: Inventory,
   findings: EngineFinding[],
+  blobCache: BlobTextCache,
 ): Promise<number> {
   let found = 0;
   for (const item of inventory.items) {
-    // Modified only: an added file has no base to disagree with, and a deleted one declares
-    // nothing any more.
-    if (!item.reviewable || item.status !== "M") continue;
+    // An added file has no base to disagree with, and a deleted one declares nothing any more —
+    // only a real edit, in place or under a new name, can leave one declaration stale.
+    if (!item.reviewable || (item.status !== "M" && item.status !== "R")) continue;
     if (findings.length >= MAX_GATE_FINDINGS) break;
     const path = item.path as string;
-    const base = await readTextAtCommit(ctx, request.base, path);
-    const head = await readTextAtCommit(ctx, request.head, path);
+    const base = await readTextAtCommitCached(
+      blobCache,
+      ctx,
+      request.base,
+      (item.oldPath ?? item.path) as string,
+    );
+    const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
     if (base === undefined || head === undefined) continue;
     for (const desync of detectPinDesync(base, head)) {
       if (findings.length >= MAX_GATE_FINDINGS) break;
@@ -998,25 +1069,29 @@ function pushGateFindings<T>(
   return false;
 }
 
-/** One changed file against one pair's counterparts; returns how many comparisons actually ran. */
+/**
+ * One changed file against one pair's counterparts; returns how many comparisons actually ran.
+ *
+ * `left`/`leftBase` are read once by the caller (`collectGateFindings`) and passed in rather than
+ * re-read here — an item matching more than one declared pair used to pay for its own head/base
+ * content once per matching pair, all identical reads. `right` (a counterpart, not this item) is
+ * still read here, through the shared cache, since which counterparts get read depends on which
+ * pair is being compared right now.
+ */
 async function compareAgainstCounterparts(
+  blobCache: BlobTextCache,
   ctx: GitContext,
-  base: CommitSha,
   head: CommitSha,
   item: InventoryItem,
   pair: { readonly counterparts: readonly string[] },
+  left: string,
+  leftBase: string | undefined,
   findings: EngineFinding[],
 ): Promise<number> {
   const path = item.path as string;
-  const left = await readTextAtCommit(ctx, head, path);
-  if (left === undefined) return 0;
-  // Only needed by the union check, which asks what this change ADDED — a member present in both
-  // versions was never widened by this pull request and is not this review's question. Absent for
-  // an added file, which correctly leaves the union check with nothing to compare.
-  const leftBase = await readTextAtCommit(ctx, base, path);
   let compared = 0;
   for (const counterpart of pair.counterparts) {
-    const right = await readTextAtCommit(ctx, head, counterpart);
+    const right = await readTextAtCommitCached(blobCache, ctx, head, counterpart);
     if (right === undefined) continue;
     compared += 1;
     // `compareDeclaredContracts`, not `compareContracts`: the profile named these two files as
@@ -1703,6 +1778,33 @@ async function publishSettledFindings(
     ...settlement.findings,
     ...changePass,
   ]);
+
+  // The staleness recheck (v0.13.0), moved here from `performReviewInner` to sit immediately before
+  // the operation it actually protects: gate collection is free, but the change-level pass above
+  // just spent real model tokens, and checking any earlier would leave a push that lands DURING
+  // that collection free to sail through to publication unchecked. See `abandonIfStale`'s own doc
+  // comment for why every check like this needs its own copy rather than one shared guard — the
+  // pull request's head can move at any point across a review that takes minutes end to end.
+  const stale = await abandonIfStale(run, inventory, memo);
+  if (stale !== undefined) {
+    // The engine's own verdict here was already `complete` — every reviewable path was covered,
+    // and `settlement.findings` is real, fully earned model output. The head moving between the
+    // engine finishing and this check is a fact about the PULL REQUEST, not about the blobs this
+    // run actually reviewed: a review-cache entry is keyed by blob content, not by head sha, so
+    // what was just paid for stays exactly as replayable as if this run had reached publication.
+    // Unaudited (`settlement.findings` directly, not `findingsForStorage`'s audited form) because
+    // this path never reaches `publishAudited` at all — there is nothing audited to prefer. Never
+    // `merged`, deliberately: gate and change-pass findings derive from more than one file's content
+    // and must never enter a store keyed for one, the same rule `publishSettledFindings`'s own
+    // caching later in this function already follows for the happy path.
+    const finalized = finalizeCacheStore(run.request, inventory, memo, settlement.findings);
+    return {
+      ...stale,
+      cacheAppended: finalized?.appended ?? stale.cacheAppended,
+      ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
+    };
+  }
+
   const { outcome: publish, auditedByOriginal } = await publishAudited(
     run,
     publishContextFor(run.request, inventory),
@@ -1956,34 +2058,33 @@ async function performReviewInner(
   // real findings directly through `publishSettledFindings`, which never calls `settleIncomplete` on
   // its happy path.
   if (settlement.status === "incomplete") {
+    // The deterministic gates cost no model tokens and depend on nothing the engine settlement
+    // decided — a coverage gap or a budget overrun says nothing about whether a declared contract
+    // pair drifted or a pin desynced, so there is no reason an incomplete run should forgo the one
+    // check class that costs it nothing to run. Merged into `findings` only, exactly like the
+    // complete path (`publishSettledFindings` below) — never into `fresh`, since a gate finding is
+    // deterministic prose this reviewer generated, not model output the classification audit has
+    // anything to adjudicate about.
+    const gate = await collectGateFindings(run.request, inventory, run.diagnostics);
     return settleIncomplete(
       run,
       inventory,
       { reason: settlement.reason },
       memo,
       {
-        findings: mergeHitFindings(settlement.findings, memo.hits),
+        findings: [...mergeHitFindings(settlement.findings, memo.hits), ...gate],
         fresh: new Set(settlement.findings),
       },
       verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths : undefined,
     );
   }
-  const postRun = await abandonIfStale(run, inventory, memo);
-  if (postRun !== undefined) {
-    // The engine's own verdict here was already `complete` — every reviewable path was covered,
-    // and `settlement.findings` is real, fully earned model output. The head moving between the
-    // engine finishing and this check is a fact about the PULL REQUEST, not about the blobs this
-    // run actually reviewed: a review-cache entry is keyed by blob content, not by head sha, so
-    // what was just paid for stays exactly as replayable as if this run had reached publication.
-    // Unaudited (`settlement.findings` directly, not `findingsForStorage`'s audited form) because
-    // this path never reaches `publishAudited` at all — there is nothing audited to prefer.
-    const finalized = finalizeCacheStore(run.request, inventory, memo, settlement.findings);
-    return {
-      ...postRun,
-      cacheAppended: finalized?.appended ?? postRun.cacheAppended,
-      ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
-    };
-  }
+  // The staleness recheck for THIS branch lives inside `publishSettledFindings` itself now (v0.13.0)
+  // — immediately before the one call it actually protects, `publishAudited`, rather than here. Gate
+  // and change-pass collection sit between this point and that call, and neither is free: the
+  // change-level pass spends real model tokens. Checking here caught the head moving before this
+  // function was ENTERED, but a push landing during gate/change-pass collection itself sailed
+  // through unchecked all the way to publication — a real, if narrow, gap the move closes without
+  // changing what the check itself does.
   return publishSettledFindings(run, inventory, settlement, memo, started);
 }
 
@@ -2282,12 +2383,16 @@ async function localSettleReport(
     const reviewed = verdictsSurviveIncompleteness(settlement.reason)
       ? settlement.coveredPaths.size + memo.hitPaths.size
       : memo.hitPaths.size;
+    // Same reasoning as `performReviewInner`'s identical branch: the deterministic gates cost no
+    // model tokens and depend on nothing the engine settlement decided, so an incomplete run still
+    // gets their coverage. Merged into `findings` only, never `fresh`.
+    const gate = await collectGateFindings(run.request, inventory, run.diagnostics);
     return localIncompleteReport(
       run,
       inventory,
       settlement.reason,
       {
-        findings: mergeHitFindings(settlement.findings, memo.hits),
+        findings: [...mergeHitFindings(settlement.findings, memo.hits), ...gate],
         fresh: new Set(settlement.findings),
       },
       reviewed,

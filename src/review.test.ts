@@ -2022,6 +2022,113 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     /**
+     * The zero-cost gates depend on nothing the engine settlement decided (v0.13.0) — a coverage
+     * gap says only that the ENGINE fell short, never that a declared contract pair agrees. Same
+     * fixture as the test above, except the engine now reports fewer files reviewed than the
+     * inventory expects, settling `coverage_gap` — and the drift finding must still reach the pull
+     * request through the incomplete-notice publish path, not be silently dropped with the rest of
+     * the (in this case, empty) engine output.
+     */
+    it("still runs the deterministic gate, and publishes its finding, when the engine settlement is incomplete", async () => {
+      // Deliberately not byte-identical to the earlier gate test's own fixture (an extra member,
+      // `c`) — this describe block reuses one shared repo across its tests, and a byte-identical
+      // rewrite here would leave `git add -A` with nothing to stage and the commit below would fail.
+      await writeFile(
+        join(repo, "src/server-api.ts"),
+        "export interface ApiShape {\n  a: string;\n  b: string;\n  c: string;\n}\n",
+      );
+      await writeFile(
+        join(repo, "src/client-api.ts"),
+        "export interface ApiShape {\n  a: string;\n  b: string;\n}\n",
+      );
+      git(["add", "-A"]);
+      git(["commit", "-q", "-m", "gate-incomplete", "--no-gpg-sign"]);
+      const gateHead = git(["rev-parse", "HEAD"]).trim();
+
+      const gateProfile = compileProfile({
+        version: 1,
+        reviewRelevant: ["src/**"],
+        deletionCritical: [],
+        generated: [],
+        excluded: [],
+        benignWarnings: [],
+        pathInstructions: [],
+        contractPairs: [{ paths: ["src/server-api.ts"], counterparts: ["src/client-api.ts"] }],
+      } satisfies ReviewProfile);
+
+      const client = new GitHubClient("https://api.example.test", "unused");
+      const created: ReviewCommentInput[] = [];
+      const comments: ReviewComment[] = [];
+      vi.spyOn(client, "getPullRequest").mockResolvedValue({
+        headSha: commitSha(gateHead),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
+      vi.spyOn(client, "createReviewComment").mockImplementation((_ref, _num, input) => {
+        created.push(input);
+        const comment: ReviewComment = {
+          id: comments.length + 1,
+          body: input.body,
+          path: input.path,
+          authorLogin: "keiko-for-quality[bot]",
+          commitId: input.commitId,
+          url: "https://example.test/c",
+        };
+        comments.push(comment);
+        return Promise.resolve(comment);
+      });
+      vi.spyOn(client, "getReviewComment").mockImplementation((_ref, id) =>
+        Promise.resolve(comments[id - 1]!),
+      );
+
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // Three reviewable files changed (server-api, client-api, plus the shared fixture's own
+      // src/a.ts and src/b.ts are NOT part of this diff — base is the gate commit's own parent), but
+      // the engine reports covering only one — a genuine coverage gap, nothing to do with the gate.
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "success",
+          summary: { files_reviewed: 1, total_tokens: 100, budget_exceeded: false },
+          comments: [],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      let modelCalls = 0;
+      globalThis.fetch = (() => {
+        modelCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(
+        {
+          ...baseRequest(undefined),
+          client,
+          base: commitSha(headSha),
+          head: commitSha(gateHead),
+          config: GATE_CONFIG,
+          profile: gateProfile,
+          env: { MODEL_TOKEN: "fake-token" },
+        },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("incomplete");
+      expect(report.reason).toBe("settlement.incomplete.coverage_gap");
+      // The gate's own finding still reached the pull request, through the incomplete-notice
+      // publish path — not silently dropped alongside the engine's own (empty) output.
+      expect(created[0]?.path).toBe("src/server-api.ts");
+      expect(created[0]?.body).toContain("ApiShape");
+      expect(modelCalls).toBe(0);
+      const record = diagnostics.drain().find((r) => r.code === "contracts.gate");
+      expect(record?.counts?.findings).toBe(1);
+    });
+
+    /**
      * The production miss this check was built for, end to end: oscharko-dev/Keiko#2977 advanced a
      * pinned action's sha and left the variable declaring the same sha behind, silently disabling
      * the consumer's own review store. Two other reviewers caught it; this one published nothing.
@@ -2113,6 +2220,106 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(report.outcome).toBe("complete");
       expect(report.publish?.published).toBe(1);
       expect(created[0]?.path).toBe("src/pinned.yml");
+      expect(modelCalls).toBe(0);
+      const record = diagnostics.drain().find((r) => r.code === "contracts.gate");
+      expect(record?.counts?.pin_desync).toBe(1);
+    });
+
+    /**
+     * The same production shape as the test above, but the file was also renamed in the same push
+     * (v0.13.0) — a rename with real content edits, which `git` detects as a rename by similarity,
+     * not as a delete-plus-add. Before this fix the pin-desync scan's own `item.status !== "M"`
+     * filter silently dropped every renamed file, so this exact case — the file that motivated the
+     * check in the first place, PLUS a rename — published nothing.
+     */
+    it("catches a same-file duplicate pin desync on a file that was also renamed", async () => {
+      const oldSha = "1".repeat(40);
+      const newSha = "2".repeat(40);
+      const workflow = (usesSha: string, pinSha: string): string =>
+        [
+          "jobs:",
+          "  review:",
+          "    steps:",
+          `      - uses: acme/reviewer@${usesSha} # keep in sync with ACTION_PIN`,
+          "        env:",
+          `          ACTION_PIN: "${pinSha}"`,
+          "",
+        ].join("\n");
+
+      await writeFile(join(repo, "src/pinned.yml"), workflow(oldSha, oldSha));
+      git(["add", "-A"]);
+      git(["commit", "-q", "-m", "pin-base", "--no-gpg-sign"]);
+      const pinBase = git(["rev-parse", "HEAD"]).trim();
+      // Renamed AND only the `uses:` site advances — git detects this as a rename by content
+      // similarity (well above the fixture's 50% threshold), not a delete-plus-add.
+      git(["mv", "src/pinned.yml", "src/pinned-renamed.yml"]);
+      await writeFile(join(repo, "src/pinned-renamed.yml"), workflow(newSha, oldSha));
+      git(["add", "-A"]);
+      git(["commit", "-q", "-m", "pin-head-renamed", "--no-gpg-sign"]);
+      const pinHead = git(["rev-parse", "HEAD"]).trim();
+
+      const client = new GitHubClient("https://api.example.test", "unused");
+      const created: ReviewCommentInput[] = [];
+      const comments: ReviewComment[] = [];
+      vi.spyOn(client, "getPullRequest").mockResolvedValue({
+        headSha: commitSha(pinHead),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
+      vi.spyOn(client, "createReviewComment").mockImplementation((_ref, _num, input) => {
+        created.push(input);
+        const comment: ReviewComment = {
+          id: comments.length + 1,
+          body: input.body,
+          path: input.path,
+          authorLogin: "keiko-for-quality[bot]",
+          commitId: input.commitId,
+          url: "https://example.test/c",
+        };
+        comments.push(comment);
+        return Promise.resolve(comment);
+      });
+      vi.spyOn(client, "getReviewComment").mockImplementation((_ref, id) =>
+        Promise.resolve(comments[id - 1]!),
+      );
+
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "success",
+          summary: { files_reviewed: 1, total_tokens: 100, budget_exceeded: false },
+          comments: [],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      let modelCalls = 0;
+      globalThis.fetch = (() => {
+        modelCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(
+        {
+          ...baseRequest(undefined),
+          client,
+          base: commitSha(pinBase),
+          head: commitSha(pinHead),
+          config: GATE_CONFIG,
+          env: { MODEL_TOKEN: "fake-token" },
+        },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish?.published).toBe(1);
+      // Anchored on the file's CURRENT name — the only one a still-open diff can attach a comment
+      // to — never the old one, even though the base-side read that proved the desync came from it.
+      expect(created[0]?.path).toBe("src/pinned-renamed.yml");
       expect(modelCalls).toBe(0);
       const record = diagnostics.drain().find((r) => r.code === "contracts.gate");
       expect(record?.counts?.pin_desync).toBe(1);
