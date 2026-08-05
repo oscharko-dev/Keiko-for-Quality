@@ -1095,11 +1095,13 @@ describe("performReview: review-cache memoization end to end", () => {
         expect.any(Function),
       );
       // The predicate handed across is the real detector, not a stand-in — a notice's own fixed
-      // template must be recognised, and ordinary finding prose must not.
+      // template, carrying a well-formed marker (#42 requires both), must be recognised, and
+      // ordinary finding prose must not.
       const predicate = cleanupSpy.mock.calls[0]?.[3] as (body: string) => boolean;
-      expect(predicate("Keiko for Quality could not complete its review. Reason code: `x`.")).toBe(
-        true,
-      );
+      const notice =
+        "Keiko for Quality could not complete its review. Reason code: `x`.\n" +
+        `<!-- ${markerComment("a".repeat(32))} -->`;
+      expect(predicate(notice)).toBe(true);
       expect(predicate("The retry loop never resets its attempt counter.")).toBe(false);
     });
 

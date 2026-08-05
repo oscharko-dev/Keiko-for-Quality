@@ -16,6 +16,7 @@
 
 import type { CommitSha, VersionTag } from "../core/brands.js";
 import { isReasonCode, type ReasonCode } from "../diagnostics/reason-codes.js";
+import { extractMarker } from "./marker.js";
 import { escapeInline } from "./sanitize.js";
 
 export interface FindingContext {
@@ -197,9 +198,22 @@ export function composeIncompleteNotice(reasonCode: string, marker: string): str
  * to ask "was this mine". Kept next to `composeIncompleteNotice` on purpose, the same discipline
  * `rule-file.ts`/`sanitize.ts` document for themselves: change the template, update the detector in
  * the same diff, or a later run stops recognising its own past notices.
+ *
+ * The sentence alone (#42) is public, product-controlled text — visible in every published comment,
+ * in this README, and in the committed `dist/index.js` — so it is guessable by anyone, not a secret
+ * this reviewer alone could have written. Combined with `resolveSupersededOwnNotices` now also
+ * requiring a provably exclusive identity (`action/identity.ts`), this raises the bar from "copy a
+ * public sentence" to "also carry a well-formed marker" before the mutation this predicate gates
+ * will even consider a thread. It does not make forgery impossible on its own — the fingerprint
+ * `extractMarker` checks the SHAPE of, not the exact value of, has no secret component — but a
+ * marker-less, sentence-only body (a contributor quoting the notice in conversation, say) no longer
+ * qualifies at all.
  */
 export function isIncompleteNoticeBody(body: string): boolean {
-  return body.includes("Keiko for Quality could not complete its review.");
+  return (
+    body.includes("Keiko for Quality could not complete its review.") &&
+    extractMarker(body) !== undefined
+  );
 }
 
 /** Mirrors `ReviewOutcome` (`review.ts`) without importing it, so `publish/` never depends on the

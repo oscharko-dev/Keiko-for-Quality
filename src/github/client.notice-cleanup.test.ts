@@ -17,9 +17,15 @@ const REF = { owner: "acme", repo: "widget" };
 const IDENTITY = "keiko-for-quality[bot]";
 const NOTICE_BODY = "Keiko for Quality could not complete its review.";
 
-/** Matches `presentation.ts`'s `isIncompleteNoticeBody` exactly — a self-contained fixture rather
- *  than importing across the `github/` → `publish/` layering this reviewer's own dependency
- *  direction forbids (`publish/` depends on `github/`, never the reverse). */
+/**
+ * A self-contained stand-in for `presentation.ts`'s `isIncompleteNoticeBody`, not an import across
+ * the `github/` → `publish/` layering this reviewer's own dependency direction forbids (`publish/`
+ * depends on `github/`, never the reverse). `resolveSupersededOwnNotices` treats this parameter as
+ * an opaque predicate — every test below is about the CLIENT's own pagination/identity/mutation
+ * logic, never about what the predicate itself considers a notice — so the sentence-only check here
+ * is deliberately simpler than the real one (#42 also requires a well-formed marker) and does not
+ * need to track it.
+ */
 function isNoticeBody(body: string): boolean {
   return body.includes(NOTICE_BODY);
 }

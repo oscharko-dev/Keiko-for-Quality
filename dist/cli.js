@@ -1387,6 +1387,32 @@ var REASON_CODES = [
 ];
 var REASON_CODE_SET = new Set(REASON_CODES);
 
+// src/publish/marker.ts
+import { createHash as createHash2 } from "node:crypto";
+var MARKER_PREFIX = "keiko-for-quality";
+var MARKER_PATTERN = new RegExp(String.raw`<!--\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\s*-->`);
+var FIELD_SEPARATOR2 = "\0";
+function normalizeUnicodeText(input) {
+  return input.normalize("NFC").replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").replace(/[\u2018\u2019\u201A\u201B]/g, "'").replace(/[\u201C\u201D\u201E\u201F]/g, '"').replace(new RegExp("\\p{Zs}", "gu"), " ").toLowerCase();
+}
+function normalizeForFingerprint(body) {
+  return normalizeUnicodeText(body).replace(/```[\s\S]*?```/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+}
+function fingerprint(input) {
+  const material = [
+    input.repository,
+    String(input.pullNumber),
+    input.path,
+    input.rule,
+    normalizeForFingerprint(input.body),
+    ...input.head !== void 0 ? [input.head] : []
+  ].join(FIELD_SEPARATOR2);
+  return createHash2("sha256").update(material).digest("hex").slice(0, 32);
+}
+function extractMarker(body) {
+  return MARKER_PATTERN.exec(body)?.[1];
+}
+
 // src/publish/sanitize.ts
 var CONTROL_EXCEPT_WHITESPACE = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/;
 var BIDIRECTIONAL = /[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/;
@@ -1711,7 +1737,7 @@ function buildNewEntries(inputs) {
 }
 
 // src/engine/acquire.ts
-import { createHash as createHash2 } from "node:crypto";
+import { createHash as createHash3 } from "node:crypto";
 import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1797,7 +1823,7 @@ async function download(url, diagnostics, version) {
   return bytes;
 }
 function digestOf(bytes) {
-  return createHash2("sha256").update(bytes).digest("hex");
+  return createHash3("sha256").update(bytes).digest("hex");
 }
 function cacheRoot(env) {
   const runnerToolCache = env.RUNNER_TOOL_CACHE;
@@ -2117,7 +2143,7 @@ async function auditClassification(findings, deps) {
 }
 
 // src/engine/rule-identity.ts
-import { createHash as createHash3 } from "node:crypto";
+import { createHash as createHash4 } from "node:crypto";
 
 // src/engine/rule-file.ts
 var CATCH_ALL_RULE = [
@@ -2428,11 +2454,11 @@ function serializeRuleFile(file) {
 // src/engine/rule-identity.ts
 function promptIdentityDigest(profile, guidelines) {
   const body = serializeRuleFile(buildRuleFile(profile, guidelines));
-  return sha256(createHash3("sha256").update(body).digest("hex"));
+  return sha256(createHash4("sha256").update(body).digest("hex"));
 }
 
 // src/engine/run.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 import { mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join as join2 } from "node:path";
@@ -2646,7 +2672,7 @@ async function writeRuleFile(options2, home) {
   const ruleBody = serializeRuleFile(rule);
   const rulePath = join2(home, "keiko-rules.json");
   await writeFile2(rulePath, ruleBody, { mode: 384 });
-  return { rulePath, ruleDigest: sha256(createHash4("sha256").update(ruleBody).digest("hex")) };
+  return { rulePath, ruleDigest: sha256(createHash5("sha256").update(ruleBody).digest("hex")) };
 }
 function reviewArguments(options2, rulePath) {
   return [
@@ -3680,32 +3706,6 @@ function isSubstantiveDisposition(lastReply, identity) {
   if (lastReply === void 0) return false;
   if (lastReply.authorLogin === identity) return false;
   return substantiveText(lastReply.body).length >= MIN_SUBSTANTIVE_CHARS;
-}
-
-// src/publish/marker.ts
-import { createHash as createHash5 } from "node:crypto";
-var MARKER_PREFIX = "keiko-for-quality";
-var MARKER_PATTERN = new RegExp(String.raw`<!--\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\s*-->`);
-var FIELD_SEPARATOR2 = "\0";
-function normalizeUnicodeText(input) {
-  return input.normalize("NFC").replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").replace(/[\u2018\u2019\u201A\u201B]/g, "'").replace(/[\u201C\u201D\u201E\u201F]/g, '"').replace(new RegExp("\\p{Zs}", "gu"), " ").toLowerCase();
-}
-function normalizeForFingerprint(body) {
-  return normalizeUnicodeText(body).replace(/```[\s\S]*?```/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
-}
-function fingerprint(input) {
-  const material = [
-    input.repository,
-    String(input.pullNumber),
-    input.path,
-    input.rule,
-    normalizeForFingerprint(input.body),
-    ...input.head !== void 0 ? [input.head] : []
-  ].join(FIELD_SEPARATOR2);
-  return createHash5("sha256").update(material).digest("hex").slice(0, 32);
-}
-function extractMarker(body) {
-  return MARKER_PATTERN.exec(body)?.[1];
 }
 
 // src/publish/similarity.ts

@@ -1495,7 +1495,7 @@ function composeIncompleteNotice(reasonCode, marker) {
   ].join("\n");
 }
 function isIncompleteNoticeBody(body) {
-  return body.includes("Keiko for Quality could not complete its review.");
+  return body.includes("Keiko for Quality could not complete its review.") && extractMarker(body) !== void 0;
 }
 function shortSha(sha) {
   return sha.slice(0, 7);

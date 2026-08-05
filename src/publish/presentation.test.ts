@@ -191,6 +191,27 @@ describe("isIncompleteNoticeBody", () => {
   it("does not recognise the empty string", () => {
     expect(isIncompleteNoticeBody("")).toBe(false);
   });
+
+  /**
+   * #42: the sentence alone used to be the whole check, and it is PUBLIC, product-controlled text —
+   * visible in every published comment, in README.md, and in the committed dist/index.js — so
+   * anyone can reproduce it verbatim without ever having been this reviewer. A body carrying the
+   * exact sentence but no marker at all (a contributor quoting the notice in a reply, say) must no
+   * longer qualify, since `resolveSupersededOwnNotices` treats a match here as license to mutate
+   * the thread.
+   */
+  it("no longer recognises the sentence alone, without a marker", () => {
+    const quoted =
+      "As mentioned above, Keiko for Quality could not complete its review. Reason code: `x`.";
+    expect(isIncompleteNoticeBody(quoted)).toBe(false);
+  });
+
+  it("does not recognise the sentence next to a malformed marker (wrong hex length)", () => {
+    const malformed =
+      "Keiko for Quality could not complete its review. Reason code: `x`.\n" +
+      `<!-- keiko-for-quality:v1:${"a".repeat(31)} -->`;
+    expect(isIncompleteNoticeBody(malformed)).toBe(false);
+  });
 });
 
 describe("composeSummaryBody", () => {
