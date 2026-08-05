@@ -123,10 +123,16 @@ describe("buildRuleFile", () => {
    */
   it("asks for nothing the publisher would reject", () => {
     const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    // Carrying the circumstance-first shape the rule prescribes from 2026-08-05 on. Production
+    // measured 21.7% of this reviewer's findings opening on a circumstance against a competitor's
+    // 63.1%, next to a 23% versus 64% rate of findings the author acted on — so the examples the
+    // sanitizer is held against have to be written the way the rule now asks, or this test would
+    // keep certifying a shape the model is no longer told to produce. The third one is the
+    // every-path case the rule also names, stated rather than left silent.
     const examples = [
-      "Validate the token in full, not by prefix.\n\nThe comparison accepts any value whose first eight characters match.",
-      "Close the handle after reading.\n\nIt leaks on every call:\n\n```js\n// no close on this path\nreturn handle.readFile();\n```",
-      "Pin this action to a full commit SHA.\n\nA tag is movable, so the reviewed bytes and the executed bytes stop being the same bytes.",
+      "Validate the token in full, not by prefix.\n\nWhen a caller sends a token sharing its first eight characters with a valid one, the comparison accepts it.",
+      "Close the handle after reading.\n\nIf the read throws, this path returns without closing, leaking the handle:\n\n```js\n// no close on this path\nreturn handle.readFile();\n```",
+      "Pin this action to a full commit SHA.\n\nOn every run, a tag is resolved fresh, so the reviewed bytes and the executed bytes stop being the same bytes.",
     ];
     for (const example of examples) {
       expect(sanitizeFindingBody(example).ok).toBe(true);
