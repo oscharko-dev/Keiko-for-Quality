@@ -229,6 +229,40 @@ function memoizablePaths(result: EngineResult): ReadonlySet<string> {
 }
 
 /**
+ * The full memoizable set of a FINISHED run with named per-file failures: everything this adapter
+ * dispatched, minus exactly the files the engine's warnings disown.
+ *
+ * Until 2026-08-06 the covered set here was finding-proven paths only, which on the first
+ * production run under the fix (oscharko-dev/Keiko#3008) memoized zero of twelve files — the two
+ * clean completions had no finding to prove them, so the next push would have re-paid everything.
+ * The wider claim is safe on two facts, both checked rather than assumed:
+ *
+ * - The pinned release's per-file executor has no silent skip: every dispatched path ends in
+ *   either a recorded completion or a typed, file-naming warning (`internal/agent/agent.go`,
+ *   `executeSubtask` — three non-success exits, each preceded by `recordWarning`; audited against
+ *   v1.8.4 source on 2026-08-06). A finished status plus the warnings IS the engine's per-path
+ *   account.
+ * - The count must corroborate it: `files_reviewed` (a dispatch count) must equal everything this
+ *   adapter expected to dispatch. When it does not — the engine's own path filters dropped
+ *   something — the identity argument is void for the missing remainder, and the set falls back
+ *   to the finding-proven paths `memoizablePaths` can still prove.
+ */
+function dispatchedMinusFailed(
+  inventory: Inventory,
+  memoizedPaths: ReadonlySet<string>,
+  failedPaths: ReadonlySet<string>,
+  result: EngineResult,
+  expected: number,
+): ReadonlySet<string> {
+  if (result.filesReviewed !== expected) return memoizablePaths(result);
+  const covered = new Set<string>();
+  for (const path of inventory.reviewablePaths) {
+    if (!memoizedPaths.has(path) && !failedPaths.has(path)) covered.add(path);
+  }
+  return covered;
+}
+
+/**
  * The engine's own budget stop, checked ahead of every terminal-state and status check on both
  * settlement paths.
  *
@@ -467,7 +501,7 @@ function settleCounted(
         reviewable: expected,
         reviewed: Math.max(0, result.filesReviewed - failedPaths.size),
       },
-      memoizablePaths(result),
+      dispatchedMinusFailed(inventory, memoizedPaths, failedPaths, result, expected),
     );
   }
   if (result.filesReviewed < expected) {

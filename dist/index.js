@@ -1,4 +1,4 @@
-// Keiko for Quality 0.19.0 — generated bundle, do not edit.
+// Keiko for Quality 0.19.1 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/action/main.ts
@@ -893,6 +893,14 @@ function memoizablePaths(result) {
   }
   return covered;
 }
+function dispatchedMinusFailed(inventory, memoizedPaths, failedPaths, result, expected) {
+  if (result.filesReviewed !== expected) return memoizablePaths(result);
+  const covered = /* @__PURE__ */ new Set();
+  for (const path of inventory.reviewablePaths) {
+    if (!memoizedPaths.has(path) && !failedPaths.has(path)) covered.add(path);
+  }
+  return covered;
+}
 function budgetDisqualifier(mode, result, config) {
   if (!result.budgetExceeded && result.totalTokens <= config.tokenBudget) return void 0;
   return incomplete(
@@ -992,7 +1000,7 @@ function settleCounted(inventory, result, profile, config, memoizedPaths) {
         reviewable: expected,
         reviewed: Math.max(0, result.filesReviewed - failedPaths.size)
       },
-      memoizablePaths(result)
+      dispatchedMinusFailed(inventory, memoizedPaths, failedPaths, result, expected)
     );
   }
   if (result.filesReviewed < expected) {
@@ -2823,6 +2831,15 @@ async function recordBadRequestNumbers(response, usage) {
     const requested = /requested (\d{1,10})/i.exec(text3);
     if (limit !== null) usage.badRequestContextLimit = Number(limit[1]);
     if (requested !== null) usage.badRequestRequestedTokens = Number(requested[1]);
+    if (/content_filter|content.management.policy|ResponsibleAIPolicyViolation/i.test(text3)) {
+      usage.badRequestContentFilter += 1;
+    } else if (/unknown parameter|unrecognized request argument|unsupported parameter|extra_forbidden|unexpected keyword/i.test(
+      text3
+    )) {
+      usage.badRequestUnknownParameter += 1;
+    } else if (/maximum context length|context.length.exceeded/i.test(text3)) {
+      usage.badRequestContextLength += 1;
+    }
   } catch {
   }
 }
@@ -2870,9 +2887,27 @@ async function fetchWithCacheKeyFallback(doFetch, url, request, options2, usage,
     return retryWithoutCacheKey(doFetch, url, request, options2, usage, latch);
   }
   if (upstream.status === 400 && isChatCompletionsPath(request.path)) {
-    return persistedBadRequest(upstream, usage);
+    return healUnkeyedBadRequest(doFetch, url, request, usage, upstream, pinned);
   }
   return upstream;
+}
+async function healUnkeyedBadRequest(doFetch, url, request, usage, upstream, pinned) {
+  if (pinned === void 0 || pinned.body === request.body) {
+    return persistedBadRequest(upstream, usage);
+  }
+  return retryWithOriginalBody(doFetch, url, request, usage);
+}
+async function retryWithOriginalBody(doFetch, url, request, usage) {
+  const asWritten = await doFetch(url, {
+    method: request.method,
+    headers: request.headers,
+    body: new Uint8Array(request.body)
+  });
+  if (asWritten.status !== 400) {
+    usage.rewriteRejected += 1;
+    return asWritten;
+  }
+  return persistedBadRequest(asWritten, usage);
 }
 async function persistedBadRequest(response, usage) {
   usage.badRequestPersisted += 1;
@@ -2891,7 +2926,7 @@ async function retryWithoutCacheKey(doFetch, url, request, options2, usage, latc
     latch.disabled = true;
     return retried;
   }
-  return persistedBadRequest(retried, usage);
+  return retryWithOriginalBody(doFetch, url, request, usage);
 }
 async function forward(options2, request, response, usage, latch) {
   const doFetch = options2.fetchImpl ?? fetch;
@@ -2940,7 +2975,11 @@ function startModelProxy(options2) {
     completion: 0,
     cached: 0,
     cacheKeyRejected: 0,
+    rewriteRejected: 0,
     badRequestPersisted: 0,
+    badRequestContentFilter: 0,
+    badRequestUnknownParameter: 0,
+    badRequestContextLength: 0,
     badRequestContextLimit: 0,
     badRequestRequestedTokens: 0
   };
@@ -3120,7 +3159,13 @@ function recordModelUsage(diagnostics, proxy, options2) {
       // Always present, even at 0: "no model call was refused" is a fact worth one word, and its
       // absence is what let Keiko#3002's persisted 400s masquerade as cache-key noise.
       bad_request_persisted: usage.badRequestPersisted,
+      // Calls the second healing stage saved by re-sending the engine's original body — each one
+      // ran without the sampling pin, which this ledger must show (2026-08-06, Keiko#3008).
+      ...usage.rewriteRejected > 0 ? { rewrite_rejected: usage.rewriteRejected } : {},
       // Only when a persisted 400's body named them — see `recordBadRequestNumbers`.
+      ...usage.badRequestContentFilter > 0 ? { bad_request_content_filter: usage.badRequestContentFilter } : {},
+      ...usage.badRequestUnknownParameter > 0 ? { bad_request_unknown_parameter: usage.badRequestUnknownParameter } : {},
+      ...usage.badRequestContextLength > 0 ? { bad_request_context_length: usage.badRequestContextLength } : {},
       ...usage.badRequestContextLimit > 0 ? { bad_request_context_limit: usage.badRequestContextLimit } : {},
       ...usage.badRequestRequestedTokens > 0 ? { bad_request_requested_tokens: usage.badRequestRequestedTokens } : {}
     }
