@@ -38,6 +38,9 @@ import {
   applySeed,
   assertSeedCaseShape,
   evaluateAttempt,
+  isMultiStep,
+  locateSeedRange,
+  observedPathOf,
   renderEvidence,
   settleCase,
   summarizeGate,
@@ -183,7 +186,7 @@ function plantSeed(repoPath, baseSha, seedCase, workDir) {
  * the other. Returns the parsed report, or undefined when the child failed in a way a retry is
  * allowed to absorb (an incomplete settlement still yields its report and is graded normally).
  */
-function runReviewAttempt(worktree, baseSha, reportPath) {
+function runReviewAttempt(worktree, baseSha, reportPath, storePath) {
   const child = spawnSync(
     process.execPath,
     [
@@ -201,6 +204,9 @@ function runReviewAttempt(worktree, baseSha, reportPath) {
       "json",
       "--out",
       reportPath,
+      // Threaded across a multi-push case's steps in warm mode only — this flag IS the memoization
+      // the cross-push case exists to measure.
+      ...(storePath === undefined ? [] : ["--store", storePath]),
     ],
     { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"], timeout: CHILD_TIMEOUT_MS },
   );
@@ -217,7 +223,116 @@ function runReviewAttempt(worktree, baseSha, reportPath) {
   }
 }
 
+/** One edit applied to one file inside a worktree; aborts the gate on a stale or ambiguous seed,
+ *  exactly like the single-shot path — a seed that no longer matches is never guessed at. */
+function applyEditInWorktree(worktree, seedCase, edit, where) {
+  const filePath = join(worktree, edit.file);
+  const applied = applySeed(readFileSync(filePath, "utf8"), edit);
+  if (!applied.ok) fail(`${seedCase.id}: ${where}: ${applied.reason}`);
+  writeFileSync(filePath, applied.content, "utf8");
+}
+
+/**
+ * A multi-push case: each step is committed on its own — one push — and reviewed against the
+ * ORIGINAL base, which is exactly what a real pull request's successive pushes look like to the
+ * reviewer. The store is threaded across the steps in warm mode and withheld in cold mode; the
+ * difference between the two verdicts is the coverage price of memoization, which is the only
+ * reason this shape exists (see the case's own rationale).
+ *
+ * The FINAL step's report decides the case. Intermediate reports are graded too and reported, so
+ * "push 1 already found it" stays distinguishable from "push 2 found it" — those are different
+ * facts about the reviewer.
+ */
+function runMultiStepCase(repoPath, baseSha, seedCase, workDir, warm) {
+  const worktree = join(workDir, "worktree");
+  git(repoPath, ["worktree", "add", "--detach", "--quiet", worktree, baseSha]);
+  const storePath = warm ? join(workDir, "store.json") : undefined;
+  const graded = [];
+  let seedRange;
+  seedCase.steps.forEach((step, index) => {
+    for (const edit of step.edits) {
+      applyEditInWorktree(worktree, seedCase, edit, `steps[${String(index)}]`);
+    }
+    git(worktree, [
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "user.name=kfq-seed-gate",
+      "-c",
+      "user.email=seed-gate@invalid",
+      "commit",
+      "--all",
+      "--quiet",
+      "-m",
+      `seed(${seedCase.id}): ${step.label}`,
+    ]);
+    // Re-derived in the tree that actually exists now — later steps shift lines, and the observed
+    // file may have been planted in an earlier step than this one.
+    const observedEdit = seedCase.steps
+      .flatMap((s) => s.edits)
+      .find((edit) => edit.file === observedPathOf(seedCase));
+    seedRange = locateSeedRange(
+      readFileSync(join(worktree, observedPathOf(seedCase)), "utf8"),
+      observedEdit.replace,
+    );
+    const report = runReviewAttempt(
+      worktree,
+      baseSha,
+      join(workDir, `report-${String(index + 1)}.json`),
+      storePath,
+    );
+    const grade = { ...evaluateAttempt(report, seedCase, seedRange), label: step.label };
+    graded.push(grade);
+    console.error(
+      `seed-gate: ${seedCase.id} [${warm ? "warm" : "cold"}] ${step.label} — outcome ` +
+        `${grade.outcome}, ${String(grade.fileFindingCount)} finding(s) in observed file`,
+    );
+  });
+  return { worktree, graded };
+}
+
+/**
+ * A multi-push case in both cache modes. Cold and warm are separate worktrees on purpose — a
+ * single worktree replayed twice would carry the first pass's commits into the second, and the
+ * comparison would no longer be about the store at all.
+ *
+ * The `--attempts` retry policy does NOT apply here: the point of the sequence is what the
+ * reviewer does across pushes, and re-running the sequence until it passes would measure how often
+ * the harness is lucky rather than what the memoization costs.
+ */
+function runMultiStepCaseBothModes(repoPath, baseSha, seedCase, keep) {
+  const graded = [];
+  for (const warm of [false, true]) {
+    const workDir = mkdtempSync(
+      join(tmpdir(), `kfq-seed-${seedCase.id}-${warm ? "warm" : "cold"}-`),
+    );
+    const run = runMultiStepCase(repoPath, baseSha, seedCase, workDir, warm);
+    // Only the FINAL step's report decides the case, once per mode; the intermediate grades stay
+    // in the record for the reader, not for the verdict.
+    graded.push(
+      ...run.graded.map((grade, index) => ({
+        ...grade,
+        label: `${warm ? "warm" : "cold"}/${grade.label}`,
+        decides: index === run.graded.length - 1,
+      })),
+    );
+    if (keep) {
+      console.error(
+        `seed-gate: ${seedCase.id} — ${warm ? "warm" : "cold"} worktree at ${run.worktree}`,
+      );
+    } else {
+      git(repoPath, ["worktree", "remove", "--force", run.worktree]);
+      rmSync(workDir, { recursive: true, force: true });
+    }
+  }
+  return settleCase(
+    seedCase,
+    graded.filter((grade) => grade.decides),
+  );
+}
+
 function runCase(repoPath, baseSha, seedCase, attempts, keep) {
+  if (isMultiStep(seedCase)) return runMultiStepCaseBothModes(repoPath, baseSha, seedCase, keep);
   const workDir = mkdtempSync(join(tmpdir(), `kfq-seed-${seedCase.id}-`));
   const { worktree, seedRange } = plantSeed(repoPath, baseSha, seedCase, workDir);
   const graded = [];

@@ -232,6 +232,12 @@ export const REASON_CODES = [
   // reconciles against.
   "engine.resumed_gap_targeted",
 
+  // A targeted round that bought nothing (2026-08-06): the gap it dispatched came back the same
+  // size or larger. That is the deterministic per-file failure `resumeWorthwhile` already refuses
+  // to re-buy, recognised one round later, so the loop stops there rather than paying for it twice
+  // more. `before`/`after` are the gap sizes on either side of the round that gave up.
+  "engine.resume_gap_not_shrinking",
+
   // Findings this adapter refused while keeping the run (2026-08-06, Keiko#3011) — see
   // `EngineResult.rejectedFindings` for the incident. Recorded only when non-zero, and a count
   // rather than a reason because diagnostics carry no free text: the alternative to this line is

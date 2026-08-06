@@ -1294,6 +1294,11 @@ var REASON_CODES = [
   // many the first attempt is credited with — their sum is the reviewable set the settlement then
   // reconciles against.
   "engine.resumed_gap_targeted",
+  // A targeted round that bought nothing (2026-08-06): the gap it dispatched came back the same
+  // size or larger. That is the deterministic per-file failure `resumeWorthwhile` already refuses
+  // to re-buy, recognised one round later, so the loop stops there rather than paying for it twice
+  // more. `before`/`after` are the gap sizes on either side of the round that gave up.
+  "engine.resume_gap_not_shrinking",
   // Findings this adapter refused while keeping the run (2026-08-06, Keiko#3011) — see
   // `EngineResult.rejectedFindings` for the incident. Recorded only when non-zero, and a count
   // rather than a reason because diagnostics carry no free text: the alternative to this line is
@@ -2732,8 +2737,14 @@ function contractPairsSection(pairs) {
     ...lines
   ].join("\n");
 }
+var NO_CONVENTIONS = Object.freeze({ nodeNextEsm: false });
+var NODE_NEXT_ESM_FACT = 'This repository\'s own `tsconfig.json` sets `moduleResolution` and `module` to `NodeNext`, and its `package.json` declares `"type": "module"`. Under that combination, a `.js` file extension inside a relative TypeScript import specifier \u2014 for example `from "./foo.js"` inside a `.ts` file \u2014 is the correct, required NodeNext/ESM spelling this project\'s own build already relies on. It is not a defect.';
+function repoConventionsSection(conventions) {
+  if (!conventions.nodeNextEsm) return "";
+  return ["", "## This repository's module conventions", "", NODE_NEXT_ESM_FACT].join("\n");
+}
 var NO_GUIDELINES = Object.freeze({ paths: Object.freeze([]) });
-function buildRuleFile(profile, guidelines = NO_GUIDELINES, mechanicallyClean = []) {
+function buildRuleFile(profile, guidelines = NO_GUIDELINES, mechanicallyClean = [], conventions = NO_CONVENTIONS) {
   const include = [...profile.profile.reviewRelevant];
   if (include.length === 0) {
     throw new TypeError("profile.reviewRelevant must declare at least one pattern");
@@ -2742,7 +2753,7 @@ function buildRuleFile(profile, guidelines = NO_GUIDELINES, mechanicallyClean = 
     rules: [
       {
         path: "**/*",
-        rule: CATCH_ALL_RULE + guidanceSection(guidelines) + pathInstructionsSection(profile.profile.pathInstructions) + contractPairsSection(profile.profile.contractPairs ?? []),
+        rule: CATCH_ALL_RULE + guidanceSection(guidelines) + pathInstructionsSection(profile.profile.pathInstructions) + contractPairsSection(profile.profile.contractPairs ?? []) + repoConventionsSection(conventions),
         // `false` is load-bearing, measured on 2026-08-03. With `true` the engine appends its
         // built-in per-language checklist AFTER this rule — the last text before the model
         // answers, the position it weights most — and that checklist is neither versioned nor
@@ -5312,6 +5323,21 @@ async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnost
 // src/publish/substantiate.ts
 var SUBSTANTIATION_VERDICTS = ["grounded", "vague", "unsupported"];
 var CONSEQUENCE_VERDICTS = ["actionable", "nitpick"];
+var SUBSTANTIATION_STRICTNESS_LEVELS = [
+  "lenient",
+  "default",
+  "strict",
+  "paranoid"
+];
+var STRICTNESS_ENV_VAR = "KFQ_SUBSTANTIATION_STRICTNESS";
+var DEFAULT_STRICTNESS = "default";
+function isSubstantiationStrictness(value) {
+  return SUBSTANTIATION_STRICTNESS_LEVELS.includes(value);
+}
+function resolveSubstantiationStrictness(env = process.env) {
+  const raw = (env[STRICTNESS_ENV_VAR] ?? "").trim().toLowerCase();
+  return isSubstantiationStrictness(raw) ? raw : DEFAULT_STRICTNESS;
+}
 var CIRCUMSTANCE = /(^|[.!?]\s|\*\*\s*)(When|If|Once|After|While|Whenever|Because)\s+[a-z`]|\b(on every (call|run|request|invocation)|for all inputs|on all paths|in every case)\b/imu;
 var LOCATION = /`[A-Za-z_$][\w$.]*`|\b[\w./-]+\.[a-z]{2,4}\b|\bline \d+|:\d+\b/u;
 var DIFF_LINE = /^[+-]\s{2,}\S/u;
@@ -5452,29 +5478,61 @@ function extractFrom(text3, vocabulary) {
   const value = matches.at(-1)?.[1];
   return vocabulary.includes(value ?? "") ? value : void 0;
 }
-async function judgeOne(finding, readHunk, deps) {
+function dropsOnUndecidedJudge(strictness) {
+  return strictness === "strict" || strictness === "paranoid";
+}
+function dropsOnUnreadableHunk(strictness) {
+  return strictness === "paranoid";
+}
+function consequenceAxisEnabled(strictness) {
+  return strictness !== "lenient";
+}
+async function judgeOne(finding, readHunk, deps, strictness) {
   const dossier = buildDossier(finding.content);
   if (!needsJudging(dossier)) return { finding, disposition: "kept", tokens: 0 };
   const hunk = readHunk(finding);
-  if (hunk === "") return { finding, disposition: "undecided", tokens: 0 };
+  if (hunk === "") {
+    return {
+      finding: dropsOnUnreadableHunk(strictness) ? void 0 : finding,
+      disposition: "undecided",
+      tokens: 0
+    };
+  }
   const first = await requestText(buildJudgePrompt(finding, hunk, dossier), deps);
   const verdict = extractVerdict(first.text);
-  if (verdict === void 0) return { finding, disposition: "undecided", tokens: first.tokens };
-  if (verdict === "grounded") return await weighConsequence(finding, hunk, deps, first.tokens);
+  if (verdict === void 0) {
+    return {
+      finding: dropsOnUndecidedJudge(strictness) ? void 0 : finding,
+      disposition: "undecided",
+      tokens: first.tokens
+    };
+  }
+  if (verdict === "grounded") {
+    return await weighConsequence(finding, hunk, deps, first.tokens, strictness);
+  }
   if (verdict === "unsupported") {
     return { finding: void 0, disposition: "unsupported", tokens: first.tokens };
   }
-  return await repairVague(finding, hunk, deps, first.tokens);
+  return await repairVague(finding, hunk, deps, first.tokens, strictness);
 }
-async function weighConsequence(finding, hunk, deps, spentSoFar) {
+async function weighConsequence(finding, hunk, deps, spentSoFar, strictness) {
+  if (!consequenceAxisEnabled(strictness)) {
+    return { finding, disposition: "kept", tokens: spentSoFar };
+  }
   const call = await requestText(buildConsequencePrompt(finding, hunk), deps);
   const tokens = spentSoFar + call.tokens;
   const verdict = extractConsequence(call.text);
   if (verdict === "nitpick") return { finding: void 0, disposition: "nitpick", tokens };
-  if (verdict === void 0) return { finding, disposition: "undecided", tokens };
+  if (verdict === void 0) {
+    return {
+      finding: dropsOnUndecidedJudge(strictness) ? void 0 : finding,
+      disposition: "undecided",
+      tokens
+    };
+  }
   return { finding, disposition: "kept", tokens };
 }
-async function repairVague(finding, hunk, deps, spentSoFar) {
+async function repairVague(finding, hunk, deps, spentSoFar, strictness) {
   const rewrite = await requestText(buildRepairPrompt(finding, hunk), deps);
   const tokensAfterRewrite = spentSoFar + rewrite.tokens;
   const rewritten = (rewrite.text ?? "").trim();
@@ -5486,14 +5544,20 @@ async function repairVague(finding, hunk, deps, spentSoFar) {
   const tokens = tokensAfterRewrite + second.tokens;
   const verdict = extractVerdict(second.text);
   if (verdict === "grounded") {
-    const weighed = await weighConsequence(repaired, hunk, deps, tokens);
+    const weighed = await weighConsequence(repaired, hunk, deps, tokens, strictness);
     return weighed.disposition === "kept" ? { ...weighed, disposition: "repaired" } : weighed;
   }
-  if (verdict === void 0) return { finding, disposition: "undecided", tokens };
+  if (verdict === void 0) {
+    return {
+      finding: dropsOnUndecidedJudge(strictness) ? void 0 : finding,
+      disposition: "undecided",
+      tokens
+    };
+  }
   if (verdict === "unsupported") return { finding: void 0, disposition: "unsupported", tokens };
   return { finding: void 0, disposition: "vague", tokens };
 }
-async function substantiate(findings, readHunk, deps) {
+async function substantiate(findings, readHunk, deps, strictness = resolveSubstantiationStrictness()) {
   const kept = [];
   const counts = {
     repaired: 0,
@@ -5504,7 +5568,7 @@ async function substantiate(findings, readHunk, deps) {
   };
   let tokens = 0;
   for (const finding of findings) {
-    const judged = await judgeOne(finding, readHunk, deps);
+    const judged = await judgeOne(finding, readHunk, deps, strictness);
     tokens += judged.tokens;
     if (judged.finding !== void 0) kept.push(judged.finding);
     if (judged.disposition === "repaired") counts.repaired += 1;
@@ -5513,7 +5577,7 @@ async function substantiate(findings, readHunk, deps) {
     if (judged.disposition === "unsupported") counts.droppedUnsupported += 1;
     if (judged.disposition === "nitpick") counts.droppedNitpick += 1;
   }
-  return { findings: kept, ...counts, tokens };
+  return { findings: kept, ...counts, tokens, strictness };
 }
 
 // src/review.ts
@@ -5710,7 +5774,7 @@ function engineInvocationOptions(request, inventory, binaryPath, allottedBudget,
     mechanicallyCleanPaths: excluded
   };
 }
-async function executeEngine(request, inventory, memo, ledger, diagnostics) {
+async function executeEngine(request, inventory, memo, ledger, diagnostics, credited) {
   const workspace = await mkdtemp2(join3(tmpdir2(), "kfq-engine-bin-"));
   try {
     const engine = await acquireEngine(workspace, diagnostics);
@@ -5739,6 +5803,7 @@ async function executeEngine(request, inventory, memo, ledger, diagnostics) {
       diagnostics
     );
     ledger.classify += classifyTokens;
+    for (const path of alreadyReviewedPaths) credited.add(path);
     const memoizedForSettlement = alreadyReviewedPaths.length === 0 ? memo.hitPaths : /* @__PURE__ */ new Set([...memo.hitPaths, ...alreadyReviewedPaths]);
     return settle(inventory, classified, request.profile, request.config, memoizedForSettlement);
   } catch (error) {
@@ -5972,6 +6037,7 @@ function parseBooked(output, ledger) {
   }
 }
 var TARGETED_GAP_MAX_FRACTION = 0.5;
+var TARGETED_GAP_MAX_ROUNDS = 3;
 function targetedGapPaths(result, reviewablePaths) {
   if (reviewablePaths.size === 0) return void 0;
   const failed = /* @__PURE__ */ new Set();
@@ -6005,26 +6071,46 @@ async function decideAfterFirstAttempt(parsed, context) {
 }
 async function settleFinishedRun(parsed, context) {
   const { options: options2, diagnostics, ledger, reviewablePaths, firstAttemptTokens } = context;
-  const targeted = targetedGapPaths(parsed, reviewablePaths);
-  if (targeted === void 0) return finishedRunOutcome(diagnostics, parsed, options2);
-  const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
-  const remaining = clamp(
-    options2.allottedBudget - parsed.totalTokens,
-    Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION),
-    options2.allottedBudget
-  );
-  diagnostics.record("engine.resumed_gap_targeted", {
-    counts: { targeted: targeted.size, covered: covered.length, remaining }
-  });
-  return await attemptResume(
-    options2,
-    diagnostics,
-    remaining,
-    firstAttemptTokens,
-    parsed,
-    covered,
-    ledger
-  );
+  let standing = parsed;
+  let spent = firstAttemptTokens;
+  let outcome;
+  for (let round = 1; round <= TARGETED_GAP_MAX_ROUNDS; round += 1) {
+    const targeted = targetedGapPaths(standing, reviewablePaths);
+    if (targeted === void 0) break;
+    const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
+    const remaining = clamp(
+      options2.allottedBudget - spent,
+      Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION),
+      options2.allottedBudget
+    );
+    diagnostics.record("engine.resumed_gap_targeted", {
+      counts: { round, targeted: targeted.size, covered: covered.length, remaining }
+    });
+    const attempt = await attemptResume(
+      options2,
+      diagnostics,
+      remaining,
+      spent,
+      standing,
+      covered,
+      ledger
+    );
+    const before = targeted.size;
+    const after = targetedGapPaths(attempt.result, reviewablePaths)?.size ?? 0;
+    outcome = attempt;
+    spent = attempt.engineTokens;
+    standing = attempt.result;
+    if (after === 0 || after >= before) {
+      if (after > 0 && after >= before) {
+        diagnostics.record("engine.resume_gap_not_shrinking", {
+          counts: { round, before, after }
+        });
+      }
+      break;
+    }
+  }
+  if (outcome === void 0) return finishedRunOutcome(diagnostics, parsed, options2);
+  return outcome;
 }
 function finishedRunOutcome(diagnostics, parsed, options2) {
   diagnostics.record("engine.resume_skipped_run_completed", {
@@ -6404,7 +6490,8 @@ async function settleOrReport(run2, inventory, memo) {
       inventory,
       memo,
       run2.ledger,
-      run2.diagnostics
+      run2.diagnostics,
+      run2.credited
     );
     run2.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
@@ -6460,7 +6547,7 @@ async function resolvePairOrReport(ctx, request, diagnostics) {
 }
 async function performReviewInner(request, diagnostics, ledger) {
   const started = Date.now();
-  const run2 = { request, ledger, diagnostics };
+  const run2 = { request, ledger, diagnostics, credited: /* @__PURE__ */ new Set() };
   diagnostics.record("run.started", { headSha: request.head });
   const ctx = gitContext(request);
   const pair = await resolvePairOrReport(ctx, request, diagnostics);

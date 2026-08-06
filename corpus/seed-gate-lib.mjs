@@ -51,13 +51,8 @@ function assertOneSeedCase(seedCase) {
   if (typeof id !== "string" || id === "") {
     throw new TypeError("seed cases: every case needs an id");
   }
-  for (const field of ["file", "find", "replace", "rationale"]) {
-    if (typeof seedCase[field] !== "string" || seedCase[field] === "") {
-      throw new TypeError(`seed case ${id}: ${field} must be a non-empty string`);
-    }
-  }
-  if (seedCase.find === seedCase.replace) {
-    throw new Error(`seed case ${id}: find and replace are identical — no defect is planted`);
+  if (typeof seedCase.rationale !== "string" || seedCase.rationale === "") {
+    throw new TypeError(`seed case ${id}: rationale must be a non-empty string`);
   }
   if (seedCase.tier !== 1 && seedCase.tier !== 2) {
     throw new Error(`seed case ${id}: tier must be 1 (blatant) or 2 (subtle)`);
@@ -65,6 +60,83 @@ function assertOneSeedCase(seedCase) {
   if (typeof seedCase.required !== "boolean") {
     throw new TypeError(`seed case ${id}: required must be an explicit boolean`);
   }
+  // A case is EITHER single-shot or multi-push, never both: the two carry different grading rules
+  // (which file decides, which tree the anchor is located in), and a case answering to both would
+  // have no single answer to either.
+  const multi = seedCase.steps !== undefined;
+  const single = seedCase.file !== undefined;
+  if (multi && single) {
+    throw new Error(`seed case ${id}: has both steps and a top-level file — pick one form`);
+  }
+  if (multi) assertMultiStepCase(seedCase, id);
+  else assertSingleStepCase(seedCase, id);
+}
+
+function assertEdit(edit, id, where) {
+  for (const field of ["file", "find", "replace"]) {
+    if (typeof edit?.[field] !== "string" || edit[field] === "") {
+      throw new TypeError(`seed case ${id}: ${where}.${field} must be a non-empty string`);
+    }
+  }
+  if (edit.find === edit.replace) {
+    throw new Error(
+      `seed case ${id}: ${where} find and replace are identical — no defect is planted`,
+    );
+  }
+}
+
+function assertSingleStepCase(seedCase, id) {
+  assertEdit(seedCase, id, "case");
+}
+
+/**
+ * A multi-push case: two or more steps, each one push's worth of edits, plus the `observedFile`
+ * whose finding decides the case.
+ *
+ * `observedFile` must be touched by some edit — a case that watches a file it never plants a
+ * defect in measures nothing — but deliberately need NOT be touched by the LAST step. That is the
+ * whole point of the cross-push shape (PRWeaver, arXiv:2608.02693): the final push changes only a
+ * neighbour, the reviewed pull request's path set does not change, and the question is whether the
+ * observed file's earlier verdict is replayed from cache instead of being re-read in the light of
+ * what the neighbour now means.
+ */
+function assertMultiStepCase(seedCase, id) {
+  if (!Array.isArray(seedCase.steps) || seedCase.steps.length < 2) {
+    throw new Error(`seed case ${id}: a multi-push case needs at least 2 steps`);
+  }
+  if (typeof seedCase.observedFile !== "string" || seedCase.observedFile === "") {
+    throw new TypeError(`seed case ${id}: a multi-push case needs an observedFile`);
+  }
+  let touchesObserved = false;
+  seedCase.steps.forEach((step, index) => {
+    if (typeof step?.label !== "string" || step.label === "") {
+      throw new TypeError(
+        `seed case ${id}: steps[${String(index)}].label must be a non-empty string`,
+      );
+    }
+    if (!Array.isArray(step.edits) || step.edits.length === 0) {
+      throw new Error(`seed case ${id}: steps[${String(index)}] needs at least one edit`);
+    }
+    step.edits.forEach((edit, editIndex) => {
+      assertEdit(edit, id, `steps[${String(index)}].edits[${String(editIndex)}]`);
+      if (edit.file === seedCase.observedFile) touchesObserved = true;
+    });
+  });
+  if (!touchesObserved) {
+    throw new Error(
+      `seed case ${id}: no edit touches observedFile — the case would measure nothing`,
+    );
+  }
+}
+
+/** The path whose findings decide a case, for either shape. */
+export function observedPathOf(seedCase) {
+  return seedCase.observedFile ?? seedCase.file;
+}
+
+/** True for a case the harness must sequence as several commits. */
+export function isMultiStep(seedCase) {
+  return seedCase.steps !== undefined;
 }
 
 /** 1-based line number of the character at `index` in `content`. */
@@ -103,8 +175,30 @@ export function applySeed(content, seedCase) {
   };
 }
 
+/**
+ * Where the planted text sits in the FINAL tree, for a multi-push case.
+ *
+ * `applySeed` computes its range against the content it just produced, which is the right answer
+ * for a single-shot case and the wrong one for a sequence: later steps shift lines, and the step
+ * that planted the observed defect may not even be the last. So the range is re-derived at the end,
+ * by locating the planted replacement in the final file. Exactly one occurrence or nothing — a
+ * text that now appears twice cannot say which copy the finding should have anchored to, and
+ * guessing would manufacture a line-anchor claim the evidence does not support.
+ */
+export function locateSeedRange(finalContent, plantedText) {
+  const first = finalContent.indexOf(plantedText);
+  if (first === -1 || finalContent.includes(plantedText, first + 1)) return undefined;
+  const seedStartLine = lineOfIndex(finalContent, first);
+  const lines = plantedText === "" ? 1 : plantedText.split("\n").length;
+  return { seedStartLine, seedEndLine: seedStartLine + lines - 1 };
+}
+
 /** True when the finding's line range overlaps the seeded range widened by `slack` on each side. */
 function overlapsSeed(finding, seedRange, slack) {
+  // No range means the harness could not locate the planted text unambiguously in the final tree
+  // (`locateSeedRange`). The case can still PASS on the file — line anchoring is a quality metric,
+  // not the recall claim — but it must never be asserted from a location nobody established.
+  if (seedRange === undefined) return false;
   if (finding.startLine === null || finding.endLine === null) return false;
   return (
     finding.startLine <= seedRange.seedEndLine + slack &&
@@ -122,7 +216,8 @@ export function evaluateAttempt(report, seedCase, seedRange, slack = LINE_SLACK_
     throw new Error(`unexpected report schema: ${String(report.schema)}`);
   }
   const outcome = report.settlement.outcome;
-  const fileFindings = report.findings.filter((finding) => finding.path === seedCase.file);
+  const observed = observedPathOf(seedCase);
+  const fileFindings = report.findings.filter((finding) => finding.path === observed);
   return {
     outcome,
     found: outcome === "complete" && fileFindings.length > 0,

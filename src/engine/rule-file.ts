@@ -385,6 +385,370 @@ function contractPairsSection(pairs: readonly ContractPair[]): string {
 }
 
 /**
+ * Deterministic, repo-derived facts this module can state as project truth rather than general
+ * expectation — never inferred from a model call, and never defaulted to "probably" when a source
+ * file is missing, unreadable, or only partially conclusive.
+ *
+ * Boolean-only by construction, and that is the whole security argument for this type, not an
+ * incidental style choice: `repoConventionsSection` below never interpolates a config VALUE into
+ * the rendered rule text, because there is no config value left on this type to interpolate — only
+ * a yes/no this module already decided against a fixed allowlist (`NODE_STYLE_RESOLUTION_VALUES`)
+ * before construction. A hostile `tsconfig.json` can flip a field between `true` and `false`; it can
+ * never make this type carry one byte of its own content into the prompt the model reads.
+ *
+ * One field today, added for one real, repeatedly observed false-positive class: a general-purpose
+ * review model has no way to know a project's own module resolution mode, so it reads a correct
+ * `.js`-suffixed relative import — required, not optional, under this project's own NodeNext
+ * configuration — as a broken or missing file. A second fact belongs on this type only once it
+ * clears the same bar: an evidenced, repeated false positive, not a guess at what else might help.
+ * Padding this interface with a plausible-sounding field nothing has measured yet is exactly the
+ * failure mode `deriveRepoConventions`'s own doc comment below is written to avoid.
+ */
+export interface RepoConventions {
+  /**
+   * True only when `deriveRepoConventions` found, with nothing filled in for a gap, that this
+   * repository's own `tsconfig.json` requires Node-style module resolution AND its `package.json`
+   * declares itself an ES module package. `false` covers two situations this type deliberately
+   * cannot distinguish — "confirmed not NodeNext/ESM" and "could not tell, because a file was
+   * missing, unreadable, or the fields in question are only reachable through an unresolved
+   * `extends`" — because both demand the identical action from `repoConventionsSection`: say
+   * nothing. Collapsing "no" and "unknown" into one value is what makes "deliver nothing rather
+   * than a wrong convention" (see `deriveRepoConventions`) the only way to read this field, not a
+   * discipline callers have to remember to apply themselves.
+   */
+  readonly nodeNextEsm: boolean;
+}
+
+/**
+ * The `conventions` default `buildRuleFile` falls back to when a caller does not yet read
+ * `tsconfig.json`/`package.json` and pass the result — which, as of this change, is every existing
+ * caller. A module-level frozen constant rather than an object literal at the call site, for the
+ * same reason `NO_GUIDELINES` below is one (Sonar S7737): a fresh object on every defaulted call
+ * when a single shared, frozen one behaves identically and costs nothing to share.
+ */
+const NO_CONVENTIONS: RepoConventions = Object.freeze({ nodeNextEsm: false });
+
+/**
+ * Upper bound on the `tsconfig.json`/`package.json` text this module will even attempt to parse.
+ * Real files of both kinds are a few kilobytes at the outside — this very repository's own
+ * `tsconfig.json` is under 1000 characters — so a document past this bound is either not really one
+ * of these files or is shaped to cost more to read than the one boolean it could ever produce is
+ * worth. Not load-bearing for correctness the way `sanitize.ts`'s `MAX_BODY_CHARS` is against a
+ * super-linear regex — every scan below is a single linear walk with no backtracking to blow up —
+ * this exists purely to cap the memory an optional, best-effort feature is allowed to spend before
+ * it has produced anything.
+ */
+const MAX_CONFIG_SOURCE_CHARS = 65536;
+
+/**
+ * Narrows `unknown` to a plain JSON object — not an array, not `null`, both of which also pass
+ * `typeof value === "object"` and would otherwise read as a record with every property missing.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Reads `key` from `record` only when it is the record's OWN property with a string value —
+ * `Object.hasOwn` rather than `key in record` or a plain truthiness check, for two reasons that
+ * happen to want the identical guard. Safety first: a key looked up on a plain object can otherwise
+ * resolve through the prototype chain (`toString`, `constructor`, …), the exact shape this file's
+ * own `CATCH_ALL_RULE` tells a reviewer to flag elsewhere. Specific to this module, second: an
+ * own-key check is what makes tsconfig's `extends` safe to ignore entirely instead of something
+ * this module must chase through the filesystem. TypeScript merges an extended config so the
+ * extending file's own value for a key always overrides the base's, so a key present here is
+ * already the EFFECTIVE value no matter what any base config says — while a key absent here might
+ * still be set by a base config this function was never given and has no way to read. Absence
+ * therefore means "unknown", never "unset", which is exactly the "say nothing rather than guess"
+ * outcome the rest of this module exists to produce.
+ */
+function ownString(record: Record<string, unknown>, key: string): string | undefined {
+  if (!Object.hasOwn(record, key)) return undefined;
+  const value = record[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * Index just past the closing quote of the JSON string literal starting at `quoteIndex`, or
+ * `text.length` when it never closes. An escape (`\\` and whatever follows it, whether that is a
+ * simple escape like `\"` or the first two characters of a `\uXXXX` sequence) always consumes two
+ * characters together so an escaped quote is never mistaken for the string's real end; nothing here
+ * needs to know which escape it is, only that the character right after a backslash can never
+ * itself close the string. An unterminated string is not a case this function has to get "right" in
+ * any deeper sense — the text is already headed for a `JSON.parse` that will reject it regardless —
+ * so returning `text.length` only needs to keep the scan terminating, not produce a meaningful index.
+ */
+function stringLiteralEnd(text: string, quoteIndex: number): number {
+  let i = quoteIndex + 1;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "\\") {
+      i += 2;
+      continue;
+    }
+    if (ch === '"') return i + 1;
+    i += 1;
+  }
+  return text.length;
+}
+
+/**
+ * Index just past a `//` line comment that starts at `from` — the index of its terminating newline
+ * — or `text.length` when the comment runs to the end of the text. Split out of
+ * `stripJsonComments` so that function's own branching stays small enough to read at a glance
+ * (Sonar-style cyclomatic-complexity budget, enforced here by this project's own `complexity: 10`
+ * ESLint rule); the two halves are simple enough on their own that naming them is the whole benefit.
+ */
+function lineCommentEnd(text: string, from: number): number {
+  let j = from;
+  while (j < text.length && text[j] !== "\n") j += 1;
+  return j;
+}
+
+/**
+ * Index just past a slash-star block comment's closing delimiter, or `text.length` when the
+ * comment never closes — the block-comment counterpart to `lineCommentEnd` immediately above, split
+ * out for the identical complexity-budget reason.
+ */
+function blockCommentEnd(text: string, from: number): number {
+  const close = text.indexOf("*/", from);
+  return close === -1 ? text.length : close + 2;
+}
+
+/**
+ * Strips `//` line comments and slash-star block comments from JSONC text — the one deviation from
+ * strict JSON that `tsconfig.json` is documented to allow and that real-world files use routinely.
+ *
+ * A global regex stripping everything from a `//` marker to the end of its line was the shape first
+ * considered, and rejected: it cannot tell a comment from the identical two characters inside a
+ * string value, and a tsconfig can hold one legitimately (a `"paths"` entry, a URL in a generated
+ * header). This walks the text one character at a time instead, the same technique `sanitize.ts`'s
+ * `maskFencedBlocks` uses for the same reason — a linear walk that already knows where the strings
+ * are can never misread their content as syntax, and never risks the super-linear backtracking a
+ * cleverer regex could.
+ */
+function stripJsonComments(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') {
+      const end = stringLiteralEnd(text, i);
+      out += text.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "/") {
+      i = lineCommentEnd(text, i + 2);
+      continue;
+    }
+    if (ch === "/" && text[i + 1] === "*") {
+      i = blockCommentEnd(text, i + 2);
+      continue;
+    }
+    // `noUncheckedIndexedAccess` types `ch` as `string | undefined`, even though the loop guard
+    // (`i < text.length`) already makes it a real character on every reachable path here — string
+    // indexing has no narrower type for the compiler to infer from that comparison. `?? ""` is a
+    // no-op on every actual input and keeps the accumulation typed as `string` without a cast.
+    out += ch ?? "";
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Whitespace as JSON defines it — checked one character at a time against a `Set`, never through a
+ * regex, because a single-character lookup cannot backtrack and does not need to justify that it
+ * can't.
+ */
+const JSON_WHITESPACE: ReadonlySet<string> = new Set([" ", "\t", "\n", "\r"]);
+
+/** True when only JSON whitespace separates index `from` from the next `}` or `]`. */
+function isTrailingComma(text: string, from: number): boolean {
+  let j = from;
+  while (j < text.length && JSON_WHITESPACE.has(text[j] ?? "")) j += 1;
+  return text[j] === "}" || text[j] === "]";
+}
+
+/**
+ * Drops a comma that precedes only whitespace and then a closing `}` or `]` — the other JSONC
+ * deviation `tsconfig.json` files commonly use. Runs strictly after `stripJsonComments`, so the
+ * only whitespace a dropped comma can ever be separated from its bracket by is real whitespace,
+ * never a comment that used to sit between them.
+ *
+ * Strings are copied verbatim through the same `stringLiteralEnd` scan `stripJsonComments` uses, so
+ * a string value that happens to end in `,}`-shaped text — unusual, but not impossible — is never
+ * mistaken for trailing-comma syntax.
+ */
+function stripTrailingCommas(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === '"') {
+      const end = stringLiteralEnd(text, i);
+      out += text.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === "," && isTrailingComma(text, i + 1)) {
+      i += 1;
+      continue;
+    }
+    // See `stripJsonComments`'s identical line for why `?? ""` is here: the loop guard already
+    // guarantees a real character, `noUncheckedIndexedAccess` just cannot see that guarantee.
+    out += ch ?? "";
+    i += 1;
+  }
+  return out;
+}
+
+/**
+ * Parses JSONC text into an `unknown` value, or `undefined` when it cannot be understood as JSON
+ * even after stripping comments and trailing commas — never throws.
+ *
+ * This is the one place `JSON.parse` runs against reviewed-repository content in this module, and it
+ * runs inside a `try` deliberately even though the two passes above cannot themselves manufacture
+ * anything `JSON.parse` would newly reject: the source text can still be malformed on its own terms
+ * — unbalanced braces, a bare word, input truncated mid-token — and "cannot parse" has to resolve to
+ * "say nothing" here, not to an exception three call frames away from anything that signed up to
+ * catch it.
+ */
+function parseLenientJson(text: string): unknown {
+  try {
+    return JSON.parse(stripTrailingCommas(stripJsonComments(text))) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The `moduleResolution`/`module` spellings whose Node-style resolution requires an explicit file
+ * extension on a relative specifier. Compared case-insensitively because TypeScript itself accepts
+ * these enum values case-insensitively in `tsconfig.json`.
+ *
+ * Comparing the value read from the file against this FIXED set — and never interpolating the value
+ * itself into anything this module renders — is the entire injection defense for this feature. The
+ * worst a hostile `tsconfig.json` can do to `isNodeStyleResolutionValue` is fail to match, or match,
+ * a string this module already knew how to write before it ever read the file; there is no path
+ * from a crafted config value to a single byte of that value appearing in the rule text.
+ */
+const NODE_STYLE_RESOLUTION_VALUES: ReadonlySet<string> = new Set(["nodenext", "node16"]);
+
+function isNodeStyleResolutionValue(value: string | undefined): boolean {
+  return value !== undefined && NODE_STYLE_RESOLUTION_VALUES.has(value.trim().toLowerCase());
+}
+
+/**
+ * True when the reviewed repository's OWN root `tsconfig.json` — never a base config reached only
+ * through `extends` — declares both `compilerOptions.moduleResolution` and `compilerOptions.module`
+ * as `NodeNext` or `Node16`. Both, not either: TypeScript rejects most combinations where the two
+ * disagree, so requiring both is corroboration against a config that does not actually compile, not
+ * redundant caution.
+ *
+ * A monorepo whose real settings live in a base config this function never reads — `extends`
+ * present, neither key its own — resolves to `false` here exactly as a repository with no
+ * `tsconfig.json` at all would. That is not this function deciding ESM is absent; it is this
+ * function not knowing, and "does not know" and "no" are made to render identically on purpose (see
+ * `RepoConventions`'s own doc comment on why `false` carries both meanings at once).
+ */
+function tsconfigDeclaresNodeNextEsm(tsconfigText: string | undefined): boolean {
+  if (tsconfigText === undefined || tsconfigText.length > MAX_CONFIG_SOURCE_CHARS) return false;
+  const parsed = parseLenientJson(tsconfigText);
+  if (!isRecord(parsed)) return false;
+  const compilerOptions = parsed.compilerOptions;
+  if (!isRecord(compilerOptions)) return false;
+  return (
+    isNodeStyleResolutionValue(ownString(compilerOptions, "moduleResolution")) &&
+    isNodeStyleResolutionValue(ownString(compilerOptions, "module"))
+  );
+}
+
+/**
+ * True when the reviewed repository's `package.json` declares `"type": "module"` as its own
+ * top-level key. `package.json` has no `extends` mechanism, so there is no chain to reason about
+ * here — this check exists only to corroborate the tsconfig fact above with the ecosystem's own
+ * signal for "this package's `.js` files are ES modules", not to establish the convention on its
+ * own. Requiring both is deliberately stricter than either fact alone would justify — this project
+ * could plausibly need only the resolution mode to be true for the `.js`-suffix claim to hold — but
+ * a second, independently authored file corroborating the first is cheap, and can only ever make
+ * this feature fire less often, never wrongly: the one direction "say nothing rather than a false
+ * claim" always prefers.
+ */
+function packageDeclaresEsmType(packageJsonText: string | undefined): boolean {
+  if (packageJsonText === undefined || packageJsonText.length > MAX_CONFIG_SOURCE_CHARS) {
+    return false;
+  }
+  const parsed = parseLenientJson(packageJsonText);
+  return isRecord(parsed) && ownString(parsed, "type") === "module";
+}
+
+/**
+ * Derives `RepoConventions` from the reviewed repository's own `tsconfig.json` and `package.json`
+ * text — `undefined` for either input when that file does not exist in the checkout this module was
+ * handed. Deterministic and synchronous: no model call, no network access, no filesystem access of
+ * its own (the caller reads the two files; this function only ever reasons about text already in
+ * hand), so calling it twice on the same two strings always answers identically.
+ *
+ * The `try`/`catch` here is deliberately redundant with the ones already inside
+ * `parseLenientJson`/`tsconfigDeclaresNodeNextEsm`/`packageDeclaresEsmType` — every one of those is
+ * already written to fail closed on its own, through `typeof` guards and optional chaining rather
+ * than an assumed shape. This is cheap insurance at the one seam a future edit to any of them is
+ * most likely to weaken by accident, so that a mistake three functions down becomes the same silent
+ * "say nothing" this whole feature promises, not a crash in the middle of building a rule file.
+ */
+export function deriveRepoConventions(
+  tsconfigText: string | undefined,
+  packageJsonText: string | undefined,
+): RepoConventions {
+  try {
+    const nodeNextEsm =
+      tsconfigDeclaresNodeNextEsm(tsconfigText) && packageDeclaresEsmType(packageJsonText);
+    return { nodeNextEsm };
+  } catch {
+    return NO_CONVENTIONS;
+  }
+}
+
+/**
+ * The one deterministic, repo-derived project fact this module currently knows how to state.
+ *
+ * Written as a fact about this project ("X is the correct spelling here"), deliberately never as an
+ * instruction to the reviewer ("don't report X") — a prohibition invites over-generalizing to a
+ * nearby but different construct the evidence never covered: a genuinely missing file, a stray
+ * `.ts` extension left in by mistake, a `.mjs` sibling that really doesn't exist. A stated fact only
+ * ever answers the one question it was built to answer — whether THIS shape, in THIS project, is a
+ * defect — and this file's own `CATCH_ALL_RULE` ("report a finding only when you can name a concrete
+ * defect") does the rest without needing to be told the same thing twice.
+ *
+ * Kept to one short paragraph on purpose: this text is appended to the rule sent with EVERY reviewed
+ * file, not once per run, so its cost is paid repeatedly rather than amortized — the same reason
+ * `guidanceSection` above names paths instead of inlining whole documents.
+ */
+const NODE_NEXT_ESM_FACT =
+  "This repository's own `tsconfig.json` sets `moduleResolution` and `module` to `NodeNext`, and " +
+  'its `package.json` declares `"type": "module"`. Under that combination, a `.js` file extension ' +
+  'inside a relative TypeScript import specifier — for example `from "./foo.js"` inside a `.ts` ' +
+  "file — is the correct, required NodeNext/ESM spelling this project's own build already relies " +
+  "on. It is not a defect.";
+
+/**
+ * Renders the repo-conventions fact, or nothing when `deriveRepoConventions` could not establish it
+ * with confidence — see that function's doc comment, and `RepoConventions`'s, for why silence is
+ * the ONLY fallback this module has, never a best guess.
+ *
+ * Structurally this mirrors `pathInstructionsSection`/`contractPairsSection` above for the identical
+ * reasons documented there: appended into the one catch-all rule text rather than a second `rules[]`
+ * entry, and rendered from inputs that do not vary with the current run's diff — `promptIdentityDigest`
+ * (`rule-identity.ts`) hashes this module's output as a stable cache identity, and that digest must
+ * stay a function of the profile, the guidelines, and now these repository-level facts alone.
+ */
+function repoConventionsSection(conventions: RepoConventions): string {
+  if (!conventions.nodeNextEsm) return "";
+  return ["", "## This repository's module conventions", "", NODE_NEXT_ESM_FACT].join("\n");
+}
+
+/**
  * The `guidelines` default: a consumer that declared no guideline documents at all, for which
  * `guidanceSection` renders nothing.
  *
@@ -412,11 +776,21 @@ const NO_GUIDELINES: GuidelineIndex = Object.freeze({ paths: Object.freeze([]) }
  *   verdict. This list also changes per run — a rename on this head is not a rename on the next —
  *   so the rule digest recorded with the run changes with it, which is expected: the digest names
  *   exactly what was sent to the engine, and it did change.
+ * @param conventions Deterministic facts from `deriveRepoConventions` — see that function and
+ *   `RepoConventions` for what they cover and why an unestablished fact must never be guessed.
+ *   Defaults to `NO_CONVENTIONS` (nothing established), so every caller that does not yet read
+ *   `tsconfig.json`/`package.json` and pass the result here renders exactly the rule text it
+ *   rendered before this parameter existed. This feature is additive and, as of this change, inert
+ *   until a caller reads those two files from the base checkout and threads the result through —
+ *   the same base-checkout trust level `guidelines` and `profile.profile.pathInstructions` already
+ *   carry, and for the identical reason: a candidate diff must never get to author the conventions
+ *   it is reviewed against.
  */
 export function buildRuleFile(
   profile: CompiledProfile,
   guidelines: GuidelineIndex = NO_GUIDELINES,
   mechanicallyClean: readonly string[] = [],
+  conventions: RepoConventions = NO_CONVENTIONS,
 ): EngineRuleFile {
   // Both lists are derived from the consumer's own profile, so the engine's file selection and this
   // adapter's inventory answer the same question from the same source.
@@ -453,7 +827,8 @@ export function buildRuleFile(
           CATCH_ALL_RULE +
           guidanceSection(guidelines) +
           pathInstructionsSection(profile.profile.pathInstructions) +
-          contractPairsSection(profile.profile.contractPairs ?? []),
+          contractPairsSection(profile.profile.contractPairs ?? []) +
+          repoConventionsSection(conventions),
         // `false` is load-bearing, measured on 2026-08-03. With `true` the engine appends its
         // built-in per-language checklist AFTER this rule — the last text before the model
         // answers, the position it weights most — and that checklist is neither versioned nor

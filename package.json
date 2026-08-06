@@ -39,6 +39,7 @@
     "check:qualification": "node scripts/check-qualification.mjs",
     "corpus:real": "node corpus/real-diffs.mjs",
     "corpus:seed": "node corpus/seed-gate.mjs",
+    "corpus:completion": "node corpus/completion-gate.mjs",
     "arena": "node corpus/arena.mjs",
     "arena:trend": "node corpus/arena-trend.mjs",
     "live:telemetry": "node corpus/live-telemetry.mjs"
