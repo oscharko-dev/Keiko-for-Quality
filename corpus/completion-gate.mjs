@@ -47,6 +47,17 @@ const CHILD_TIMEOUT_MS = 2_400_000;
  * and explicit rather than absent. Raise it as the rate improves; never lower it silently.
  */
 const DEFAULT_THRESHOLD = 0.8;
+/**
+ * The consumer's own ceiling, not the CLI's.
+ *
+ * `src/cli.ts` defaults `--token-budget` to 2,000,000 because that is a sensible ceiling for a
+ * developer reviewing their own working copy. Keiko's workflow passes 6,000,000. Measuring
+ * completion under the smaller number manufactures `budget_exceeded` settlements production would
+ * never have had — the gate's own first run produced exactly one, at 4.66M spent against a 2M
+ * allotment, and it would have been read as a product failure rather than a harness artifact. A
+ * completion rate is only meaningful under the budget the reviewed pull request actually gets.
+ */
+const CONSUMER_TOKEN_BUDGET = 6_000_000;
 
 function fail(message) {
   console.error(`completion-gate: ${message}`);
@@ -60,6 +71,7 @@ function parseArgs(argv) {
     runs: 1,
     base: "origin/dev",
     threshold: DEFAULT_THRESHOLD,
+    tokenBudget: CONSUMER_TOKEN_BUDGET,
     dryRun: false,
     evidence: undefined,
   };
@@ -76,6 +88,7 @@ function parseArgs(argv) {
     else if (token === "--runs") args.runs = Number(next());
     else if (token === "--base") args.base = next();
     else if (token === "--threshold") args.threshold = Number(next());
+    else if (token === "--token-budget") args.tokenBudget = Number(next());
     else if (token === "--evidence") args.evidence = next();
     else if (token === "--dry-run") args.dryRun = true;
     else fail(`unknown option: ${token}`);
@@ -88,6 +101,9 @@ function parseArgs(argv) {
     fail("--runs must be an integer between 1 and 5");
   }
   if (!(args.threshold > 0) || args.threshold > 1) fail("--threshold must be in (0, 1]");
+  if (!Number.isInteger(args.tokenBudget) || args.tokenBudget < 1) {
+    fail("--token-budget must be a positive integer");
+  }
   return args;
 }
 
@@ -141,7 +157,7 @@ function resolveTarget(repoPath, prNumber, baseRef) {
 
 /** One CLI run against one target; never throws — an unusable run becomes a measurement failure
  *  rather than an incomplete, so a broken harness cannot masquerade as a broken product. */
-function runOnce(target, repoPath, workDir, index) {
+function runOnce(target, repoPath, workDir, index, tokenBudget) {
   const worktree = join(workDir, `wt-${String(index)}`);
   const reportPath = join(workDir, `report-${String(index)}.json`);
   try {
@@ -167,6 +183,9 @@ function runOnce(target, repoPath, workDir, index) {
         "json",
         "--out",
         reportPath,
+        // Production parity — see CONSUMER_TOKEN_BUDGET.
+        "--token-budget",
+        String(tokenBudget),
       ],
       { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"], timeout: CHILD_TIMEOUT_MS },
     );
@@ -183,13 +202,13 @@ function runOnce(target, repoPath, workDir, index) {
   }
 }
 
-function runTarget(target, repoPath, runs) {
+function runTarget(target, repoPath, runs, tokenBudget) {
   const workDir = mkdtempSync(join(tmpdir(), `kfq-completion-${String(target.prNumber)}-`));
   const attempts = [];
   try {
     for (let index = 1; index <= runs; index += 1) {
       console.error(`completion-gate: ${target.label} run ${String(index)}/${String(runs)}`);
-      const attempt = runOnce(target, repoPath, workDir, index);
+      const attempt = runOnce(target, repoPath, workDir, index, tokenBudget);
       attempts.push(attempt);
       console.error(
         `completion-gate: ${target.label} run ${String(index)} — ${attempt.outcome}` +
@@ -225,7 +244,10 @@ function printPlan(targets, args, estimate) {
     );
   }
   console.error("");
-  console.error(`  runs per target: ${String(args.runs)}   threshold: ${String(args.threshold)}`);
+  console.error(
+    `  runs per target: ${String(args.runs)}   threshold: ${String(args.threshold)}   ` +
+      `token budget: ${args.tokenBudget.toLocaleString("en-US")}`,
+  );
   console.error(
     `  estimated spend: ${estimate.low.toLocaleString("en-US")}-` +
       `${estimate.high.toLocaleString("en-US")} tokens ` +
@@ -249,7 +271,9 @@ function main() {
     return;
   }
 
-  const results = targets.map((target) => runTarget(target, args.repo, args.runs));
+  const results = targets.map((target) =>
+    runTarget(target, args.repo, args.runs, args.tokenBudget),
+  );
   const summary = summarizeRuns(
     results.flatMap((result) => result.attempts),
     args.threshold,
