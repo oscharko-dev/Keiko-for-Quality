@@ -155,18 +155,53 @@ export function composeFindingBody(
 }
 
 /**
+ * The one optional sentence naming how much of the review is missing.
+ *
+ * Rendered only from count keys `settle.ts` itself writes; an unknown shape renders nothing rather
+ * than guessing. Returned as an array so the caller can splice it in without an empty line when
+ * absent.
+ */
+function gapLine(counts: Readonly<Record<string, number>> | undefined): string[] {
+  if (counts === undefined) return [];
+  const { gap, reviewable, reviewed, expected } = counts;
+  if (gap !== undefined && reviewable !== undefined) {
+    return [
+      "",
+      `The run finished and kept its findings; ${String(gap)} of ${String(reviewable)} reviewable file(s) remain unreviewed and stay owed to the next run.`,
+    ];
+  }
+  if (reviewed !== undefined && expected !== undefined) {
+    return [
+      "",
+      `The engine reports ${String(reviewed)} of ${String(expected)} expected files reviewed.`,
+    ];
+  }
+  return [];
+}
+
+/**
  * The body of the incomplete-review notice.
  *
  * Deliberately plainer than a finding: it is not a defect in the change, and dressing it up like
  * one would mislead. It still carries the repair block, because the operator action is real.
  */
-export function composeIncompleteNotice(reasonCode: string, marker: string): string {
+export function composeIncompleteNotice(
+  reasonCode: string,
+  marker: string,
+  counts?: Readonly<Record<string, number>>,
+): string {
   return [
     "_⚠️ Coverage_ | _🟠 Major_",
     "",
     "**This change was not fully reviewed.**",
     "",
     `Keiko for Quality could not complete its review. Reason code: \`${escapeInline(reasonCode)}\`.`,
+    // The size of the shortfall, when the settlement measured one (2026-08-06). Numbers only, and
+    // only the settlement's own numbers: they are what separates "one file is still owed" from
+    // "nothing was reviewed", which is the first question every reader of this notice asks — the
+    // eight notices on Keiko#3002 could not answer it. Inserted between the reason line and the
+    // fixed sentences below so `isOwnIncompleteNotice`'s detector text stays byte-identical.
+    ...gapLine(counts),
     "",
     "Treat this pull request as unreviewed by this bot. Resolving this conversation does not make",
     "the review complete — it only records that someone looked.",

@@ -677,7 +677,14 @@ function currentPlatformDigest(pin = ENGINE_PIN, platform = process.platform, ar
 
 // src/engine/result.ts
 var SUPPORTED_MANIFEST_SCHEMA = "ocr.run-manifest/v1";
-var RUN_STATUSES = /* @__PURE__ */ new Set(["success", "skipped", "failed"]);
+var RUN_STATUSES = /* @__PURE__ */ new Set([
+  "success",
+  "skipped",
+  "failed",
+  "completed_with_warnings",
+  "completed_with_errors",
+  "budget_exceeded"
+]);
 var TERMINAL_STATES = /* @__PURE__ */ new Set([
   "complete",
   "partial",
@@ -851,6 +858,25 @@ var NO_COVERED_PATHS = /* @__PURE__ */ new Set();
 function verdictsSurviveIncompleteness(reason) {
   return reason === "settlement.incomplete.budget_exceeded" || reason === "settlement.incomplete.coverage_gap" || reason === "settlement.incomplete.publication_degraded";
 }
+var FINISHED_STATUSES = /* @__PURE__ */ new Set([
+  "success",
+  "completed_with_warnings",
+  "completed_with_errors"
+]);
+var SUBTASK_FAILURE_WARNING_TYPES = /* @__PURE__ */ new Set([
+  "subtask_error",
+  "scan_subtask_error",
+  "token_threshold_exceeded"
+]);
+function engineFailurePaths(result) {
+  const failed = /* @__PURE__ */ new Set();
+  for (const warning of result.warnings) {
+    if (SUBTASK_FAILURE_WARNING_TYPES.has(warning.type) && warning.file !== "") {
+      failed.add(warning.file);
+    }
+  }
+  return failed;
+}
 function coveredPaths(result) {
   const covered = /* @__PURE__ */ new Set();
   for (const entry of result.coverage.completed) covered.add(entry.path);
@@ -860,6 +886,7 @@ function coveredPaths(result) {
 function memoizablePaths(result) {
   const covered = new Set(coveredPaths(result));
   const failed = new Set(result.coverage.failed.map((entry) => entry.path));
+  for (const path of engineFailurePaths(result)) failed.add(path);
   for (const finding of result.findings) {
     const path = finding.path;
     if (!failed.has(path)) covered.add(path);
@@ -941,27 +968,45 @@ function settleReconciled(inventory, result, profile, config, memoizedPaths) {
 function unreviewedByEngine(inventory, memoizedPaths) {
   return Math.max(0, inventory.reviewablePaths.size - memoizedPaths.size);
 }
+function statusDisqualifier(result, expected) {
+  if (FINISHED_STATUSES.has(result.status)) return void 0;
+  return incomplete("counted", "settlement.incomplete.engine_status_not_success", result.findings, {
+    reviewed: result.filesReviewed,
+    expected
+  });
+}
 function settleCounted(inventory, result, profile, config, memoizedPaths) {
   const expected = unreviewedByEngine(inventory, memoizedPaths);
   const overBudget = budgetDisqualifier("counted", result, config);
   if (overBudget !== void 0) return overBudget;
-  if (result.status !== "success") {
+  const notFinished = statusDisqualifier(result, expected);
+  if (notFinished !== void 0) return notFinished;
+  const failedPaths = engineFailurePaths(result);
+  if (failedPaths.size > 0) {
     return incomplete(
       "counted",
-      "settlement.incomplete.engine_status_not_success",
+      "settlement.incomplete.coverage_gap",
       result.findings,
       {
-        reviewed: result.filesReviewed,
-        expected
-      }
+        gap: failedPaths.size,
+        reviewable: expected,
+        reviewed: Math.max(0, result.filesReviewed - failedPaths.size)
+      },
+      memoizablePaths(result)
     );
   }
   if (result.filesReviewed < expected) {
-    return incomplete("counted", "settlement.incomplete.coverage_gap", result.findings, {
-      gap: expected - result.filesReviewed,
-      reviewable: expected,
-      reviewed: result.filesReviewed
-    });
+    return incomplete(
+      "counted",
+      "settlement.incomplete.coverage_gap",
+      result.findings,
+      {
+        gap: expected - result.filesReviewed,
+        reviewable: expected,
+        reviewed: result.filesReviewed
+      },
+      memoizablePaths(result)
+    );
   }
   return commonDisqualifier("counted", result, profile, config) ?? {
     status: "complete",
@@ -1048,6 +1093,21 @@ var REASON_CODES = [
   "engine.run.timeout",
   "engine.run.spawn_failed",
   "engine.run.nonzero_exit",
+  // The engine's own verdict about its run, recorded once per engine execution (2026-08-06). One
+  // code per status value rather than a free-form field, because diagnostics carry no strings —
+  // and because "which status did the engine actually report" is precisely the question the
+  // Keiko#3002 incident could not answer from its logs: eight runs settled
+  // `engine_status_not_success` and no line anywhere said what the status WAS. Counts carry
+  // `files_reviewed`, `findings`, `warnings`, and one `warnings_<type>` entry per warning type the
+  // engine attached, so a completed-with-reservations run names its reservations without quoting
+  // them.
+  "engine.status.success",
+  "engine.status.skipped",
+  "engine.status.failed",
+  "engine.status.completed_with_warnings",
+  "engine.status.completed_with_errors",
+  "engine.status.budget_exceeded",
+  "engine.status.unknown",
   // Settlement
   "settlement.complete",
   // Which coverage question was actually answered. Recorded on every run, because a consumer
@@ -1130,6 +1190,16 @@ var REASON_CODES = [
   // settlement may write an entry.
   "cache.store_loaded",
   "cache.store_rejected",
+  // The rejection's own five-way cause (2026-08-06), recorded instead of the bare umbrella above
+  // whenever `readStore` computed one: an oversized store, corrupt JSON, a schema change, and an
+  // entry overflow each demand a different operator response, and the umbrella collapsed them into
+  // a code that answered none. `cache.store_rejected` remains for the one caller with nothing
+  // finer to say — a read error that is not ENOENT.
+  "cache.store.oversized",
+  "cache.store.malformed_json",
+  "cache.store.schema_invalid",
+  "cache.store.entry_overflow",
+  "cache.store.entry_invalid",
   "cache.store_write_failed",
   // The action's own final output write failed (v0.13.0) — `$GITHUB_OUTPUT` unwritable, a full
   // disk. Mirrors `cache.store_write_failed`'s own posture: a delivery-mechanism failure at the
@@ -1182,6 +1252,14 @@ var REASON_CODES = [
   // than left silent because "no resume line in the log" would otherwise be indistinguishable
   // between a run that never needed one and a run that was denied one.
   "engine.resume_skipped_budget_exceeded",
+  // The other resume that deliberately does NOT happen (2026-08-06): the first attempt FINISHED —
+  // `completed_with_warnings`, `completed_with_errors`, or `skipped` — and its reservations are
+  // deterministic facts about this change's content, not sampling noise a different seed could
+  // shake off. Measured on Keiko#3002 before this existed: every resume re-dispatched ~all files
+  // (~0.76M tokens), hit the identical per-file failures, and produced the identical status —
+  // the second attempt was pure re-payment. A finished run settles on what it earned; the gap it
+  // reports is the next push's (store-discounted) work, not this run's to re-buy.
+  "engine.resume_skipped_run_completed",
   // Run-level spend accounting (v0.12.0): one record per engine execution naming what the review
   // actually cost — the engine's own reported total plus the classification side-calls. The parts
   // stay separate because they answer different questions (engine behaviour vs. adapter-added
@@ -1508,13 +1586,36 @@ function composeFindingBody(sanitizedProse, marker, context) {
   );
   return parts.join("\n");
 }
-function composeIncompleteNotice(reasonCode, marker) {
+function gapLine(counts) {
+  if (counts === void 0) return [];
+  const { gap, reviewable, reviewed, expected } = counts;
+  if (gap !== void 0 && reviewable !== void 0) {
+    return [
+      "",
+      `The run finished and kept its findings; ${String(gap)} of ${String(reviewable)} reviewable file(s) remain unreviewed and stay owed to the next run.`
+    ];
+  }
+  if (reviewed !== void 0 && expected !== void 0) {
+    return [
+      "",
+      `The engine reports ${String(reviewed)} of ${String(expected)} expected files reviewed.`
+    ];
+  }
+  return [];
+}
+function composeIncompleteNotice(reasonCode, marker, counts) {
   return [
     "_\u26A0\uFE0F Coverage_ | _\u{1F7E0} Major_",
     "",
     "**This change was not fully reviewed.**",
     "",
     `Keiko for Quality could not complete its review. Reason code: \`${escapeInline(reasonCode)}\`.`,
+    // The size of the shortfall, when the settlement measured one (2026-08-06). Numbers only, and
+    // only the settlement's own numbers: they are what separates "one file is still owed" from
+    // "nothing was reviewed", which is the first question every reader of this notice asks — the
+    // eight notices on Keiko#3002 could not answer it. Inserted between the reason line and the
+    // fixed sentences below so `isOwnIncompleteNotice`'s detector text stays byte-identical.
+    ...gapLine(counts),
     "",
     "Treat this pull request as unreviewed by this bot. Resolving this conversation does not make",
     "the review complete \u2014 it only records that someone looked.",
@@ -2693,6 +2794,16 @@ function pinSampling(path, body, options2, includeCacheKey) {
     return { body, cacheKeyInjected: false };
   }
 }
+async function recordBadRequestNumbers(response, usage) {
+  try {
+    const text3 = (await response.text()).slice(0, 8192);
+    const limit = /maximum context length is (\d{1,10})/i.exec(text3);
+    const requested = /requested (\d{1,10})/i.exec(text3);
+    if (limit !== null) usage.badRequestContextLimit = Number(limit[1]);
+    if (requested !== null) usage.badRequestRequestedTokens = Number(requested[1]);
+  } catch {
+  }
+}
 function isJsonContentType(contentType) {
   return contentType?.toLowerCase().includes("application/json") ?? false;
 }
@@ -2733,16 +2844,32 @@ async function fetchWithCacheKeyFallback(doFetch, url, request, options2, usage,
     headers: request.headers,
     ...pinned !== void 0 ? { body: new Uint8Array(pinned.body) } : {}
   });
-  if (pinned?.cacheKeyInjected !== true || upstream.status !== 400) return upstream;
-  usage.cacheKeyRejected += 1;
+  if (pinned?.cacheKeyInjected === true && upstream.status === 400) {
+    return retryWithoutCacheKey(doFetch, url, request, options2, usage, latch);
+  }
+  if (upstream.status === 400 && isChatCompletionsPath(request.path)) {
+    return persistedBadRequest(upstream, usage);
+  }
+  return upstream;
+}
+async function persistedBadRequest(response, usage) {
+  usage.badRequestPersisted += 1;
+  await recordBadRequestNumbers(response.clone(), usage);
+  return response;
+}
+async function retryWithoutCacheKey(doFetch, url, request, options2, usage, latch) {
   const retryPinned = pinSampling(request.path, request.body, options2, false);
   const retried = await doFetch(url, {
     method: request.method,
     headers: request.headers,
     body: new Uint8Array(retryPinned.body)
   });
-  if (retried.status !== 400) latch.disabled = true;
-  return retried;
+  if (retried.status !== 400) {
+    usage.cacheKeyRejected += 1;
+    latch.disabled = true;
+    return retried;
+  }
+  return persistedBadRequest(retried, usage);
 }
 async function forward(options2, request, response, usage, latch) {
   const doFetch = options2.fetchImpl ?? fetch;
@@ -2790,7 +2917,10 @@ function startModelProxy(options2) {
     prompt: 0,
     completion: 0,
     cached: 0,
-    cacheKeyRejected: 0
+    cacheKeyRejected: 0,
+    badRequestPersisted: 0,
+    badRequestContextLimit: 0,
+    badRequestRequestedTokens: 0
   };
   const latch = { disabled: false };
   const server = createServer((request, response) => {
@@ -2964,7 +3094,13 @@ function recordModelUsage(diagnostics, proxy, options2) {
       prompt: usage.prompt,
       completion: usage.completion,
       cached: usage.cached,
-      cache_key_rejected: usage.cacheKeyRejected
+      cache_key_rejected: usage.cacheKeyRejected,
+      // Always present, even at 0: "no model call was refused" is a fact worth one word, and its
+      // absence is what let Keiko#3002's persisted 400s masquerade as cache-key noise.
+      bad_request_persisted: usage.badRequestPersisted,
+      // Only when a persisted 400's body named them — see `recordBadRequestNumbers`.
+      ...usage.badRequestContextLimit > 0 ? { bad_request_context_limit: usage.badRequestContextLimit } : {},
+      ...usage.badRequestRequestedTokens > 0 ? { bad_request_requested_tokens: usage.badRequestRequestedTokens } : {}
     }
   });
 }
@@ -4132,7 +4268,7 @@ var RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: In
           id
           isResolved
           isOutdated
-          comments(first: 100) { nodes { databaseId author { login } body } }
+          comments(first: 100) { nodes { databaseId author { login } body originalCommit { oid } } }
           lastComment: comments(last: 1) { nodes { author { login } body } }
         }
         pageInfo { hasNextPage endCursor }
@@ -4160,14 +4296,19 @@ function collectThreadOverlays(nodes, into) {
     }
   }
 }
-function collectResolvableNoticeThreadIds(nodes, identity, isNoticeBody, into) {
+function collectResolvableNoticeThreadIds(nodes, identity, isNoticeBody, currentHead, into) {
   for (const node of nodes) {
-    if (node.isOutdated !== true || node.isResolved === true) continue;
+    if (node.isResolved === true) continue;
     if (typeof node.id !== "string") continue;
-    const hasOwnNotice = (node.comments?.nodes ?? []).some(
+    const ownNotices = (node.comments?.nodes ?? []).filter(
       (comment) => comment.author?.login === identity && typeof comment.body === "string" && isNoticeBody(comment.body)
     );
-    if (hasOwnNotice) into.push(node.id);
+    if (ownNotices.length === 0) continue;
+    const supersededByHead = ownNotices.some((comment) => {
+      const oid = comment.originalCommit?.oid;
+      return typeof oid === "string" && oid !== "" && oid !== currentHead;
+    });
+    if (node.isOutdated === true || supersededByHead) into.push(node.id);
   }
 }
 var RESOLVE_REVIEW_THREAD_MUTATION = `mutation($threadId: ID!) {
@@ -4341,7 +4482,7 @@ var GitHubClient = class {
    * path this method must never affect the shape or cost of. The duplicated pagination shell is a
    * dozen identical lines, not a design this file has any other copy of to drift from.
    */
-  async fetchResolvableNoticeThreadIds(ref, number, identity, isNoticeBody) {
+  async fetchResolvableNoticeThreadIds(ref, number, identity, isNoticeBody, currentHead) {
     const ids = [];
     try {
       let cursor = null;
@@ -4354,7 +4495,13 @@ var GitHubClient = class {
         });
         const threads = reviewThreadsPage(raw);
         if (threads === void 0) break;
-        collectResolvableNoticeThreadIds(threads.nodes ?? [], identity, isNoticeBody, ids);
+        collectResolvableNoticeThreadIds(
+          threads.nodes ?? [],
+          identity,
+          isNoticeBody,
+          currentHead,
+          ids
+        );
         const next = nextThreadsCursor(threads);
         if (next === void 0) break;
         cursor = next;
@@ -4398,8 +4545,14 @@ var GitHubClient = class {
    * failed mutation to the same `false` a thread that just wasn't resolved would produce: `attempted`
    * is the only way a caller can tell "nothing needed resolving" apart from "every attempt failed."
    */
-  async resolveSupersededOwnNotices(ref, number, identity, isNoticeBody) {
-    const ids = await this.fetchResolvableNoticeThreadIds(ref, number, identity, isNoticeBody);
+  async resolveSupersededOwnNotices(ref, number, identity, isNoticeBody, currentHead) {
+    const ids = await this.fetchResolvableNoticeThreadIds(
+      ref,
+      number,
+      identity,
+      isNoticeBody,
+      currentHead
+    );
     let resolved = 0;
     for (const threadId of ids) {
       if (await this.resolveThread(threadId)) resolved += 1;
@@ -4996,7 +5149,7 @@ async function executePublication(context, plan, diagnostics) {
     apiFailures: counters.apiFailures
   };
 }
-async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnostics, prefetch) {
+async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnostics, prefetch, counts) {
   const marker = fingerprint({
     repository: `${context.ref.owner}/${context.ref.repo}`,
     pullNumber: context.pullNumber,
@@ -5015,13 +5168,17 @@ async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnost
       context.ref,
       context.pullNumber,
       {
-        body: composeIncompleteNotice(reasonCode, markerComment(marker)),
+        body: composeIncompleteNotice(reasonCode, markerComment(marker), counts),
         commitId: context.headSha,
         path: anchorPath
       }
     );
     const verified = await verifyPublication(context, created, marker);
-    diagnostics.record("publish.incomplete_notice_published", { headSha: context.headSha });
+    if (verified) {
+      diagnostics.record("publish.incomplete_notice_published", { headSha: context.headSha });
+    } else {
+      diagnostics.record("publish.readback_failed", { headSha: context.headSha });
+    }
     return verified;
   } catch {
     diagnostics.record("publish.api_failed", { headSha: context.headSha });
@@ -5361,11 +5518,18 @@ function truncatedCacheFields(request, inventory, memo, findings, covered) {
     ...finalized === void 0 ? {} : { updatedCacheStore: finalized.store }
   };
 }
-async function publishIncompleteSettlement(run2, context, reason, anchor, batch) {
+async function publishIncompleteSettlement(run2, context, cause, anchor, batch) {
   const prefetch = batch.findings.length > 0 || anchor !== void 0 ? await prefetchExistingConversations(context) : void 0;
   const published = batch.findings.length === 0 ? void 0 : await publishAudited(run2, context, batch, prefetch);
   if (anchor !== void 0) {
-    await publishIncompleteNotice(context, reason, anchor, run2.diagnostics, prefetch);
+    await publishIncompleteNotice(
+      context,
+      cause.reason,
+      anchor,
+      run2.diagnostics,
+      prefetch,
+      cause.counts
+    );
   }
   return published;
 }
@@ -5374,14 +5538,18 @@ async function settleIncomplete(run2, inventory, cause, memo = INERT_MEMO, batch
     headSha: run2.request.head,
     ...cause.counts !== void 0 ? { counts: cause.counts } : {}
   });
+  const engineFindings = [...batch.fresh];
   if (!await headIsCurrent(run2.request)) {
     run2.diagnostics.record("publish.abandoned_stale_head", { headSha: run2.request.head });
-    return abandonedReport(inventory, memo);
+    return {
+      ...abandonedReport(inventory, memo),
+      ...truncatedCacheFields(run2.request, inventory, memo, engineFindings, covered)
+    };
   }
   const context = publishContextFor(run2.request, inventory);
   const anchor = noticeAnchor(inventory);
-  const published = await publishIncompleteSettlement(run2, context, cause.reason, anchor, batch);
-  const storedFindings = published === void 0 ? batch.findings : findingsForStorage(batch.findings, published.auditedByOriginal);
+  const published = await publishIncompleteSettlement(run2, context, cause, anchor, batch);
+  const storedFindings = published === void 0 ? engineFindings : findingsForStorage(engineFindings, published.auditedByOriginal);
   return {
     outcome: "incomplete",
     reason: cause.reason,
@@ -5631,6 +5799,37 @@ async function repairEngineFindings(parsed, request, diagnostics) {
 }
 var RESUME_SEED = 43;
 var RESUME_FLOOR_FRACTION = 0.25;
+var ENGINE_STATUS_DIAGNOSTIC = {
+  success: "engine.status.success",
+  skipped: "engine.status.skipped",
+  failed: "engine.status.failed",
+  completed_with_warnings: "engine.status.completed_with_warnings",
+  completed_with_errors: "engine.status.completed_with_errors",
+  budget_exceeded: "engine.status.budget_exceeded",
+  unknown: "engine.status.unknown"
+};
+function recordEngineStatus(diagnostics, result, headSha) {
+  const counts = {
+    files_reviewed: result.filesReviewed,
+    findings: result.findings.length,
+    warnings: result.warnings.length
+  };
+  for (const warning of result.warnings) {
+    const key = `warnings_${warning.type}`;
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  diagnostics.record(ENGINE_STATUS_DIAGNOSTIC[result.status], { headSha, counts });
+}
+function resumeWorthwhile(status) {
+  return status === "failed" || status === "unknown";
+}
+function finishedRunOutcome(diagnostics, parsed, options2) {
+  diagnostics.record("engine.resume_skipped_run_completed", {
+    headSha: options2.pair.head,
+    counts: { files_reviewed: parsed.filesReviewed, warnings: parsed.warnings.length }
+  });
+  return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
+}
 async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths) {
   try {
     const second = await runEngine(
@@ -5643,6 +5842,7 @@ async function attemptResume(options2, diagnostics, remaining, firstAttemptToken
       diagnostics
     );
     const parsedSecond = parseEngineResult(second.stdout);
+    recordEngineStatus(diagnostics, parsedSecond, options2.pair.head);
     const merged = firstResult === void 0 ? parsedSecond : mergeResumedResult(firstResult, parsedSecond, alreadyReviewedPaths);
     return {
       result: merged,
@@ -5663,6 +5863,7 @@ async function runEngineWithOneResume(options2, diagnostics) {
   try {
     const first = await runEngine(options2, diagnostics);
     const parsed = parseEngineResult(first.stdout);
+    recordEngineStatus(diagnostics, parsed, options2.pair.head);
     if (parsed.status === "success") {
       return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
     }
@@ -5674,6 +5875,7 @@ async function runEngineWithOneResume(options2, diagnostics) {
       });
       return { result: parsed, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
     }
+    if (!resumeWorthwhile(parsed.status)) return finishedRunOutcome(diagnostics, parsed, options2);
     alreadyReviewedPaths = parsed.findings.filter((f) => !parsed.coverage.failed.some((c) => c.path === f.path)).map((f) => f.path);
     remaining = clamp(
       options2.allottedBudget - parsed.totalTokens,
@@ -6023,7 +6225,8 @@ async function performReview(request, diagnostics) {
           request.ref,
           request.pullNumber,
           request.identity,
-          isIncompleteNoticeBody
+          isIncompleteNoticeBody,
+          request.head
         );
         if (attempted > 0) {
           diagnostics.record("cleanup.superseded_notices_resolved", {
@@ -6078,7 +6281,10 @@ async function performReviewInner(request, diagnostics, ledger) {
     return settleIncomplete(
       run2,
       inventory,
-      { reason: settlement.reason },
+      // The settlement's own counts, not just its code (2026-08-06): `settle()` measures
+      // reviewed/expected/gap precisely so an operator can tell one failed file from a dead run,
+      // and this call site was where those numbers silently fell out of the log line.
+      { reason: settlement.reason, counts: settlement.counts },
       memo,
       {
         findings: [...mergeHitFindings(settlement.findings, memo.hits), ...gate],
@@ -6365,7 +6571,7 @@ async function loadCacheStore(path, diagnostics) {
   }
   const result = readStore(text3);
   if (!result.ok) {
-    diagnostics.record("cache.store_rejected");
+    diagnostics.record(result.reason);
     return EMPTY_STORE;
   }
   const usable = entriesUnderCurrentSemantics(result.store);

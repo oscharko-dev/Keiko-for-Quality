@@ -109,7 +109,10 @@ async function loadCacheStore(path: string, diagnostics: Diagnostics): Promise<C
 
   const result = readStore(text);
   if (!result.ok) {
-    diagnostics.record("cache.store_rejected");
+    // The rejection's own five-way reason, not the bare umbrella code (2026-08-06): an oversized
+    // store, corrupt JSON, a schema bump, and an entry overflow each demand a different operator
+    // response, and `readStore` already computed which one this is.
+    diagnostics.record(result.reason);
     return EMPTY_STORE;
   }
   // A structurally valid store may still hold entries a different publication contract wrote; those

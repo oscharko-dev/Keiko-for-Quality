@@ -121,6 +121,64 @@ export function verdictsSurviveIncompleteness(reason: ReasonCode): boolean {
   );
 }
 
+/**
+ * The engine statuses that mean "this run FINISHED and its result is to be believed".
+ *
+ * `completed_with_warnings` and `completed_with_errors` (v1.8.4 `output.go`) are not failure
+ * states: the run dispatched everything, collected its comments, and wrote a well-formed result —
+ * the caveats live in `warnings`, each one typed and usually naming its file. Reading either as
+ * "engine broke" is the exact defect class the budget hoist above this was built for: eight runs
+ * on oscharko-dev/Keiko#3002 finished `completed_with_errors` (verified by re-running the same
+ * diff against the same engine and provider, 2026-08-06), and every one settled
+ * `engine_status_not_success`, discarded its findings, and re-paid the whole review next push.
+ *
+ * `budget_exceeded` is deliberately NOT here: it arrives with `summary.budget_exceeded` set, so
+ * `budgetDisqualifier` already owns it before any status check runs — listing it would claim an
+ * authority this branch never exercises.
+ */
+const FINISHED_STATUSES: ReadonlySet<string> = new Set<string>([
+  "success",
+  "completed_with_warnings",
+  "completed_with_errors",
+]);
+
+/**
+ * Warning types whose `file` names a path the engine dispatched but did not properly review.
+ *
+ * From the pinned release's own emission sites (`internal/agent/agent.go`, `internal/scan/agent.go`):
+ * `subtask_error` / `scan_subtask_error` are a per-file review that errored or panicked;
+ * `token_threshold_exceeded` is a file whose assembled prompt was refused before the first model
+ * call. All three leave the file inside `files_reviewed` — that counter counts dispatch, not
+ * completion — so the count-based gap check below can never see them. The warning's `file` field
+ * is the only identity the engine offers for them, and identity beats cardinality: it lets the
+ * settlement say WHICH files the next run still owes, not merely how many.
+ *
+ * `token_budget_reached` is deliberately absent: it belongs to the budget family, which
+ * `budgetDisqualifier` already settles via `summary.budget_exceeded`. If it ever arrived without
+ * that flag, `unlistedWarnings` would still fail the run closed rather than letting it pass.
+ */
+const SUBTASK_FAILURE_WARNING_TYPES: ReadonlySet<string> = new Set<string>([
+  "subtask_error",
+  "scan_subtask_error",
+  "token_threshold_exceeded",
+]);
+
+/**
+ * The paths the engine's own warnings disown — dispatched, counted, but not properly reviewed.
+ *
+ * A warning of a failure type without a `file` contributes nothing here; it stays visible to
+ * `unlistedWarnings`, which fails the run closed on anything it cannot attribute.
+ */
+function engineFailurePaths(result: EngineResult): ReadonlySet<string> {
+  const failed = new Set<string>();
+  for (const warning of result.warnings) {
+    if (SUBTASK_FAILURE_WARNING_TYPES.has(warning.type) && warning.file !== "") {
+      failed.add(warning.file);
+    }
+  }
+  return failed;
+}
+
 /** Paths the engine claims it actually reviewed, or safely reused a prior review for. */
 function coveredPaths(result: EngineResult): ReadonlySet<string> {
   const covered = new Set<string>();
@@ -157,6 +215,12 @@ function coveredPaths(result: EngineResult): ReadonlySet<string> {
 function memoizablePaths(result: EngineResult): ReadonlySet<string> {
   const covered = new Set(coveredPaths(result));
   const failed = new Set(result.coverage.failed.map((entry) => entry.path));
+  // The same laundering rule, fed from the second failure source (2026-08-06): a path a
+  // subtask-failure warning names is a review that fell over partway, whether the manifest exists
+  // to say so or not. On the manifest-less pinned release the warnings are the ONLY failed-list
+  // there is, so without this line a finding produced moments before its file's loop died would
+  // freeze as that file's verdict.
+  for (const path of engineFailurePaths(result)) failed.add(path);
   for (const finding of result.findings) {
     const path = finding.path as string;
     if (!failed.has(path)) covered.add(path);
@@ -333,6 +397,30 @@ function unreviewedByEngine(inventory: Inventory, memoizedPaths: ReadonlySet<str
 }
 
 /**
+ * The status check of the counted path, for statuses that mean the run itself is not to be
+ * believed.
+ *
+ * Named for the field that actually failed: counted mode has no manifest, so there is no terminal
+ * state to report and the old code said something the run never claimed. The counts are the
+ * load-bearing half — a bare reason told an operator that the review was incomplete and nothing
+ * whatever about how much of it was missing, which is the difference between "one file failed on
+ * a large change" and "nothing was reviewed at all".
+ *
+ * Reached only by `failed`, `skipped`, and `unknown` (2026-08-06) — a status the pinned release
+ * cannot say on stdout, a run that claims it had nothing to do while the inventory says otherwise
+ * (the all-memoized case already settled in `settle()` before this), or a value this adapter has
+ * never seen. For those, nothing the result carries is worth believing, which is why this branch
+ * still forfeits verdicts while the finished statuses (`FINISHED_STATUSES`) keep them.
+ */
+function statusDisqualifier(result: EngineResult, expected: number): Settlement | undefined {
+  if (FINISHED_STATUSES.has(result.status)) return undefined;
+  return incomplete("counted", "settlement.incomplete.engine_status_not_success", result.findings, {
+    reviewed: result.filesReviewed,
+    expected,
+  });
+}
+
+/**
  * Settlement against an engine that reports no coverage manifest.
  *
  * `files_reviewed` is the engine's own count of what it dispatched. Comparing it to the independent
@@ -359,28 +447,45 @@ function settleCounted(
   // production.
   const overBudget = budgetDisqualifier("counted", result, config);
   if (overBudget !== undefined) return overBudget;
-  if (result.status !== "success") {
-    // Named for the field that actually failed: counted mode has no manifest, so there is no
-    // terminal state to report and the old code said something the run never claimed. The counts
-    // are the load-bearing half — a bare reason told an operator that the review was incomplete
-    // and nothing whatever about how much of it was missing, which is the difference between
-    // "one file failed on a large change" and "nothing was reviewed at all".
+  const notFinished = statusDisqualifier(result, expected);
+  if (notFinished !== undefined) return notFinished;
+  // A finished run's own confession, checked before the count comparison because these paths are
+  // invisible to it: `files_reviewed` counts dispatch, and every warning-named failure was
+  // dispatched. Settled as a coverage gap — which it literally is — rather than as an engine
+  // failure, so the verdicts for every OTHER file survive (`verdictsSurviveIncompleteness`), the
+  // store keeps what this run paid for, and the notice can name how much is actually missing.
+  // Eight runs on Keiko#3002 settled `engine_status_not_success` for want of this branch, each
+  // discarding a finished review over (in the verified re-run) five files out of 33.
+  const failedPaths = engineFailurePaths(result);
+  if (failedPaths.size > 0) {
     return incomplete(
       "counted",
-      "settlement.incomplete.engine_status_not_success",
+      "settlement.incomplete.coverage_gap",
       result.findings,
       {
-        reviewed: result.filesReviewed,
-        expected,
+        gap: failedPaths.size,
+        reviewable: expected,
+        reviewed: Math.max(0, result.filesReviewed - failedPaths.size),
       },
+      memoizablePaths(result),
     );
   }
   if (result.filesReviewed < expected) {
-    return incomplete("counted", "settlement.incomplete.coverage_gap", result.findings, {
-      gap: expected - result.filesReviewed,
-      reviewable: expected,
-      reviewed: result.filesReviewed,
-    });
+    // `memoizablePaths`, not the empty default (2026-08-06): a count shortfall says nothing about
+    // WHICH file is missing, but a finding still proves its own file was opened — the identical
+    // evidence bar `budgetDisqualifier` already memoizes under. Withholding it here made every
+    // count-gapped run re-pay even the files it demonstrably finished.
+    return incomplete(
+      "counted",
+      "settlement.incomplete.coverage_gap",
+      result.findings,
+      {
+        gap: expected - result.filesReviewed,
+        reviewable: expected,
+        reviewed: result.filesReviewed,
+      },
+      memoizablePaths(result),
+    );
   }
   return (
     commonDisqualifier("counted", result, profile, config) ?? {

@@ -258,7 +258,8 @@ describe("runAction: loading the store", () => {
 
     await runAction(env, diagnostics);
 
-    expect(diagnostics.drain().map((r) => r.code)).toContain("cache.store_rejected");
+    // The five-way cause, not the umbrella (2026-08-06): unparseable text is a malformed store.
+    expect(diagnostics.drain().map((r) => r.code)).toContain("cache.store.malformed_json");
     const [request] = performReviewMock.mock.calls[0] as [{ cacheStore?: CacheStore }, unknown];
     expect(request.cacheStore).toEqual({ schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] });
   });
@@ -276,7 +277,8 @@ describe("runAction: loading the store", () => {
 
     await runAction(env, diagnostics);
 
-    expect(diagnostics.drain().map((r) => r.code)).toContain("cache.store_rejected");
+    // A retired schema is a schema problem, and now says so (2026-08-06).
+    expect(diagnostics.drain().map((r) => r.code)).toContain("cache.store.schema_invalid");
     const [request] = performReviewMock.mock.calls[0] as [{ cacheStore?: CacheStore }, unknown];
     expect(request.cacheStore).toEqual({ schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] });
   });

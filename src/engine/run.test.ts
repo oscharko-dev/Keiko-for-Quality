@@ -273,6 +273,7 @@ describe("runEngine: model.usage telemetry", () => {
         completion: 1,
         cached: 0,
         cache_key_rejected: 0,
+        bad_request_persisted: 0,
       });
     } finally {
       await upstream.close();

@@ -39,6 +39,22 @@ export const REASON_CODES = [
   "engine.run.spawn_failed",
   "engine.run.nonzero_exit",
 
+  // The engine's own verdict about its run, recorded once per engine execution (2026-08-06). One
+  // code per status value rather than a free-form field, because diagnostics carry no strings —
+  // and because "which status did the engine actually report" is precisely the question the
+  // Keiko#3002 incident could not answer from its logs: eight runs settled
+  // `engine_status_not_success` and no line anywhere said what the status WAS. Counts carry
+  // `files_reviewed`, `findings`, `warnings`, and one `warnings_<type>` entry per warning type the
+  // engine attached, so a completed-with-reservations run names its reservations without quoting
+  // them.
+  "engine.status.success",
+  "engine.status.skipped",
+  "engine.status.failed",
+  "engine.status.completed_with_warnings",
+  "engine.status.completed_with_errors",
+  "engine.status.budget_exceeded",
+  "engine.status.unknown",
+
   // Settlement
   "settlement.complete",
   // Which coverage question was actually answered. Recorded on every run, because a consumer
@@ -126,6 +142,16 @@ export const REASON_CODES = [
   // settlement may write an entry.
   "cache.store_loaded",
   "cache.store_rejected",
+  // The rejection's own five-way cause (2026-08-06), recorded instead of the bare umbrella above
+  // whenever `readStore` computed one: an oversized store, corrupt JSON, a schema change, and an
+  // entry overflow each demand a different operator response, and the umbrella collapsed them into
+  // a code that answered none. `cache.store_rejected` remains for the one caller with nothing
+  // finer to say — a read error that is not ENOENT.
+  "cache.store.oversized",
+  "cache.store.malformed_json",
+  "cache.store.schema_invalid",
+  "cache.store.entry_overflow",
+  "cache.store.entry_invalid",
   "cache.store_write_failed",
   // The action's own final output write failed (v0.13.0) — `$GITHUB_OUTPUT` unwritable, a full
   // disk. Mirrors `cache.store_write_failed`'s own posture: a delivery-mechanism failure at the
@@ -181,6 +207,15 @@ export const REASON_CODES = [
   // than left silent because "no resume line in the log" would otherwise be indistinguishable
   // between a run that never needed one and a run that was denied one.
   "engine.resume_skipped_budget_exceeded",
+
+  // The other resume that deliberately does NOT happen (2026-08-06): the first attempt FINISHED —
+  // `completed_with_warnings`, `completed_with_errors`, or `skipped` — and its reservations are
+  // deterministic facts about this change's content, not sampling noise a different seed could
+  // shake off. Measured on Keiko#3002 before this existed: every resume re-dispatched ~all files
+  // (~0.76M tokens), hit the identical per-file failures, and produced the identical status —
+  // the second attempt was pure re-payment. A finished run settles on what it earned; the gap it
+  // reports is the next push's (store-discounted) work, not this run's to re-buy.
+  "engine.resume_skipped_run_completed",
 
   // Run-level spend accounting (v0.12.0): one record per engine execution naming what the review
   // actually cost — the engine's own reported total plus the classification side-calls. The parts

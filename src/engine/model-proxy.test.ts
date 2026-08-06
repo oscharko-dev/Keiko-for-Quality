@@ -282,6 +282,9 @@ describe("startModelProxy", () => {
         completion: 4,
         cached: 0,
         cacheKeyRejected: 1,
+        badRequestPersisted: 0,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
       });
     });
 
@@ -311,12 +314,84 @@ describe("startModelProxy", () => {
       // Both the original attempt and the bounded retry reached upstream — exactly one retry, not
       // a loop — and the response served back is the retry's, not the discarded first attempt's.
       expect(upstream.captured).toHaveLength(2);
+      // A 400 that persists without the key says nothing about the key (2026-08-06): it is NOT
+      // counted as a rejection — that miscount is what pointed the Keiko#3002 investigation at
+      // prompt caching — but as the provider refusing the request itself.
       expect(proxy.usage()).toEqual({
         requests: 1,
         prompt: 0,
         completion: 0,
         cached: 0,
-        cacheKeyRejected: 1,
+        cacheKeyRejected: 0,
+        badRequestPersisted: 1,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
+      });
+    });
+
+    it("distills the provider's own numbers from a persisted 400 without keeping its text", async () => {
+      const upstream = await startUpstream(() => ({
+        status: 400,
+        contentType: "application/json",
+        body: '{"error":{"message":"This model\'s maximum context length is 131072 tokens. However, you requested 137542 tokens (128000 in the messages, 9542 in the completion)."}}',
+      }));
+      cleanups.push(upstream.close);
+      const proxy = await startModelProxy({
+        upstreamUrl: upstream.url,
+        temperature: 0,
+        seed: 42,
+        promptCacheKey: "kfq-deadbeefcafef00d",
+      });
+      cleanups.push(() => proxy.close());
+
+      const response = await fetch(`${proxy.url}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "m", messages: [] }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(proxy.usage()).toEqual({
+        requests: 1,
+        prompt: 0,
+        completion: 0,
+        cached: 0,
+        cacheKeyRejected: 0,
+        badRequestPersisted: 1,
+        badRequestContextLimit: 131072,
+        badRequestRequestedTokens: 137542,
+      });
+    });
+
+    it("counts a 400 to a request that never carried the key as a persisted bad request", async () => {
+      const upstream = await startUpstream(() => ({
+        status: 400,
+        contentType: "application/json",
+        body: '{"error":"bad request"}',
+      }));
+      cleanups.push(upstream.close);
+      // No promptCacheKey configured: the fallback has nothing to retry, so the refusal must be
+      // attributed to the request itself in one round trip.
+      const proxy = await startModelProxy({ upstreamUrl: upstream.url, temperature: 0, seed: 42 });
+      cleanups.push(() => proxy.close());
+
+      const response = await fetch(`${proxy.url}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "m", messages: [] }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(upstream.captured).toHaveLength(1);
+      expect(proxy.usage()).toEqual({
+        requests: 1,
+        prompt: 0,
+        completion: 0,
+        cached: 0,
+        cacheKeyRejected: 0,
+        badRequestPersisted: 1,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
       });
     });
   });
@@ -340,6 +415,9 @@ describe("startModelProxy", () => {
         completion: 0,
         cached: 0,
         cacheKeyRejected: 0,
+        badRequestPersisted: 0,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
       });
     });
 
@@ -371,6 +449,9 @@ describe("startModelProxy", () => {
         completion: 8,
         cached: 0,
         cacheKeyRejected: 0,
+        badRequestPersisted: 0,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
       });
     });
 
@@ -399,6 +480,9 @@ describe("startModelProxy", () => {
         completion: 20,
         cached: 64,
         cacheKeyRejected: 0,
+        badRequestPersisted: 0,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
       });
     });
 
@@ -431,6 +515,9 @@ describe("startModelProxy", () => {
         completion: 2,
         cached: 0,
         cacheKeyRejected: 0,
+        badRequestPersisted: 0,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
       });
     });
 
@@ -457,6 +544,9 @@ describe("startModelProxy", () => {
         completion: 0,
         cached: 0,
         cacheKeyRejected: 0,
+        badRequestPersisted: 0,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
       });
     });
 
@@ -480,6 +570,9 @@ describe("startModelProxy", () => {
         completion: 0,
         cached: 0,
         cacheKeyRejected: 0,
+        badRequestPersisted: 0,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
       });
     });
 
@@ -503,6 +596,9 @@ describe("startModelProxy", () => {
         completion: 0,
         cached: 0,
         cacheKeyRejected: 0,
+        badRequestPersisted: 0,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
       });
     });
   });

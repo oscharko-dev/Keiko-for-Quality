@@ -434,6 +434,121 @@ describe("counted settlement (no manifest)", () => {
   });
 
   /**
+   * The Keiko#3002 shape, pinned from a verified re-run of the same diff (2026-08-06): the run
+   * FINISHED (`completed_with_errors`), reviewed everything it dispatched, filed real findings —
+   * and named the files whose per-file loop died in typed warnings. Eight production runs settled
+   * `engine_status_not_success` on this shape, each discarding a finished review.
+   */
+  describe("finished statuses (v1.8.4 completed_with_*)", () => {
+    it("settles completed_with_errors as a coverage gap that names its size", () => {
+      const outcome = settle(
+        inventory(["src/a.ts", "src/b.ts", "src/c.ts"]),
+        released({
+          status: "completed_with_errors",
+          filesReviewed: 3,
+          warnings: [{ type: "subtask_error", file: "src/b.ts" }],
+          findings: [finding("src/a.ts"), finding("src/b.ts")],
+        }),
+        PROFILE,
+        CONFIG,
+      );
+      expect(outcome).toMatchObject({
+        status: "incomplete",
+        mode: "counted",
+        reason: "settlement.incomplete.coverage_gap",
+      });
+      if (outcome.status !== "incomplete") return;
+      expect(outcome.counts).toEqual({ gap: 1, reviewable: 3, reviewed: 2 });
+      // The verdicts survive — and the failed file's own finding is NOT frozen as its verdict:
+      // the warning is the manifest-less release's only failed-list, and `memoizablePaths`
+      // subtracts it exactly like a manifest `failed` entry.
+      expect(outcome.findings).toHaveLength(2);
+      expect([...outcome.coveredPaths]).toEqual(["src/a.ts"]);
+    });
+
+    it("treats a token_threshold_exceeded file as owed, not as reviewed", () => {
+      const outcome = settle(
+        inventory(["src/a.ts", "src/b.ts"]),
+        released({
+          status: "completed_with_warnings",
+          filesReviewed: 2,
+          warnings: [{ type: "token_threshold_exceeded", file: "src/b.ts" }],
+        }),
+        PROFILE,
+        CONFIG,
+      );
+      expect(outcome).toMatchObject({
+        status: "incomplete",
+        reason: "settlement.incomplete.coverage_gap",
+      });
+      if (outcome.status !== "incomplete") return;
+      expect(outcome.counts).toEqual({ gap: 1, reviewable: 2, reviewed: 1 });
+    });
+
+    it("settles completed_with_warnings as complete when every warning is allowlisted", () => {
+      const outcome = settle(
+        inventory(["src/a.ts"]),
+        released({
+          status: "completed_with_warnings",
+          warnings: [{ type: "context_truncated", file: "src/a.ts" }],
+        }),
+        PROFILE,
+        CONFIG,
+      );
+      expect(outcome).toMatchObject({ status: "complete", mode: "counted" });
+    });
+
+    it("still fails closed on an unlisted warning that names no failed file", () => {
+      const outcome = settle(
+        inventory(["src/a.ts"]),
+        released({
+          status: "completed_with_warnings",
+          warnings: [{ type: "provider_hiccup", file: "" }],
+        }),
+        PROFILE,
+        CONFIG,
+      );
+      expect(outcome).toMatchObject({
+        status: "incomplete",
+        reason: "settlement.incomplete.warning_not_allowlisted",
+      });
+    });
+
+    it("fails closed via the allowlist on a subtask_error that names no file", () => {
+      // No file, no identity, no gap arithmetic — but the warning still says a review fell over
+      // somewhere, so it must not pass. The allowlist branch is the fail-closed catch-all.
+      const outcome = settle(
+        inventory(["src/a.ts"]),
+        released({
+          status: "completed_with_errors",
+          warnings: [{ type: "subtask_error", file: "" }],
+        }),
+        PROFILE,
+        CONFIG,
+      );
+      expect(outcome).toMatchObject({
+        status: "incomplete",
+        reason: "settlement.incomplete.warning_not_allowlisted",
+      });
+    });
+
+    it("memoizes finding-proven paths on a plain count shortfall too", () => {
+      const outcome = settle(
+        inventory(["src/a.ts", "src/b.ts"]),
+        released({ status: "success", filesReviewed: 1, findings: [finding("src/a.ts")] }),
+        PROFILE,
+        CONFIG,
+      );
+      expect(outcome).toMatchObject({
+        status: "incomplete",
+        reason: "settlement.incomplete.coverage_gap",
+      });
+      if (outcome.status !== "incomplete") return;
+      expect([...outcome.coveredPaths]).toEqual(["src/a.ts"]);
+    });
+  });
+
+  /**
    * The one path a finding does NOT prove: a file whose review fell over partway may have filed one
    * finding and missed three, so freezing that as its verdict is the laundering `review-cache.ts`
    * warns about. Reconciled mode, because only a manifest can report a failed coverage entry.
