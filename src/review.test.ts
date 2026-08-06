@@ -1620,15 +1620,46 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(second.allottedBudget).toBe(260_000);
     });
 
-    it("never lets a targeted round outspend what the consumer's ceiling has left", async () => {
+    it("dispatches NO round once the ceiling is exhausted, because 0 means unlimited downstream", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      // 1.9M of the 2M ceiling already spent: the round is worth 130k and may have 100k. Pricing
-      // by the gap must never turn a stop-loss into a blank cheque.
+      // The Keiko#3008 shape (2026-08-06): the first attempt has already spent past the 2M
+      // ceiling. A budget rendered as a number here would be 0, and the engine's own
+      // `--max-tokens-budget` help reads `0 = unlimited` — so the one run that most needs a bound
+      // would proceed without one. It spent 9.07M against a 6M ceiling before this test existed.
       runEngineMock.mockResolvedValueOnce({
         stdout: JSON.stringify({
           status: "completed_with_errors",
-          summary: { files_reviewed: 2, total_tokens: 1_900_000, budget_exceeded: false },
+          summary: { files_reviewed: 2, total_tokens: 2_500_000, budget_exceeded: false },
+          comments: [],
+          warnings: [
+            { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+          ],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      const diagnostics = createSilentDiagnostics();
+      await performReview(baseRequest(undefined), diagnostics);
+
+      // Exactly one dispatch: the first attempt. No round was funded, so none was sent.
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
+      const codes = diagnostics.drain().map((record) => record.code);
+      expect(codes).toContain("engine.resume_skipped_budget_exhausted");
+      expect(codes).not.toContain("engine.resumed_gap_targeted");
+    });
+
+    it("never lets a targeted round outspend what the consumer's ceiling has left", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // 1.8M of the 2M ceiling already spent: the round is worth 260k and may have 200k. Pricing
+      // by the gap must never turn a stop-loss into a blank cheque. (Headroom is deliberately
+      // above ALLOTMENT_FLOOR — below it no round is dispatched at all, which its own test
+      // covers.)
+      runEngineMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          status: "completed_with_errors",
+          summary: { files_reviewed: 2, total_tokens: 1_800_000, budget_exceeded: false },
           comments: [],
           warnings: [
             { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
@@ -1649,7 +1680,7 @@ describe("performReview: review-cache memoization end to end", () => {
       await performReview(baseRequest(undefined), createSilentDiagnostics());
 
       const second = runEngineMock.mock.calls[1]?.[0] as { allottedBudget: number };
-      expect(second.allottedBudget).toBe(100_000);
+      expect(second.allottedBudget).toBe(200_000);
     });
 
     it("keeps retrying while the gap shrinks, and stops the moment it does not", async () => {

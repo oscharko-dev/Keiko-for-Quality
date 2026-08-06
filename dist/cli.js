@@ -1495,6 +1495,12 @@ var REASON_CODES = [
   // to re-buy, recognised one round later, so the loop stops there rather than paying for it twice
   // more. `before`/`after` are the gap sizes on either side of the round that gave up.
   "engine.resume_gap_not_shrinking",
+  // A targeted round the consumer's ceiling could not fund (2026-08-06). Recorded rather than
+  // left silent because the alternative reading of the same situation is far worse: the engine's
+  // `--max-tokens-budget` treats 0 as UNLIMITED, so a round dispatched on an exhausted headroom
+  // would be the one run that most needs a bound proceeding without one. Measured on Keiko#3008 —
+  // 8.79M spent against a 6M ceiling, round 2 dispatched at `remaining: 0`, run total 9.07M.
+  "engine.resume_skipped_budget_exhausted",
   // Findings this adapter refused while keeping the run (2026-08-06, Keiko#3011) — see
   // `EngineResult.rejectedFindings` for the incident. Recorded only when non-zero, and a count
   // rather than a reason because diagnostics carry no free text: the alternative to this line is
@@ -5060,6 +5066,7 @@ function targetedRoundBudget(gapSize, spent, options2) {
   const priced = Math.round(gapSize * allottedPerFile() * ALLOTMENT_MARGIN);
   const floor = Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION);
   const headroom = Math.max(0, options2.config.tokenBudget - spent);
+  if (headroom < ALLOTMENT_FLOOR) return void 0;
   return clamp(Math.min(priced, headroom), Math.min(floor, headroom), options2.config.tokenBudget);
 }
 async function decideAfterFirstAttempt(parsed, context) {
@@ -5073,6 +5080,15 @@ async function decideAfterFirstAttempt(parsed, context) {
   if (!resumeWorthwhile(parsed.status)) return await settleFinishedRun(parsed, context);
   return void 0;
 }
+function gapShrank(before, result, reviewablePaths, diagnostics, round) {
+  const after = targetedGapPaths(result, reviewablePaths)?.size ?? 0;
+  if (after === 0) return false;
+  if (after >= before) {
+    diagnostics.record("engine.resume_gap_not_shrinking", { counts: { round, before, after } });
+    return false;
+  }
+  return true;
+}
 async function settleFinishedRun(parsed, context) {
   const { options: options2, diagnostics, ledger, reviewablePaths, firstAttemptTokens } = context;
   let standing = parsed;
@@ -5083,6 +5099,12 @@ async function settleFinishedRun(parsed, context) {
     if (targeted === void 0) break;
     const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
     const remaining = targetedRoundBudget(targeted.size, spent, options2);
+    if (remaining === void 0) {
+      diagnostics.record("engine.resume_skipped_budget_exhausted", {
+        counts: { round, targeted: targeted.size, spent }
+      });
+      break;
+    }
     diagnostics.record("engine.resumed_gap_targeted", {
       counts: { round, targeted: targeted.size, covered: covered.length, remaining }
     });
@@ -5095,19 +5117,10 @@ async function settleFinishedRun(parsed, context) {
       covered,
       ledger
     );
-    const before = targeted.size;
-    const after = targetedGapPaths(attempt.result, reviewablePaths)?.size ?? 0;
     outcome = attempt;
     spent = attempt.engineTokens;
     standing = attempt.result;
-    if (after === 0 || after >= before) {
-      if (after > 0 && after >= before) {
-        diagnostics.record("engine.resume_gap_not_shrinking", {
-          counts: { round, before, after }
-        });
-      }
-      break;
-    }
+    if (!gapShrank(targeted.size, attempt.result, reviewablePaths, diagnostics, round)) break;
   }
   if (outcome === void 0) return finishedRunOutcome(diagnostics, parsed, options2);
   return outcome;
