@@ -35,6 +35,11 @@ vi.mock("./engine/run.js", async (importOriginal) => ({
 }));
 
 const { performLocalReview } = await import("./review.js");
+// Imported dynamically for the same hoisting reason as `performLocalReview` above: a static
+// import of `./engine/run.js` would evaluate the `vi.mock` factory before `runEngineMock`
+// exists. The class itself is the original — the factory spreads `importOriginal` and replaces
+// only `runEngine` — so `instanceof` in production code matches what these tests construct.
+const { EngineRunError } = await import("./engine/run.js");
 
 /**
  * The pin covers this platform or the store-backed block below cannot run here — never a silent
@@ -287,6 +292,46 @@ describe("performLocalReview (issue #95)", () => {
     // A failed acquisition never spent anything, so the `run.spend` guard both `performReview` and
     // `performLocalReview` share must not fire a zero-spend line.
     expect(codes).not.toContain("run.spend");
+  });
+
+  it("carries the wire-counted spend of failed engine invocations in an incomplete report", async () => {
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: "a".repeat(64) });
+    // Both invocations fail: the first attempt's error is absorbed (the resume IS the recovery)
+    // and books its wire count where it is caught; the resume's own error propagates and books in
+    // `executeEngine`'s catch. Distinct amounts prove BOTH sites fire exactly once each — the
+    // 2026-08-06 observation this pins was a report saying `spend 0` while `model.usage` had
+    // counted thousands of real, billable tokens for the same run.
+    runEngineMock
+      .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit", 15_841))
+      .mockRejectedValueOnce(new EngineRunError("engine.run.timeout", 4_023));
+
+    const diagnostics = createSilentDiagnostics();
+    const report = await performLocalReview(baseRequest(), diagnostics);
+
+    expect(report.outcome).toBe("incomplete");
+    expect(report.reason).toBe("settlement.incomplete.engine_error");
+    expect(report.spend.engine).toBe(15_841 + 4_023);
+    expect(report.spend.total).toBe(15_841 + 4_023);
+
+    const codes = diagnostics.drain().map((record) => record.code);
+    // A run that measurably spent must say so: the shared `run.spend` guard now fires for it.
+    expect(codes).toContain("run.spend");
+  });
+
+  it("keeps an unmeasured engine failure at spend 0 — absent wire counts never fake a number", async () => {
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: "a".repeat(64) });
+    // No wireTokens on either error — the anthropic path, where no proxy counts. "Unmeasured"
+    // must stay distinguishable from "measured at N": the ledger books nothing, and the
+    // zero-spend guard keeps `run.spend` silent exactly as it does for a failed acquisition.
+    runEngineMock.mockRejectedValue(new EngineRunError("engine.run.nonzero_exit"));
+
+    const diagnostics = createSilentDiagnostics();
+    const report = await performLocalReview(baseRequest(), diagnostics);
+
+    expect(report.outcome).toBe("incomplete");
+    expect(report.reason).toBe("settlement.incomplete.engine_error");
+    expect(report.spend.engine).toBe(0);
+    expect(diagnostics.drain().some((record) => record.code === "run.spend")).toBe(false);
   });
 
   describe("no GitHub API interaction", () => {

@@ -3067,10 +3067,20 @@ function gitEnvironment(pathValue) {
 // src/engine/run.ts
 var EngineRunError = class extends Error {
   reason;
-  constructor(reason) {
+  /**
+   * What the failed invocation measurably cost on the wire — the loopback proxy's prompt plus
+   * completion counts at the moment of failure (2026-08-06): a run that times out or exits
+   * nonzero may still have made real, billable model calls, and a caller accounting spend has
+   * nothing else to bill them from, because a failed engine never reports a token total of its
+   * own. Absent — not zero — when no proxy counted (the anthropic path, or a spawn that failed
+   * before the proxy existed): "unmeasured" and "free" must stay distinguishable.
+   */
+  wireTokens;
+  constructor(reason, wireTokens) {
     super(reason);
     this.name = "EngineRunError";
     this.reason = reason;
+    if (wireTokens !== void 0) this.wireTokens = wireTokens;
   }
 };
 function engineEnvironment(options2, token, home) {
@@ -3175,6 +3185,11 @@ function failureReason(error) {
   if (!(error instanceof ExecFailure)) return "engine.run.spawn_failed";
   return error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit";
 }
+function proxyWireTokens(proxy) {
+  if (proxy === void 0) return void 0;
+  const usage = proxy.usage();
+  return usage.prompt + usage.completion;
+}
 async function runEngine(options2, diagnostics) {
   const token = readModelToken(options2.config, options2.env);
   if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
@@ -3200,14 +3215,19 @@ async function runEngine(options2, diagnostics) {
       durationMs: Date.now() - started,
       counts: { bytes: result.stdout.byteLength, budget: options2.allottedBudget }
     });
-    return { stdout: result.stdout.toString("utf8"), ruleDigest };
+    const wireTokens = proxyWireTokens(proxy);
+    return {
+      stdout: result.stdout.toString("utf8"),
+      ruleDigest,
+      ...wireTokens === void 0 ? {} : { wireTokens }
+    };
   } catch (error) {
     const reason = failureReason(error);
     diagnostics.record(reason, {
       headSha: options2.pair.head,
       durationMs: Date.now() - started
     });
-    throw new EngineRunError(reason);
+    throw new EngineRunError(reason, proxyWireTokens(proxy));
   } finally {
     recordModelUsage(diagnostics, proxy, options2);
     await proxy?.close();
@@ -5642,6 +5662,24 @@ function computeEngineBudget(request, inventory, memo) {
   );
   return { excluded, allottedBudget };
 }
+function bookPropagatedEngineFailure(error, ledger) {
+  if (error instanceof EngineRunError) ledger.engine += error.wireTokens ?? 0;
+}
+function engineInvocationOptions(request, inventory, binaryPath, allottedBudget, excluded) {
+  return {
+    binaryPath,
+    repositoryPath: request.repositoryPath,
+    pair: inventory.pair,
+    config: request.config,
+    profile: request.profile,
+    guidelines: request.guidelines,
+    env: request.env,
+    pathValue: request.pathValue,
+    ...request.changeIntent === void 0 ? {} : { changeIntent: request.changeIntent },
+    allottedBudget,
+    mechanicallyCleanPaths: excluded
+  };
+}
 async function executeEngine(request, inventory, memo, ledger, diagnostics) {
   const workspace = await mkdtemp2(join3(tmpdir2(), "kfq-engine-bin-"));
   try {
@@ -5653,20 +5691,9 @@ async function executeEngine(request, inventory, memo, ledger, diagnostics) {
       engineTokens,
       alreadyReviewedPaths
     } = await runEngineWithOneResume(
-      {
-        binaryPath: engine.binaryPath,
-        repositoryPath: request.repositoryPath,
-        pair: inventory.pair,
-        config: request.config,
-        profile: request.profile,
-        guidelines: request.guidelines,
-        env: request.env,
-        pathValue: request.pathValue,
-        ...request.changeIntent === void 0 ? {} : { changeIntent: request.changeIntent },
-        allottedBudget,
-        mechanicallyCleanPaths: excluded
-      },
-      diagnostics
+      engineInvocationOptions(request, inventory, engine.binaryPath, allottedBudget, excluded),
+      diagnostics,
+      ledger
     );
     ledger.engine += engineTokens;
     const { result: classified, classifyTokens } = await repairEngineFindings(
@@ -5677,6 +5704,9 @@ async function executeEngine(request, inventory, memo, ledger, diagnostics) {
     ledger.classify += classifyTokens;
     const memoizedForSettlement = alreadyReviewedPaths.length === 0 ? memo.hitPaths : /* @__PURE__ */ new Set([...memo.hitPaths, ...alreadyReviewedPaths]);
     return settle(inventory, classified, request.profile, request.config, memoizedForSettlement);
+  } catch (error) {
+    bookPropagatedEngineFailure(error, ledger);
+    throw error;
   } finally {
     await rm3(workspace, { recursive: true, force: true });
   }
@@ -5896,6 +5926,14 @@ function recordEngineStatus(diagnostics, result, headSha) {
 function resumeWorthwhile(status) {
   return status === "failed" || status === "unknown";
 }
+function parseBooked(output, ledger) {
+  try {
+    return parseEngineResult(output.stdout);
+  } catch (error) {
+    ledger.engine += output.wireTokens ?? 0;
+    throw error;
+  }
+}
 function finishedRunOutcome(diagnostics, parsed, options2) {
   diagnostics.record("engine.resume_skipped_run_completed", {
     headSha: options2.pair.head,
@@ -5903,7 +5941,7 @@ function finishedRunOutcome(diagnostics, parsed, options2) {
   });
   return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
 }
-async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths) {
+async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger) {
   try {
     const second = await runEngine(
       {
@@ -5914,7 +5952,7 @@ async function attemptResume(options2, diagnostics, remaining, firstAttemptToken
       },
       diagnostics
     );
-    const parsedSecond = parseEngineResult(second.stdout);
+    const parsedSecond = parseBooked(second, ledger);
     recordEngineStatus(diagnostics, parsedSecond, options2.pair.head);
     const merged = firstResult === void 0 ? parsedSecond : mergeResumedResult(firstResult, parsedSecond, alreadyReviewedPaths);
     return {
@@ -5923,19 +5961,23 @@ async function attemptResume(options2, diagnostics, remaining, firstAttemptToken
       alreadyReviewedPaths
     };
   } catch (error) {
-    if (!(error instanceof EngineRunError) || firstResult === void 0) throw error;
+    if (!(error instanceof EngineRunError) || firstResult === void 0) {
+      ledger.engine += firstAttemptTokens;
+      throw error;
+    }
+    ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resume_failed", { counts: { spent: firstAttemptTokens } });
     return { result: firstResult, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
   }
 }
-async function runEngineWithOneResume(options2, diagnostics) {
+async function runEngineWithOneResume(options2, diagnostics, ledger) {
   let remaining = options2.allottedBudget;
   let firstAttemptTokens = 0;
   let firstResult;
   let alreadyReviewedPaths = [];
   try {
     const first = await runEngine(options2, diagnostics);
-    const parsed = parseEngineResult(first.stdout);
+    const parsed = parseBooked(first, ledger);
     recordEngineStatus(diagnostics, parsed, options2.pair.head);
     if (parsed.status === "success") {
       return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
@@ -5958,6 +6000,7 @@ async function runEngineWithOneResume(options2, diagnostics) {
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   } catch (error) {
     if (!(error instanceof EngineRunError)) throw error;
+    ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   }
   return attemptResume(
@@ -5966,7 +6009,8 @@ async function runEngineWithOneResume(options2, diagnostics) {
     remaining,
     firstAttemptTokens,
     firstResult,
-    alreadyReviewedPaths
+    alreadyReviewedPaths,
+    ledger
   );
 }
 function mergeResumedResult(first, second, excludedPaths) {
