@@ -23,19 +23,21 @@ import { CASES } from "./cases.mjs";
  */
 
 /**
- * The six cases that carry the shape and are left alone on purpose. Their verdict is decidable from
+ * The five cases that carry the shape and are left alone on purpose. Their verdict is decidable from
  * the diff itself — every seeded one hides its defect INSIDE the test file — so none has ever
  * spiralled the way `clean-added-test` did. They stay listed rather than fixed because a fixture is
- * a recorded measurement basis: re-cutting six of them on suspicion, with no failing run to point
+ * a recorded measurement basis: re-cutting five of them on suspicion, with no failing run to point
  * at, would discard comparability against every qualification already in `corpus/evidence/` and buy
- * nothing. A case that starts failing here earns its fix with evidence, exactly as this one did.
+ * nothing. A case that starts failing here earns its fix with evidence, exactly as this one did —
+ * and `clean-reset-modules-is-load-bearing` left this list on 2026-08-06 with exactly that
+ * evidence (3/3 false positives in the v0.18.0 qualification; see the case's own comment and
+ * corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md for the record).
  */
 const MODULE_OMITTED_ON_PURPOSE = new Set([
   "weakened-assertion",
   "redaction-assertion-loosened",
   "stale-session-after-refresh",
   "clean-test-asserts-the-opposite",
-  "clean-reset-modules-is-load-bearing",
   "budget-starved-clean-neighbours",
 ]);
 
@@ -103,6 +105,46 @@ test("clean-added-test's module is context, not part of the change", () => {
     moduleFile.head,
     /throw new RangeError/u,
     "the module has to actually satisfy the added assertion — otherwise silence would be the wrong verdict",
+  );
+});
+
+/**
+ * Same mechanism, second earner: `clean-reset-modules-is-load-bearing` left
+ * MODULE_OMITTED_ON_PURPOSE on 2026-08-06 with the evidence that list demands — 3/3 false
+ * positives in the v0.18.0 qualification plus one more in a six-run isolated follow-up, every
+ * directly observed one anchored on the added test (the observed repair invented a `clearCache`
+ * export for a module the repository did not contain). A validation run against the committed
+ * module alone then grounded a real name-versus-assertion gap in the added test, so the fix has
+ * two halves; see the case's comment in cases.mjs and
+ * corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md.
+ *
+ * The module must stay context, it must actually memoize at module scope — a module without
+ * module-level state would make the `beforeEach` reset genuinely redundant, turning the exact
+ * finding this case exists to punish into a correct one — and it must export the `entryCount`
+ * the added test's isolation assertion calls, or the assertion cannot hold and silence would be
+ * the wrong verdict.
+ */
+test("clean-reset-modules-is-load-bearing's module is context, not part of the change", () => {
+  const testCase = CASES.find((entry) => entry.id === "clean-reset-modules-is-load-bearing");
+  const moduleFile = testCase.files.find((file) => file.path === "src/cache.ts");
+
+  assert.ok(moduleFile !== undefined, "the module under test must be committed with the case");
+  assert.equal(
+    moduleFile.base,
+    moduleFile.head,
+    "the module must be unchanged context, not a diff",
+  );
+  assert.match(
+    moduleFile.head,
+    /const memo = new Map/u,
+    "the module must memoize at module scope — otherwise the reset the case defends really is " +
+      "redundant, and the finding this case exists to punish would be correct",
+  );
+  assert.match(
+    moduleFile.head,
+    /export function entryCount/u,
+    "the module has to actually satisfy the added isolation assertion — otherwise silence would " +
+      "be the wrong verdict",
   );
 });
 
