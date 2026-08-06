@@ -282,7 +282,11 @@ describe("startModelProxy", () => {
         completion: 4,
         cached: 0,
         cacheKeyRejected: 1,
+        rewriteRejected: 0,
         badRequestPersisted: 0,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
         badRequestContextLimit: 0,
         badRequestRequestedTokens: 0,
       });
@@ -311,9 +315,9 @@ describe("startModelProxy", () => {
 
       expect(response.status).toBe(400);
       expect(await response.text()).toBe('{"error":"still bad"}');
-      // Both the original attempt and the bounded retry reached upstream — exactly one retry, not
-      // a loop — and the response served back is the retry's, not the discarded first attempt's.
-      expect(upstream.captured).toHaveLength(2);
+      // Three bounded attempts, no loop (2026-08-06): the keyed attempt, the keyless retry, and
+      // the second healing stage's original-body attempt — the served response is the last one's.
+      expect(upstream.captured).toHaveLength(3);
       // A 400 that persists without the key says nothing about the key (2026-08-06): it is NOT
       // counted as a rejection — that miscount is what pointed the Keiko#3002 investigation at
       // prompt caching — but as the provider refusing the request itself.
@@ -323,7 +327,11 @@ describe("startModelProxy", () => {
         completion: 0,
         cached: 0,
         cacheKeyRejected: 0,
+        rewriteRejected: 0,
         badRequestPersisted: 1,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
         badRequestContextLimit: 0,
         badRequestRequestedTokens: 0,
       });
@@ -357,7 +365,11 @@ describe("startModelProxy", () => {
         completion: 0,
         cached: 0,
         cacheKeyRejected: 0,
+        rewriteRejected: 0,
         badRequestPersisted: 1,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 1,
         badRequestContextLimit: 131072,
         badRequestRequestedTokens: 137542,
       });
@@ -382,17 +394,131 @@ describe("startModelProxy", () => {
       });
 
       expect(response.status).toBe(400);
-      expect(upstream.captured).toHaveLength(1);
+      // The refused body was still this proxy's rewrite, so the second healing stage spends its
+      // one original-body attempt before the refusal is booked (2026-08-06).
+      expect(upstream.captured).toHaveLength(2);
       expect(proxy.usage()).toEqual({
         requests: 1,
         prompt: 0,
         completion: 0,
         cached: 0,
         cacheKeyRejected: 0,
+        rewriteRejected: 0,
         badRequestPersisted: 1,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
         badRequestContextLimit: 0,
         badRequestRequestedTokens: 0,
       });
+    });
+
+    it("heals a 400 by re-sending the engine's original body, and counts the unpinned call", async () => {
+      // The Keiko#3008 shape (2026-08-06): the provider refuses every rewritten body — keyed and
+      // keyless alike — but accepts what the engine itself wrote. Ten of twelve file reviews died
+      // on exactly this before the second healing stage existed.
+      let call = 0;
+      const upstream = await startUpstream(() => {
+        call += 1;
+        return call <= 2
+          ? { status: 400, contentType: "application/json", body: '{"error":"bad request"}' }
+          : {
+              status: 200,
+              contentType: "application/json",
+              body: '{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":2}}',
+            };
+      });
+      cleanups.push(upstream.close);
+      const proxy = await startModelProxy({
+        upstreamUrl: upstream.url,
+        temperature: 0,
+        seed: 42,
+        promptCacheKey: "kfq-deadbeefcafef00d",
+      });
+      cleanups.push(() => proxy.close());
+
+      const response = await fetch(`${proxy.url}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "m", messages: [] }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(upstream.captured).toHaveLength(3);
+      // The healed call went out exactly as the engine wrote it: no pin, no key, no splice.
+      const healedBody = JSON.parse(upstream.captured[2]?.body ?? "{}") as Record<string, unknown>;
+      expect(healedBody).toEqual({ model: "m", messages: [] });
+      expect(proxy.usage()).toEqual({
+        requests: 1,
+        prompt: 7,
+        completion: 2,
+        cached: 0,
+        cacheKeyRejected: 0,
+        rewriteRejected: 1,
+        badRequestPersisted: 0,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
+      });
+    });
+
+    it("classifies a content-filter refusal that persists through every healing stage", async () => {
+      const upstream = await startUpstream(() => ({
+        status: 400,
+        contentType: "application/json",
+        body: '{"error":{"code":"content_filter","message":"The response was filtered due to the prompt triggering content management policy."}}',
+      }));
+      cleanups.push(upstream.close);
+      const proxy = await startModelProxy({ upstreamUrl: upstream.url, temperature: 0, seed: 42 });
+      cleanups.push(() => proxy.close());
+
+      const response = await fetch(`${proxy.url}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "m", messages: [] }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(proxy.usage()).toEqual({
+        requests: 1,
+        prompt: 0,
+        completion: 0,
+        cached: 0,
+        cacheKeyRejected: 0,
+        rewriteRejected: 0,
+        badRequestPersisted: 1,
+        badRequestContentFilter: 1,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
+        badRequestContextLimit: 0,
+        badRequestRequestedTokens: 0,
+      });
+    });
+
+    it("does not repeat a refused request whose body this proxy never rewrote", async () => {
+      const upstream = await startUpstream(() => ({
+        status: 400,
+        contentType: "application/json",
+        body: '{"error":"bad request"}',
+      }));
+      cleanups.push(upstream.close);
+      const proxy = await startModelProxy({ upstreamUrl: upstream.url, temperature: 0, seed: 42 });
+      cleanups.push(() => proxy.close());
+
+      // A non-JSON body passes through `pinSampling` byte-identical, so the "original" retry would
+      // be the same refused request verbatim — the gate must keep it to one round trip.
+      const response = await fetch(`${proxy.url}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: "not json",
+      });
+
+      expect(response.status).toBe(400);
+      expect(upstream.captured).toHaveLength(1);
+      expect(proxy.usage().badRequestPersisted).toBe(1);
+      expect(proxy.usage().rewriteRejected).toBe(0);
     });
   });
 
@@ -415,7 +541,11 @@ describe("startModelProxy", () => {
         completion: 0,
         cached: 0,
         cacheKeyRejected: 0,
+        rewriteRejected: 0,
         badRequestPersisted: 0,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
         badRequestContextLimit: 0,
         badRequestRequestedTokens: 0,
       });
@@ -449,7 +579,11 @@ describe("startModelProxy", () => {
         completion: 8,
         cached: 0,
         cacheKeyRejected: 0,
+        rewriteRejected: 0,
         badRequestPersisted: 0,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
         badRequestContextLimit: 0,
         badRequestRequestedTokens: 0,
       });
@@ -480,7 +614,11 @@ describe("startModelProxy", () => {
         completion: 20,
         cached: 64,
         cacheKeyRejected: 0,
+        rewriteRejected: 0,
         badRequestPersisted: 0,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
         badRequestContextLimit: 0,
         badRequestRequestedTokens: 0,
       });
@@ -515,7 +653,11 @@ describe("startModelProxy", () => {
         completion: 2,
         cached: 0,
         cacheKeyRejected: 0,
+        rewriteRejected: 0,
         badRequestPersisted: 0,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
         badRequestContextLimit: 0,
         badRequestRequestedTokens: 0,
       });
@@ -544,7 +686,11 @@ describe("startModelProxy", () => {
         completion: 0,
         cached: 0,
         cacheKeyRejected: 0,
+        rewriteRejected: 0,
         badRequestPersisted: 0,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
         badRequestContextLimit: 0,
         badRequestRequestedTokens: 0,
       });
@@ -570,7 +716,11 @@ describe("startModelProxy", () => {
         completion: 0,
         cached: 0,
         cacheKeyRejected: 0,
+        rewriteRejected: 0,
         badRequestPersisted: 0,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
         badRequestContextLimit: 0,
         badRequestRequestedTokens: 0,
       });
@@ -596,7 +746,11 @@ describe("startModelProxy", () => {
         completion: 0,
         cached: 0,
         cacheKeyRejected: 0,
+        rewriteRejected: 0,
         badRequestPersisted: 0,
+        badRequestContentFilter: 0,
+        badRequestUnknownParameter: 0,
+        badRequestContextLength: 0,
         badRequestContextLimit: 0,
         badRequestRequestedTokens: 0,
       });

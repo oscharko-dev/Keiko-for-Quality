@@ -71,12 +71,27 @@ export interface ModelUsage {
    */
   readonly cacheKeyRejected: number;
   /**
+   * Count of PROVEN sampling/intent-rewrite rejections (2026-08-06, Keiko#3008): a 400 that
+   * persisted through the keyless retry but was cured by re-sending the engine's ORIGINAL body,
+   * with none of this proxy's injected fields. Each one is a model call that survived at the cost
+   * of its sampling pin for that single call — an unpinned review beats a dead file, and this
+   * counter is what keeps that trade visible instead of silent.
+   */
+  readonly rewriteRejected: number;
+  /**
    * Chat-completions 400s the fallback could NOT explain away: the request was refused with the
-   * key absent, or refused again after the keyless retry. These are the provider rejecting the
-   * request itself — malformed body, over-long prompt — and each one surfaces to the engine as a
-   * failed model call.
+   * key absent, refused again after the keyless retry, and refused once more as the engine's
+   * unmodified original body. These are the provider rejecting the request itself, and each one
+   * surfaces to the engine as a failed model call. On Keiko#3008 ten of these killed ten of
+   * twelve file reviews — the classification counters below exist to name why.
    */
   readonly badRequestPersisted: number;
+  /** Persisted 400s whose body matched the provider's content-filter vocabulary. */
+  readonly badRequestContentFilter: number;
+  /** Persisted 400s whose body named an unknown/unsupported request parameter. */
+  readonly badRequestUnknownParameter: number;
+  /** Persisted 400s whose body matched the context-length vocabulary. */
+  readonly badRequestContextLength: number;
   /**
    * Numbers distilled from the most recent persisted 400's error body — the provider's own
    * "maximum context length is N" / "requested N" figures when present, 0 otherwise. Numbers
@@ -312,7 +327,11 @@ interface MutableUsage {
   completion: number;
   cached: number;
   cacheKeyRejected: number;
+  rewriteRejected: number;
   badRequestPersisted: number;
+  badRequestContentFilter: number;
+  badRequestUnknownParameter: number;
+  badRequestContextLength: number;
   badRequestContextLimit: number;
   badRequestRequestedTokens: number;
 }
@@ -333,6 +352,21 @@ async function recordBadRequestNumbers(response: Response, usage: MutableUsage):
     const requested = /requested (\d{1,10})/i.exec(text);
     if (limit !== null) usage.badRequestContextLimit = Number(limit[1]);
     if (requested !== null) usage.badRequestRequestedTokens = Number(requested[1]);
+    // Class counters (2026-08-06, Keiko#3008): ten persisted 400s killed ten file reviews and the
+    // numbers above stayed zero, which proved "not context length" and nothing else. Each class
+    // here is a pattern over provider error vocabulary — a counter bump, never a quoted body, so
+    // the redaction contract holds while the log finally names the failure family.
+    if (/content_filter|content.management.policy|ResponsibleAIPolicyViolation/i.test(text)) {
+      usage.badRequestContentFilter += 1;
+    } else if (
+      /unknown parameter|unrecognized request argument|unsupported parameter|extra_forbidden|unexpected keyword/i.test(
+        text,
+      )
+    ) {
+      usage.badRequestUnknownParameter += 1;
+    } else if (/maximum context length|context.length.exceeded/i.test(text)) {
+      usage.badRequestContextLength += 1;
+    }
   } catch {
     // The forward path owes the engine its response either way.
   }
@@ -452,12 +486,45 @@ async function fetchWithCacheKeyFallback(
     return retryWithoutCacheKey(doFetch, url, request, options, usage, latch);
   }
   if (upstream.status === 400 && isChatCompletionsPath(request.path)) {
-    // A 400 this fallback never touched — no key was on the request, so the request itself was
-    // refused. Counted and distilled like a persisting retry, because to the engine they are the
-    // same event: a model call that failed.
-    return persistedBadRequest(upstream, usage);
+    // A 400 without the key on it — but the body was still THIS PROXY'S rewrite (temperature,
+    // seed, intent). Before booking the provider's refusal as the request's own fault, spend one
+    // attempt on the engine's unmodified original: if that heals it, the rejection was ours.
+    // Gated on the rewrite having actually changed the bytes — when `pinSampling` passed a
+    // non-JSON body through untouched, the "original" would be the identical refused request, and
+    // repeating it verbatim buys wall-clock for nothing.
+    if (pinned === undefined || pinned.body === request.body) {
+      return persistedBadRequest(upstream, usage);
+    }
+    return retryWithOriginalBody(doFetch, url, request, usage);
   }
   return upstream;
+}
+
+/**
+ * The second healing stage (2026-08-06, Keiko#3008): a 400 that survives the keyless retry gets
+ * exactly one attempt as the engine's ORIGINAL body — no temperature/seed pin, no cache key, no
+ * intent splice. Ten of twelve file reviews on that pull request died on 400s that were not
+ * context-length; whatever field that provider refuses, re-sending what the engine itself wrote
+ * is the one recovery that cannot be wrong about which injected field caused it. A cure is
+ * counted as `rewriteRejected` — the call ran unpinned, which the determinism ledger must see —
+ * and a 400 that persists even here is finally the request's own fault (`persistedBadRequest`).
+ */
+async function retryWithOriginalBody(
+  doFetch: typeof fetch,
+  url: string,
+  request: ChatCompletionsRequest,
+  usage: MutableUsage,
+): Promise<Response> {
+  const asWritten = await doFetch(url, {
+    method: request.method,
+    headers: request.headers,
+    body: new Uint8Array(request.body),
+  });
+  if (asWritten.status !== 400) {
+    usage.rewriteRejected += 1;
+    return asWritten;
+  }
+  return persistedBadRequest(asWritten, usage);
 }
 
 /** Counts a 400 the fallback could not explain away, distills its numbers, and serves it. */
@@ -497,7 +564,11 @@ async function retryWithoutCacheKey(
     latch.disabled = true;
     return retried;
   }
-  return persistedBadRequest(retried, usage);
+  // Key removed, still refused — the keyless body is still the sampling/intent rewrite, so the
+  // second healing stage gets its one attempt before the refusal is booked as persisted. A
+  // key-injected request implies the body parsed as JSON, so the rewrite necessarily differs
+  // from the original and the identical-bytes gate above cannot apply here.
+  return retryWithOriginalBody(doFetch, url, request, usage);
 }
 
 async function forward(
@@ -582,7 +653,11 @@ export function startModelProxy(options: ModelProxyOptions): Promise<ModelProxy>
     completion: 0,
     cached: 0,
     cacheKeyRejected: 0,
+    rewriteRejected: 0,
     badRequestPersisted: 0,
+    badRequestContentFilter: 0,
+    badRequestUnknownParameter: 0,
+    badRequestContextLength: 0,
     badRequestContextLimit: 0,
     badRequestRequestedTokens: 0,
   };
