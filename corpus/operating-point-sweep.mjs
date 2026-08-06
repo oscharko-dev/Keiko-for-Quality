@@ -267,8 +267,13 @@ export function renderDryRunPlan(plan) {
  * inventing them here would be exactly the fabricated measurement AGENTS.md and this script's own
  * task both forbid. `buildSweepRows` renders their absence as "n/a", not as zero.
  */
+/** Named apart from the template that uses it, so no template nests inside another (S4624). */
+function describeScope(only) {
+  return only === undefined ? "full corpus" : `--only ${only}`;
+}
+
 export function summarizeStageReport(report) {
-  if (report === undefined || report === null || report.measured !== true) {
+  if (report?.measured !== true) {
     return {
       measured: false,
       reason: report?.reason ?? "report_unreadable",
@@ -421,7 +426,7 @@ export function renderEvidenceMarkdown({ generatedAtIso, plan, stageOutcomes }) 
     "## Method",
     "",
     `- Stages: ${plan.stages.join(", ")}`,
-    `- Scope: ${plan.only !== undefined ? `--only ${plan.only}` : "full corpus"}`,
+    `- Scope: ${describeScope(plan.only)}`,
     "- Each stage: one `node corpus/run.mjs` child process, KFQ_SUBSTANTIATION_STRICTNESS set in",
     "  its environment only, a fresh OCR_REPORT path read back afterward. corpus/run.mjs itself is",
     "  unmodified and was not imported — only invoked, through its own documented CLI.",

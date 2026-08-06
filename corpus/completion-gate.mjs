@@ -93,18 +93,24 @@ function parseArgs(argv) {
     else if (token === "--dry-run") args.dryRun = true;
     else fail(`unknown option: ${token}`);
   }
+  assertArgs(args);
+  return args;
+}
+
+/** Bounds, split from the token loop above so each half stays readable on its own. */
+function assertArgs(args) {
   if (args.repo === undefined) fail("--repo <consumer-checkout> is required");
   if (args.prs.length === 0) fail("at least one --pr <number> is required");
-  if (args.prs.some((pr) => !Number.isInteger(pr) || pr < 1))
+  if (args.prs.some((pr) => !Number.isInteger(pr) || pr < 1)) {
     fail("--pr must be a positive integer");
+  }
   if (!Number.isInteger(args.runs) || args.runs < 1 || args.runs > 5) {
     fail("--runs must be an integer between 1 and 5");
   }
-  if (!(args.threshold > 0) || args.threshold > 1) fail("--threshold must be in (0, 1]");
+  if (args.threshold <= 0 || args.threshold > 1) fail("--threshold must be in (0, 1]");
   if (!Number.isInteger(args.tokenBudget) || args.tokenBudget < 1) {
     fail("--token-budget must be a positive integer");
   }
-  return args;
 }
 
 function assertModelEnv(env) {
@@ -210,9 +216,9 @@ function runTarget(target, repoPath, runs, tokenBudget) {
       console.error(`completion-gate: ${target.label} run ${String(index)}/${String(runs)}`);
       const attempt = runOnce(target, repoPath, workDir, index, tokenBudget);
       attempts.push(attempt);
+      const why = attempt.reason === undefined ? "" : ` (${attempt.reason})`;
       console.error(
-        `completion-gate: ${target.label} run ${String(index)} — ${attempt.outcome}` +
-          `${attempt.reason === undefined ? "" : ` (${attempt.reason})`}, ` +
+        `completion-gate: ${target.label} run ${String(index)} — ${attempt.outcome}${why}, ` +
           `reviewed ${String(attempt.reviewed)}/${String(attempt.reviewable)}`,
       );
     }

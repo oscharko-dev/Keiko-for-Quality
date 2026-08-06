@@ -119,7 +119,9 @@ test("estimateSpend scales with files and runs", () => {
   const estimate = estimateSpend([{ files: 10 }, { files: 9 }], 2);
   assert.equal(estimate.files, 19);
   assert.equal(estimate.runs, 2);
-  assert.ok(estimate.low > 0 && estimate.high > estimate.low);
+  // Split, so a failure names WHICH half broke (Sonar S9073).
+  assert.ok(estimate.low > 0);
+  assert.ok(estimate.high > estimate.low);
 });
 
 test("renderEvidence leads with the rate and names every incomplete reason", () => {

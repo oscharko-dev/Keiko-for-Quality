@@ -100,6 +100,12 @@ export function summarizeRuns(attempts, threshold) {
   };
 }
 
+/** `PR #3011 (19 files), PR #3008 (12 files)` — named apart from the template that uses it so no
+ *  template nests inside another (Sonar S4624). */
+function describeTargets(targets) {
+  return targets.map((t) => `${t.label} (${String(t.files ?? 0)} files)`).join(", ");
+}
+
 /** Percentage with one decimal, or `n/a` when nothing was gradeable. */
 function ratePercent(rate) {
   return rate === null ? "n/a" : `${(rate * 100).toFixed(1)}%`;
@@ -141,7 +147,7 @@ export function renderEvidence({
     `- Reviewer under test: keiko-for-quality ${gateVersion}`,
     `- Reviewer tree: ${reviewerTree}`,
     `- Model: ${model}`,
-    `- Targets: ${targets.map((t) => `${t.label} (${String(t.files ?? 0)} files)`).join(", ")}`,
+    `- Targets: ${describeTargets(targets)}`,
     `- **Completion rate: ${ratePercent(summary.completionRate)}** ` +
       `(${String(summary.complete)}/${String(summary.graded)} graded attempts, ` +
       `threshold ${ratePercent(summary.threshold)}) — ${summary.green ? "GREEN" : "RED"}`,

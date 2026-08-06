@@ -112,7 +112,9 @@ test("estimateStageCost: --only narrows to one case, proportionally, and says so
   assert.equal(cost.isProportional, true);
   assert.equal(cost.tokensLow, Math.round(FULL_CORPUS_TOKENS_LOW / FULL_CORPUS_CASE_COUNT));
   assert.equal(cost.tokensHigh, Math.round(FULL_CORPUS_TOKENS_HIGH / FULL_CORPUS_CASE_COUNT));
-  assert.ok(cost.minutes > 0 && cost.minutes < FULL_CORPUS_MINUTES);
+  // Split, so a failure names WHICH bound broke (Sonar S9073).
+  assert.ok(cost.minutes > 0);
+  assert.ok(cost.minutes < FULL_CORPUS_MINUTES);
 });
 
 test("buildPlan sums the per-stage estimate across every requested stage, not a flat total", () => {
