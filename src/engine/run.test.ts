@@ -204,13 +204,16 @@ describe("runEngine: model.usage telemetry", () => {
       execRunMock.mockImplementation(respondThroughProxy());
       const diagnostics = createSilentDiagnostics();
 
-      await runEngine(
+      const output = await runEngine(
         options({
           config: { ...CONFIG, protocol: "openai", endpoint: upstream.url },
           env: { MODEL_TOKEN: "secret" },
         }),
         diagnostics,
       );
+      // The success output carries the same wire count (prompt 120 + completion 30) — the number
+      // `parseBooked` bills from when validation later refuses the stdout it rode in with.
+      expect(output.wireTokens).toBe(150);
 
       const records = diagnostics.drain().filter((record) => record.code === "model.usage");
       expect(records).toHaveLength(1);
@@ -255,15 +258,22 @@ describe("runEngine: model.usage telemetry", () => {
       );
       const diagnostics = createSilentDiagnostics();
 
-      await expect(
-        runEngine(
-          options({
-            config: { ...CONFIG, protocol: "openai", endpoint: upstream.url },
-            env: { MODEL_TOKEN: "secret" },
-          }),
-          diagnostics,
-        ),
-      ).rejects.toBeInstanceOf(EngineRunError);
+      const thrown = await runEngine(
+        options({
+          config: { ...CONFIG, protocol: "openai", endpoint: upstream.url },
+          env: { MODEL_TOKEN: "secret" },
+        }),
+        diagnostics,
+      ).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(thrown).toBeInstanceOf(EngineRunError);
+      // The failed invocation's real, billable spend rides the error (2026-08-06): prompt 5 plus
+      // completion 1 from the one proxied request above — this is what lets an incomplete run's
+      // report carry its measured cost instead of a zero. (`toMatchObject`, not a cast: the class
+      // arrives through a dynamic import, so it is a value binding here, not a type.)
+      expect(thrown).toMatchObject({ wireTokens: 6 });
 
       const records = diagnostics.drain().filter((record) => record.code === "model.usage");
       expect(records).toHaveLength(1);

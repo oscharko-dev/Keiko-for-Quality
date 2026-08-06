@@ -36,7 +36,12 @@ import {
   type RunStatus,
 } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
-import { EngineRunError, runEngine, type EngineRunOptions } from "./engine/run.js";
+import {
+  EngineRunError,
+  runEngine,
+  type EngineRunOptions,
+  type EngineRunOutput,
+} from "./engine/run.js";
 import { settle, verdictsSurviveIncompleteness, type Settlement } from "./engine/settle.js";
 import { readTextAtCommit, type GitContext } from "./git/plumbing.js";
 import { runChangePass, type ChangedFile } from "./contracts/change-pass.js";
@@ -880,6 +885,42 @@ function computeEngineBudget(
   return { excluded, allottedBudget };
 }
 
+/**
+ * Books a propagating `EngineRunError`'s wire-counted spend (2026-08-06) — the ONE booking site
+ * for a thrown-and-propagated attempt, which is what stops an incomplete run's report from
+ * saying `spend 0` while `model.usage` counted thousands of real tokens. The absorbed-failure
+ * paths inside `runEngineWithOneResume`/`attemptResume` book their own, so nothing is counted
+ * twice; anything that is not an `EngineRunError` either already booked (`parseBooked`) or never
+ * reached an invocation that could spend.
+ */
+function bookPropagatedEngineFailure(error: unknown, ledger: SpendLedger): void {
+  if (error instanceof EngineRunError) ledger.engine += error.wireTokens ?? 0;
+}
+
+/** The invocation options `executeEngine` hands `runEngineWithOneResume` — pure assembly, split
+ *  out solely for that function's own line budget. */
+function engineInvocationOptions(
+  request: PipelineRequest,
+  inventory: Inventory,
+  binaryPath: string,
+  allottedBudget: number,
+  excluded: readonly string[],
+): EngineRunOptions {
+  return {
+    binaryPath,
+    repositoryPath: request.repositoryPath,
+    pair: inventory.pair,
+    config: request.config,
+    profile: request.profile,
+    guidelines: request.guidelines,
+    env: request.env,
+    pathValue: request.pathValue,
+    ...(request.changeIntent === undefined ? {} : { changeIntent: request.changeIntent }),
+    allottedBudget,
+    mechanicallyCleanPaths: excluded,
+  };
+}
+
 async function executeEngine(
   request: PipelineRequest,
   inventory: Inventory,
@@ -897,20 +938,9 @@ async function executeEngine(
       engineTokens,
       alreadyReviewedPaths,
     } = await runEngineWithOneResume(
-      {
-        binaryPath: engine.binaryPath,
-        repositoryPath: request.repositoryPath,
-        pair: inventory.pair,
-        config: request.config,
-        profile: request.profile,
-        guidelines: request.guidelines,
-        env: request.env,
-        pathValue: request.pathValue,
-        ...(request.changeIntent === undefined ? {} : { changeIntent: request.changeIntent }),
-        allottedBudget,
-        mechanicallyCleanPaths: excluded,
-      },
+      engineInvocationOptions(request, inventory, engine.binaryPath, allottedBudget, excluded),
       diagnostics,
+      ledger,
     );
     ledger.engine += engineTokens;
     const { result: classified, classifyTokens } = await repairEngineFindings(
@@ -928,6 +958,9 @@ async function executeEngine(
         ? memo.hitPaths
         : new Set([...memo.hitPaths, ...alreadyReviewedPaths]);
     return settle(inventory, classified, request.profile, request.config, memoizedForSettlement);
+  } catch (error) {
+    bookPropagatedEngineFailure(error, ledger);
+    throw error;
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -1449,11 +1482,20 @@ const RESUME_FLOOR_FRACTION = 0.25;
  * fund a second opinion with. Resuming anyway would only re-pay for ground the first attempt
  * already covered and settle incomplete regardless — cost with no chance of a different outcome.
  *
- * `engineTokens` (v0.12.0) is the cumulative spend across every attempt that actually ran, not
- * just the one whose result stands: a resumed run paid for both attempts, and `run.spend` has to
- * say so rather than under-report by the size of the discarded first one. A skipped resume is one
- * attempt, so it is exactly that attempt's own total — never a guess at what a second would have
- * cost.
+ * `engineTokens` (v0.12.0) is the cumulative SELF-REPORTED spend across every attempt whose
+ * parsed result stands behind the returned outcome: a resumed run paid for both attempts, and
+ * `run.spend` has to say so rather than under-report by the size of the discarded first one. A
+ * skipped resume is one attempt, so it is exactly that attempt's own total — never a guess at
+ * what a second would have cost.
+ *
+ * Attempts that FAIL never appear in `engineTokens` — a thrown invocation reports no total and a
+ * malformed one's total cannot be trusted — but their cost is real, so it enters the ledger
+ * directly at the failure site instead (2026-08-06), wire-counted by the proxy
+ * (`EngineRunError.wireTokens` / `EngineRunOutput.wireTokens`): the absorbed-first-attempt catch
+ * below, `attemptResume`'s own catch, `parseBooked`, and — for errors that propagate out of this
+ * function entirely — `executeEngine`'s catch. One site per failure shape, so no attempt is ever
+ * counted twice, and an incomplete run's report now carries what it measurably burned instead of
+ * a zero.
  */
 /**
  * `alreadyReviewedPaths` is the fact `executeEngine` needs and this function alone can produce: the
@@ -1525,6 +1567,24 @@ function resumeWorthwhile(status: RunStatus): boolean {
   return status === "failed" || status === "unknown";
 }
 
+/**
+ * Parses an invocation's stdout, booking its wire-counted spend into the ledger when — and only
+ * when — validation refuses the result (2026-08-06). A malformed result is rejected, never
+ * repaired, but the invocation that produced it made real, billable model calls, and its own
+ * `total_tokens` field is exactly what cannot be trusted at that point: the proxy's wire count
+ * (`EngineRunOutput.wireTokens`) is the one measured number left. On the success path the parsed
+ * total flows through `ResumeOutcome.engineTokens` unchanged — this helper books nothing there,
+ * so the qualified success-path accounting keeps its measurement basis.
+ */
+function parseBooked(output: EngineRunOutput, ledger: SpendLedger): EngineResult {
+  try {
+    return parseEngineResult(output.stdout);
+  } catch (error) {
+    ledger.engine += output.wireTokens ?? 0;
+    throw error;
+  }
+}
+
 /** The denied-resume outcome for a finished first attempt — recorded, then settled on as-is. */
 function finishedRunOutcome(
   diagnostics: Diagnostics,
@@ -1551,6 +1611,7 @@ async function attemptResume(
   firstAttemptTokens: number,
   firstResult: EngineResult | undefined,
   alreadyReviewedPaths: readonly string[],
+  ledger: SpendLedger,
 ): Promise<ResumeOutcome> {
   try {
     // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
@@ -1568,7 +1629,7 @@ async function attemptResume(
       },
       diagnostics,
     );
-    const parsedSecond = parseEngineResult(second.stdout);
+    const parsedSecond = parseBooked(second, ledger);
     recordEngineStatus(diagnostics, parsedSecond, options.pair.head);
     const merged =
       firstResult === undefined
@@ -1587,7 +1648,20 @@ async function attemptResume(
     // are still trustworthy. Rethrown, too, when there is nothing to fall back to: a first attempt
     // that itself threw leaves `firstResult` undefined, and the caller's own handling of that case
     // is unchanged from before this fallback existed.
-    if (!(error instanceof EngineRunError) || firstResult === undefined) throw error;
+    if (!(error instanceof EngineRunError) || firstResult === undefined) {
+      // This throw ends the whole run, and `engineTokens` will never be returned — so the first
+      // attempt's own measured total must be booked HERE or vanish from the ledger entirely. A
+      // propagating `EngineRunError`'s own wire count is deliberately NOT booked here:
+      // `executeEngine`'s catch is that error's one booking site (see there), and a
+      // `ValidationError` already booked its invocation's wire count in `parseBooked`.
+      ledger.engine += firstAttemptTokens;
+      throw error;
+    }
+    // The absorbed failure's wire-counted spend (2026-08-06): this second invocation made real
+    // model calls before failing, its error never propagates (the fallback below stands), so this
+    // is the one place its cost can enter the ledger. `firstAttemptTokens` stays in the returned
+    // `engineTokens`, exactly as before.
+    ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resume_failed", { counts: { spent: firstAttemptTokens } });
     // The returned result is `firstResult` UNCHANGED — its own coverage already accounts for
     // everything IT dispatched, so there is nothing narrower than usual for `settle()` to be told
@@ -1600,6 +1674,7 @@ async function attemptResume(
 async function runEngineWithOneResume(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
+  ledger: SpendLedger,
 ): Promise<ResumeOutcome> {
   // The resume runs on what the first attempt left, floored at RESUME_FLOOR_FRACTION of THIS
   // review's own allotment (see that constant's own comment) rather than a literal whole-review
@@ -1620,7 +1695,7 @@ async function runEngineWithOneResume(
   let alreadyReviewedPaths: readonly string[] = [];
   try {
     const first = await runEngine(options, diagnostics);
-    const parsed = parseEngineResult(first.stdout);
+    const parsed = parseBooked(first, ledger);
     recordEngineStatus(diagnostics, parsed, options.pair.head);
     if (parsed.status === "success") {
       return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
@@ -1657,6 +1732,11 @@ async function runEngineWithOneResume(
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   } catch (error) {
     if (!(error instanceof EngineRunError)) throw error;
+    // The absorbed first attempt's wire-counted spend (2026-08-06): this error never propagates —
+    // the resume below IS the recovery — so `executeEngine`'s propagated-error booking never sees
+    // it, and this catch is its one chance to reach the ledger. Nothing self-reported exists to
+    // conflict with: a thrown attempt has no parsed `total_tokens` at all.
+    ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   }
   return attemptResume(
@@ -1666,6 +1746,7 @@ async function runEngineWithOneResume(
     firstAttemptTokens,
     firstResult,
     alreadyReviewedPaths,
+    ledger,
   );
 }
 
