@@ -34,6 +34,7 @@ import {
   gradeAttempt,
   measurementFailure,
   renderEvidence,
+  stratify,
   summarizeRuns,
 } from "./completion-gate-lib.mjs";
 
@@ -104,8 +105,12 @@ function assertArgs(args) {
   if (args.prs.some((pr) => !Number.isInteger(pr) || pr < 1)) {
     fail("--pr must be a positive integer");
   }
-  if (!Number.isInteger(args.runs) || args.runs < 1 || args.runs > 5) {
-    fail("--runs must be an integer between 1 and 5");
+  // The old ceiling of 5 made a conclusive result unreachable by construction: against an 80%
+  // threshold the interval's lower bound only clears the bar at about twenty flawless runs, so a
+  // gate capped at five could report nothing but INCONCLUSIVE forever. Twenty-five is a real
+  // bound against a typo, not a policy about how much evidence is enough.
+  if (!Number.isInteger(args.runs) || args.runs < 1 || args.runs > 25) {
+    fail("--runs must be an integer between 1 and 25");
   }
   if (args.threshold <= 0 || args.threshold > 1) fail("--threshold must be in (0, 1]");
   if (!Number.isInteger(args.tokenBudget) || args.tokenBudget < 1) {
@@ -158,7 +163,16 @@ function resolveTarget(repoPath, prNumber, baseRef) {
   const files = git(repoPath, ["diff", "--name-only", `${base}..${head}`])
     .split("\n")
     .filter((line) => line !== "").length;
-  return { label: `PR #${String(prNumber)}`, prNumber, head, base, files };
+  // Changed lines, not just file count: size classes are keyed on lines because that is the
+  // dimension the literature measures detection against, and because two twelve-file changes can
+  // differ by an order of magnitude in what the reviewer actually has to read.
+  const numstat = git(repoPath, ["diff", "--numstat", `${base}..${head}`]);
+  let changedLines = 0;
+  for (const line of numstat.split("\n")) {
+    const [added, deleted] = line.split("\t");
+    changedLines += (Number(added) || 0) + (Number(deleted) || 0);
+  }
+  return { label: `PR #${String(prNumber)}`, prNumber, head, base, files, changedLines };
 }
 
 /** One CLI run against one target; never throws — an unusable run becomes a measurement failure
@@ -246,6 +260,7 @@ function printPlan(targets, args, estimate) {
   for (const target of targets) {
     console.error(
       `  ${target.label}: ${String(target.files)} files, ` +
+        `${String(target.changedLines)} changed lines, ` +
         `${target.base.slice(0, 12)}..${target.head.slice(0, 12)}`,
     );
   }
@@ -293,6 +308,7 @@ function main() {
     targets,
     results,
     summary,
+    strata: stratify(results, args.threshold),
   });
   if (args.evidence !== undefined) {
     writeFileSync(args.evidence, `${evidence}\n`, "utf8");

@@ -83,6 +83,8 @@ export function summarizeRuns(attempts, threshold) {
     reasons[key] = (reasons[key] ?? 0) + 1;
   }
   const completionRate = graded.length === 0 ? null : complete / graded.length;
+  const interval = wilsonInterval(complete, graded.length);
+  const verdict = verdictFor(interval, threshold);
   return {
     attempts: attempts.length,
     graded: graded.length,
@@ -93,9 +95,12 @@ export function summarizeRuns(attempts, threshold) {
     // have to sort a histogram by eye to find it.
     reasons: Object.fromEntries(Object.entries(reasons).sort((a, b) => b[1] - a[1])),
     threshold,
-    // A null rate never passes: "nothing was measured" is not evidence of health. Neither does a
-    // rate below the threshold, however honest each individual incomplete was.
-    green: completionRate !== null && completionRate >= threshold,
+    ...(interval === undefined ? {} : { interval }),
+    verdict,
+    // Green is now the STATISTICAL claim, not the arithmetic one: the interval's lower bound must
+    // clear the threshold. A point estimate that happens to sit above it on four draws is not
+    // evidence the reviewer finishes reliably, and this gate refuses to call it one.
+    green: verdict === "GREEN",
     spendTotal: attempts.reduce((sum, attempt) => sum + attempt.spendTotal, 0),
   };
 }
@@ -104,6 +109,101 @@ export function summarizeRuns(attempts, threshold) {
  *  template nests inside another (Sonar S4624). */
 function describeTargets(targets) {
   return targets.map((t) => `${t.label} (${String(t.files ?? 0)} files)`).join(", ");
+}
+
+/**
+ * Size classes for stratifying the rate, in CHANGED LINES.
+ *
+ * A single aggregate rate over mixed pull requests is the cheapest way to mislead yourself here.
+ * Kumar 2026 (arXiv:2606.15689) measured detection collapsing with diff size — F1 0.657 under ten
+ * changed lines against 0.043 past a hundred and fifty — and completion is subject to the same
+ * pressure for the same reason: more files and more lines mean more per-file conversations, each
+ * of which can exhaust its tool rounds.
+ *
+ * This is diagnosis, not accounting. An aggregate of 50% over mixed sizes could mean the reviewer
+ * fails half the time everywhere, or that it finishes every small change and no large one. Those
+ * are different products and they need different fixes, and only the stratified rate tells them
+ * apart. A stratum is never a substitute for measuring the size that matters: if large changes are
+ * the ones that fail, the sample that decides the question has to be large changes.
+ */
+export const SIZE_CLASSES = [
+  { key: "lines_lt_50", label: "<50 lines", max: 50 },
+  { key: "lines_50_250", label: "50-250 lines", max: 250 },
+  { key: "lines_250_1000", label: "250-1000 lines", max: 1000 },
+  { key: "lines_gte_1000", label: ">=1000 lines", max: Number.POSITIVE_INFINITY },
+];
+
+/** The class a target falls into, by its changed-line count. */
+export function sizeClassOf(changedLines) {
+  return SIZE_CLASSES.find((c) => changedLines < c.max) ?? SIZE_CLASSES[SIZE_CLASSES.length - 1];
+}
+
+/**
+ * The rate within each size class that actually has attempts, each with its own interval and
+ * verdict — computed by exactly the same functions as the aggregate, so a stratum and the whole
+ * are never judged by two different standards.
+ */
+export function stratify(results, threshold) {
+  const byClass = new Map();
+  for (const result of results) {
+    const key = sizeClassOf(result.changedLines ?? 0).key;
+    const bucket = byClass.get(key) ?? [];
+    bucket.push(...result.attempts);
+    byClass.set(key, bucket);
+  }
+  return SIZE_CLASSES.filter((c) => byClass.has(c.key)).map((c) => ({
+    label: c.label,
+    ...summarizeRuns(byClass.get(c.key) ?? [], threshold),
+  }));
+}
+
+/**
+ * Wilson score interval for a proportion, at 95%.
+ *
+ * The completion rate is a proportion measured on a handful of very expensive draws, and a bare
+ * point estimate invites exactly the error this gate was built to prevent. On 2026-08-06 four
+ * measurements read 25%, 50%, 50%, 50% and were reported as an improvement followed by a plateau.
+ * Their intervals are [4.6%, 69.9%] and [15.0%, 85.0%]: they overlap almost entirely, and not one
+ * of those comparisons was supported by its own data.
+ *
+ * Wilson rather than the textbook normal approximation because n here is single digits and the
+ * proportion sits near the boundaries, which is precisely where the normal approximation produces
+ * intervals running past 0 or 1.
+ */
+export function wilsonInterval(successes, total, z = 1.96) {
+  if (total <= 0) return undefined;
+  const p = successes / total;
+  const denominator = 1 + (z * z) / total;
+  const centre = (p + (z * z) / (2 * total)) / denominator;
+  const margin =
+    (z / denominator) * Math.sqrt((p * (1 - p)) / total + (z * z) / (4 * total * total));
+  return { low: Math.max(0, centre - margin), high: Math.min(1, centre + margin) };
+}
+
+/**
+ * The verdict, with the sample's own precision folded in.
+ *
+ * Three states rather than two, because two cannot express the situation this gate is usually in.
+ * `GREEN` means the interval's LOWER bound clears the threshold — the data supports the claim.
+ * `RED` means its UPPER bound falls short — the data refutes it. `INCONCLUSIVE` means the interval
+ * spans the threshold, which is not a soft red: it is the honest statement that this many runs
+ * cannot decide the question either way, and the answer is more runs rather than a louder verdict.
+ */
+export function verdictFor(interval, threshold) {
+  if (interval === undefined) return "INCONCLUSIVE";
+  if (interval.low >= threshold) return "GREEN";
+  if (interval.high < threshold) return "RED";
+  return "INCONCLUSIVE";
+}
+
+/** The interval as a reader should see it: bounds and width, because the width is the part that
+ *  says whether any comparison to another measurement is meaningful at all. */
+function describeInterval(interval) {
+  if (interval === undefined) return "n/a (nothing gradeable)";
+  return (
+    `[${ratePercent(interval.low)}, ${ratePercent(interval.high)}] ` +
+    `(width ${ratePercent(interval.high - interval.low)})`
+  );
 }
 
 /** Percentage with one decimal, or `n/a` when nothing was gradeable. */
@@ -136,6 +236,7 @@ export function renderEvidence({
   targets,
   results,
   summary,
+  strata,
 }) {
   const lines = [
     `# Completion gate — ${dateIso}`,
@@ -149,12 +250,37 @@ export function renderEvidence({
     `- Model: ${model}`,
     `- Targets: ${describeTargets(targets)}`,
     `- **Completion rate: ${ratePercent(summary.completionRate)}** ` +
-      `(${String(summary.complete)}/${String(summary.graded)} graded attempts, ` +
-      `threshold ${ratePercent(summary.threshold)}) — ${summary.green ? "GREEN" : "RED"}`,
+      `(${String(summary.complete)}/${String(summary.graded)} graded attempts) — ` +
+      `**${summary.verdict}** against a ${ratePercent(summary.threshold)} threshold`,
+    `- 95% interval: ${describeInterval(summary.interval)}`,
+    ...(summary.verdict === "INCONCLUSIVE"
+      ? [
+          "- **This sample cannot decide the question.** The interval spans the threshold, so the",
+          "  data neither supports nor refutes the bar. The answer is more runs, not a louder verdict.",
+        ]
+      : []),
     `- Measurement failures (excluded from the rate): ${String(summary.measurementFailures)}`,
     `- Total spend (tokens): ${String(summary.spendTotal)}`,
     "",
   ];
+  if (strata !== undefined && strata.length > 1) {
+    lines.push(
+      "## Rate by change size",
+      "",
+      "A single aggregate over mixed pull requests hides the effect size matters most for. Each",
+      "row is judged by the same standard as the whole.",
+      "",
+      "| size | rate | 95% interval | verdict |",
+      "| --- | --- | --- | --- |",
+    );
+    for (const s of strata) {
+      lines.push(
+        `| ${s.label} | ${ratePercent(s.completionRate)} (${String(s.complete)}/${String(s.graded)}) ` +
+          `| ${describeInterval(s.interval)} | ${s.verdict} |`,
+      );
+    }
+    lines.push("");
+  }
   if (Object.keys(summary.reasons).length > 0) {
     lines.push("## Why the incomplete attempts were incomplete", "");
     for (const [reason, count] of Object.entries(summary.reasons)) {
