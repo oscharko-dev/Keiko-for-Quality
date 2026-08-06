@@ -168,7 +168,7 @@ async function writeRuleFile(
  * likely stuck rather than slow, and `engine.status.*`'s `warnings_subtask_error_tool_budget`
  * count (see `result.ts`) is what will say whether that guess held.
  */
-const MAX_TOOL_ROUNDS_PER_FILE = 60;
+export const MAX_TOOL_ROUNDS_PER_FILE = 60;
 
 export function reviewArguments(options: EngineRunOptions, rulePath: string): string[] {
   return [

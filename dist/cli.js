@@ -4643,6 +4643,10 @@ async function substantiate(findings, readHunk, deps, strictness = resolveSubsta
 
 // src/review.ts
 var PER_FILE_TOKENS = 1e5;
+var CALIBRATED_TOOL_ROUNDS = 30;
+function allottedPerFile() {
+  return PER_FILE_TOKENS * MAX_TOOL_ROUNDS_PER_FILE / CALIBRATED_TOOL_ROUNDS;
+}
 var PER_LINE_TOKENS = 60;
 var ALLOTMENT_MARGIN = 1.3;
 var ALLOTMENT_FLOOR = 15e4;
@@ -4655,7 +4659,7 @@ function clamp(value, floor, ceiling) {
   return Math.min(ceiling, Math.max(floor, value));
 }
 function computeAllottedBudget(tokenBudget, reviewableFileCount, reviewableChangedLines2) {
-  const sizeScaled = ALLOTMENT_MARGIN * (reviewableFileCount * PER_FILE_TOKENS + reviewableChangedLines2 * PER_LINE_TOKENS);
+  const sizeScaled = ALLOTMENT_MARGIN * (reviewableFileCount * allottedPerFile() + reviewableChangedLines2 * PER_LINE_TOKENS);
   const clamped = clamp(sizeScaled, ALLOTMENT_FLOOR, ALLOTMENT_CEILING);
   return Math.round(Math.min(tokenBudget, clamped));
 }
@@ -5053,7 +5057,7 @@ function planGeneralResume(parsed, options2) {
   };
 }
 function targetedRoundBudget(gapSize, spent, options2) {
-  const priced = Math.round(gapSize * PER_FILE_TOKENS * ALLOTMENT_MARGIN);
+  const priced = Math.round(gapSize * allottedPerFile() * ALLOTMENT_MARGIN);
   const floor = Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION);
   const headroom = Math.max(0, options2.config.tokenBudget - spent);
   return clamp(Math.min(priced, headroom), Math.min(floor, headroom), options2.config.tokenBudget);

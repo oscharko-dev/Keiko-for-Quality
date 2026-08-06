@@ -38,6 +38,7 @@ import {
 import { promptIdentityDigest } from "./engine/rule-identity.js";
 import {
   EngineRunError,
+  MAX_TOOL_ROUNDS_PER_FILE,
   runEngine,
   type EngineRunOptions,
   type EngineRunOutput,
@@ -428,6 +429,35 @@ interface LocalRun {
 const PER_FILE_TOKENS = 100_000;
 
 /**
+ * The tool-round ceiling this per-file price was calibrated under — the engine's own embedded
+ * default (`MAX_TOOL_REQUEST_TIMES: 30`, `task_template.json` at v1.8.4).
+ *
+ * Named here rather than left implicit because on 2026-08-06 the two drifted apart and the
+ * measurement caught it. Raising the ceiling to 60 (`MAX_TOOL_ROUNDS_PER_FILE`, engine/run.ts)
+ * without touching this price did not fix Keiko#3008 — it MOVED the failure: run 1 stopped
+ * settling `coverage_gap` and started settling `budget_exceeded` instead, spending 3.2M against
+ * an allotment of 1.59M that was still priced for half the conversation length it now permits.
+ *
+ * A per-file price and a per-file round ceiling are two statements about the same thing, so
+ * `allottedPerFile` below derives one from the other instead of letting a future change to either
+ * silently invalidate the calibration behind this constant.
+ */
+const CALIBRATED_TOOL_ROUNDS = 30;
+
+/**
+ * The per-file price at the round ceiling actually in force.
+ *
+ * Deliberately NOT a second hand-tuned constant: the 100k above was measured against 30 rounds,
+ * and the only honest way to keep it meaningful when the ceiling moves is to scale it by the same
+ * factor. This over-provisions slightly — a file rarely uses every round it is allowed — but the
+ * asymmetry `PER_FILE_TOKENS`'s own comment records still holds: headroom a run does not need
+ * costs nothing, and hitting the stop-loss costs the entire run.
+ */
+function allottedPerFile(): number {
+  return (PER_FILE_TOKENS * MAX_TOOL_ROUNDS_PER_FILE) / CALIBRATED_TOOL_ROUNDS;
+}
+
+/**
  * A weak secondary term, in tokens per changed line.
  *
  * Deliberately small relative to `PER_FILE_TOKENS`: line count is a poor predictor of spend next to
@@ -506,7 +536,7 @@ export function computeAllottedBudget(
 ): number {
   const sizeScaled =
     ALLOTMENT_MARGIN *
-    (reviewableFileCount * PER_FILE_TOKENS + reviewableChangedLines * PER_LINE_TOKENS);
+    (reviewableFileCount * allottedPerFile() + reviewableChangedLines * PER_LINE_TOKENS);
   const clamped = clamp(sizeScaled, ALLOTMENT_FLOOR, ALLOTMENT_CEILING);
   return Math.round(Math.min(tokenBudget, clamped));
 }
@@ -1727,7 +1757,10 @@ function planGeneralResume(
  * left unspent. The second bound is what keeps rounds from turning a stop-loss into a blank cheque.
  */
 function targetedRoundBudget(gapSize: number, spent: number, options: EngineRunOptions): number {
-  const priced = Math.round(gapSize * PER_FILE_TOKENS * ALLOTMENT_MARGIN);
+  // `allottedPerFile()`, not the raw `PER_FILE_TOKENS`: a retried file runs under the SAME
+  // tool-round ceiling as every other, so pricing it at the pre-2026-08-06 calibration would
+  // reintroduce, one function over, exactly the drift that constant now exists to prevent.
+  const priced = Math.round(gapSize * allottedPerFile() * ALLOTMENT_MARGIN);
   const floor = Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION);
   const headroom = Math.max(0, options.config.tokenBudget - spent);
   return clamp(Math.min(priced, headroom), Math.min(floor, headroom), options.config.tokenBudget);
