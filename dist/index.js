@@ -6058,6 +6058,12 @@ function planGeneralResume(parsed, options2) {
     )
   };
 }
+function targetedRoundBudget(gapSize, spent, options2) {
+  const priced = Math.round(gapSize * PER_FILE_TOKENS * ALLOTMENT_MARGIN);
+  const floor = Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION);
+  const headroom = Math.max(0, options2.config.tokenBudget - spent);
+  return clamp(Math.min(priced, headroom), Math.min(floor, headroom), options2.config.tokenBudget);
+}
 async function decideAfterFirstAttempt(parsed, context) {
   const { options: options2, diagnostics, firstAttemptTokens } = context;
   if (parsed.budgetExceeded) {
@@ -6078,11 +6084,7 @@ async function settleFinishedRun(parsed, context) {
     const targeted = targetedGapPaths(standing, reviewablePaths);
     if (targeted === void 0) break;
     const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
-    const remaining = clamp(
-      options2.allottedBudget - spent,
-      Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION),
-      options2.allottedBudget
-    );
+    const remaining = targetedRoundBudget(targeted.size, spent, options2);
     diagnostics.record("engine.resumed_gap_targeted", {
       counts: { round, targeted: targeted.size, covered: covered.length, remaining }
     });
