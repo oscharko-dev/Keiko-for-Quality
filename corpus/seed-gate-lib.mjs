@@ -37,32 +37,40 @@ export function assertSeedCaseShape(cases) {
   }
   const seen = new Set();
   for (const seedCase of cases) {
-    const id = seedCase.id;
-    if (typeof id !== "string" || id === "") throw new Error("seed cases: every case needs an id");
-    if (seen.has(id)) throw new Error(`seed cases: duplicate id ${id}`);
-    seen.add(id);
-    for (const field of ["file", "find", "replace", "rationale"]) {
-      if (typeof seedCase[field] !== "string" || seedCase[field] === "") {
-        throw new Error(`seed case ${id}: ${field} must be a non-empty string`);
-      }
-    }
-    if (seedCase.find === seedCase.replace) {
-      throw new Error(`seed case ${id}: find and replace are identical — no defect is planted`);
-    }
-    if (seedCase.tier !== 1 && seedCase.tier !== 2) {
-      throw new Error(`seed case ${id}: tier must be 1 (blatant) or 2 (subtle)`);
-    }
-    if (typeof seedCase.required !== "boolean") {
-      throw new Error(`seed case ${id}: required must be an explicit boolean`);
-    }
+    assertOneSeedCase(seedCase);
+    if (seen.has(seedCase.id)) throw new Error(`seed cases: duplicate id ${seedCase.id}`);
+    seen.add(seedCase.id);
   }
   return cases;
+}
+
+/** The per-case half of `assertSeedCaseShape`; only the cross-case checks (array shape,
+ *  id uniqueness) live with the loop above. */
+function assertOneSeedCase(seedCase) {
+  const id = seedCase.id;
+  if (typeof id !== "string" || id === "") {
+    throw new TypeError("seed cases: every case needs an id");
+  }
+  for (const field of ["file", "find", "replace", "rationale"]) {
+    if (typeof seedCase[field] !== "string" || seedCase[field] === "") {
+      throw new TypeError(`seed case ${id}: ${field} must be a non-empty string`);
+    }
+  }
+  if (seedCase.find === seedCase.replace) {
+    throw new Error(`seed case ${id}: find and replace are identical — no defect is planted`);
+  }
+  if (seedCase.tier !== 1 && seedCase.tier !== 2) {
+    throw new Error(`seed case ${id}: tier must be 1 (blatant) or 2 (subtle)`);
+  }
+  if (typeof seedCase.required !== "boolean") {
+    throw new TypeError(`seed case ${id}: required must be an explicit boolean`);
+  }
 }
 
 /** 1-based line number of the character at `index` in `content`. */
 function lineOfIndex(content, index) {
   let line = 1;
-  for (let i = 0; i < index; i += 1) if (content.charCodeAt(i) === 10) line += 1;
+  for (let i = 0; i < index; i += 1) if (content.codePointAt(i) === 10) line += 1;
   return line;
 }
 
@@ -78,7 +86,7 @@ export function applySeed(content, seedCase) {
   if (first === -1) {
     return { ok: false, reason: `seed stale — find text not present in ${seedCase.file}` };
   }
-  if (content.indexOf(seedCase.find, first + 1) !== -1) {
+  if (content.includes(seedCase.find, first + 1)) {
     return { ok: false, reason: `seed ambiguous — find text matches twice in ${seedCase.file}` };
   }
   const seeded =
@@ -134,7 +142,9 @@ export function evaluateAttempt(report, seedCase, seedRange, slack = LINE_SLACK_
 export function settleCase(seedCase, attempts) {
   const passed = attempts.some((attempt) => attempt.found);
   const anyComplete = attempts.some((attempt) => attempt.outcome === "complete");
-  const status = passed ? "passed" : anyComplete ? "missed" : "never-complete";
+  let status = "never-complete";
+  if (passed) status = "passed";
+  else if (anyComplete) status = "missed";
   return {
     id: seedCase.id,
     tier: seedCase.tier,

@@ -32,6 +32,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { FIXED_PATH } from "./fixed-path.mjs";
 import { SEED_CASES } from "./seed-gate-cases.mjs";
 import {
   applySeed,
@@ -113,8 +114,15 @@ function assertModelEnv(env) {
   }
 }
 
+/** Every git subprocess runs under `FIXED_PATH` (corpus/fixed-path.mjs, Sonar S4036) — the same
+ *  posture every other corpus harness holds, and load-bearing here too: this process carries the
+ *  model credential in its environment. The consumer repository must be reachable anonymously
+ *  (Keiko is public); a stripped environment deliberately loads no credential helper. */
 function git(repoPath, gitArgs) {
-  return execFileSync("git", ["-C", repoPath, ...gitArgs], { encoding: "utf8" }).trim();
+  return execFileSync("git", ["-C", repoPath, ...gitArgs], {
+    encoding: "utf8",
+    env: { PATH: FIXED_PATH },
+  }).trim();
 }
 
 /** `origin/dev` → fetch `dev` from `origin` so the base is current; anything without a

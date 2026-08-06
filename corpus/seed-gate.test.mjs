@@ -60,6 +60,22 @@ test("assertSeedCaseShape refuses a no-op seed", () => {
   );
 });
 
+test("assertSeedCaseShape refuses every other malformed shape, each with its own message", () => {
+  assert.throws(() => assertSeedCaseShape([]), /non-empty array/);
+  assert.throws(() => assertSeedCaseShape("cases"), /non-empty array/);
+  assert.throws(() => assertSeedCaseShape([{ ...CASE_FIXTURE, id: "" }]), /needs an id/);
+  assert.throws(() => assertSeedCaseShape([CASE_FIXTURE, CASE_FIXTURE]), /duplicate id/);
+  assert.throws(
+    () => assertSeedCaseShape([{ ...CASE_FIXTURE, rationale: "" }]),
+    /rationale must be a non-empty string/,
+  );
+  assert.throws(() => assertSeedCaseShape([{ ...CASE_FIXTURE, tier: 3 }]), /tier must be 1/);
+  assert.throws(
+    () => assertSeedCaseShape([{ ...CASE_FIXTURE, required: "yes" }]),
+    /explicit boolean/,
+  );
+});
+
 test("applySeed replaces exactly once and reports 1-based lines", () => {
   const content = "line one\nline two\nconst guard = value === true;\nline four\n";
   const applied = applySeed(content, CASE_FIXTURE);
@@ -197,4 +213,22 @@ test("renderEvidence names the verdict, every case, and the spend", () => {
   assert.match(evidence, /GREEN/);
   assert.match(evidence, /fixture-case/);
   assert.match(evidence, /Total spend \(tokens\): 50/);
+});
+
+test("renderEvidence names required failures on a red run and flags a file-level-only pass", () => {
+  const missed = settleCase(CASE_FIXTURE, [gradeOf()]);
+  const anchorless = settleCase({ ...CASE_FIXTURE, id: "anchorless-case" }, [
+    gradeOf({ found: true, fileFindingCount: 1 }),
+  ]);
+  const evidence = renderEvidence({
+    dateIso: "2026-08-06",
+    gateVersion: "0.19.1",
+    model: "gpt-oss-120b (openai)",
+    base: "origin/dev @ abc123def456",
+    caseResults: [missed, anchorless],
+    summary: summarizeGate([missed, anchorless]),
+  });
+  assert.match(evidence, /RED/);
+  assert.match(evidence, /required failures: fixture-case/);
+  assert.match(evidence, /file-level only/);
 });
