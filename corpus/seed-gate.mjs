@@ -117,9 +117,14 @@ function assertModelEnv(env) {
 /** Every git subprocess runs under `FIXED_PATH` (corpus/fixed-path.mjs, Sonar S4036) — the same
  *  posture every other corpus harness holds, and load-bearing here too: this process carries the
  *  model credential in its environment. The consumer repository must be reachable anonymously
- *  (Keiko is public); a stripped environment deliberately loads no credential helper. */
+ *  (Keiko is public); a stripped environment deliberately loads no credential helper.
+ *
+ *  `core.hooksPath=/dev/null` neutralizes repository-configured hooks for the same reason: the
+ *  consumer checkout is this tool's untrusted input, and a `core.hooksPath` in ITS config would
+ *  otherwise run that repository's code inside this credential-carrying process on every
+ *  `commit`, `fetch`, or ref update the gate performs. */
 function git(repoPath, gitArgs) {
-  return execFileSync("git", ["-C", repoPath, ...gitArgs], {
+  return execFileSync("git", ["-C", repoPath, "-c", "core.hooksPath=/dev/null", ...gitArgs], {
     encoding: "utf8",
     env: { PATH: FIXED_PATH },
   }).trim();
@@ -243,6 +248,19 @@ function runCase(repoPath, baseSha, seedCase, attempts, keep) {
   return settleCase(seedCase, graded);
 }
 
+/** The gate's own checkout, identified for the evidence: commit plus dirty state, or an honest
+ *  `unknown` when ROOT is not a git checkout (fail-open — the run still measures; it just cannot
+ *  claim to be release evidence, and the rendered line says so on its face). */
+function reviewerTreeIdentity() {
+  try {
+    const head = git(ROOT, ["rev-parse", "HEAD"]);
+    const dirty = git(ROOT, ["status", "--porcelain"]) !== "";
+    return `${head.slice(0, 12)}${dirty ? " (DIRTY — not release evidence)" : " (clean)"}`;
+  } catch {
+    return "unknown (not a git checkout — not release evidence)";
+  }
+}
+
 function main() {
   const args = parseGateArgs(process.argv.slice(2));
   assertModelEnv(process.env);
@@ -253,6 +271,9 @@ function main() {
       : allCases.filter((seedCase) => args.cases.includes(seedCase.id));
   if (selected.length === 0)
     fail(`--case matched nothing; known: ${allCases.map((c) => c.id).join(", ")}`);
+  const omittedRequired = allCases
+    .filter((seedCase) => seedCase.required && !selected.includes(seedCase))
+    .map((seedCase) => seedCase.id);
 
   const deviated = process.env.KFQ_MODEL_ID !== PINNED_MODEL;
   console.error(
@@ -265,12 +286,13 @@ function main() {
   const caseResults = selected.map((seedCase) =>
     runCase(args.repo, baseSha, seedCase, args.attempts, args.keep),
   );
-  const summary = summarizeGate(caseResults);
+  const summary = summarizeGate(caseResults, omittedRequired);
 
   const gateVersion = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
   const evidence = renderEvidence({
     dateIso: new Date().toISOString().slice(0, 10),
     gateVersion,
+    reviewerTree: reviewerTreeIdentity(),
     model: `${process.env.KFQ_MODEL_ID} (${process.env.KFQ_MODEL_PROTOCOL})`,
     base: `${args.base} @ ${baseSha.slice(0, 12)}`,
     caseResults,

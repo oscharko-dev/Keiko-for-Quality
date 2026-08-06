@@ -157,23 +157,47 @@ export function settleCase(seedCase, attempts) {
 }
 
 /**
- * The gate verdict: green means every REQUIRED case passed. Non-required cases are measured and
- * reported — they exist so a rotating case can stay visible without holding releases hostage —
- * but they never decide the exit code.
+ * The gate verdict: green means every REQUIRED case that RAN passed. Non-required cases are
+ * measured and reported — they exist so a rotating case can stay visible without holding
+ * releases hostage — but they never decide the exit code.
+ *
+ * `omittedRequired` names the required cases a `--case` selection left out. A partial selection
+ * is a legitimate diagnostic run and keeps its exit semantics, but it must never read as release
+ * evidence: `releaseVerdict` is `PARTIAL` whenever the list is non-empty, and only a full-set
+ * `GREEN` satisfies the release rule (AGENTS.md).
  */
-export function summarizeGate(caseResults) {
+export function summarizeGate(caseResults, omittedRequired = []) {
   const requiredFailed = caseResults
     .filter((result) => result.required && result.status !== "passed")
     .map((result) => result.id);
   const advisoryFailed = caseResults
     .filter((result) => !result.required && result.status !== "passed")
     .map((result) => result.id);
+  const green = requiredFailed.length === 0;
+  let releaseVerdict = green ? "GREEN" : "RED";
+  if (omittedRequired.length > 0) releaseVerdict = "PARTIAL";
   return {
-    green: requiredFailed.length === 0,
+    green,
+    releaseVerdict,
     requiredFailed,
+    omittedRequired,
     advisoryFailed,
     spendTotal: caseResults.reduce((sum, result) => sum + result.spendTotal, 0),
   };
+}
+
+/** The verdict line names what the run can honestly claim: a PARTIAL run says so and names what
+ *  it skipped, so no `--case` diagnostic can be mistaken for release evidence. */
+function renderVerdictLine(summary) {
+  if (summary.releaseVerdict === "PARTIAL") {
+    return (
+      `- Verdict: PARTIAL (diagnostics only — omitted required: ` +
+      `${summary.omittedRequired.join(", ")}; NOT release evidence)`
+    );
+  }
+  return `- Verdict: ${summary.releaseVerdict} (required failures: ${
+    summary.requiredFailed.length === 0 ? "none" : summary.requiredFailed.join(", ")
+  })`;
 }
 
 /**
@@ -181,17 +205,30 @@ export function summarizeGate(caseResults) {
  * corpus/evidence/qualification-*.md, deliberately NOT that format: qualification evidence has
  * its own shape contract (corpus/evidence-shape.mjs), and this gate must never masquerade as a
  * corpus qualification.
+ *
+ * `reviewerTree` identifies the gate's OWN checkout — commit and dirty state — because
+ * `gateVersion` alone cannot: a dirty tree and a release tree render the same version string,
+ * and the release rule demands evidence from the candidate's own tree. A dirty or unknown tree
+ * is recorded as such rather than rejected — a development iteration is a legitimate run, it
+ * just self-disqualifies as release evidence on its face.
  */
-export function renderEvidence({ dateIso, gateVersion, model, base, caseResults, summary }) {
+export function renderEvidence({
+  dateIso,
+  gateVersion,
+  reviewerTree,
+  model,
+  base,
+  caseResults,
+  summary,
+}) {
   const lines = [
     `# Consumer-seed gate — ${dateIso}`,
     "",
     `- Reviewer under test: keiko-for-quality ${gateVersion}`,
+    `- Reviewer tree: ${reviewerTree}`,
     `- Model: ${model}`,
     `- Base: ${base}`,
-    `- Verdict: ${summary.green ? "GREEN" : "RED"} (required failures: ${
-      summary.requiredFailed.length === 0 ? "none" : summary.requiredFailed.join(", ")
-    })`,
+    renderVerdictLine(summary),
     `- Total spend (tokens): ${String(summary.spendTotal)}`,
     "",
   ];

@@ -193,10 +193,41 @@ test("summarizeGate goes red only on required failures", () => {
   };
   const green = summarizeGate([requiredPass, advisoryMiss]);
   assert.equal(green.green, true);
+  assert.equal(green.releaseVerdict, "GREEN");
   assert.deepEqual(green.advisoryFailed, ["b"]);
   const red = summarizeGate([{ ...requiredPass, status: "missed" }]);
   assert.equal(red.green, false);
+  assert.equal(red.releaseVerdict, "RED");
   assert.deepEqual(red.requiredFailed, ["a"]);
+});
+
+test("a selection that omits a required case is PARTIAL, never release-green", () => {
+  const requiredPass = {
+    id: "a",
+    tier: 1,
+    required: true,
+    status: "passed",
+    lineAnchored: true,
+    attempts: [],
+    spendTotal: 1,
+  };
+  const partial = summarizeGate([requiredPass], ["b-omitted"]);
+  assert.equal(partial.green, true);
+  assert.equal(partial.releaseVerdict, "PARTIAL");
+  assert.deepEqual(partial.omittedRequired, ["b-omitted"]);
+  const evidence = renderEvidence({
+    dateIso: "2026-08-06",
+    gateVersion: "0.19.1",
+    reviewerTree: "abc123def456 (clean)",
+    model: "gpt-oss-120b (openai)",
+    base: "origin/dev @ abc123def456",
+    caseResults: [requiredPass],
+    summary: partial,
+  });
+  assert.match(evidence, /Verdict: PARTIAL/);
+  assert.match(evidence, /NOT release evidence/);
+  assert.match(evidence, /b-omitted/);
+  assert.doesNotMatch(evidence, /Verdict: GREEN/);
 });
 
 test("renderEvidence names the verdict, every case, and the spend", () => {
@@ -205,12 +236,14 @@ test("renderEvidence names the verdict, every case, and the spend", () => {
   const evidence = renderEvidence({
     dateIso: "2026-08-06",
     gateVersion: "0.19.1",
+    reviewerTree: "abc123def456 (clean)",
     model: "gpt-oss-120b (openai)",
     base: "origin/dev @ abc123def456",
     caseResults: [result],
     summary,
   });
   assert.match(evidence, /GREEN/);
+  assert.match(evidence, /Reviewer tree: abc123def456 \(clean\)/);
   assert.match(evidence, /fixture-case/);
   assert.match(evidence, /Total spend \(tokens\): 50/);
 });
@@ -223,6 +256,7 @@ test("renderEvidence names required failures on a red run and flags a file-level
   const evidence = renderEvidence({
     dateIso: "2026-08-06",
     gateVersion: "0.19.1",
+    reviewerTree: "abc123def456 (DIRTY — not release evidence)",
     model: "gpt-oss-120b (openai)",
     base: "origin/dev @ abc123def456",
     caseResults: [missed, anchorless],
@@ -230,5 +264,6 @@ test("renderEvidence names required failures on a red run and flags a file-level
   });
   assert.match(evidence, /RED/);
   assert.match(evidence, /required failures: fixture-case/);
+  assert.match(evidence, /DIRTY/);
   assert.match(evidence, /file-level only/);
 });
