@@ -285,7 +285,8 @@ export interface SummaryCounts {
   readonly suppressedSimilar: number;
   /** Suppressed against a resolved thread with a substantive disposition reply (Keiko-for-Quality#64). */
   readonly suppressedDispositioned: number;
-  /** Suppressed as a restatement of a still-open, push-outdated conversation — see `similarity.ts`'s
+  /** Suppressed as a restatement of a still-open conversation the anchored stages cannot see —
+   *  push-outdated, or (2026-08-06) file-level with no line anchor at all; see `similarity.ts`'s
    *  `findsOutdatedRecurrence`. Always a plain number here, for the same reason
    *  `suppressedIntraRun` above is. */
   readonly suppressedRecurrence: number;

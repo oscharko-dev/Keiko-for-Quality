@@ -83,11 +83,12 @@ export interface PublishOutcome {
    *  never against a bare resolve, which must keep a genuinely recurred defect publishable. */
   readonly suppressedDispositioned: number;
   /**
-   * Suppressed as a restatement of a still-open conversation a push marked OUTDATED — the stage the
-   * three fields above structurally cannot reach, because each of them matches on a line anchor and
-   * an outdated thread no longer has a trustworthy one. See `similarity.ts`'s
-   * `findsOutdatedRecurrence`. Optional for the same `exactOptionalPropertyTypes` reason as
-   * `suppressedIntraRun`.
+   * Suppressed as a restatement of a still-open conversation the anchored stages cannot reach:
+   * one a push marked OUTDATED (its line anchor is stale), or — since 2026-08-06 — one that never
+   * had a line anchor at all (a FILE-level comment; GitHub reports no `line`/`start_line` and no
+   * `original_*` fallback for it, and it can never become outdated because there is no hunk to go
+   * stale). See `similarity.ts`'s `findsOutdatedRecurrence`. Optional for the same
+   * `exactOptionalPropertyTypes` reason as `suppressedIntraRun`.
    */
   readonly suppressedRecurrence?: number;
   readonly rejectedSanitization: number;
@@ -144,7 +145,11 @@ function ownMarkers(comments: readonly ReviewComment[], identity: string): Reado
  *
  * GitHub reports a multi-line comment's end as `line` and its start as `start_line`; a single-line
  * comment carries only `line`. Absent either, there is no usable anchor and the similarity stage's
- * own range check will correctly never match it.
+ * own range check will correctly never match it — since 2026-08-06 such a thread is instead
+ * admitted by the anchor-less clauses in `findsOutdatedRecurrence` (open threads) and
+ * `findsDispositionedConversation` (substantively answered ones), on the same path at the raised
+ * coordinate-free bar, because a FILE-level comment can never become outdated and would otherwise
+ * be invisible to every phrasing-independent stage.
  *
  * `ExistingConversation.resolved` deliberately folds `github/client.ts`'s two independent facts,
  * `resolved` and `outdated`, back into one — and only here. The similarity stage's own eligibility
@@ -284,11 +289,14 @@ interface Counters {
  * bare resolve — the case where someone actually decided the question, so a matching recurrence
  * should stop re-litigating it rather than republish.
  *
- * The recurrence stage runs last, and covers the threads none of the three above can see: the
- * still-open ones a push marked outdated, whose stale line anchors put them out of reach of every
- * location-matching stage here. It is ordered last because it is the only stage that decides
- * without a location at all, so anything an anchored stage can settle should be settled there
- * first.
+ * The recurrence stage runs last, and covers the still-open threads no location-matching stage
+ * can see: the ones a push marked outdated, whose stale line anchors are untrustworthy, and —
+ * since 2026-08-06 — the ones that never had an anchor at all, findings published as FILE-level
+ * comments, which GitHub reports with no `line`/`start_line` and no `original_*` fallback and can
+ * never mark outdated. It is ordered last because it decides without a location at all, so
+ * anything an anchored stage can settle should be settled there first. (The dispositioned stage
+ * carries its own anchor-less clause for its resolved-and-answered threads, at the same raised
+ * coordinate-free bar — see `findsDispositionedConversation`.)
  */
 function classifySuppression(
   finding: EngineFinding,

@@ -1152,13 +1152,14 @@ var REASON_CODES = [
   // above so an operator can tell "the model repeats itself within a run" from "a later run
   // repeated an earlier one": they call for different remedies.
   "publish.finding_suppressed_intra_run",
-  // Suppressed as a restatement of a still-open conversation a push marked OUTDATED — the one
-  // shape no other stage here can see, because an outdated thread's line anchor is stale and every
-  // sibling stage matches on location. Its own code rather than reusing `_similar` because it is
-  // the code that answers a specific operator question — "how much of this pull request's comment
-  // volume is one defect re-filed across pushes" — and because it is the only cross-run stage that
-  // decided without a location, which is exactly what someone auditing a false suppression needs to
-  // know first.
+  // Suppressed as a restatement of a still-open conversation the location-matching stages cannot
+  // see: one a push marked OUTDATED (its line anchor is stale), or — since 2026-08-06 — one that
+  // never had an anchor at all (a FILE-level comment, which GitHub can never mark outdated because
+  // there is no hunk to go stale; the code name predates that second shape and stays, because a
+  // rename would orphan every recorded run). Its own code rather than reusing `_similar` because it
+  // is the code that answers a specific operator question — "how much of this pull request's
+  // comment volume is one defect re-filed across pushes" — and because the stage decided without a
+  // location, which is exactly what someone auditing a false suppression needs to know first.
   "publish.finding_suppressed_outdated_recurrence",
   "publish.finding_rejected_sanitization",
   "publish.finding_rejected_placement",
@@ -4808,6 +4809,12 @@ function linesOverlap(candidate, existing) {
 function isSameFindingAtSameLocation(candidate, thread, identity) {
   return thread.authorLogin === identity && thread.path === candidate.path && linesOverlap(candidate, thread) && bodiesAreSimilar(candidate.body, thread.body);
 }
+function carriesNoAnchor(thread) {
+  return thread.startLine === void 0 && thread.endLine === void 0;
+}
+function isSameFindingOnSamePath(candidate, thread, identity) {
+  return thread.authorLogin === identity && thread.path === candidate.path && recurrenceBodiesMatch(candidate.body, thread.body);
+}
 function findsSimilarOpenConversation(candidate, existing, identity) {
   return existing.some(
     (thread) => !thread.resolved && isSameFindingAtSameLocation(candidate, thread, identity)
@@ -4815,12 +4822,12 @@ function findsSimilarOpenConversation(candidate, existing, identity) {
 }
 function findsDispositionedConversation(candidate, existing, identity) {
   return existing.some(
-    (thread) => thread.resolved && thread.dispositioned && isSameFindingAtSameLocation(candidate, thread, identity)
+    (thread) => thread.resolved && thread.dispositioned && (isSameFindingAtSameLocation(candidate, thread, identity) || carriesNoAnchor(thread) && isSameFindingOnSamePath(candidate, thread, identity))
   );
 }
 function findsOutdatedRecurrence(candidate, existing, identity) {
   return existing.some(
-    (thread) => thread.outdatedOnly === true && thread.authorLogin === identity && thread.path === candidate.path && recurrenceBodiesMatch(candidate.body, thread.body)
+    (thread) => (thread.outdatedOnly === true || !thread.resolved && carriesNoAnchor(thread)) && isSameFindingOnSamePath(candidate, thread, identity)
   );
 }
 function recurrenceBodiesMatch(candidateBody, existingBody) {
