@@ -1099,6 +1099,9 @@ describe("performReview: review-cache memoization end to end", () => {
         request.pullNumber,
         request.identity,
         expect.any(Function),
+        // The reviewed head (2026-08-06): the supersession clause that resolves file-level
+        // notices compares each notice's originalCommit against exactly this value.
+        request.head,
       );
       // The predicate handed across is the real detector, not a stand-in — a notice's own fixed
       // template, carrying a well-formed marker (#42 requires both), must be recognised, and
@@ -1419,6 +1422,48 @@ describe("performReview: review-cache memoization end to end", () => {
       // second call that never happened.
       const spend = diagnostics.drain().find((record) => record.code === "run.spend");
       expect(spend?.counts).toStrictEqual({ engine: 40_000, classify: 0, total: 40_000 });
+    });
+
+    /**
+     * The Keiko#3002 cost fix (2026-08-06): a FINISHED first attempt is settled on, never re-run.
+     * Its reservations are deterministic facts about the change's content — measured in
+     * production, every resume re-dispatched ~all files for ~0.76M tokens and reproduced the
+     * identical failure set — so the only thing a second dispatch buys is the same answer twice.
+     */
+    it("skips the resume when the first attempt finished with per-file errors, and settles the gap", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const finished = JSON.stringify({
+        status: "completed_with_errors",
+        summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+        comments: [
+          {
+            path: "src/a.ts",
+            content: "Close the handle.",
+            start_line: 1,
+            end_line: 1,
+            severity: "high",
+            category: "bug",
+          },
+        ],
+        warnings: [
+          { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+        ],
+      });
+      runEngineMock.mockResolvedValueOnce({ stdout: finished, ruleDigest: engineDigest });
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
+      expect(report.outcome).toBe("incomplete");
+      // A coverage gap, not an engine failure: the verdicts survive and the store keeps them.
+      expect(report.reason).toBe("settlement.incomplete.coverage_gap");
+
+      const codes = diagnostics.drain().map((record) => record.code);
+      expect(codes).not.toContain("engine.resumed_once");
+      expect(codes).toContain("engine.resume_skipped_run_completed");
+      expect(codes).toContain("engine.status.completed_with_errors");
     });
   });
 

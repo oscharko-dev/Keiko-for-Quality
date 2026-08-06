@@ -881,9 +881,11 @@ export async function publishFindings(
 /**
  * Publishes the one conversation that says "this review did not cover your change".
  *
- * It carries a reason code and nothing else. An incomplete review is exactly the situation in which
- * a detailed explanation would be most tempting and most dangerous: the failure may have been
- * caused by the candidate, and the diagnostic would be the leak.
+ * It carries a reason code and the settlement's own bounded counts, nothing else. An incomplete
+ * review is exactly the situation in which a detailed explanation would be most tempting and most
+ * dangerous: the failure may have been caused by the candidate, and the diagnostic would be the
+ * leak. The counts stay inside that rule — they are numbers `settle.ts` computed from its own
+ * arithmetic, never engine or candidate prose.
  */
 export async function publishIncompleteNotice(
   context: PublishContext,
@@ -895,6 +897,10 @@ export async function publishIncompleteNotice(
   // result here instead of paying for the same list-and-walk twice. Absent, this fetches its own —
   // every caller that passes nothing keeps behaving exactly as it did before this parameter existed.
   prefetch?: ExistingConversationsPrefetch,
+  // The settlement's own measured counts, rendered into the notice body (`gapLine`) but kept out
+  // of the marker fingerprint: the notice's identity is reason+head, and a shifting number must
+  // not mint a duplicate conversation.
+  counts?: Readonly<Record<string, number>>,
 ): Promise<boolean> {
   const marker = fingerprint({
     repository: `${context.ref.owner}/${context.ref.repo}`,
@@ -915,13 +921,19 @@ export async function publishIncompleteNotice(
       context.ref,
       context.pullNumber,
       {
-        body: composeIncompleteNotice(reasonCode, markerComment(marker)),
+        body: composeIncompleteNotice(reasonCode, markerComment(marker), counts),
         commitId: context.headSha,
         path: anchorPath,
       },
     );
     const verified = await verifyPublication(context, created, marker);
-    diagnostics.record("publish.incomplete_notice_published", { headSha: context.headSha });
+    // Recorded as what actually happened (2026-08-06): this used to claim `published` even when
+    // the read-back failed, so a run could report itself blocked on a notice that does not exist.
+    if (verified) {
+      diagnostics.record("publish.incomplete_notice_published", { headSha: context.headSha });
+    } else {
+      diagnostics.record("publish.readback_failed", { headSha: context.headSha });
+    }
     return verified;
   } catch {
     diagnostics.record("publish.api_failed", { headSha: context.headSha });

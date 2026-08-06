@@ -29,7 +29,12 @@ import {
   needsClassification,
   type ClassifyEndpoint,
 } from "./engine/classify.js";
-import { parseEngineResult, type EngineFinding, type EngineResult } from "./engine/result.js";
+import {
+  parseEngineResult,
+  type EngineFinding,
+  type EngineResult,
+  type RunStatus,
+} from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
 import { EngineRunError, runEngine, type EngineRunOptions } from "./engine/run.js";
 import { settle, verdictsSurviveIncompleteness, type Settlement } from "./engine/settle.js";
@@ -736,7 +741,7 @@ function truncatedCacheFields(
 async function publishIncompleteSettlement(
   run: ReviewRun,
   context: PublishContext,
-  reason: ReasonCode,
+  cause: IncompleteCause,
   anchor: string | undefined,
   batch: FindingBatch,
 ): Promise<AuditedPublication | undefined> {
@@ -747,7 +752,14 @@ async function publishIncompleteSettlement(
   const published =
     batch.findings.length === 0 ? undefined : await publishAudited(run, context, batch, prefetch);
   if (anchor !== undefined) {
-    await publishIncompleteNotice(context, reason, anchor, run.diagnostics, prefetch);
+    await publishIncompleteNotice(
+      context,
+      cause.reason,
+      anchor,
+      run.diagnostics,
+      prefetch,
+      cause.counts,
+    );
   }
   return published;
 }
@@ -798,20 +810,38 @@ async function settleIncomplete(
     ...(cause.counts !== undefined ? { counts: cause.counts } : {}),
   });
 
+  // Only the settlement's own engine findings may reach the store (2026-08-06). `batch.findings`
+  // also carries replayed cache hits (already stored; `buildNewEntries` skips their paths anyway)
+  // and gate findings — and a gate finding cached under one file's key is cross-file state frozen
+  // into a per-file verdict: the next push that fixes the OTHER file of the pair replays a drift
+  // report the freshly-run gate no longer makes. The complete path already refuses this
+  // (`publishSettledFindings` stores `settlement.findings` only); this was the one path that did
+  // not. `fresh` IS the engine list, by construction at every call site.
+  const engineFindings = [...batch.fresh];
+
   if (!(await headIsCurrent(run.request))) {
     run.diagnostics.record("publish.abandoned_stale_head", { headSha: run.request.head });
-    return abandonedReport(inventory, memo);
+    // The store write still happens (2026-08-06): an entry is keyed by blob content, not head
+    // sha, so a racing push does not invalidate what this run's engine already judged — the same
+    // argument `abandonStalePublish` makes on the complete path. Heads move most often exactly
+    // during the rapid-push sequences where a truncated run's verdicts are worth the most;
+    // dropping them here reinstated the #75 non-convergence for every such race. `covered`
+    // (present only for verdict-surviving reasons) is what gates the write, exactly as below.
+    return {
+      ...abandonedReport(inventory, memo),
+      ...truncatedCacheFields(run.request, inventory, memo, engineFindings, covered),
+    };
   }
 
   const context = publishContextFor(run.request, inventory);
   const anchor = noticeAnchor(inventory);
-  const published = await publishIncompleteSettlement(run, context, cause.reason, anchor, batch);
+  const published = await publishIncompleteSettlement(run, context, cause, anchor, batch);
 
   // What the store should remember for a finding this settlement carried — see `findingsForStorage`.
   const storedFindings =
     published === undefined
-      ? batch.findings
-      : findingsForStorage(batch.findings, published.auditedByOriginal);
+      ? engineFindings
+      : findingsForStorage(engineFindings, published.auditedByOriginal);
   return {
     outcome: "incomplete",
     reason: cause.reason,
@@ -1411,6 +1441,71 @@ interface ResumeOutcome {
   readonly alreadyReviewedPaths: readonly string[];
 }
 
+/** One diagnostic code per engine status — diagnostics carry no strings, so the code IS the value. */
+const ENGINE_STATUS_DIAGNOSTIC: Readonly<Record<RunStatus, ReasonCode>> = {
+  success: "engine.status.success",
+  skipped: "engine.status.skipped",
+  failed: "engine.status.failed",
+  completed_with_warnings: "engine.status.completed_with_warnings",
+  completed_with_errors: "engine.status.completed_with_errors",
+  budget_exceeded: "engine.status.budget_exceeded",
+  unknown: "engine.status.unknown",
+};
+
+/**
+ * Records what the engine actually said about its run — once per engine execution, resumes
+ * included.
+ *
+ * This line is the one the Keiko#3002 incident was missing: eight runs settled
+ * `engine_status_not_success` and the log never named the status, the warning types, or how many
+ * files the engine itself claimed. Warning types become `warnings_<type>` count entries; a type
+ * that fails the sink's key grammar is dropped by `sanitizeCounts` rather than quoted, which keeps
+ * the no-content contract intact.
+ */
+function recordEngineStatus(
+  diagnostics: Diagnostics,
+  result: EngineResult,
+  headSha: CommitSha,
+): void {
+  const counts: Record<string, number> = {
+    files_reviewed: result.filesReviewed,
+    findings: result.findings.length,
+    warnings: result.warnings.length,
+  };
+  for (const warning of result.warnings) {
+    const key = `warnings_${warning.type}`;
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  diagnostics.record(ENGINE_STATUS_DIAGNOSTIC[result.status], { headSha, counts });
+}
+
+/**
+ * Whether a first attempt's status makes a second dispatch worth paying for.
+ *
+ * `failed` and `unknown` mean the run itself is not to be believed — a resume is the designed
+ * recovery. The completed statuses mean the run FINISHED and its reservations are deterministic
+ * facts about this change (a per-file loop that hit its tool ceiling, a prompt over the per-file
+ * threshold), not sampling noise: measured on Keiko#3002, every production resume re-dispatched
+ * ~all files for ~0.76M tokens and reproduced the identical failure set. `skipped` has nothing to
+ * resume by definition. Budget stops are handled a branch earlier and never reach this question.
+ */
+function resumeWorthwhile(status: RunStatus): boolean {
+  return status === "failed" || status === "unknown";
+}
+
+/** The denied-resume outcome for a finished first attempt — recorded, then settled on as-is. */
+function finishedRunOutcome(
+  diagnostics: Diagnostics,
+  parsed: EngineResult,
+  options: EngineRunOptions,
+): ResumeOutcome {
+  diagnostics.record("engine.resume_skipped_run_completed", {
+    headSha: options.pair.head,
+    counts: { files_reviewed: parsed.filesReviewed, warnings: parsed.warnings.length },
+  });
+  return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
+}
+
 /**
  * The resumed dispatch itself, plus its own failure fallback — split out of
  * `runEngineWithOneResume` purely for that function's own line budget; the two try blocks share no
@@ -1442,6 +1537,7 @@ async function attemptResume(
       diagnostics,
     );
     const parsedSecond = parseEngineResult(second.stdout);
+    recordEngineStatus(diagnostics, parsedSecond, options.pair.head);
     const merged =
       firstResult === undefined
         ? parsedSecond
@@ -1493,6 +1589,7 @@ async function runEngineWithOneResume(
   try {
     const first = await runEngine(options, diagnostics);
     const parsed = parseEngineResult(first.stdout);
+    recordEngineStatus(diagnostics, parsed, options.pair.head);
     if (parsed.status === "success") {
       return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
     }
@@ -1509,6 +1606,11 @@ async function runEngineWithOneResume(
       });
       return { result: parsed, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
     }
+    // A finished run is not resumed either (2026-08-06) — see `resumeWorthwhile` for the measured
+    // cost of doing so. Settlement decides what the finished result means; this function's only
+    // question is whether a second dispatch could change the answer, and for a deterministic
+    // per-file failure it cannot.
+    if (!resumeWorthwhile(parsed.status)) return finishedRunOutcome(diagnostics, parsed, options);
     // The same bar `memoizablePaths` (engine/settle.ts) uses: a finding proves the engine opened
     // the file, unless the manifest says that same file's review itself failed, in which case the
     // finding might be a partial verdict from before the failure and the path is not safe to skip.
@@ -2311,6 +2413,7 @@ export async function performReview(
           request.pullNumber,
           request.identity,
           isIncompleteNoticeBody,
+          request.head,
         );
         // Gated on `attempted`, not `resolved`: a run where every attempt failed (a token missing
         // the mutation permission, say) must still leave a trace distinguishable from a run with
@@ -2409,7 +2512,10 @@ async function performReviewInner(
     return settleIncomplete(
       run,
       inventory,
-      { reason: settlement.reason },
+      // The settlement's own counts, not just its code (2026-08-06): `settle()` measures
+      // reviewed/expected/gap precisely so an operator can tell one failed file from a dead run,
+      // and this call site was where those numbers silently fell out of the log line.
+      { reason: settlement.reason, counts: settlement.counts },
       memo,
       {
         findings: [...mergeHitFindings(settlement.findings, memo.hits), ...gate],
@@ -2555,8 +2661,14 @@ async function localIncompleteReport(
   batch: FindingBatch,
   reviewed: number,
   memo?: MemoContext,
+  counts?: Readonly<Record<string, number>>,
 ): Promise<LocalReviewReport> {
-  run.diagnostics.record(reason, { headSha: run.request.head });
+  // The settlement's measured counts, same as the action path (2026-08-06): the CLI diagnostic
+  // stream is the only log a local run has, and a bare reason there answered nothing.
+  run.diagnostics.record(reason, {
+    headSha: run.request.head,
+    ...(counts !== undefined ? { counts } : {}),
+  });
   const reported = await localFindings(run, inventory, batch);
   return {
     outcome: "incomplete",
@@ -2737,6 +2849,7 @@ async function localSettleReport(
       },
       reviewed,
       memo,
+      settlement.counts,
     );
   }
 

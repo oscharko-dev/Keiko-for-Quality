@@ -61,12 +61,29 @@ export interface ModelUsage {
   /** Provider-reported `usage.prompt_tokens_details.cached_tokens`, summed. */
   readonly cached: number;
   /**
-   * Count of the self-healing fallback firing: a 400 to a request that carried the injected
-   * `prompt_cache_key`, whether or not the retry that follows succeeds — see the module doc for
-   * the retry/latch mechanics this counts. 0 when `promptCacheKey` is not configured, or when the
-   * upstream simply accepts the key.
+   * Count of PROVEN cache-key rejections: a 400 to a request that carried the injected
+   * `prompt_cache_key`, where the keyless retry then succeeded — the only observation that
+   * actually implicates the key. Until 2026-08-06 this counted the 400 whether or not the retry
+   * helped, which made the Keiko#3002 log read "cache_key_rejected: 4" for eight runs whose 400s
+   * had nothing to do with the key at all — the number pointed the investigation at prompt
+   * caching while the real story sat uncounted. 0 when `promptCacheKey` is not configured, or
+   * when the upstream simply accepts the key.
    */
   readonly cacheKeyRejected: number;
+  /**
+   * Chat-completions 400s the fallback could NOT explain away: the request was refused with the
+   * key absent, or refused again after the keyless retry. These are the provider rejecting the
+   * request itself — malformed body, over-long prompt — and each one surfaces to the engine as a
+   * failed model call.
+   */
+  readonly badRequestPersisted: number;
+  /**
+   * Numbers distilled from the most recent persisted 400's error body — the provider's own
+   * "maximum context length is N" / "requested N" figures when present, 0 otherwise. Numbers
+   * only, extracted by pattern: the body itself may quote the request and never enters any log.
+   */
+  readonly badRequestContextLimit: number;
+  readonly badRequestRequestedTokens: number;
 }
 
 export interface ModelProxy {
@@ -295,6 +312,30 @@ interface MutableUsage {
   completion: number;
   cached: number;
   cacheKeyRejected: number;
+  badRequestPersisted: number;
+  badRequestContextLimit: number;
+  badRequestRequestedTokens: number;
+}
+
+/**
+ * Distills a persisted 400's error body into the two numbers worth keeping.
+ *
+ * The body may quote the refused request, so it must never be stored or logged; the context-limit
+ * and requested-token figures providers embed in their message are the redaction-safe part, and
+ * they are precisely what an operator needs to tell "prompt outgrew the window" from every other
+ * 400. Reads a clone — the original body still belongs to the engine. Telemetry, never a gate: an
+ * unreadable body contributes nothing.
+ */
+async function recordBadRequestNumbers(response: Response, usage: MutableUsage): Promise<void> {
+  try {
+    const text = (await response.text()).slice(0, 8192);
+    const limit = /maximum context length is (\d{1,10})/i.exec(text);
+    const requested = /requested (\d{1,10})/i.exec(text);
+    if (limit !== null) usage.badRequestContextLimit = Number(limit[1]);
+    if (requested !== null) usage.badRequestRequestedTokens = Number(requested[1]);
+  } catch {
+    // The forward path owes the engine its response either way.
+  }
 }
 
 /**
@@ -407,20 +448,56 @@ async function fetchWithCacheKeyFallback(
     headers: request.headers,
     ...(pinned !== undefined ? { body: new Uint8Array(pinned.body) } : {}),
   });
-  if (pinned?.cacheKeyInjected !== true || upstream.status !== 400) return upstream;
+  if (pinned?.cacheKeyInjected === true && upstream.status === 400) {
+    return retryWithoutCacheKey(doFetch, url, request, options, usage, latch);
+  }
+  if (upstream.status === 400 && isChatCompletionsPath(request.path)) {
+    // A 400 this fallback never touched — no key was on the request, so the request itself was
+    // refused. Counted and distilled like a persisting retry, because to the engine they are the
+    // same event: a model call that failed.
+    return persistedBadRequest(upstream, usage);
+  }
+  return upstream;
+}
 
-  usage.cacheKeyRejected += 1;
+/** Counts a 400 the fallback could not explain away, distills its numbers, and serves it. */
+async function persistedBadRequest(response: Response, usage: MutableUsage): Promise<Response> {
+  usage.badRequestPersisted += 1;
+  await recordBadRequestNumbers(response.clone(), usage);
+  return response;
+}
+
+/**
+ * The bounded keyless retry after a 400 to a key-carrying request — the second half of
+ * `fetchWithCacheKeyFallback`, split out for that function's complexity budget.
+ *
+ * Only a retry that actually stops the 400 is evidence the key was the cause — so that, and only
+ * that, is when the rejection is counted (2026-08-06; this used to count on the first 400 alone,
+ * which is how Keiko#3002's logs blamed the cache key for 400s that persisted without it). A 400
+ * that persists says nothing about the key: the latch stays open, the next request tries
+ * injection again, and the failure is counted as what it is — the provider refusing the request
+ * itself.
+ */
+async function retryWithoutCacheKey(
+  doFetch: typeof fetch,
+  url: string,
+  request: ChatCompletionsRequest,
+  options: ModelProxyOptions,
+  usage: MutableUsage,
+  latch: CacheKeyLatch,
+): Promise<Response> {
   const retryPinned = pinSampling(request.path, request.body, options, false);
   const retried = await doFetch(url, {
     method: request.method,
     headers: request.headers,
     body: new Uint8Array(retryPinned.body),
   });
-  // Only a retry that actually stops the 400 is evidence the key was the cause; a 400 that
-  // persists without the key says nothing about the key, so the latch stays open and the next
-  // request tries injection again.
-  if (retried.status !== 400) latch.disabled = true;
-  return retried;
+  if (retried.status !== 400) {
+    usage.cacheKeyRejected += 1;
+    latch.disabled = true;
+    return retried;
+  }
+  return persistedBadRequest(retried, usage);
 }
 
 async function forward(
@@ -505,6 +582,9 @@ export function startModelProxy(options: ModelProxyOptions): Promise<ModelProxy>
     completion: 0,
     cached: 0,
     cacheKeyRejected: 0,
+    badRequestPersisted: 0,
+    badRequestContextLimit: 0,
+    badRequestRequestedTokens: 0,
   };
   // Fresh per proxy, matching the module doc's "remainder of this proxy's lifetime": the next
   // `startModelProxy` call — the next engine invocation — starts injecting again from a clean slate.
