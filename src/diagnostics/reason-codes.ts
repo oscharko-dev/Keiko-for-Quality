@@ -218,6 +218,26 @@ export const REASON_CODES = [
   // reports is the next push's (store-discounted) work, not this run's to re-buy.
   "engine.resume_skipped_run_completed",
 
+  // The TARGETED resume the rule above used to forbid (2026-08-06, Keiko#3011).
+  //
+  // "Do not resume a finished run" was measured against a FULL re-dispatch and generalised one step
+  // too far. A finished run that names its own casualties — `subtask_error`,
+  // `scan_subtask_error`, `token_threshold_exceeded` all carry the failing `file` — leaves a gap
+  // whose IDENTITY is known, not merely its size. Re-dispatching only those paths is a different
+  // trade entirely from re-buying the whole review: on Keiko#3011, two files out of nineteen
+  // failed and the blanket rule sent a 1.6M-token review to `incomplete` rather than spend a
+  // proportional share on the two that were missing.
+  // `counts.targeted` is how many paths the second dispatch was pointed at, `counts.covered` how
+  // many the first attempt is credited with — their sum is the reviewable set the settlement then
+  // reconciles against.
+  "engine.resumed_gap_targeted",
+
+  // Findings this adapter refused while keeping the run (2026-08-06, Keiko#3011) — see
+  // `EngineResult.rejectedFindings` for the incident. Recorded only when non-zero, and a count
+  // rather than a reason because diagnostics carry no free text: the alternative to this line is
+  // not a better message, it is silently losing findings.
+  "engine.result.findings_rejected",
+
   // Run-level spend accounting (v0.12.0): one record per engine execution naming what the review
   // actually cost — the engine's own reported total plus the classification side-calls. The parts
   // stay separate because they answer different questions (engine behaviour vs. adapter-added

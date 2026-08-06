@@ -729,30 +729,40 @@ function parseLine(value, field) {
   return value;
 }
 function parseFindings2(value, field) {
-  if (value === void 0 || value === null) return [];
-  return asArray(value, field, LIMITS.maxFindings).map((entry, i) => {
-    const scope = `${field}[${String(i)}]`;
-    const object = asObject(entry, scope);
-    const start = parseLine(object.start_line, `${scope}.start_line`);
-    const end = parseLine(object.end_line, `${scope}.end_line`);
-    if (end < start) throw new ValidationError(`${scope}.end_line`);
-    const path = repoPath(asString(object.path, `${scope}.path`), `${scope}.path`);
-    const content = asString(object.content, `${scope}.content`, LIMITS.maxBodyChars);
-    const severity = optionalToken2(object.severity);
-    const category = optionalToken2(object.category);
-    const unwrapped = unwrapEnvelopeContent(content, `${scope}.content`);
-    if (unwrapped === void 0) {
-      return { path, content, startLine: start, endLine: end, severity, category };
+  if (value === void 0 || value === null) return { findings: [], rejected: 0 };
+  const findings = [];
+  let rejected = 0;
+  asArray(value, field, LIMITS.maxFindings).forEach((entry, i) => {
+    try {
+      findings.push(parseOneFinding(entry, `${field}[${String(i)}]`));
+    } catch (error) {
+      if (!(error instanceof ValidationError)) throw error;
+      rejected += 1;
     }
-    return {
-      path: unwrapped.path ?? path,
-      content: unwrapped.content,
-      startLine: unwrapped.startLine ?? start,
-      endLine: unwrapped.endLine ?? end,
-      severity: unwrapped.severity ?? severity,
-      category: unwrapped.category ?? category
-    };
   });
+  return { findings, rejected };
+}
+function parseOneFinding(entry, scope) {
+  const object = asObject(entry, scope);
+  const start = parseLine(object.start_line, `${scope}.start_line`);
+  const end = parseLine(object.end_line, `${scope}.end_line`);
+  if (end < start) throw new ValidationError(`${scope}.end_line`);
+  const path = repoPath(asString(object.path, `${scope}.path`), `${scope}.path`);
+  const content = asString(object.content, `${scope}.content`, LIMITS.maxBodyChars);
+  const severity = optionalToken2(object.severity);
+  const category = optionalToken2(object.category);
+  const unwrapped = unwrapEnvelopeContent(content, `${scope}.content`);
+  if (unwrapped === void 0) {
+    return { path, content, startLine: start, endLine: end, severity, category };
+  }
+  return {
+    path: unwrapped.path ?? path,
+    content: unwrapped.content,
+    startLine: unwrapped.startLine ?? start,
+    endLine: unwrapped.endLine ?? end,
+    severity: unwrapped.severity ?? severity,
+    category: unwrapped.category ?? category
+  };
 }
 function optionalToken2(value) {
   if (typeof value !== "string" || value.length === 0 || value.length > 64) return void 0;
@@ -842,6 +852,7 @@ function parseEngineResult(text) {
   const summary = parseSummary(root.summary);
   const rawStatus = root.status;
   const status = typeof rawStatus === "string" && RUN_STATUSES.has(rawStatus) ? rawStatus : "unknown";
+  const comments = parseFindings2(root.comments, "result.comments");
   return {
     manifestPresent,
     status,
@@ -849,10 +860,11 @@ function parseEngineResult(text) {
     schemaVersion: manifestPresent ? asString(manifest.schema_version, "result.manifest.schema_version", 128) : "",
     terminalState: parseTerminalState(manifest.terminal_state),
     coverage: manifestPresent ? parseCoverage(manifest.coverage, "result.manifest.coverage") : { selected: [], completed: [], reused: [], failed: [], waived: [] },
-    findings: parseFindings2(root.comments, "result.comments"),
+    findings: comments.findings,
     warnings: parseWarnings(root.warnings, "result.warnings"),
     totalTokens: summary.totalTokens,
-    budgetExceeded: summary.budgetExceeded
+    budgetExceeded: summary.budgetExceeded,
+    rejectedFindings: comments.rejected
   };
 }
 
@@ -1456,6 +1468,24 @@ var REASON_CODES = [
   // the second attempt was pure re-payment. A finished run settles on what it earned; the gap it
   // reports is the next push's (store-discounted) work, not this run's to re-buy.
   "engine.resume_skipped_run_completed",
+  // The TARGETED resume the rule above used to forbid (2026-08-06, Keiko#3011).
+  //
+  // "Do not resume a finished run" was measured against a FULL re-dispatch and generalised one step
+  // too far. A finished run that names its own casualties — `subtask_error`,
+  // `scan_subtask_error`, `token_threshold_exceeded` all carry the failing `file` — leaves a gap
+  // whose IDENTITY is known, not merely its size. Re-dispatching only those paths is a different
+  // trade entirely from re-buying the whole review: on Keiko#3011, two files out of nineteen
+  // failed and the blanket rule sent a 1.6M-token review to `incomplete` rather than spend a
+  // proportional share on the two that were missing.
+  // `counts.targeted` is how many paths the second dispatch was pointed at, `counts.covered` how
+  // many the first attempt is credited with — their sum is the reviewable set the settlement then
+  // reconciles against.
+  "engine.resumed_gap_targeted",
+  // Findings this adapter refused while keeping the run (2026-08-06, Keiko#3011) — see
+  // `EngineResult.rejectedFindings` for the incident. Recorded only when non-zero, and a count
+  // rather than a reason because diagnostics carry no free text: the alternative to this line is
+  // not a better message, it is silently losing findings.
+  "engine.result.findings_rejected",
   // Run-level spend accounting (v0.12.0): one record per engine execution naming what the review
   // actually cost — the engine's own reported total plus the classification side-calls. The parts
   // stay separate because they answer different questions (engine behaviour vs. adapter-added
@@ -4671,9 +4701,16 @@ async function executeEngine(request, inventory, memo, ledger, diagnostics) {
     } = await runEngineWithOneResume(
       engineInvocationOptions(request, inventory, engine.binaryPath, allottedBudget, excluded),
       diagnostics,
-      ledger
+      ledger,
+      inventory.reviewablePaths
     );
     ledger.engine += engineTokens;
+    if (parsed.rejectedFindings > 0) {
+      diagnostics.record("engine.result.findings_rejected", {
+        headSha: inventory.pair.head,
+        counts: { rejected: parsed.rejectedFindings }
+      });
+    }
     const { result: classified, classifyTokens } = await repairEngineFindings(
       parsed,
       request,
@@ -4912,6 +4949,61 @@ function parseBooked(output, ledger) {
     throw error;
   }
 }
+var TARGETED_GAP_MAX_FRACTION = 0.5;
+function targetedGapPaths(result, reviewablePaths) {
+  if (reviewablePaths.size === 0) return void 0;
+  const failed = /* @__PURE__ */ new Set();
+  for (const path of engineFailurePaths(result)) {
+    if (reviewablePaths.has(path)) failed.add(path);
+  }
+  if (failed.size === 0 || failed.size >= reviewablePaths.size) return void 0;
+  if (failed.size > reviewablePaths.size * TARGETED_GAP_MAX_FRACTION) return void 0;
+  return failed;
+}
+function planGeneralResume(parsed, options2) {
+  return {
+    alreadyReviewedPaths: parsed.findings.filter((f) => !parsed.coverage.failed.some((c) => c.path === f.path)).map((f) => f.path),
+    remaining: clamp(
+      options2.allottedBudget - parsed.totalTokens,
+      Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION),
+      options2.allottedBudget
+    )
+  };
+}
+async function decideAfterFirstAttempt(parsed, context) {
+  const { options: options2, diagnostics, firstAttemptTokens } = context;
+  if (parsed.budgetExceeded) {
+    diagnostics.record("engine.resume_skipped_budget_exceeded", {
+      counts: { spent: firstAttemptTokens, allotted: options2.allottedBudget }
+    });
+    return { result: parsed, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
+  }
+  if (!resumeWorthwhile(parsed.status)) return await settleFinishedRun(parsed, context);
+  return void 0;
+}
+async function settleFinishedRun(parsed, context) {
+  const { options: options2, diagnostics, ledger, reviewablePaths, firstAttemptTokens } = context;
+  const targeted = targetedGapPaths(parsed, reviewablePaths);
+  if (targeted === void 0) return finishedRunOutcome(diagnostics, parsed, options2);
+  const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
+  const remaining = clamp(
+    options2.allottedBudget - parsed.totalTokens,
+    Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION),
+    options2.allottedBudget
+  );
+  diagnostics.record("engine.resumed_gap_targeted", {
+    counts: { targeted: targeted.size, covered: covered.length, remaining }
+  });
+  return await attemptResume(
+    options2,
+    diagnostics,
+    remaining,
+    firstAttemptTokens,
+    parsed,
+    covered,
+    ledger
+  );
+}
 function finishedRunOutcome(diagnostics, parsed, options2) {
   diagnostics.record("engine.resume_skipped_run_completed", {
     headSha: options2.pair.head,
@@ -4948,7 +5040,7 @@ async function attemptResume(options2, diagnostics, remaining, firstAttemptToken
     return { result: firstResult, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
   }
 }
-async function runEngineWithOneResume(options2, diagnostics, ledger) {
+async function runEngineWithOneResume(options2, diagnostics, ledger, reviewablePaths) {
   let remaining = options2.allottedBudget;
   let firstAttemptTokens = 0;
   let firstResult;
@@ -4962,19 +5054,15 @@ async function runEngineWithOneResume(options2, diagnostics, ledger) {
     }
     firstAttemptTokens = parsed.totalTokens;
     firstResult = parsed;
-    if (parsed.budgetExceeded) {
-      diagnostics.record("engine.resume_skipped_budget_exceeded", {
-        counts: { spent: firstAttemptTokens, allotted: options2.allottedBudget }
-      });
-      return { result: parsed, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
-    }
-    if (!resumeWorthwhile(parsed.status)) return finishedRunOutcome(diagnostics, parsed, options2);
-    alreadyReviewedPaths = parsed.findings.filter((f) => !parsed.coverage.failed.some((c) => c.path === f.path)).map((f) => f.path);
-    remaining = clamp(
-      options2.allottedBudget - parsed.totalTokens,
-      Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION),
-      options2.allottedBudget
-    );
+    const decided = await decideAfterFirstAttempt(parsed, {
+      options: options2,
+      diagnostics,
+      ledger,
+      reviewablePaths,
+      firstAttemptTokens
+    });
+    if (decided !== void 0) return decided;
+    ({ alreadyReviewedPaths, remaining } = planGeneralResume(parsed, options2));
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   } catch (error) {
     if (!(error instanceof EngineRunError)) throw error;

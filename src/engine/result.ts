@@ -108,6 +108,30 @@ export interface EngineResult {
   readonly warnings: readonly EngineWarning[];
   readonly totalTokens: number;
   readonly budgetExceeded: boolean;
+  /**
+   * Findings this parser refused and dropped, rather than taking the whole result down with them
+   * (2026-08-06, Keiko#3011).
+   *
+   * `optionalToken`'s doc comment already tells half of this story: one finding's malformed
+   * `category` used to discard every OTHER finding in the same result, because `parseFindings`
+   * builds its list with a single `.map()` and any throw escapes it. That fix stopped at the two
+   * vocabulary fields, on the reasoning that a bad path or an inverted line range "is not
+   * something a retry can repair, so there is nothing to gain by being lenient there".
+   *
+   * The reasoning was right about the FINDING and wrong about the RUN. On Keiko#3011 the engine
+   * finished a nineteen-file review costing 1.76M tokens, and a structural defect in one finding
+   * — the pinned model does emit `start_line: 0`, which `parseLine`'s own comment documents —
+   * threw a `ValidationError` out of `parseEngineResult`. That error is not an `EngineRunError`,
+   * so it bypassed the resume path entirely and landed in the generic catch that reports every
+   * exception as `settlement.incomplete.engine_error`: the whole review discarded, eighteen
+   * innocent files unreviewed, and a diagnostic blaming the engine for this adapter's refusal.
+   *
+   * Dropping the one finding is still rejection, not repair — nothing here invents a line number
+   * or rewrites a path. It only scopes the refusal to the element that earned it. A count, not a
+   * reason, because diagnostics carry no free text; `review.ts` records it so a run that quietly
+   * loses findings this way is visible instead of silent.
+   */
+  readonly rejectedFindings: number;
 }
 
 /**
@@ -168,39 +192,64 @@ function parseLine(value: unknown, field: string): number {
   return value;
 }
 
-function parseFindings(value: unknown, field: string): EngineFinding[] {
-  if (value === undefined || value === null) return [];
-  return asArray(value, field, LIMITS.maxFindings).map((entry, i) => {
-    const scope = `${field}[${String(i)}]`;
-    const object = asObject(entry, scope);
-    const start = parseLine(object.start_line, `${scope}.start_line`);
-    const end = parseLine(object.end_line, `${scope}.end_line`);
-    if (end < start) throw new ValidationError(`${scope}.end_line`);
-    // The engine's path comes from candidate-controlled input and is used to address the GitHub
-    // API, so it is re-validated here rather than trusted because the engine echoed it.
-    const path = repoPath(asString(object.path, `${scope}.path`), `${scope}.path`);
-    const content = asString(object.content, `${scope}.content`, LIMITS.maxBodyChars);
-    const severity = optionalToken(object.severity);
-    const category = optionalToken(object.category);
-
-    // See `unwrapEnvelopeContent` below: the model sometimes answers with a full finding
-    // envelope stuffed into `content` instead of `content`'s prose. When that shape appears, the
-    // inner envelope is what the model actually meant to file, and the fields below adopt it
-    // field-by-field, falling back to this outer envelope wherever the inner one is absent or
-    // invalid.
-    const unwrapped = unwrapEnvelopeContent(content, `${scope}.content`);
-    if (unwrapped === undefined) {
-      return { path, content, startLine: start, endLine: end, severity, category };
+/**
+ * Every finding the engine emitted, minus the ones this parser refused.
+ *
+ * The refusal is per element and the survivors are unaffected — see `EngineResult.rejectedFindings`
+ * for the incident that made the difference between "this finding is unusable" and "this run is
+ * unusable" worth 1.76M tokens. The array bound itself still throws: a `comments` field that is not
+ * an array, or one past `maxFindings`, is a malformed RESULT rather than a malformed element, and
+ * there is no element boundary to scope a refusal to.
+ */
+function parseFindings(
+  value: unknown,
+  field: string,
+): { findings: EngineFinding[]; rejected: number } {
+  if (value === undefined || value === null) return { findings: [], rejected: 0 };
+  const findings: EngineFinding[] = [];
+  let rejected = 0;
+  asArray(value, field, LIMITS.maxFindings).forEach((entry, i) => {
+    try {
+      findings.push(parseOneFinding(entry, `${field}[${String(i)}]`));
+    } catch (error) {
+      // Only this parser's own refusals are scoped away. Anything else escaping `parseOneFinding`
+      // is a defect in this adapter, not a malformed finding, and must not be swallowed as one.
+      if (!(error instanceof ValidationError)) throw error;
+      rejected += 1;
     }
-    return {
-      path: unwrapped.path ?? path,
-      content: unwrapped.content,
-      startLine: unwrapped.startLine ?? start,
-      endLine: unwrapped.endLine ?? end,
-      severity: unwrapped.severity ?? severity,
-      category: unwrapped.category ?? category,
-    };
   });
+  return { findings, rejected };
+}
+
+function parseOneFinding(entry: unknown, scope: string): EngineFinding {
+  const object = asObject(entry, scope);
+  const start = parseLine(object.start_line, `${scope}.start_line`);
+  const end = parseLine(object.end_line, `${scope}.end_line`);
+  if (end < start) throw new ValidationError(`${scope}.end_line`);
+  // The engine's path comes from candidate-controlled input and is used to address the GitHub
+  // API, so it is re-validated here rather than trusted because the engine echoed it.
+  const path = repoPath(asString(object.path, `${scope}.path`), `${scope}.path`);
+  const content = asString(object.content, `${scope}.content`, LIMITS.maxBodyChars);
+  const severity = optionalToken(object.severity);
+  const category = optionalToken(object.category);
+
+  // See `unwrapEnvelopeContent` below: the model sometimes answers with a full finding
+  // envelope stuffed into `content` instead of `content`'s prose. When that shape appears, the
+  // inner envelope is what the model actually meant to file, and the fields below adopt it
+  // field-by-field, falling back to this outer envelope wherever the inner one is absent or
+  // invalid.
+  const unwrapped = unwrapEnvelopeContent(content, `${scope}.content`);
+  if (unwrapped === undefined) {
+    return { path, content, startLine: start, endLine: end, severity, category };
+  }
+  return {
+    path: unwrapped.path ?? path,
+    content: unwrapped.content,
+    startLine: unwrapped.startLine ?? start,
+    endLine: unwrapped.endLine ?? end,
+    severity: unwrapped.severity ?? severity,
+    category: unwrapped.category ?? category,
+  };
 }
 
 /**
@@ -398,6 +447,7 @@ export function parseEngineResult(text: string): EngineResult {
     typeof rawStatus === "string" && RUN_STATUSES.has(rawStatus)
       ? (rawStatus as RunStatus)
       : "unknown";
+  const comments = parseFindings(root.comments, "result.comments");
 
   return {
     manifestPresent,
@@ -410,9 +460,10 @@ export function parseEngineResult(text: string): EngineResult {
     coverage: manifestPresent
       ? parseCoverage(manifest.coverage, "result.manifest.coverage")
       : { selected: [], completed: [], reused: [], failed: [], waived: [] },
-    findings: parseFindings(root.comments, "result.comments"),
+    findings: comments.findings,
     warnings: parseWarnings(root.warnings, "result.warnings"),
     totalTokens: summary.totalTokens,
     budgetExceeded: summary.budgetExceeded,
+    rejectedFindings: comments.rejected,
   };
 }
