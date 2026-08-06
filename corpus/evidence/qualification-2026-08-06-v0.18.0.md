@@ -46,11 +46,11 @@ failure mode v0.15.0 recorded twice for the same case.
 
 ## Per case, every failure, with its isolated second opinion
 
-| case                                  | Main run | Second opinions      | v0.15.0 precedent             |
-| ------------------------------------- | -------- | -------------------- | ----------------------------- |
-| `missing-timeout`                     | MISS     | **PASS**             | rotating recall dropout class |
-| `cleared-list-omitted-from-update`    | ERROR    | **PASS**             | ERROR in R2 there too         |
-| `clean-added-test`                    | 1 FP     | **PASS**             | ERROR in R1 there             |
+| case                                  | Main run | Second opinions        | v0.15.0 precedent             |
+| ------------------------------------- | -------- | ---------------------- | ----------------------------- |
+| `missing-timeout`                     | MISS     | **PASS**               | rotating recall dropout class |
+| `cleared-list-omitted-from-update`    | ERROR    | **PASS**               | ERROR in R2 there too         |
+| `clean-added-test`                    | 1 FP     | **PASS**               | ERROR in R1 there             |
 | `clean-reset-modules-is-load-bearing` | 1 FP     | 1 FP, 1 FP — see below | 1 FP in R3 there, SO 2/3      |
 
 **Three of the four failures pass on their first isolated retry.** The fourth did not, and gets
