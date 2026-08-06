@@ -2022,6 +2022,79 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(record?.counts?.skipped_budget).toBe(1);
       expect(record?.counts?.findings).toBe(0);
     });
+
+    it("abandons a head that moved during the engine run before the pass spends anything (2026-08-06)", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: cleanEngineStdout(), ruleDigest: engineDigest });
+      let fetchCalls = 0;
+      globalThis.fetch = (() => {
+        fetchCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      // Fresh on the FIRST call, stale from then on — the same race the settleIncomplete staleness
+      // tests reproduce: the head was current at the pre-flight check and moved while the engine
+      // ran. The next `getPullRequest` after that is the early, flag-gated check this test pins.
+      const client = new GitHubClient("https://api.example.test", "unused");
+      vi.spyOn(client, "getPullRequest")
+        .mockResolvedValueOnce({
+          headSha: commitSha(headSha),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        })
+        .mockResolvedValue({
+          headSha: commitSha("f".repeat(40)),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
+      const createSpy = vi.spyOn(client, "createReviewComment").mockResolvedValue({
+        id: 1,
+        body: "",
+        path: "src/a.ts",
+        authorLogin: "keiko-for-quality[bot]",
+        commitId: headSha,
+        url: "https://example.test/c",
+      });
+
+      const request: ReviewRequest = {
+        client,
+        ref: { owner: "acme", repo: "widget" },
+        pullNumber: 1,
+        base: commitSha(baseSha),
+        head: commitSha(headSha),
+        repositoryPath: repo,
+        config: PASS_CONFIG,
+        profile: PROFILE,
+        guidelines: { paths: [] },
+        identity: "keiko-for-quality[bot]",
+        identityExclusive: true,
+        env: { MODEL_TOKEN: "fake-token" },
+        pathValue: process.env.PATH ?? "/usr/bin:/bin",
+      };
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(request, diagnostics);
+
+      // The pre-flight check passed (fresh), so the engine genuinely ran — proof the run reached
+      // the new early check rather than being short-circuited before the spend it protects.
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
+      expect(report.outcome).toBe("abandoned");
+
+      // The discriminator against the pre-2026-08-06 order, where `collectChangePassFindings` ran
+      // before ANY staleness check: the pass records `contracts.change_pass` whenever it gets past
+      // its flag and endpoint guards — this fixture's own zero-summary short-circuit still does —
+      // so its absence proves the collection never STARTED, not merely that no model call happened
+      // to fire. The fetch count pins the model half of the same claim.
+      const codes = diagnostics.drain().map((record) => record.code);
+      expect(codes).toContain("publish.abandoned_stale_head");
+      expect(codes).not.toContain("contracts.change_pass");
+      expect(fetchCalls).toBe(0);
+      expect(createSpy).not.toHaveBeenCalled();
+    });
   });
 
   /**

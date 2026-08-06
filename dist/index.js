@@ -6136,6 +6136,10 @@ async function abandonStalePublish(run2, inventory, memo, settlement) {
     ...finalized === void 0 ? {} : { updatedCacheStore: finalized.store }
   };
 }
+async function abandonStaleBeforeChangePass(run2, inventory, memo, settlement) {
+  if (run2.request.config.crossArtifactPass !== true) return void 0;
+  return abandonStalePublish(run2, inventory, memo, settlement);
+}
 function combineSettledFindings(settlement, memo, gate, changePass) {
   const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
   const fresh = /* @__PURE__ */ new Set([...settlement.findings, ...changePass]);
@@ -6144,6 +6148,8 @@ function combineSettledFindings(settlement, memo, gate, changePass) {
 async function publishSettledFindings(run2, inventory, settlement, memo, startedAt) {
   const blobCache = /* @__PURE__ */ new Map();
   const gate = await collectGateFindings(run2.request, inventory, run2.diagnostics, blobCache);
+  const staleBeforeSpend = await abandonStaleBeforeChangePass(run2, inventory, memo, settlement);
+  if (staleBeforeSpend !== void 0) return staleBeforeSpend;
   const changePass = await collectChangePassFindings(
     run2.request,
     inventory,
