@@ -596,19 +596,65 @@ describe("publishFindings", () => {
       expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
     });
 
-    it("does not suppress against a conversation with no usable line anchor", async () => {
-      // A file-level comment: no `line`/`startLine` key at all, distinct from setting either to
-      // `undefined` (which `exactOptionalPropertyTypes` would reject as a caller error anyway).
-      api.existing = [
-        {
-          id: 1,
-          body: REPHRASED_SAME_DEFECT,
-          path: "src/retry.ts",
-          authorLogin: IDENTITY,
-          commitId: HEAD,
-          url: "https://example.test/existing",
-        },
-      ];
+    /** A file-level comment: no `line`/`startLine` key at all, distinct from setting either to
+     *  `undefined` (which `exactOptionalPropertyTypes` would reject as a caller error anyway). */
+    function fileLevelComment(body: string, overrides: Partial<ReviewComment> = {}): ReviewComment {
+      return {
+        id: 1,
+        body,
+        path: "src/retry.ts",
+        authorLogin: IDENTITY,
+        commitId: HEAD,
+        url: "https://example.test/existing",
+        ...overrides,
+      };
+    }
+
+    /**
+     * Until 2026-08-06 this exact shape PUBLISHED (`published: 1`) — the audit finding this pins:
+     * a finding that landed as a file-level comment (deleted file, unknown path, `(0, 0)` anchor,
+     * 422 fallback) read back with no line anchor and no `original_*` either, so the similarity
+     * stage's range check refused it, and — because GitHub can never mark an anchor-less thread
+     * outdated — the recurrence stage's `outdatedOnly` gate refused it too. Every rewording
+     * republished the still-open finding as a brand-new conversation. The recurrence stage now
+     * claims it, on the same raised coordinate-free bar it already holds for outdated threads;
+     * `suppressedSimilar` stays 0 so the anchored stage's own precision choice remains visible.
+     */
+    it("routes a rephrased repost against a file-level (anchor-less) thread to the recurrence stage", async () => {
+      api.existing = [fileLevelComment(REPHRASED_SAME_DEFECT)];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({
+        published: 0,
+        suppressed: 1,
+        suppressedSimilar: 0,
+        suppressedRecurrence: 1,
+      });
+      expect(api.created).toHaveLength(0);
+    });
+
+    /**
+     * The precision half, same as for outdated threads: without an anchor the body carries the
+     * whole decision, so a genuinely different defect in the same file must still publish —
+     * over-suppression here would swallow a NEW finding, which is worse than a duplicate.
+     */
+    it("still publishes a different defect in the same file against a file-level thread", async () => {
+      api.existing = [fileLevelComment(UNRELATED_DEFECT)];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+
+    /**
+     * The #38 contract, unchanged by the anchor-less clause: someone resolved the file-level
+     * thread, so a defect that comes back has to be able to speak again.
+     */
+    it("still publishes a recurrence once the file-level thread is resolved", async () => {
+      api.existing = [fileLevelComment(REPHRASED_SAME_DEFECT, { resolved: true })];
+      const outcome = await publishFindings(context, [finding()], diagnostics);
+      expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
+    });
+
+    it("does not suppress against a file-level thread someone else authored", async () => {
+      api.existing = [fileLevelComment(REPHRASED_SAME_DEFECT, { authorLogin: "contributor" })];
       const outcome = await publishFindings(context, [finding()], diagnostics);
       expect(outcome).toMatchObject({ published: 1, suppressed: 0 });
     });
@@ -1119,10 +1165,17 @@ describe("intra-run deduplication (v0.12.0)", () => {
  */
 describe("planPublication and executePublication", () => {
   /**
-   * An existing IDENTITY-authored, unresolved, file-level comment whose marker is keyed on `rule` —
-   * lets a test seed a marker for a category a finding has not been given yet, which is exactly what
-   * the execute-time re-check below needs to exercise. File-level (no `line`/`startLine`) so it can
-   * never match the similarity/dispositioned stages, which this describe block does not exercise.
+   * An existing IDENTITY-authored, unresolved comment whose marker is keyed on `rule` — lets a
+   * test seed a marker for a category a finding has not been given yet, which is exactly what the
+   * execute-time re-check below needs to exercise. Anchored FAR from `finding()`'s lines (beyond
+   * `LINE_TOLERANCE`) so it can never match the similarity/dispositioned stages, which this
+   * describe block does not exercise. It used to isolate itself by being file-level (no
+   * `line`/`startLine`) instead — that stopped working on 2026-08-06, when the recurrence stage's
+   * anchor-less clause made an open, own-authored, same-path, same-body FILE-level thread
+   * suppress at plan time (correct product behaviour, but it would swallow the survivor this
+   * block needs to reach the execute phase). Distance keeps every stage refusing it: the marker
+   * stage never reads coordinates, the anchored stages fail the overlap check, and the
+   * coordinate-free clauses only admit outdated or anchor-less threads.
    */
   function existingMarkedComment(rule: string, body: string): ReviewComment {
     const marker = fingerprint({
@@ -1144,6 +1197,8 @@ describe("planPublication and executePublication", () => {
       authorLogin: IDENTITY,
       commitId: HEAD,
       url: "https://example.test/existing",
+      line: 500,
+      startLine: 500,
     };
   }
 

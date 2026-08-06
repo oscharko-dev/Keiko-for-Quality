@@ -1321,6 +1321,38 @@ async function collectChangePassFindings(
  * findings that survive all the way to publication, because reclassifying a finding nobody will
  * ever read is a pure loss.
  *
+ * Moving repair to that same post-plan point — into `planAndAudit`, beside substantiation and the
+ * audit, so a plan-suppressed finding never pays for it — was evaluated and REJECTED (2026-08-06).
+ * Not for settlement's sake: `settle()` reads statuses, warnings, counts, coverage, and finding
+ * PATHS (`memoizablePaths`), never `category`/`severity`, so the move is legal there. It fails on
+ * the two consumers the audit's placement argument does not have:
+ *
+ * - Dedup itself. The exact-marker fingerprint hashes the category (`findingMarker`,
+ *   `publisher.ts`), so when the engine re-reports an already-published defect WITHOUT its fields —
+ *   the serving-stack coin flip this repair exists for — repair-before-plan is what makes the
+ *   plan-stage marker check match the thread that already carries the finding. Repair-after-plan
+ *   demotes that suppression to `executeOne`'s execute-time re-check, and the finding pays
+ *   substantiation plus the audit on its way to being suppressed anyway: for the recurring-duplicate
+ *   cohort — measured as the dominant duplicate source — the "saving" is a net increase.
+ * - The store. `findingsForStorage` persists EVERY settlement finding, not the survivor subset, and
+ *   a replayed hit is never in `fresh`, so nothing ever repairs it later (`mergeHitFindings` →
+ *   `planPublication` is its whole pipeline). A plan-suppressed finding stored unrepaired would
+ *   replay under `category ?? "general"` — a fingerprint that no longer matches the thread it is
+ *   supposed to keep suppressing, the same desync `findingsForStorage`'s own comment engineers
+ *   against for the audited category — and, wherever it publishes, render under the fallback
+ *   labels regardless of what the defect actually is. Repairing at store time instead would re-ask
+ *   for the same full fresh set the move claimed to save, netting zero whenever a store is
+ *   configured, which is the production configuration. And the stale-abandon paths store
+ *   `settlement.findings` without ever reaching `planAndAudit`, in exactly the rapid-push races
+ *   where replays earn the most.
+ *
+ * The asymmetry with the audit is therefore the point, not an accident: the audit's only consumer
+ * is the reader, so it belongs after the plan decides who reads; repair's classification also
+ * feeds the dedup fingerprint and the store, so it belongs before both. The spend this placement
+ * accepts is bounded by `needsClassification` below — a finding that arrives with both fields
+ * valid never places a call at all — and the corpus harness (`corpus/run.mjs`, `repairFindings`)
+ * mirrors this repair-before-plan order, so it keeps measuring the pipeline that ships.
+ *
  * Returns the repair spend alongside the (possibly reclassified) result, so the caller can fold it
  * into this run's `SpendLedger`. Zero on every skip path below — an implausible finding count, the
  * anthropic protocol, no findings to classify, no token to call with, or nothing that actually needs
@@ -2161,13 +2193,18 @@ async function reportDegradedPublication(
 }
 
 /**
- * The v0.13.0 staleness recheck's own abandon branch. Called immediately before `publishAudited`,
- * after gate collection (free) and the change-level pass (which just spent real model tokens) have
- * already run — checking any earlier would leave a push that lands DURING that collection free to
- * sail through to publication unchecked. Every check like this needs its own copy rather than one
- * shared guard: the pull request's head can move at any point across a review that takes minutes
- * end to end. Split out purely for `publishSettledFindings`'s own line budget. `undefined` means
- * the head was still current and publication should proceed.
+ * The v0.13.0 staleness recheck's own abandon branch, now called from two points in
+ * `publishSettledFindings` (2026-08-06). The original call sits immediately before
+ * `publishAudited`, after gate collection (free) and the change-level pass have already run —
+ * checking any earlier alone would leave a push that lands DURING those collections free to sail
+ * through to publication unchecked. The second, earlier call sits immediately before the
+ * change-level pass, and only when that pass is enabled: it is the one collection between
+ * settlement and publication that spends real model tokens, and until this check existed a head
+ * that moved during the engine's own minutes-long run still paid for a cross-file opinion nobody
+ * could ever publish. Every check like this needs its own copy rather than one shared guard: the
+ * pull request's head can move at any point across a review that takes minutes end to end. Split
+ * out purely for `publishSettledFindings`'s own line budget. `undefined` means the head was still
+ * current and the caller should proceed.
  */
 async function abandonStalePublish(
   run: ReviewRun,
@@ -2193,6 +2230,28 @@ async function abandonStalePublish(
     cacheAppended: finalized?.appended ?? stale.cacheAppended,
     ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
   };
+}
+
+/**
+ * The earlier of `abandonStalePublish`'s two call sites (2026-08-06) — see its doc comment for the
+ * pair. Gated on the flag rather than unconditional because the check itself is not free (one
+ * `getPullRequest` call per completed settlement), and with the pass dark — its default — there is
+ * no spend between this point and the existing pre-`publishAudited` check for it to protect: gate
+ * collection costs no model tokens, and a disabled change-level pass costs one boolean. The flag
+ * is the same first guard `collectChangePassFindings` applies, so "enabled here" and "willing to
+ * spend there" cannot drift apart; the rarer zero-spend configurations behind it (no token, an
+ * exhausted budget) cost this check one API call rather than this call site re-deriving their
+ * guards. Split out of `publishSettledFindings` for that function's own line budget, exactly like
+ * the sibling it wraps.
+ */
+async function abandonStaleBeforeChangePass(
+  run: ReviewRun,
+  inventory: Inventory,
+  memo: MemoContext,
+  settlement: Extract<Settlement, { status: "complete" }>,
+): Promise<ReviewReport | undefined> {
+  if (run.request.config.crossArtifactPass !== true) return undefined;
+  return abandonStalePublish(run, inventory, memo, settlement);
 }
 
 /**
@@ -2223,6 +2282,10 @@ async function publishSettledFindings(
   // Shared across both collectors (#33) — see `BlobTextCache`'s own doc comment.
   const blobCache: BlobTextCache = new Map();
   const gate = await collectGateFindings(run.request, inventory, run.diagnostics, blobCache);
+
+  const staleBeforeSpend = await abandonStaleBeforeChangePass(run, inventory, memo, settlement);
+  if (staleBeforeSpend !== undefined) return staleBeforeSpend;
+
   const changePass = await collectChangePassFindings(
     run.request,
     inventory,

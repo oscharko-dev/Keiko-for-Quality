@@ -214,6 +214,51 @@ describe("buildRuleFile", () => {
   });
 
   /**
+   * Alignment pins for the 2026-08-06 sanitizer relaxations (AGENTS.md: the rule text and the
+   * sanitizer must move together). None of the rule's text moved — it still teaches the ideal
+   * shape: backtick code, close every fence, never echo the hunk back. What moved is the
+   * sanitizer no longer destroying a correct finding when the model misses that ideal in one of
+   * three provably inert ways, and these round-trips through the real `sanitizeFindingBody` are
+   * what keep the two documents honest about exactly where that line now sits.
+   */
+  it("keeps the 2026-08-06 relaxations aligned: prose the rule never invited is repaired, not lost", () => {
+    // A spaceless comparison neutralizes to code instead of dying as html. The rule's own advice
+    // ("a comparison like `i < items.length` is unaffected, since a space or digit follows")
+    // stays true as written; the spaceless spelling it does not mention now costs a backtick
+    // wrap, not the finding.
+    expect(
+      sanitizeFindingBody(
+        "Fix the bound.\n\nThe loop runs while i<n, so the final element is never copied.",
+      ),
+    ).toEqual({
+      ok: true,
+      body: "Fix the bound.\n\nThe loop runs while `i<n`, so the final element is never copied.",
+      neutralized: 1,
+    });
+    // The rule invites a short fenced block; a body truncated before its closing fence used to
+    // lose every neutralization, so an `@param` in the intact paragraphs ABOVE the fence killed
+    // the whole finding. The head now repairs; the unclosed tail still fails closed (pinned in
+    // sanitize.test.ts).
+    const truncated =
+      "Close the handle.\n\nDocument the @param tag on the wrapper.\n\n```js\nreturn handle.readFile();";
+    const result = sanitizeFindingBody(truncated);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.body).toContain("`@param`");
+    // A two-space bullet list of prose is a list, not a diff echo: the space before a prose
+    // parenthetical is what separates it from a call.
+    expect(
+      sanitizeFindingBody(
+        "Restore the guard.\n\n-  the guard (added last week) never fires\n-  the request is dispatched anyway",
+      ).ok,
+    ).toBe(true);
+    // And the boundary held: the echo shape the check exists for still dies.
+    expect(sanitizeFindingBody("-  const total = sumOfParts(stageRoot);")).toEqual({
+      ok: false,
+      reason: "diff_echo",
+    });
+  });
+
+  /**
    * Issue #58: the corpus's own measured gap (epic #26's judged-uniques classification) named
    * mechanisms the rule text did not yet ask for. Each assertion here pins one addition to the
    * text a corpus case (`corpus/cases.mjs`) now depends on being present — a regression here would
@@ -253,6 +298,20 @@ describe("buildRuleFile", () => {
           "primary key or unique constraint on the compared columns already",
           "before stating how an encoding, format, or algorithm behaves",
           "confidently wrong claim about padding, rounding",
+        ],
+      },
+      {
+        // 2026-08-06, `clean-reset-modules-is-load-bearing`: the measured false-positive class this
+        // pins against is a `test`/`high` isolation claim that reasons about ES-module caching as if
+        // the file's own `beforeEach` reset did not exist, and whose repair invents a reset helper
+        // (`clearCache`, `resetCache`) the module never exports — observed 3/3 in the v0.18.0
+        // qualification and reproduced isolated; the full record is
+        // corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md.
+        name: "requires the suite's own setup to be read before an isolation claim, and bans invented helpers",
+        phrases: [
+          "before claiming a test's reset, isolation, or fresh-state setup fails to do its job",
+          "as if that setup were absent",
+          "helper the module does not export",
         ],
       },
     ];

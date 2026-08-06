@@ -118,14 +118,16 @@ const SIMILARITY_THRESHOLD = 0.5;
 const MIN_SHARED_TOKENS = 4;
 
 /**
- * The bar `findsOutdatedRecurrence` holds instead of a line anchor, and why it is higher.
+ * The bar every coordinate-free admission holds instead of a line anchor — `findsOutdatedRecurrence`,
+ * and since 2026-08-06 `findsDispositionedConversation`'s anchor-less clause — and why it is higher.
  *
  * Every other stage in this file narrows on THREE independent signals: same path, overlapping
- * lines, similar body. The outdated stage has only two, because its whole premise is that the
- * thread's coordinates are stale and must not be compared. Dropping a narrowing condition without
- * tightening the others would trade one stage's precision for another's recall, so the body has to
- * carry the decision alone — on BOTH bounds at once, each raised over the anchored stages':
- * seven tenths of the smaller body's content words, and at least eight of them shared outright.
+ * lines, similar body. A coordinate-free admission has only two, because its whole premise is that
+ * the thread's coordinates are stale (outdated) or do not exist (file-level) and must not be
+ * compared. Dropping a narrowing condition without tightening the others would trade one stage's
+ * precision for another's recall, so the body has to carry the decision alone — on BOTH bounds at
+ * once, each raised over the anchored stages': seven tenths of the smaller body's content words,
+ * and at least eight of them shared outright.
  *
  * Calibrated against the production repeats on oscharko-dev/Keiko#2981, where one unfixed
  * regression-guard objection was filed three times across three pushes, each as its own new
@@ -387,6 +389,41 @@ function isSameFindingAtSameLocation(
 }
 
 /**
+ * True for a thread that carries no line anchor at all: both bounds `undefined`, the shape
+ * `toExistingConversation` (`publisher.ts`) produces for a FILE-level review comment. GitHub
+ * reports such a comment with `line`/`start_line` null and — unlike an outdated thread — no
+ * `original_*` fallback either, because there never was a line to remember (see `client.ts`'s
+ * `toReviewComment`). Deliberately requires BOTH bounds absent, the only shape that projection
+ * actually emits for a file-level comment, rather than either: a half-anchored oddity — should one
+ * ever appear — stays outside every stage, unsuppressed, which is this file's publish-bias for
+ * anything uncertain.
+ */
+function carriesNoAnchor(thread: ExistingConversation): boolean {
+  return thread.startLine === undefined && thread.endLine === undefined;
+}
+
+/**
+ * `isSameFindingAtSameLocation`'s coordinate-free counterpart: same author, same path, and a body
+ * match at the RAISED recurrence bar (`recurrenceBodiesMatch`) — never the ordinary thresholds and
+ * never the shared-code-block shortcut, because a caller reaches for this exactly when the
+ * thread's coordinates cannot be trusted (outdated) or do not exist (file-level), so the body has
+ * to carry the whole decision (see `RECURRENCE_THRESHOLD`). Path agreement alone never suppresses.
+ * Eligibility — which threads may be judged this way at all — stays each caller's own question,
+ * exactly as it does for the anchored counterpart above.
+ */
+function isSameFindingOnSamePath(
+  candidate: SimilarityCandidate,
+  thread: ExistingConversation,
+  identity: string,
+): boolean {
+  return (
+    thread.authorLogin === identity &&
+    thread.path === candidate.path &&
+    recurrenceBodiesMatch(candidate.body, thread.body)
+  );
+}
+
+/**
  * True when `candidate` is a phrasing-independent duplicate of an open conversation this reviewer
  * already authored at the same location.
  */
@@ -414,6 +451,18 @@ export function findsSimilarOpenConversation(
  * `disposition.ts`), so the #38 guarantee is preserved: a thread resolved without a considered reply
  * can never reach this branch's `true` outcome, and its finding remains publishable exactly as
  * before.
+ *
+ * Since 2026-08-06 the location match has an anchor-less counterpart. A finding that could only be
+ * published as a FILE-level comment (a deleted file, a path outside the diff, a `(0, 0)` engine
+ * anchor, a line rung the API 422-rejected — see `placement.ts`'s ladder) produces a thread
+ * `isSameFindingAtSameLocation` can never admit: read back, the comment carries no
+ * `line`/`start_line` and no `original_*` either, so `linesOverlap` refuses it outright, and a
+ * reworded recurrence of a substantively answered file-level finding re-litigated the settled
+ * question on every push — the exact loop this stage exists to stop. Such a thread is admitted
+ * through `isSameFindingOnSamePath` instead, which replaces the missing anchor with the RAISED
+ * coordinate-free bar (`RECURRENCE_THRESHOLD`), never the ordinary thresholds — path agreement
+ * alone suppresses nothing. Eligibility is unchanged: `resolved && dispositioned` still gates
+ * every admission, anchored or not, so the #38 guarantee above holds exactly as before.
  */
 export function findsDispositionedConversation(
   candidate: SimilarityCandidate,
@@ -424,7 +473,8 @@ export function findsDispositionedConversation(
     (thread) =>
       thread.resolved &&
       thread.dispositioned &&
-      isSameFindingAtSameLocation(candidate, thread, identity),
+      (isSameFindingAtSameLocation(candidate, thread, identity) ||
+        (carriesNoAnchor(thread) && isSameFindingOnSamePath(candidate, thread, identity))),
   );
 }
 
@@ -459,6 +509,27 @@ export function findsDispositionedConversation(
  * shared-code-block shortcut in `similarByContent` is deliberately NOT reachable from here: a
  * quoted snippet identifies a location, and location is the one thing this stage has agreed not to
  * trust.
+ *
+ * Since 2026-08-06 the stage admits a second shape alongside `outdatedOnly`: an OPEN thread of
+ * this reviewer's own that never carried a line anchor at all — a finding that could only be
+ * published as a FILE-level comment (a deleted file, a path outside the diff, a `(0, 0)` engine
+ * anchor, a line rung the API 422-rejected; see `placement.ts`'s ladder). Read back, such a
+ * comment has `line`/`start_line` null and — unlike an outdated thread — no `original_*` fallback
+ * either, so both bounds arrive `undefined` (`toExistingConversation`, `publisher.ts`) and
+ * `linesOverlap` refuses the thread outright: invisible to every anchored stage, reachable only by
+ * the exact marker, which any rewording defeats — one file-level finding republished as a
+ * brand-new conversation on every push that rephrased it. `outdatedOnly` is deliberately NOT
+ * required for this shape, and that is no weakening of the contract above: GitHub derives
+ * "outdated" from the diff hunk a thread anchors, and a thread with no anchor has no hunk to go
+ * stale, so it can NEVER become outdated — for an anchor-less thread the flag carries no
+ * information either way, and same-path plus this stage's own raised similarity bar is the only
+ * supersession evidence that can exist. Suppressing still loses nothing a reader needs, for the
+ * same reason as above: the file-level conversation is open, says the same thing, and still blocks
+ * the merge. Everything else is unchanged: a line-anchored thread still requires `outdatedOnly`
+ * exactly as before, and the `!resolved` guard keeps Keiko-for-Quality#38 intact — a resolved
+ * file-level thread never silences a recurrence here, because bare resolution is not a verdict;
+ * `findsDispositionedConversation`'s own anchor-less clause covers the substantively answered
+ * ones.
  */
 export function findsOutdatedRecurrence(
   candidate: SimilarityCandidate,
@@ -467,10 +538,8 @@ export function findsOutdatedRecurrence(
 ): boolean {
   return existing.some(
     (thread) =>
-      thread.outdatedOnly === true &&
-      thread.authorLogin === identity &&
-      thread.path === candidate.path &&
-      recurrenceBodiesMatch(candidate.body, thread.body),
+      (thread.outdatedOnly === true || (!thread.resolved && carriesNoAnchor(thread))) &&
+      isSameFindingOnSamePath(candidate, thread, identity),
   );
 }
 

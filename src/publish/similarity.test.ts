@@ -15,6 +15,30 @@ import {
 const IDENTITY = "keiko-for-quality[bot]";
 const PATH = "src/connectors/codingContextRoutes.ts";
 
+/**
+ * The production-calibrated recurrence pair from oscharko-dev/Keiko#2981 — the real restatement
+ * that sits at 10 shared content words and a 0.71 overlap, the measurement `RECURRENCE_THRESHOLD`
+ * (similarity.ts) is pinned to. Module-scoped because two suites hold the coordinate-free bar
+ * against it: `findsOutdatedRecurrence`'s own, and — since 2026-08-06 —
+ * `findsDispositionedConversation`'s anchor-less clause.
+ */
+const ORIGINAL =
+  "Do not lower the expected number of commit preview calls; this weakens a regression guard " +
+  "and may hide unintended duplicate requests.";
+const RESTATED =
+  "Do not reduce the expected number of commit preview calls; this weakens the regression guard " +
+  "and may let missing requests through.";
+/**
+ * A DIFFERENT defect written into the same sentence template as `ORIGINAL` — shares 6 content
+ * words at exactly 0.50, so it clears the ORDINARY similarity thresholds and must still fail the
+ * raised recurrence bar. The nearest-false-positive measurement in `RECURRENCE_THRESHOLD`'s own
+ * doc comment, and the fixture that would fail first if a coordinate-free admission ever slipped
+ * down to the anchored stages' thresholds.
+ */
+const SAME_TEMPLATE_DIFFERENT_DEFECT =
+  "Do not lower the configured retry ceiling; this weakens a timeout guard and may hide " +
+  "unintended socket exhaustion.";
+
 function candidate(overrides: Partial<SimilarityCandidate> = {}): SimilarityCandidate {
   return {
     path: PATH,
@@ -385,6 +409,73 @@ describe("findsDispositionedConversation", () => {
     );
     expect(found).toBe(false);
   });
+
+  /**
+   * 2026-08-06: the same anchor-less blindness `findsOutdatedRecurrence`'s file-level suite pins,
+   * on this stage's own eligibility — see that suite for the read-back mechanics. A file-level
+   * thread resolved with a substantive disposition was invisible to `isSameFindingAtSameLocation`'s
+   * anchor requirement, so a reworded recurrence re-litigated the settled question on every push.
+   * The admission replaces the missing anchor with the RAISED coordinate-free bar, never the
+   * ordinary thresholds this suite's anchored fixtures clear.
+   */
+  describe("anchor-less (file-level) dispositioned threads (2026-08-06)", () => {
+    function dispositionedFileLevel(
+      overrides: Partial<ExistingConversation> = {},
+    ): ExistingConversation {
+      return thread({
+        body: ORIGINAL,
+        resolved: true,
+        dispositioned: true,
+        startLine: undefined,
+        endLine: undefined,
+        ...overrides,
+      });
+    }
+
+    it("suppresses a reworded recurrence of a dispositioned file-level finding", () => {
+      const found = findsDispositionedConversation(
+        candidate({ body: RESTATED }),
+        [dispositionedFileLevel()],
+        IDENTITY,
+      );
+      expect(found).toBe(true);
+    });
+
+    /**
+     * The over-suppression guard: this body clears the ORDINARY similarity thresholds against
+     * `ORIGINAL` (6 shared words at exactly 0.50 — an anchored dispositioned thread at the same
+     * location would suppress it), so it proves the anchor-less clause holds the raised
+     * coordinate-free bar rather than the bar the anchored match uses.
+     */
+    it("does not swallow a different defect that merely clears the ordinary thresholds", () => {
+      const found = findsDispositionedConversation(
+        candidate({ body: SAME_TEMPLATE_DIFFERENT_DEFECT }),
+        [dispositionedFileLevel()],
+        IDENTITY,
+      );
+      expect(found).toBe(false);
+    });
+
+    // Keiko-for-Quality#38, unchanged by the anchor-less clause: bare resolution is not a verdict,
+    // with or without an anchor.
+    it("does not suppress for a bare-resolved file-level thread that was never dispositioned", () => {
+      const found = findsDispositionedConversation(
+        candidate({ body: RESTATED }),
+        [dispositionedFileLevel({ dispositioned: false })],
+        IDENTITY,
+      );
+      expect(found).toBe(false);
+    });
+
+    it("does not suppress another author's dispositioned file-level thread", () => {
+      const found = findsDispositionedConversation(
+        candidate({ body: RESTATED }),
+        [dispositionedFileLevel({ authorLogin: "contributor" })],
+        IDENTITY,
+      );
+      expect(found).toBe(false);
+    });
+  });
 });
 
 /**
@@ -577,13 +668,6 @@ describe("areIntraRunDuplicates: Unicode-adversarial pairs agree (freeze-backlog
  * blocking conversations across three pushes.
  */
 describe("findsOutdatedRecurrence", () => {
-  const ORIGINAL =
-    "Do not lower the expected number of commit preview calls; this weakens a regression guard " +
-    "and may hide unintended duplicate requests.";
-  const RESTATED =
-    "Do not reduce the expected number of commit preview calls; this weakens the regression guard " +
-    "and may let missing requests through.";
-
   function outdated(overrides: Partial<ExistingConversation> = {}): ExistingConversation {
     return thread({ body: ORIGINAL, outdatedOnly: true, resolved: true, ...overrides });
   }
@@ -658,8 +742,7 @@ describe("findsOutdatedRecurrence", () => {
   it.each([
     [
       "a different defect that happens to share the sentence template",
-      "Do not lower the configured retry ceiling; this weakens a timeout guard and may hide " +
-        "unintended socket exhaustion.",
+      SAME_TEMPLATE_DIFFERENT_DEFECT,
     ],
     ["an unrelated defect in the same file", "The locking order here inverts under contention."],
   ])("does not suppress %s", (_label, body) => {
@@ -679,5 +762,88 @@ describe("findsOutdatedRecurrence", () => {
       IDENTITY,
     );
     expect(found).toBe(false);
+  });
+
+  /**
+   * The 2026-08-06 addition: threads that NEVER had a line anchor. A finding published as a
+   * FILE-level comment (a deleted file, a path outside the diff, a `(0, 0)` engine anchor, a line
+   * rung the API 422-rejected — see `placement.ts`) reads back with `line`/`start_line` null and,
+   * unlike an outdated thread, no `original_*` fallback either, so both bounds are `undefined` and
+   * every anchored stage refuses the thread. GitHub can also never mark it outdated — there is no
+   * hunk to go stale — so `outdatedOnly` never admits it here either. Before this clause, only the
+   * exact marker could suppress a repeat, and any rewording republished the finding as a brand-new
+   * conversation on every push.
+   */
+  describe("anchor-less (file-level) threads (2026-08-06)", () => {
+    function fileLevel(overrides: Partial<ExistingConversation> = {}): ExistingConversation {
+      return thread({ body: ORIGINAL, startLine: undefined, endLine: undefined, ...overrides });
+    }
+
+    it("suppresses a reworded repeat of an own open file-level finding on the same path", () => {
+      const found = findsOutdatedRecurrence(candidate({ body: RESTATED }), [fileLevel()], IDENTITY);
+      expect(found).toBe(true);
+    });
+
+    it("matches a (0, 0)-anchored candidate too — the gate-finding shape that lands file-level", () => {
+      const found = findsOutdatedRecurrence(
+        candidate({ body: RESTATED, startLine: 0, endLine: 0 }),
+        [fileLevel()],
+        IDENTITY,
+      );
+      expect(found).toBe(true);
+    });
+
+    /**
+     * The over-suppression guard, exercised where it bites: without an anchor the body carries the
+     * whole decision, so the FULL recurrence bar applies — never path-match alone, and never the
+     * ordinary thresholds (the first fixture clears those). A genuinely new finding on the same
+     * path must stay publishable.
+     */
+    it.each([
+      [
+        "a different defect that happens to share the sentence template",
+        SAME_TEMPLATE_DIFFERENT_DEFECT,
+      ],
+      ["an unrelated defect on the same path", "The locking order here inverts under contention."],
+    ])("does not swallow %s", (_label, body) => {
+      expect(findsOutdatedRecurrence(candidate({ body }), [fileLevel()], IDENTITY)).toBe(false);
+    });
+
+    /**
+     * The additive-only guard: a line-anchored thread still requires `outdatedOnly`, exactly as
+     * before. An open, anchored, non-outdated thread is the anchored stages' case
+     * (`findsSimilarOpenConversation`), and this stage must not reach around their line-tolerance
+     * precision by matching it on body alone.
+     */
+    it("still ignores an open, line-anchored, non-outdated thread with a matching body", () => {
+      const anchored = thread({ body: ORIGINAL });
+      expect(findsOutdatedRecurrence(candidate({ body: RESTATED }), [anchored], IDENTITY)).toBe(
+        false,
+      );
+    });
+
+    it("does not suppress against another author's file-level thread", () => {
+      const found = findsOutdatedRecurrence(
+        candidate({ body: RESTATED }),
+        [fileLevel({ authorLogin: "contributor" })],
+        IDENTITY,
+      );
+      expect(found).toBe(false);
+    });
+
+    /**
+     * Keiko-for-Quality#38, unchanged: someone resolved this thread, so a defect that comes back
+     * must be able to speak again. The `!resolved` guard on the anchor-less clause is what keeps
+     * bare resolution from becoming a verdict; the substantively answered ones are
+     * `findsDispositionedConversation`'s case, below.
+     */
+    it("does not suppress against a RESOLVED file-level thread", () => {
+      const found = findsOutdatedRecurrence(
+        candidate({ body: RESTATED }),
+        [fileLevel({ resolved: true })],
+        IDENTITY,
+      );
+      expect(found).toBe(false);
+    });
   });
 });
