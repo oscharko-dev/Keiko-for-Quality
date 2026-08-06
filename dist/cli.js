@@ -1594,6 +1594,7 @@ var MENTION_NEUTRALIZE = /(^|[^\w`])(@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\/[A-Za-z0
 var LINK_NEUTRALIZE = /([A-Za-z][A-Za-z0-9+.-]*:\/\/|\bwww\.)\S*/g;
 var URL_TRAILING_PUNCTUATION = /(?<![.,;:!?)\]}'"])[.,;:!?)\]}'"]+$/;
 var GENERIC_HEAD = /[A-Za-z_$][\w$]*</g;
+var COMPARISON_TAIL = /[A-Za-z][\w$]*/y;
 function mentionSpans(masked) {
   const spans = [];
   for (const match of masked.matchAll(MENTION_NEUTRALIZE)) {
@@ -1639,7 +1640,13 @@ function genericSpans(masked) {
     const next = masked.charAt(openAngle + 1);
     if (next === "" || "/!?".includes(next)) continue;
     const end = balancedGenericEnd(masked, openAngle);
-    if (end !== -1) spans.push({ start, end: end + 1 });
+    if (end !== -1) {
+      spans.push({ start, end: end + 1 });
+      continue;
+    }
+    COMPARISON_TAIL.lastIndex = openAngle + 1;
+    const tail = COMPARISON_TAIL.exec(masked);
+    if (tail !== null) spans.push({ start, end: openAngle + 1 + tail[0].length });
   }
   return spans;
 }
@@ -1672,8 +1679,7 @@ function neutralize(body) {
   if (spans.length === 0) return { body, neutralized: 0 };
   return { body: applySpans(body, spans), neutralized: spans.length };
 }
-function hasUnclosedFence(body) {
-  const lines = body.split("\n");
+function firstUnclosedFenceLine(lines) {
   let i = 0;
   while (i < lines.length) {
     const marker = openingFenceMarker(lines[i] ?? "");
@@ -1682,20 +1688,26 @@ function hasUnclosedFence(body) {
       continue;
     }
     const close = closingFenceIndex(lines, i + 1, marker);
-    if (close === -1) return true;
+    if (close === -1) return i;
     i = close + 1;
   }
-  return false;
+  return -1;
 }
 function neutralizeGuardingUnclosedFence(body) {
-  return hasUnclosedFence(body) ? { body, neutralized: 0 } : neutralize(body);
+  const lines = body.split("\n");
+  const opener = firstUnclosedFenceLine(lines);
+  if (opener === -1) return neutralize(body);
+  if (opener === 0) return { body, neutralized: 0 };
+  const boundary = lines.slice(0, opener).reduce((length, line) => length + line.length + 1, 0);
+  const { body: head, neutralized } = neutralize(body.slice(0, boundary));
+  return { body: head + body.slice(boundary), neutralized };
 }
 function isDiffEcho(body) {
   const lines = body.split("\n").filter((line) => line.trim() !== "");
   if (lines.length === 0) return false;
   const everyLineIsDiffShaped = lines.every((line) => /^[+-]\s{2,}\S/.test(line));
   const someLineLooksLikeCode = lines.some(
-    (line) => line.includes(";") || line.includes("(") || line.includes(" = ")
+    (line) => line.includes(";") || /[\w$]\(/.test(line) || line.includes(" = ")
   );
   return everyLineIsDiffShaped && someLineLooksLikeCode;
 }

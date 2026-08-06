@@ -253,7 +253,8 @@ function looksLikeCredential(text: string): boolean {
  * rule text spends hundreds of words trying to talk the model out of the same handful of shapes.
  *
  * The asymmetry that limits this to exactly three shapes — an `@mention`, a bare URL, or an
- * unbackticked generic — is that each is, outside a code span, IDENTICAL in every publishable
+ * unbackticked generic (since 2026-08-06 including its unbalanced degenerate, the spaceless
+ * comparison `i<n`) — is that each is, outside a code span, IDENTICAL in every publishable
  * respect to the same text already inside one: wrapping it changes only its Markdown escaping,
  * never what it says. A reversible formatting slip like this costs the consumer a blocked merge
  * today, over a fix that is entirely mechanical. Nothing else qualifies for that treatment. A real
@@ -329,6 +330,17 @@ const URL_TRAILING_PUNCTUATION = /(?<![.,;:!?)\]}'"])[.,;:!?)\]}'"]+$/;
  */
 const GENERIC_HEAD = /[A-Za-z_$][\w$]*</g;
 
+/**
+ * The right-hand side of a comparison written without spaces (`i<n`), matched sticky at the
+ * character after the `<`. The first class is `[A-Za-z]` and deliberately not `[\w$]`: `HTML_TAG`
+ * only fires on `<` followed by a letter, so `i<3` and `i<_max` publish untouched today and
+ * rewriting them would change bodies that were never at risk. Only the letter case needs rescuing
+ * (2026-08-06): `while i<n` puts an identifier directly before the `<` — so `GENERIC_HEAD` reads
+ * it as a generic head — but no `>` follows on the line, so `genericSpans` produced no span, left
+ * the `<` visible, and `HTML_TAG` rejected the whole finding over a comparison.
+ */
+const COMPARISON_TAIL = /[A-Za-z][\w$]*/y;
+
 function mentionSpans(masked: string): Span[] {
   const spans: Span[] = [];
   for (const match of masked.matchAll(MENTION_NEUTRALIZE)) {
@@ -367,8 +379,9 @@ function linkSpans(masked: string): Span[] {
 /**
  * Index of the `>` that balances the `<` at `openAngle`, scanning forward on the SAME line only —
  * "on one line" is part of the shape this rewrites, not an incidental limit. Returns -1 when the
- * line ends, or the body does, before depth returns to zero, which leaves the candidate for
- * `HTML_TAG` to reject exactly as before this pass existed.
+ * line ends, or the body does, before depth returns to zero — which since 2026-08-06 falls
+ * through to `genericSpans`'s narrower comparison wrap rather than straight to `HTML_TAG`'s
+ * rejection.
  */
 function balancedGenericEnd(masked: string, openAngle: number): number {
   let depth = 1;
@@ -401,7 +414,19 @@ function genericSpans(masked: string): Span[] {
     const next = masked.charAt(openAngle + 1);
     if (next === "" || "/!?".includes(next)) continue;
     const end = balancedGenericEnd(masked, openAngle);
-    if (end !== -1) spans.push({ start, end: end + 1 });
+    if (end !== -1) {
+      spans.push({ start, end: end + 1 });
+      continue;
+    }
+    // No balanced close on the line, so this is not a generic — but `identifier<identifier` is
+    // not a tag either: a tag's name never has an identifier glued to its left. Wrap exactly the
+    // comparison's two tokens (2026-08-06) and nothing further, so `while i<n` publishes with
+    // `i<n` as code instead of dying as html. This launders nothing: `sanitizeFindingBody` re-runs
+    // the masked checks on the rewritten body, so any construct still reading as HTML there — a
+    // closing tag later in the body, a `<` the wrap did not cover — still rejects.
+    COMPARISON_TAIL.lastIndex = openAngle + 1;
+    const tail = COMPARISON_TAIL.exec(masked);
+    if (tail !== null) spans.push({ start, end: openAngle + 1 + tail[0].length });
   }
   return spans;
 }
@@ -453,10 +478,10 @@ function neutralize(body: string): NeutralizeOutcome {
   return { body: applySpans(body, spans), neutralized: spans.length };
 }
 
-/** True when some fence in the body never closes — the same walk `maskFencedBlocks` performs,
- *  cursor jump and all (see its doc comment), reported as a boolean instead of applied. */
-function hasUnclosedFence(body: string): boolean {
-  const lines = body.split("\n");
+/** Line index of the first fence opener that never closes, or -1 when every fence closes — the
+ *  same walk `maskFencedBlocks` performs, cursor jump and all (see its doc comment), reported as
+ *  a position instead of applied. */
+function firstUnclosedFenceLine(lines: readonly string[]): number {
   let i = 0;
   while (i < lines.length) {
     const marker = openingFenceMarker(lines[i] ?? "");
@@ -465,22 +490,38 @@ function hasUnclosedFence(body: string): boolean {
       continue;
     }
     const close = closingFenceIndex(lines, i + 1, marker);
-    if (close === -1) return true;
+    if (close === -1) return i;
     i = close + 1;
   }
-  return false;
+  return -1;
 }
 
 /**
- * Gates the whole pass on fence closure: an unclosed fence makes `maskCodeRegions` leave that
- * region visible to every check rather than guess where it ends (see `maskFencedBlocks`'s own doc
- * comment), and that same uncertainty makes it impossible to trust ANY span in the body as
- * definitely-prose rather than the inside of a fence whose delimiter never arrived. Neutralization
- * runs nowhere in that case rather than somewhere by guesswork — the existing fail-closed rationale,
- * extended from masking to the pass that depends on it.
+ * Bounds the pass by fence closure: an unclosed fence makes `maskCodeRegions` leave that region
+ * visible to every check rather than guess where it ends (see `maskFencedBlocks`'s own doc
+ * comment), and that same uncertainty makes it impossible to trust any span AFTER the orphaned
+ * opener as definitely-prose rather than the inside of a fence whose delimiter never arrived.
+ *
+ * What CAN be trusted is everything before that opener: the walk reports an opener unclosed only
+ * after every earlier fence found its closer, so the head is exactly as well-delimited as a body
+ * with no unclosed fence at all. Until 2026-08-06 this function skipped the whole body instead,
+ * and one stray fence at the end switched off every rewrite before it — an `@param` or a bare URL
+ * in perfectly ordinary paragraphs then tripped the masked checks, and a correct finding was
+ * rejected over exactly the formatting slip the pass exists to repair, in the common case of a
+ * body truncated mid-fence. Neutralization now runs on the head and leaves the tail — the
+ * orphaned opener onward — untouched, still failing closed precisely where the uncertainty
+ * actually starts.
  */
 function neutralizeGuardingUnclosedFence(body: string): NeutralizeOutcome {
-  return hasUnclosedFence(body) ? { body, neutralized: 0 } : neutralize(body);
+  const lines = body.split("\n");
+  const opener = firstUnclosedFenceLine(lines);
+  if (opener === -1) return neutralize(body);
+  if (opener === 0) return { body, neutralized: 0 };
+  // The head keeps the newline before the opener's line, so the cut sits between lines and no
+  // span can straddle it — every span the pass produces is single-line by construction.
+  const boundary = lines.slice(0, opener).reduce((length, line) => length + line.length + 1, 0);
+  const { body: head, neutralized } = neutralize(body.slice(0, boundary));
+  return { body: head + body.slice(boundary), neutralized };
 }
 
 /**
@@ -493,18 +534,24 @@ function neutralizeGuardingUnclosedFence(body: string): NeutralizeOutcome {
  * The test is deliberately narrow, because its false-positive risk is a Markdown bullet list. A
  * bullet is `- ` — marker, ONE space — while a diff line carrying indented code is marker plus the
  * code's own leading whitespace, so `^[+-]\s{2,}` separates the two without guessing. On top of
- * that at least one line must look like code (`;`, `(`, or ` = `), so even an eccentric two-space
- * bullet list of prose stays publishable. Column-zero code (`+const x = 1;`) escapes this check on
- * purpose: the gate prefers missing an echo to ever eating a real finding, and the offline run
- * against all 127 production bodies (2 rejected, 125 untouched) is the measurement that bound was
- * chosen against.
+ * that at least one line must look like code: a `;`, a ` = `, or a call — `(` glued to an
+ * identifier character, the way `sumOfParts(stageRoot)` writes one. A bare `(` used to be enough,
+ * and that read a prose parenthetical as code (2026-08-06): `-  the guard (added last week) never
+ * fires` is an eccentric two-space bullet, but a bullet, and the space before its `(` is exactly
+ * what separates a parenthetical from a call. `guard(s)`-style gluing still counts as code — the
+ * residual bound, accepted because loosening the call shape further starts missing real echoes in
+ * semicolon-free languages, where that shape is the only signal left. Column-zero code
+ * (`+const x = 1;`) escapes this check on purpose: the gate prefers missing an echo to ever eating
+ * a real finding, and the offline run against all 127 production bodies (2 rejected, 125
+ * untouched) is the measurement that bound was chosen against — the call-shape narrowing only
+ * shrinks what is rejected, so that measurement stands.
  */
 function isDiffEcho(body: string): boolean {
   const lines = body.split("\n").filter((line) => line.trim() !== "");
   if (lines.length === 0) return false;
   const everyLineIsDiffShaped = lines.every((line) => /^[+-]\s{2,}\S/.test(line));
   const someLineLooksLikeCode = lines.some(
-    (line) => line.includes(";") || line.includes("(") || line.includes(" = "),
+    (line) => line.includes(";") || /[\w$]\(/.test(line) || line.includes(" = "),
   );
   return everyLineIsDiffShaped && someLineLooksLikeCode;
 }
