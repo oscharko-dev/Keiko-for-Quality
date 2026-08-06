@@ -139,6 +139,37 @@ async function writeRuleFile(
   return { rulePath, ruleDigest: sha256(createHash("sha256").update(ruleBody).digest("hex")) };
 }
 
+/**
+ * Tool-call rounds the engine may spend on ONE file before it gives up on it.
+ *
+ * This is the root cause of the failure class every other fix this week has been catching
+ * downstream. Read from the pinned engine's own source (v1.8.4), the chain is exact:
+ * `Template.MaxToolRequestTimes` defaults to 30 in the embedded `task_template.json`;
+ * `llmloop.RunPerFile` counts down from it and, on exhaustion, prints "Max tool requests reached"
+ * and returns `false, nil`; `agent.executeSubtask` turns that into
+ * `errors.New("main_task did not complete before stopping")`; and the agent records it as a
+ * `subtask_error` warning naming the file. That warning is what `settle.ts` reads as a coverage
+ * gap, which is what settles the review incomplete. Thirty rounds is where reviews were dying.
+ *
+ * `--max-tools` only ever RAISES the template value (`loadCommonContext`: `if maxTools >
+ * tpl.MaxToolRequestTimes`), so this cannot accidentally lower the engine's own floor, and the
+ * engine clamps anything under 10 upward.
+ *
+ * Sixty rather than a larger number, and the reasoning is about cost asymmetry rather than
+ * ambition. A file that finishes in 25 rounds is completely unaffected — the ceiling is not a
+ * budget, only a stopping point. The extra spend falls exclusively on files that WOULD have died
+ * at 30, and those files already paid for their 30 rounds and returned nothing usable: raising the
+ * ceiling converts spend that bought a coverage gap into spend that may buy a verdict. Total cost
+ * stays bounded regardless, because `--max-tokens-budget` above is a separate, unchanged
+ * stop-loss on the whole run — this ceiling can extend one file's conversation, never the run's
+ * total spend.
+ *
+ * Doubling is deliberate over a bigger jump: a file that cannot finish in sixty rounds is very
+ * likely stuck rather than slow, and `engine.status.*`'s `warnings_subtask_error_tool_budget`
+ * count (see `result.ts`) is what will say whether that guess held.
+ */
+const MAX_TOOL_ROUNDS_PER_FILE = 60;
+
 export function reviewArguments(options: EngineRunOptions, rulePath: string): string[] {
   return [
     "review",
@@ -159,6 +190,8 @@ export function reviewArguments(options: EngineRunOptions, rulePath: string): st
     // already selected has been paid for.
     "--max-tokens-budget",
     String(options.allottedBudget),
+    "--max-tools",
+    String(MAX_TOOL_ROUNDS_PER_FILE),
   ];
 }
 

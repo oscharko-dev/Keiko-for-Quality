@@ -1591,6 +1591,14 @@ function recordEngineStatus(
   for (const warning of result.warnings) {
     const key = `warnings_${warning.type}`;
     counts[key] = (counts[key] ?? 0) + 1;
+    // The split that makes the round ceiling evaluable (2026-08-06): `subtask_error` covers both
+    // a file that exhausted its tool rounds and one whose model call simply failed, and only the
+    // first is answered by giving files more rounds. Without this second key, raising the ceiling
+    // would be a change nobody could measure. See `EngineWarning.cause`.
+    if (warning.cause !== undefined) {
+      const causeKey = `${key}_${warning.cause}`;
+      counts[causeKey] = (counts[causeKey] ?? 0) + 1;
+    }
   }
   diagnostics.record(ENGINE_STATUS_DIAGNOSTIC[result.status], { headSha, counts });
 }

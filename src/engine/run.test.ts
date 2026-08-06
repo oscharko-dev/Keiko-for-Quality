@@ -111,7 +111,20 @@ describe("reviewArguments", () => {
       "4",
       "--max-tokens-budget",
       "123456",
+      "--max-tools",
+      "60",
     ]);
+  });
+
+  // The root cause the rest of this week's fixes were catching downstream: the engine's own
+  // template stops a per-file conversation after 30 tool rounds, turns that into
+  // "main_task did not complete before stopping", and records it as the `subtask_error` warning
+  // that settles a review as a coverage gap. `--max-tools` only ever raises the template value,
+  // so the number must be above the engine's 30 to do anything at all.
+  it("raises the per-file tool-round ceiling above the engine's own default of 30", () => {
+    const args = reviewArguments(options(), "/home/keiko-rules.json");
+    const ceiling = Number(args[args.indexOf("--max-tools") + 1]);
+    expect(ceiling).toBeGreaterThan(30);
   });
 
   it("never consults the engine's own discovery paths for the rule file", () => {

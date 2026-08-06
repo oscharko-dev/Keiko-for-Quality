@@ -1530,6 +1530,42 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(diagnostics.drain().map((r) => r.code)).toContain("engine.resumed_gap_targeted");
     });
 
+    it("splits subtask failures by cause, so the tool-round ceiling can be evaluated", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // One file lost to the engine's tool-round ceiling, one to a failed model call. Both are
+      // `subtask_error`; only the first is answered by raising the ceiling, and a diagnostic that
+      // could not tell them apart would make that change unmeasurable.
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "completed_with_errors",
+          summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+          comments: [],
+          warnings: [
+            {
+              type: "subtask_error",
+              file: "src/a.ts",
+              message: "main_task did not complete before stopping",
+            },
+            { type: "subtask_error", file: "src/b.ts", message: "LLM completion error: 503" },
+          ],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      const diagnostics = createSilentDiagnostics();
+      await performReview(baseRequest(undefined), diagnostics);
+
+      const status = diagnostics
+        .drain()
+        .find((record) => record.code === "engine.status.completed_with_errors");
+      expect(status?.counts).toMatchObject({
+        warnings_subtask_error: 2,
+        warnings_subtask_error_tool_budget: 1,
+        warnings_subtask_error_other: 1,
+      });
+    });
+
     it("prices a targeted round from the gap it dispatches, not from the first attempt's leftovers", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
