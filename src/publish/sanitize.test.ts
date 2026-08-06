@@ -179,6 +179,32 @@ describe("sanitizeFindingBody", () => {
       expect(sanitizeFindingBody(body)).toEqual({ ok: true, body });
     });
 
+    // A prose parenthetical is not a call: code writes `sumOfParts(stageRoot)` with the `(` glued
+    // to an identifier, prose writes `guard (added last week)` with a space before it. Until
+    // 2026-08-06 a bare `(` counted as code, so this two-space bullet list — eccentric, but a
+    // bullet list — was classified as an echo and the finding rejected.
+    it("never rejects a two-space bullet list whose prose carries a parenthetical", () => {
+      const body = [
+        "-  the guard (added last week) never fires",
+        "-  the request is dispatched anyway",
+      ].join("\n");
+      expect(sanitizeFindingBody(body)).toEqual({ ok: true, body });
+    });
+
+    it("never rejects a single two-space prose line with a parenthetical", () => {
+      const body = "-  the guard (added last week) never fires";
+      expect(sanitizeFindingBody(body)).toEqual({ ok: true, body });
+    });
+
+    // The call shape is what keeps semicolon-free code detected: `(` glued to an identifier is
+    // still a code signal on its own, so narrowing `(` to a call must not exempt real echoes.
+    it("still rejects an echoed line whose only code signal is a call", () => {
+      expect(sanitizeFindingBody("-  total += sumOfParts(stageRoot)")).toEqual({
+        ok: false,
+        reason: "diff_echo",
+      });
+    });
+
     it("never rejects a real finding that quotes a diff line inside prose", () => {
       const body = [
         "The staged inventory reads from the wrong directory after the rename.",
@@ -285,6 +311,28 @@ describe("neutralization (turning a reversible formatting slip into inline code)
       });
     });
 
+    /**
+     * `identifier<identifier` with no `>` anywhere on the line is a comparison written without
+     * spaces — not a generic, and not a tag either, since a tag's name never has an identifier
+     * glued to its left. Until 2026-08-06 the generic pass produced no span here (no balanced
+     * close), the `<` stayed visible, and `HTML_TAG` rejected the whole finding over `<n`.
+     */
+    it("neutralizes a spaceless comparison instead of rejecting it as html", () => {
+      const body = `${VALID} The loop runs while i<n and copies one element per pass.`;
+      expect(sanitizeFindingBody(body)).toEqual({
+        ok: true,
+        body: `${VALID} The loop runs while \`i<n\` and copies one element per pass.`,
+        neutralized: 1,
+      });
+    });
+
+    // The wrap is limited to `<` before a LETTER — the only case `HTML_TAG` fires on. A digit
+    // comparison was never at risk, and rewriting it would change bodies that publish untouched.
+    it("leaves a comparison against a digit alone — `<3` never read as html to begin with", () => {
+      const body = `${VALID} The loop runs while i<3 and copies one element per pass.`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: true, body });
+    });
+
     it("neutralizes more than one span in the same body, in one pass", () => {
       const body = `${VALID} cc @octocat, see https://example.test/docs.`;
       const result = sanitizeFindingBody(body);
@@ -317,6 +365,15 @@ describe("neutralization (turning a reversible formatting slip into inline code)
       expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "html" });
     });
 
+    // The comparison wrap must never launder a tag whose closing counterpart arrives later: the
+    // masked checks re-run on the rewritten body, and `</script` still reads as html there even
+    // after the glued `x<script` head was backticked. Extends the attack coverage for the
+    // 2026-08-06 fallback rather than trusting the wrap's own narrowness.
+    it("still rejects a glued-open tag when a closing tag follows — the wrap launders nothing", () => {
+      const body = `${VALID} Emits x<script\n>alert(1)</script> at render time.`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "html" });
+    });
+
     it("still rejects a credential, evaluated before neutralization ever runs", () => {
       const body = `${VALID} cc @octocat ghp_abcdefghijklmnopqrstuvwxyz0123456789`;
       expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "credential" });
@@ -336,17 +393,61 @@ describe("neutralization (turning a reversible formatting slip into inline code)
 
     /**
      * Masking cannot tell code from prose once a fence never closes (see `maskFencedBlocks`), so
-     * neutralization must not run at all there — not just skip the unclosed region, the whole
-     * body. Pinned for both an inner `<` and an inner `@`, since the gate is meant to be uniform
-     * across every neutralization category, not special-cased per check.
+     * neutralization must not run where that uncertainty lives: from the orphaned opener onward.
+     * Since 2026-08-06 the boundary is the opener itself, not the whole body — everything before
+     * it is fully delimited, and rewrites there are as trustworthy as in a fence-free body (see
+     * the "unclosed fence bounds neutralization" block below) — but inside the unclosed tail the
+     * gate stays uniform across every neutralization category, pinned here for an inner `<` and
+     * an inner `@` alike.
      */
-    it("skips neutralization entirely inside an unclosed fence, so an inner generic still rejects", () => {
+    it("skips neutralization inside an unclosed fence, so an inner generic still rejects", () => {
       const body = `${VALID}\n\n\`\`\`\nIndexing a plain Record<string, string> resolves it.`;
       expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "html" });
     });
 
-    it("skips neutralization entirely inside an unclosed fence, so an inner mention still rejects", () => {
+    it("skips neutralization inside an unclosed fence, so an inner mention still rejects", () => {
       const body = `${VALID}\n\n\`\`\`\ncc @octocat, see the diff.`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "mention" });
+    });
+  });
+
+  /**
+   * One unbalanced fence used to switch the whole pass off: `neutralizeGuardingUnclosedFence`
+   * returned the body untouched, so an `@param`, a bare URL, or an unbackticked generic in
+   * ordinary paragraphs BEFORE the fence tripped the masked checks and the finding was rejected —
+   * over prose the pass exists to repair, in the common case of a body truncated mid-fence.
+   * Fixed 2026-08-06: the head up to the orphaned opener neutralizes — every fence before it is
+   * closed, so its spans are as trustworthy as in a fence-free body — and the tail stays
+   * untouched for the masked checks to judge.
+   */
+  describe("an unclosed fence bounds neutralization instead of disabling it", () => {
+    const UNCLOSED = "```\nconst x = readSetting(name);";
+
+    it.each([
+      ["a JSDoc-style mention", `${VALID} Document the @param tag.`, "@param"],
+      [
+        "a bare URL",
+        `${VALID} See https://example.test/docs for details.`,
+        "https://example.test/docs",
+      ],
+      ["an unbackticked generic", `${VALID} It returns Promise<void> either way.`, "Promise<void>"],
+    ])("neutralizes %s ahead of an unclosed fence", (_name, head, token) => {
+      const body = `${head}\n\n${UNCLOSED}`;
+      expect(sanitizeFindingBody(body)).toEqual({
+        ok: true,
+        body: body.replace(token, `\`${token}\``),
+        neutralized: 1,
+      });
+    });
+
+    // The attack side of the same boundary: a rescued head must never rescue the tail with it.
+    it("still rejects a mention in the tail even while the head neutralizes its own", () => {
+      const body = `${VALID} Document the @param tag.\n\n\`\`\`\ncc @octocat`;
+      expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "mention" });
+    });
+
+    it("neutralizes nothing when the unclosed fence opens the body", () => {
+      const body = "```\ncc @octocat wrote this line inside the fence.";
       expect(sanitizeFindingBody(body)).toEqual({ ok: false, reason: "mention" });
     });
   });
