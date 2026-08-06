@@ -300,6 +300,20 @@ describe("buildRuleFile", () => {
           "confidently wrong claim about padding, rounding",
         ],
       },
+      {
+        // 2026-08-06, `clean-reset-modules-is-load-bearing`: the measured false-positive class this
+        // pins against is a `test`/`high` isolation claim that reasons about ES-module caching as if
+        // the file's own `beforeEach` reset did not exist, and whose repair invents a reset helper
+        // (`clearCache`, `resetCache`) the module never exports — observed 3/3 in the v0.18.0
+        // qualification and reproduced isolated; the full record is
+        // corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md.
+        name: "requires the suite's own setup to be read before an isolation claim, and bans invented helpers",
+        phrases: [
+          "before claiming a test's reset, isolation, or fresh-state setup fails to do its job",
+          "as if that setup were absent",
+          "helper the module does not export",
+        ],
+      },
     ];
 
     // Rows are spread as positional tuples with a `%s` title, not as objects with `$name`: `$key`

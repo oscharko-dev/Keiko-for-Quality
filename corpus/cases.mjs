@@ -1449,8 +1449,86 @@ export function schemaVersion(): string {
     // test bleeding the call prevents — the suite mutates a module-level cache, and the comment
     // above the call says so. A finding that proposes deleting a guard must account for what the
     // guard is guarding.
+    //
+    // Recalibrated 2026-08-06 in three layers, each on its own failing evidence (the full record:
+    // corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md). The v0.18.0 qualification
+    // drew 3/3 false positives here (37,413 / 24,457 / 23,767 tokens) and a six-run isolated
+    // follow-up on the same binding drew one more (5 silent), leaving
+    // MODULE_OMITTED_ON_PURPOSE (case-coherence.test.mjs) exactly the way that list says an entry
+    // leaves. Layer one: the module under test is committed as unchanged context (base === head).
+    // The fixture used to reference `./cache.js` without committing it, so every claim about what
+    // the reset does to module state was ungroundable — the observed false positive called the
+    // reset insufficient ("ES modules are cached") and its repair invented a `clearCache` export,
+    // hedged behind optional chaining, for a module the repository did not contain. Same
+    // incoherent-repository condition `clean-added-test` measured (2/8 passing) before its module
+    // was committed (6/6 after). Layer two, forced by a validation run against layer one alone:
+    // with the module readable, the model grounded a REAL gap — the added test's name claims
+    // cross-case isolation while its old assertion (`lookup("b")` twice, `toBe`) could never fail
+    // under state bleeding, with or without the reset. A clean case must not contain a defensible
+    // finding, so the added test now asserts the property its name claims: `entryCount()` is 0 on
+    // a fresh module — it would be 1 if the previous case's instance leaked through — and 1 after
+    // one lookup. That also makes the reset mechanically load-bearing: remove it and this test
+    // fails, which is precisely the guard-versus-guarded relationship the published false positive
+    // ("remove the redundant reset") got wrong. Layer three, forced by two more validation runs:
+    // the `beforeEach` reset sits at the top of the file, OUTSIDE the added hunk's diff context,
+    // and both post-fix false positives reasoned about module caching without ever mentioning it —
+    // the draws where the model judges the hunk without opening the file. The added test now
+    // states its own premise in an author comment inside the hunk ("the beforeEach above reset the
+    // module registry"), which is what a real author writes when a reviewer misreads isolation,
+    // and which moves the case from measuring tool-use propensity (serving-side variance) to
+    // measuring the judgement it names: respecting a stated, correct isolation mechanism. All
+    // three layers re-cut the measurement basis, so this case's history is not comparable across
+    // 2026-08-06, and the recalibration rides the next full qualification wave rather than any
+    // point release.
     about: "a test reset whose removal would reintroduce state bleeding",
     files: [
+      {
+        path: "src/cache.ts",
+        base: `export interface CacheEntry {
+  readonly key: string;
+}
+
+// Memoized at module scope: this map lives as long as the module instance does, so only a fresh
+// module instance — a new import after a module-registry reset — starts from an empty cache.
+const memo = new Map<string, CacheEntry>();
+
+/** How many keys this module instance has memoized so far. */
+export function entryCount(): number {
+  return memo.size;
+}
+
+/** Returns the same entry object for every lookup of a given key. */
+export function lookup(key: string): CacheEntry {
+  const existing = memo.get(key);
+  if (existing !== undefined) return existing;
+  const created = { key };
+  memo.set(key, created);
+  return created;
+}
+`,
+        head: `export interface CacheEntry {
+  readonly key: string;
+}
+
+// Memoized at module scope: this map lives as long as the module instance does, so only a fresh
+// module instance — a new import after a module-registry reset — starts from an empty cache.
+const memo = new Map<string, CacheEntry>();
+
+/** How many keys this module instance has memoized so far. */
+export function entryCount(): number {
+  return memo.size;
+}
+
+/** Returns the same entry object for every lookup of a given key. */
+export function lookup(key: string): CacheEntry {
+  const existing = memo.get(key);
+  if (existing !== undefined) return existing;
+  const created = { key };
+  memo.set(key, created);
+  return created;
+}
+`,
+      },
       {
         path: "src/cache.test.ts",
         base: `import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -1481,8 +1559,11 @@ describe("cache", () => {
   });
 
   it("does not carry a memoized answer across cases", async () => {
-    const { lookup } = await import("./cache.js");
-    expect(lookup("b")).toBe(lookup("b"));
+    // The beforeEach above reset the module registry, so this import re-evaluates the module.
+    const { entryCount, lookup } = await import("./cache.js");
+    expect(entryCount()).toBe(0);
+    lookup("b");
+    expect(entryCount()).toBe(1);
   });
 });
 `,
