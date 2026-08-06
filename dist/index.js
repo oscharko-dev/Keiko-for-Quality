@@ -806,15 +806,24 @@ function unwrapEnvelopeContent(content, field) {
     category: optionalToken2(inner.category)
   };
 }
+var TOOL_BUDGET_MESSAGE = /main_task did not complete/i;
+function classifyWarning(type, message) {
+  if (type !== "subtask_error" && type !== "scan_subtask_error") return void 0;
+  if (typeof message !== "string") return "other";
+  return TOOL_BUDGET_MESSAGE.test(message) ? "tool_budget" : "other";
+}
 function parseWarnings(value, field) {
   if (value === void 0 || value === null) return [];
   return asArray(value, field, LIMITS.maxWarnings).map((entry, i) => {
     const scope = `${field}[${String(i)}]`;
     const object = asObject(entry, scope);
+    const type = asString(object.type, `${scope}.type`, 200);
+    const cause = classifyWarning(type, object.message);
     return {
-      type: asString(object.type, `${scope}.type`, 200),
+      type,
       // Not a validated repository path: the engine also reports warnings without a file.
-      file: typeof object.file === "string" ? object.file.slice(0, 1024) : ""
+      file: typeof object.file === "string" ? object.file.slice(0, 1024) : "",
+      ...cause === void 0 ? {} : { cause }
     };
   });
 }
@@ -3156,6 +3165,7 @@ async function writeRuleFile(options2, home) {
   await writeFile2(rulePath, ruleBody, { mode: 384 });
   return { rulePath, ruleDigest: sha256(createHash5("sha256").update(ruleBody).digest("hex")) };
 }
+var MAX_TOOL_ROUNDS_PER_FILE = 60;
 function reviewArguments(options2, rulePath) {
   return [
     "review",
@@ -3175,7 +3185,9 @@ function reviewArguments(options2, rulePath) {
     // this ceiling, instead of the overrun only being detected in `settle.ts` after every file
     // already selected has been paid for.
     "--max-tokens-budget",
-    String(options2.allottedBudget)
+    String(options2.allottedBudget),
+    "--max-tools",
+    String(MAX_TOOL_ROUNDS_PER_FILE)
   ];
 }
 var REVIEW_TEMPERATURE = 0;
@@ -6022,6 +6034,10 @@ function recordEngineStatus(diagnostics, result, headSha) {
   for (const warning of result.warnings) {
     const key = `warnings_${warning.type}`;
     counts[key] = (counts[key] ?? 0) + 1;
+    if (warning.cause !== void 0) {
+      const causeKey = `${key}_${warning.cause}`;
+      counts[causeKey] = (counts[causeKey] ?? 0) + 1;
+    }
   }
   diagnostics.record(ENGINE_STATUS_DIAGNOSTIC[result.status], { headSha, counts });
 }

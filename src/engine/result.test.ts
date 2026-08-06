@@ -3,7 +3,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { ValidationError } from "../core/brands.js";
-import { SUPPORTED_MANIFEST_SCHEMA, parseEngineResult, type EngineResult } from "./result.js";
+import {
+  SUPPORTED_MANIFEST_SCHEMA,
+  parseEngineResult,
+  type EngineResult,
+  type EngineWarning,
+} from "./result.js";
 
 function document(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -574,6 +579,42 @@ describe("parseEngineResult", () => {
       document({ warnings: [{ type: "context_truncated", message: "m", file: "src/a.ts" }] }),
     );
     expect(result.warnings).toEqual([{ type: "context_truncated", file: "src/a.ts" }]);
+  });
+
+  // `subtask_error` is the engine's catch-all for a per-file review that did not finish, and it
+  // covers two failures with opposite answers: a tool-round ceiling reached (give the file more
+  // rounds) and a model call that failed (do not). The engine distinguishes them only in the
+  // message text, which is never carried anywhere — so the class is derived here, once.
+  describe("subtask_error cause", () => {
+    function warningWith(type: string, message: unknown): EngineWarning | undefined {
+      return parseEngineResult(document({ warnings: [{ type, message, file: "src/a.ts" }] }))
+        .warnings[0];
+    }
+
+    it("names tool-budget exhaustion from the engine's own wording", () => {
+      // Verbatim from agent.executeSubtask (v1.8.4).
+      const warning = warningWith("subtask_error", "main_task did not complete before stopping");
+      expect(warning?.cause).toBe("tool_budget");
+    });
+
+    it("classifies any other subtask failure as other, never as tool budget", () => {
+      expect(warningWith("subtask_error", "LLM completion error: 503")?.cause).toBe("other");
+      expect(warningWith("scan_subtask_error", "panic: nil map")?.cause).toBe("other");
+      // A missing message is still a subtask failure — just not one we can name.
+      expect(warningWith("subtask_error", undefined)?.cause).toBe("other");
+    });
+
+    it("leaves every other warning type unclassified rather than guessing at one", () => {
+      expect(
+        warningWith("token_threshold_exceeded", "prompt tokens exceed")?.cause,
+      ).toBeUndefined();
+      expect(warningWith("context_truncated", "m")?.cause).toBeUndefined();
+    });
+
+    it("never carries the engine's message anywhere in the parsed warning", () => {
+      const warning = warningWith("subtask_error", "main_task did not complete: /secret/path");
+      expect(JSON.stringify(warning)).not.toContain("secret");
+    });
   });
 });
 

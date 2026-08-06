@@ -73,7 +73,29 @@ export interface EngineFinding {
 export interface EngineWarning {
   readonly type: string;
   readonly file: string;
+  /**
+   * Why a `subtask_error` happened, as a closed-vocabulary class rather than the engine's own
+   * message (2026-08-06).
+   *
+   * `subtask_error` is the engine's catch-all for a per-file review that did not finish, and it
+   * covers two failures that need opposite responses. Tool-budget exhaustion — the loop counting
+   * `MaxToolRequestTimes` down to zero, surfacing as "main_task did not complete before stopping"
+   * — is answered by giving the file more rounds (`MAX_TOOL_ROUNDS_PER_FILE`, run.ts). An LLM
+   * transport error or a per-file timeout is not, and more rounds would only cost more.
+   *
+   * Without this class the two are indistinguishable in every diagnostic we emit, which means a
+   * change to the round ceiling could not be evaluated at all — the whole point of raising it.
+   * The engine's message text itself is never carried anywhere: it is matched against a fixed
+   * pattern here and reduced to a name, the same discipline `model-proxy.ts` applies to 400
+   * bodies.
+   */
+  readonly cause?: WarningCause;
 }
+
+/** Closed vocabulary for `EngineWarning.cause`. `other` means the message matched no known
+ *  pattern — deliberately not "unknown", because the engine DID say something and this adapter
+ *  simply has no name for it yet. */
+export type WarningCause = "tool_budget" | "other";
 
 export interface CoverageEntry {
   readonly path: string;
@@ -389,15 +411,35 @@ function unwrapEnvelopeContent(content: string, field: string): UnwrappedEnvelop
   };
 }
 
+/**
+ * The one message this adapter recognises, matched against the pinned engine's own wording.
+ *
+ * `agent.executeSubtask` (v1.8.4) constructs it verbatim when `RunPerFile` returns without the
+ * model having called `task_done`, which happens exactly when the tool-round counter reaches zero.
+ * Matched loosely (case-insensitive, on the distinctive phrase) rather than by equality, so a
+ * reworded engine release degrades to `other` — an unmatched cause, never a wrong one.
+ */
+const TOOL_BUDGET_MESSAGE = /main_task did not complete/i;
+
+/** The class of a `subtask_error`, from the engine's own message. Never carries the message. */
+function classifyWarning(type: string, message: unknown): WarningCause | undefined {
+  if (type !== "subtask_error" && type !== "scan_subtask_error") return undefined;
+  if (typeof message !== "string") return "other";
+  return TOOL_BUDGET_MESSAGE.test(message) ? "tool_budget" : "other";
+}
+
 function parseWarnings(value: unknown, field: string): EngineWarning[] {
   if (value === undefined || value === null) return [];
   return asArray(value, field, LIMITS.maxWarnings).map((entry, i) => {
     const scope = `${field}[${String(i)}]`;
     const object = asObject(entry, scope);
+    const type = asString(object.type, `${scope}.type`, 200);
+    const cause = classifyWarning(type, object.message);
     return {
-      type: asString(object.type, `${scope}.type`, 200),
+      type,
       // Not a validated repository path: the engine also reports warnings without a file.
       file: typeof object.file === "string" ? object.file.slice(0, 1024) : "",
+      ...(cause === undefined ? {} : { cause }),
     };
   });
 }
