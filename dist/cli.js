@@ -1,4 +1,4 @@
-// Keiko for Quality CLI 0.18.0 — generated bundle, do not edit.
+// Keiko for Quality CLI 0.19.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/cli.ts
@@ -1339,13 +1339,14 @@ var REASON_CODES = [
   // above so an operator can tell "the model repeats itself within a run" from "a later run
   // repeated an earlier one": they call for different remedies.
   "publish.finding_suppressed_intra_run",
-  // Suppressed as a restatement of a still-open conversation a push marked OUTDATED — the one
-  // shape no other stage here can see, because an outdated thread's line anchor is stale and every
-  // sibling stage matches on location. Its own code rather than reusing `_similar` because it is
-  // the code that answers a specific operator question — "how much of this pull request's comment
-  // volume is one defect re-filed across pushes" — and because it is the only cross-run stage that
-  // decided without a location, which is exactly what someone auditing a false suppression needs to
-  // know first.
+  // Suppressed as a restatement of a still-open conversation the location-matching stages cannot
+  // see: one a push marked OUTDATED (its line anchor is stale), or — since 2026-08-06 — one that
+  // never had an anchor at all (a FILE-level comment, which GitHub can never mark outdated because
+  // there is no hunk to go stale; the code name predates that second shape and stays, because a
+  // rename would orphan every recorded run). Its own code rather than reusing `_similar` because it
+  // is the code that answers a specific operator question — "how much of this pull request's
+  // comment volume is one defect re-filed across pushes" — and because the stage decided without a
+  // location, which is exactly what someone auditing a false suppression needs to know first.
   "publish.finding_suppressed_outdated_recurrence",
   "publish.finding_rejected_sanitization",
   "publish.finding_rejected_placement",
@@ -1593,6 +1594,7 @@ var MENTION_NEUTRALIZE = /(^|[^\w`])(@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\/[A-Za-z0
 var LINK_NEUTRALIZE = /([A-Za-z][A-Za-z0-9+.-]*:\/\/|\bwww\.)\S*/g;
 var URL_TRAILING_PUNCTUATION = /(?<![.,;:!?)\]}'"])[.,;:!?)\]}'"]+$/;
 var GENERIC_HEAD = /[A-Za-z_$][\w$]*</g;
+var COMPARISON_TAIL = /[A-Za-z][\w$]*/y;
 function mentionSpans(masked) {
   const spans = [];
   for (const match of masked.matchAll(MENTION_NEUTRALIZE)) {
@@ -1638,7 +1640,13 @@ function genericSpans(masked) {
     const next = masked.charAt(openAngle + 1);
     if (next === "" || "/!?".includes(next)) continue;
     const end = balancedGenericEnd(masked, openAngle);
-    if (end !== -1) spans.push({ start, end: end + 1 });
+    if (end !== -1) {
+      spans.push({ start, end: end + 1 });
+      continue;
+    }
+    COMPARISON_TAIL.lastIndex = openAngle + 1;
+    const tail = COMPARISON_TAIL.exec(masked);
+    if (tail !== null) spans.push({ start, end: openAngle + 1 + tail[0].length });
   }
   return spans;
 }
@@ -1671,8 +1679,7 @@ function neutralize(body) {
   if (spans.length === 0) return { body, neutralized: 0 };
   return { body: applySpans(body, spans), neutralized: spans.length };
 }
-function hasUnclosedFence(body) {
-  const lines = body.split("\n");
+function firstUnclosedFenceLine(lines) {
   let i = 0;
   while (i < lines.length) {
     const marker = openingFenceMarker(lines[i] ?? "");
@@ -1681,20 +1688,26 @@ function hasUnclosedFence(body) {
       continue;
     }
     const close = closingFenceIndex(lines, i + 1, marker);
-    if (close === -1) return true;
+    if (close === -1) return i;
     i = close + 1;
   }
-  return false;
+  return -1;
 }
 function neutralizeGuardingUnclosedFence(body) {
-  return hasUnclosedFence(body) ? { body, neutralized: 0 } : neutralize(body);
+  const lines = body.split("\n");
+  const opener = firstUnclosedFenceLine(lines);
+  if (opener === -1) return neutralize(body);
+  if (opener === 0) return { body, neutralized: 0 };
+  const boundary = lines.slice(0, opener).reduce((length, line) => length + line.length + 1, 0);
+  const { body: head, neutralized } = neutralize(body.slice(0, boundary));
+  return { body: head + body.slice(boundary), neutralized };
 }
 function isDiffEcho(body) {
   const lines = body.split("\n").filter((line) => line.trim() !== "");
   if (lines.length === 0) return false;
   const everyLineIsDiffShaped = lines.every((line) => /^[+-]\s{2,}\S/.test(line));
   const someLineLooksLikeCode = lines.some(
-    (line) => line.includes(";") || line.includes("(") || line.includes(" = ")
+    (line) => line.includes(";") || /[\w$]\(/.test(line) || line.includes(" = ")
   );
   return everyLineIsDiffShaped && someLineLooksLikeCode;
 }
@@ -2352,6 +2365,15 @@ var CATCH_ALL_RULE = [
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
   "  or termination can recommend a fix that weakens correct code instead of improving it.",
+  "- **before claiming a test's reset, isolation, or fresh-state setup fails to do its job** \u2014 read",
+  "  the suite's own setup first. A reset the file already performs (a module-registry reset in a",
+  "  `beforeEach`, a restored mock, a cleared timer) is part of the behavior under review, and a",
+  "  finding that reasons about module caching or shared state as if that setup were absent is",
+  "  wrong before it starts. A documented framework facility doing exactly what it documents is",
+  "  the default, not a finding: claim the opposite only with evidence from this repository, never",
+  "  from general recollection about how modules are cached. And a proposed fix may only call what",
+  "  exists \u2014 recommending a reset or cleanup helper the module does not export is the loudest",
+  "  sign the claim was never checked against the code it names.",
   "",
   "Two failure modes, and the second is the expensive one. Not looking and staying silent loses one",
   "finding. Not looking and reporting anyway produces something that reads authoritative, costs an",
@@ -3995,6 +4017,12 @@ function linesOverlap(candidate, existing) {
 function isSameFindingAtSameLocation(candidate, thread, identity) {
   return thread.authorLogin === identity && thread.path === candidate.path && linesOverlap(candidate, thread) && bodiesAreSimilar(candidate.body, thread.body);
 }
+function carriesNoAnchor(thread) {
+  return thread.startLine === void 0 && thread.endLine === void 0;
+}
+function isSameFindingOnSamePath(candidate, thread, identity) {
+  return thread.authorLogin === identity && thread.path === candidate.path && recurrenceBodiesMatch(candidate.body, thread.body);
+}
 function findsSimilarOpenConversation(candidate, existing, identity) {
   return existing.some(
     (thread) => !thread.resolved && isSameFindingAtSameLocation(candidate, thread, identity)
@@ -4002,12 +4030,12 @@ function findsSimilarOpenConversation(candidate, existing, identity) {
 }
 function findsDispositionedConversation(candidate, existing, identity) {
   return existing.some(
-    (thread) => thread.resolved && thread.dispositioned && isSameFindingAtSameLocation(candidate, thread, identity)
+    (thread) => thread.resolved && thread.dispositioned && (isSameFindingAtSameLocation(candidate, thread, identity) || carriesNoAnchor(thread) && isSameFindingOnSamePath(candidate, thread, identity))
   );
 }
 function findsOutdatedRecurrence(candidate, existing, identity) {
   return existing.some(
-    (thread) => thread.outdatedOnly === true && thread.authorLogin === identity && thread.path === candidate.path && recurrenceBodiesMatch(candidate.body, thread.body)
+    (thread) => (thread.outdatedOnly === true || !thread.resolved && carriesNoAnchor(thread)) && isSameFindingOnSamePath(candidate, thread, identity)
   );
 }
 function recurrenceBodiesMatch(candidateBody, existingBody) {
