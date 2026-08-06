@@ -224,6 +224,16 @@ function recordModelUsage(
       completion: usage.completion,
       cached: usage.cached,
       cache_key_rejected: usage.cacheKeyRejected,
+      // Always present, even at 0: "no model call was refused" is a fact worth one word, and its
+      // absence is what let Keiko#3002's persisted 400s masquerade as cache-key noise.
+      bad_request_persisted: usage.badRequestPersisted,
+      // Only when a persisted 400's body named them — see `recordBadRequestNumbers`.
+      ...(usage.badRequestContextLimit > 0
+        ? { bad_request_context_limit: usage.badRequestContextLimit }
+        : {}),
+      ...(usage.badRequestRequestedTokens > 0
+        ? { bad_request_requested_tokens: usage.badRequestRequestedTokens }
+        : {}),
     },
   });
 }

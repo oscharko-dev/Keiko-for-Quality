@@ -19,10 +19,40 @@ export type TerminalState = "complete" | "partial" | "failed" | "skipped";
  * The released engine's top-level outcome.
  *
  * Distinct from `terminal_state`, which belongs to the run manifest. v1.8.4 emits only this.
+ *
+ * The full stdout vocabulary of the pinned release (`cmd/opencodereview/output.go`, v1.8.4):
+ * `success` (finished, no warnings), `completed_with_warnings` (finished; every reservation is in
+ * `warnings`), `completed_with_errors` (finished; at least one per-file subtask failed — the failed
+ * paths are in `warnings`, and `files_reviewed` still counts them, because it counts dispatch, not
+ * completion), `budget_exceeded` (the engine's own budget gate stopped dispatch; overrides the
+ * warning statuses), and `skipped` (nothing to review). `failed` appears only on stderr
+ * (`emitFailureUsage`) — a run that died outright writes no parsable stdout result at all, so
+ * parsing it here means the engine itself never claimed it.
+ *
+ * Every value the engine can actually say must be in `RUN_STATUSES`: an unlisted value parses to
+ * `unknown`, and `unknown` settles as an engine failure. That mapping gap is exactly how eight
+ * consecutive runs on oscharko-dev/Keiko#3002 — each one finished, reviewed, and carrying findings
+ * — settled `engine_status_not_success`, discarded their verdicts, and re-paid the full review on
+ * every push (2026-08-06). Same defect class as the budget stop this file's `summary` parsing
+ * exists for: a state the engine reports precisely, collapsed into "not success".
  */
-export type RunStatus = "success" | "skipped" | "failed" | "unknown";
+export type RunStatus =
+  | "success"
+  | "skipped"
+  | "failed"
+  | "completed_with_warnings"
+  | "completed_with_errors"
+  | "budget_exceeded"
+  | "unknown";
 
-const RUN_STATUSES: ReadonlySet<string> = new Set<string>(["success", "skipped", "failed"]);
+const RUN_STATUSES: ReadonlySet<string> = new Set<string>([
+  "success",
+  "skipped",
+  "failed",
+  "completed_with_warnings",
+  "completed_with_errors",
+  "budget_exceeded",
+]);
 
 const TERMINAL_STATES: ReadonlySet<string> = new Set<string>([
   "complete",

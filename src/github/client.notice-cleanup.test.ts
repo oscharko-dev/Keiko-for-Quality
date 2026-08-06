@@ -15,6 +15,7 @@ import { GitHubClient } from "./client.js";
 
 const REF = { owner: "acme", repo: "widget" };
 const IDENTITY = "keiko-for-quality[bot]";
+const CURRENT_HEAD = "1111111111111111111111111111111111111111";
 const NOTICE_BODY = "Keiko for Quality could not complete its review.";
 
 /**
@@ -98,7 +99,13 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    const outcome = await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody);
+    const outcome = await client.resolveSupersededOwnNotices(
+      REF,
+      1,
+      IDENTITY,
+      isNoticeBody,
+      CURRENT_HEAD,
+    );
 
     expect(outcome).toStrictEqual({ attempted: 1, resolved: 1 });
     expect(calls[1]?.query).toContain("resolveReviewThread");
@@ -119,7 +126,13 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    const outcome = await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody);
+    const outcome = await client.resolveSupersededOwnNotices(
+      REF,
+      1,
+      IDENTITY,
+      isNoticeBody,
+      CURRENT_HEAD,
+    );
 
     expect(outcome).toStrictEqual({ attempted: 0, resolved: 0 });
     expect(calls).toHaveLength(1); // the list query only — no mutation was ever attempted
@@ -139,10 +152,91 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+    expect(
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+    ).toStrictEqual({
       attempted: 0,
       resolved: 0,
     });
+  });
+
+  /**
+   * The Keiko#3002 accumulation, pinned (2026-08-06): a notice is a FILE-level comment, GitHub
+   * never marks a file-level thread outdated, and eight of them piled up unresolved on one pull
+   * request. The notice's own `originalCommit` is the supersession fact `isOutdated` cannot carry
+   * for a file-level thread.
+   */
+  it("resolves a file-level notice whose originalCommit is no longer the reviewed head", async () => {
+    const { fetch, calls } = scriptedGraphql([
+      threadsPage([
+        {
+          id: "PRRT_9",
+          isResolved: false,
+          isOutdated: false,
+          comments: {
+            nodes: [
+              {
+                databaseId: 9,
+                author: { login: IDENTITY },
+                body: NOTICE_BODY,
+                originalCommit: { oid: "0000000000000000000000000000000000000000" },
+              },
+            ],
+          },
+        },
+      ]),
+      jsonResponse({
+        data: { resolveReviewThread: { thread: { id: "PRRT_9", isResolved: true } } },
+      }),
+    ]);
+    globalThis.fetch = fetch;
+    const client = new GitHubClient("https://api.example.test", "token");
+
+    const outcome = await client.resolveSupersededOwnNotices(
+      REF,
+      1,
+      IDENTITY,
+      isNoticeBody,
+      CURRENT_HEAD,
+    );
+
+    expect(outcome).toStrictEqual({ attempted: 1, resolved: 1 });
+    expect(calls[1]?.variables).toStrictEqual({ threadId: "PRRT_9" });
+  });
+
+  it("never resolves the notice the current head's own settlement just published", async () => {
+    const { fetch, calls } = scriptedGraphql([
+      threadsPage([
+        {
+          id: "PRRT_10",
+          isResolved: false,
+          isOutdated: false,
+          comments: {
+            nodes: [
+              {
+                databaseId: 10,
+                author: { login: IDENTITY },
+                body: NOTICE_BODY,
+                originalCommit: { oid: CURRENT_HEAD },
+              },
+            ],
+          },
+        },
+      ]),
+    ]);
+    globalThis.fetch = fetch;
+    const client = new GitHubClient("https://api.example.test", "token");
+
+    const outcome = await client.resolveSupersededOwnNotices(
+      REF,
+      1,
+      IDENTITY,
+      isNoticeBody,
+      CURRENT_HEAD,
+    );
+
+    expect(outcome).toStrictEqual({ attempted: 0, resolved: 0 });
+    expect(calls).toHaveLength(1);
   });
 
   /**
@@ -169,7 +263,9 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+    expect(
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+    ).toStrictEqual({
       attempted: 0,
       resolved: 0,
     });
@@ -191,7 +287,9 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+    expect(
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+    ).toStrictEqual({
       attempted: 0,
       resolved: 0,
     });
@@ -219,7 +317,9 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+    expect(
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+    ).toStrictEqual({
       attempted: 1,
       resolved: 1,
     });
@@ -259,7 +359,9 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+    expect(
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+    ).toStrictEqual({
       attempted: 2,
       resolved: 2,
     });
@@ -292,7 +394,9 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     // Two of two were attempted; one of two mutations failed and the other still ran and counted —
     // a per-thread failure must not abandon the rest of the batch, the same containment posture
     // `publisher.ts`'s `executeOne` uses.
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+    expect(
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+    ).toStrictEqual({
       attempted: 2,
       resolved: 1,
     });
@@ -303,7 +407,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     const client = new GitHubClient("https://api.example.test", "token");
 
     await expect(
-      client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody),
+      client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
     ).resolves.toStrictEqual({ attempted: 0, resolved: 0 });
   });
 
@@ -321,7 +425,9 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     globalThis.fetch = fetch;
     const client = new GitHubClient("https://api.example.test", "token");
 
-    expect(await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody)).toStrictEqual({
+    expect(
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+    ).toStrictEqual({
       attempted: 0,
       resolved: 0,
     });

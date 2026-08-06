@@ -571,3 +571,53 @@ describe("real v1.8.4 release output", () => {
     expect(finding?.category).toBe("security");
   });
 });
+
+/**
+ * Captured from a real v1.8.4 review of the oscharko-dev/Keiko#3002 diff (2026-08-06), with
+ * finding bodies and repository paths replaced — the shape, statuses, warnings, and summary are
+ * verbatim. This is the run shape that eight production settlements misread as an engine failure:
+ * a FINISHED review whose reservations live in typed, file-naming warnings.
+ */
+describe("real v1.8.4 completed_with_errors output", () => {
+  const captured = readFileSync(
+    join(import.meta.dirname, "__fixtures__/real-v1.8.4-completed-with-errors.json"),
+    "utf8",
+  );
+
+  it("parses the status as its own value, not as unknown", () => {
+    const result = parseEngineResult(captured);
+    expect(result.status).toBe("completed_with_errors");
+    expect(result.manifestPresent).toBe(false);
+  });
+
+  it("carries every warning's type and file for the settlement to attribute", () => {
+    const result = parseEngineResult(captured);
+    expect(result.warnings).toHaveLength(5);
+    for (const warning of result.warnings) {
+      expect(warning.type).toBe("subtask_error");
+      expect(warning.file).not.toBe("");
+    }
+  });
+
+  it("keeps the findings a finished-with-errors run earned", () => {
+    const result = parseEngineResult(captured);
+    expect(result.findings.length).toBeGreaterThan(0);
+    expect(result.filesReviewed).toBe(33);
+    expect(result.budgetExceeded).toBe(false);
+  });
+});
+
+describe("run status vocabulary", () => {
+  it.each(["completed_with_warnings", "completed_with_errors", "budget_exceeded"] as const)(
+    "parses %s as itself",
+    (status) => {
+      const parsed = parseEngineResult(JSON.stringify({ status, comments: [] }));
+      expect(parsed.status).toBe(status);
+    },
+  );
+
+  it("still folds a value the pinned release cannot say into unknown", () => {
+    const parsed = parseEngineResult(JSON.stringify({ status: "partial", comments: [] }));
+    expect(parsed.status).toBe("unknown");
+  });
+});
