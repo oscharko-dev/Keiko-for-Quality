@@ -1,0 +1,205 @@
+// Pure logic for the consumer-seed release gate (corpus/seed-gate.mjs).
+//
+// Extracted for the same reason arena-lib.mjs and rule-source.mjs exist: the gate's executable
+// is a script with side effects (git worktrees, a child CLI process, real model spend), so the
+// hermetic suite (seed-gate.test.mjs) imports THIS module instead — every decision the gate
+// makes about a seed or a report is a pure function of its inputs and is tested without a model
+// call or a git repository.
+//
+// Vocabulary, once:
+// - A SEED CASE plants one known defect into one real file of a consumer checkout by exact
+//   string replacement (`find` → `replace`). Exactness is the calibration contract: when the
+//   consumer refactors the file and `find` no longer matches exactly once, the gate must fail
+//   loudly as "seed stale — recalibrate", never guess a nearby location.
+// - An ATTEMPT is one full CLI review of that seeded commit, evaluated against the local-report
+//   wire contract (docs/local-report-schema.md).
+// - A case PASSES when any attempt settles `complete` and carries at least one finding in the
+//   seeded file. Line proximity is measured and reported (`lineAnchored`) but does not gate:
+//   the file is the recall claim, the anchor is a quality metric with its own drift sources.
+//   An `incomplete` attempt never counts as found, even when the seeded finding is present in
+//   its report — incomplete-never-clean is this repository's settlement invariant, and a
+//   release gate must hold the whole pipeline to it, not just the finder.
+
+/** The only report schema this gate understands — check before reading anything else. */
+export const LOCAL_REPORT_SCHEMA = "keiko-for-quality.local-report/v1";
+
+/** Findings within this many lines of the seeded region still count as line-anchored. */
+export const LINE_SLACK_DEFAULT = 5;
+
+/**
+ * Validates the whole case set at load time, so a malformed case aborts the gate (and fails the
+ * hermetic suite) before any money is spent. Throws on the first violation; returns the cases
+ * unchanged so callers can use it as a pass-through.
+ */
+export function assertSeedCaseShape(cases) {
+  if (!Array.isArray(cases) || cases.length === 0) {
+    throw new Error("seed cases: expected a non-empty array");
+  }
+  const seen = new Set();
+  for (const seedCase of cases) {
+    const id = seedCase.id;
+    if (typeof id !== "string" || id === "") throw new Error("seed cases: every case needs an id");
+    if (seen.has(id)) throw new Error(`seed cases: duplicate id ${id}`);
+    seen.add(id);
+    for (const field of ["file", "find", "replace", "rationale"]) {
+      if (typeof seedCase[field] !== "string" || seedCase[field] === "") {
+        throw new Error(`seed case ${id}: ${field} must be a non-empty string`);
+      }
+    }
+    if (seedCase.find === seedCase.replace) {
+      throw new Error(`seed case ${id}: find and replace are identical — no defect is planted`);
+    }
+    if (seedCase.tier !== 1 && seedCase.tier !== 2) {
+      throw new Error(`seed case ${id}: tier must be 1 (blatant) or 2 (subtle)`);
+    }
+    if (typeof seedCase.required !== "boolean") {
+      throw new Error(`seed case ${id}: required must be an explicit boolean`);
+    }
+  }
+  return cases;
+}
+
+/** 1-based line number of the character at `index` in `content`. */
+function lineOfIndex(content, index) {
+  let line = 1;
+  for (let i = 0; i < index; i += 1) if (content.charCodeAt(i) === 10) line += 1;
+  return line;
+}
+
+/**
+ * Applies one seed case to file content. Returns `{ ok: true, content, seedStartLine,
+ * seedEndLine }` with 1-based, inclusive lines describing where the replacement sits in the NEW
+ * content, or `{ ok: false, reason }` when the seed no longer applies. Zero and multiple matches
+ * are both refusals: a seed that matches twice would plant an ambiguous defect, and reporting
+ * which situation occurred is what makes recalibration a lookup instead of an investigation.
+ */
+export function applySeed(content, seedCase) {
+  const first = content.indexOf(seedCase.find);
+  if (first === -1) {
+    return { ok: false, reason: `seed stale — find text not present in ${seedCase.file}` };
+  }
+  if (content.indexOf(seedCase.find, first + 1) !== -1) {
+    return { ok: false, reason: `seed ambiguous — find text matches twice in ${seedCase.file}` };
+  }
+  const seeded =
+    content.slice(0, first) + seedCase.replace + content.slice(first + seedCase.find.length);
+  const seedStartLine = lineOfIndex(seeded, first);
+  // Anchor the expectation to the replacement's own extent; an empty replacement (pure deletion)
+  // still anchors to the line the removed text used to start on.
+  const replacementLines = seedCase.replace === "" ? 1 : seedCase.replace.split("\n").length;
+  return {
+    ok: true,
+    content: seeded,
+    seedStartLine,
+    seedEndLine: seedStartLine + replacementLines - 1,
+  };
+}
+
+/** True when the finding's line range overlaps the seeded range widened by `slack` on each side. */
+function overlapsSeed(finding, seedRange, slack) {
+  if (finding.startLine === null || finding.endLine === null) return false;
+  return (
+    finding.startLine <= seedRange.seedEndLine + slack &&
+    finding.endLine >= seedRange.seedStartLine - slack
+  );
+}
+
+/**
+ * Grades one CLI report against one seed case. Pure: the report is the parsed `--format json`
+ * output, `seedRange` comes from `applySeed`. Throws on a schema this gate does not understand —
+ * grading an unknown wire format would be a measurement of nothing.
+ */
+export function evaluateAttempt(report, seedCase, seedRange, slack = LINE_SLACK_DEFAULT) {
+  if (report.schema !== LOCAL_REPORT_SCHEMA) {
+    throw new Error(`unexpected report schema: ${String(report.schema)}`);
+  }
+  const outcome = report.settlement.outcome;
+  const fileFindings = report.findings.filter((finding) => finding.path === seedCase.file);
+  return {
+    outcome,
+    found: outcome === "complete" && fileFindings.length > 0,
+    lineAnchored: fileFindings.some((finding) => overlapsSeed(finding, seedRange, slack)),
+    fileFindingCount: fileFindings.length,
+    noiseCount: report.findings.length - fileFindings.length,
+    spendTotal: report.spend.total,
+  };
+}
+
+/**
+ * Settles one case from its attempts, in order. `passed` is "any attempt found it"; the
+ * distinction between `missed` (at least one attempt completed, none carried the finding) and
+ * `never-complete` (no attempt completed at all) survives into the summary because the two red
+ * verdicts demand different responses — recalibrate the case versus debug the pipeline.
+ */
+export function settleCase(seedCase, attempts) {
+  const passed = attempts.some((attempt) => attempt.found);
+  const anyComplete = attempts.some((attempt) => attempt.outcome === "complete");
+  const status = passed ? "passed" : anyComplete ? "missed" : "never-complete";
+  return {
+    id: seedCase.id,
+    tier: seedCase.tier,
+    required: seedCase.required,
+    status,
+    lineAnchored: attempts.some((attempt) => attempt.found && attempt.lineAnchored),
+    attempts,
+    spendTotal: attempts.reduce((sum, attempt) => sum + attempt.spendTotal, 0),
+  };
+}
+
+/**
+ * The gate verdict: green means every REQUIRED case passed. Non-required cases are measured and
+ * reported — they exist so a rotating case can stay visible without holding releases hostage —
+ * but they never decide the exit code.
+ */
+export function summarizeGate(caseResults) {
+  const requiredFailed = caseResults
+    .filter((result) => result.required && result.status !== "passed")
+    .map((result) => result.id);
+  const advisoryFailed = caseResults
+    .filter((result) => !result.required && result.status !== "passed")
+    .map((result) => result.id);
+  return {
+    green: requiredFailed.length === 0,
+    requiredFailed,
+    advisoryFailed,
+    spendTotal: caseResults.reduce((sum, result) => sum + result.spendTotal, 0),
+  };
+}
+
+/**
+ * Renders the evidence file for a gate run — a plain, honest record in the spirit of
+ * corpus/evidence/qualification-*.md, deliberately NOT that format: qualification evidence has
+ * its own shape contract (corpus/evidence-shape.mjs), and this gate must never masquerade as a
+ * corpus qualification.
+ */
+export function renderEvidence({ dateIso, gateVersion, model, base, caseResults, summary }) {
+  const lines = [
+    `# Consumer-seed gate — ${dateIso}`,
+    "",
+    `- Reviewer under test: keiko-for-quality ${gateVersion}`,
+    `- Model: ${model}`,
+    `- Base: ${base}`,
+    `- Verdict: ${summary.green ? "GREEN" : "RED"} (required failures: ${
+      summary.requiredFailed.length === 0 ? "none" : summary.requiredFailed.join(", ")
+    })`,
+    `- Total spend (tokens): ${String(summary.spendTotal)}`,
+    "",
+  ];
+  for (const result of caseResults) {
+    lines.push(
+      `## ${result.id} (tier ${String(result.tier)}, ${result.required ? "required" : "advisory"})`,
+      "",
+      `- Status: ${result.status}${result.status === "passed" && !result.lineAnchored ? " (file-level only — no attempt anchored near the seeded lines)" : ""}`,
+    );
+    result.attempts.forEach((attempt, index) => {
+      lines.push(
+        `- Attempt ${String(index + 1)}: outcome ${attempt.outcome}, ` +
+          `${String(attempt.fileFindingCount)} finding(s) in the seeded file` +
+          `${attempt.lineAnchored ? " (line-anchored)" : ""}, ` +
+          `noise ${String(attempt.noiseCount)}, spend ${String(attempt.spendTotal)}`,
+      );
+    });
+    lines.push("");
+  }
+  return lines.join("\n");
+}

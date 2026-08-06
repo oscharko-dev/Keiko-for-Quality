@@ -21,14 +21,16 @@ deliberately separate, not-yet-scoped decision, left alone so the qualification 
 release keeps the same measurement basis it was recorded under (see `corpus/run.mjs`'s own header
 comment).
 
-## Two commands spend real money
+## Three commands spend real money
 
-`npm run corpus` and `npm run corpus:real` call a real model over a real endpoint — the second one
-against however many commits you point it at, and its own header comment records a real multi-file
-commit running to several hundred thousand tokens. Neither is part of `verify` for that reason.
-Do not run either without the user's explicit go-ahead, and do not reach for one to "double check"
-an ordinary change — the deterministic half of the corpus (inventory, placement, sanitization,
-settlement) already runs under `npm test`.
+`npm run corpus`, `npm run corpus:real`, and `npm run corpus:seed` call a real model over a real
+endpoint — `corpus:real` against however many commits you point it at (its own header comment
+records a real multi-file commit running to several hundred thousand tokens), `corpus:seed` once
+per attempt per seed case against a consumer checkout. None is part of `verify` for that reason.
+Do not run any of them without the user's explicit go-ahead, and do not reach for one to "double
+check" an ordinary change — the deterministic half of the corpus (inventory, placement,
+sanitization, settlement) already runs under `npm test`, and the seed gate's own grading logic is
+hermetically covered by `corpus/seed-gate.test.mjs`.
 
 The free half of the corpus is inside `verify`: `test:corpus` runs the hermetic `corpus/*.test.mjs`
 suites under `node --test`, in the chain between `npm test` and `build`, so a red corpus test fails
@@ -124,8 +126,12 @@ with the source that produced it. This exact miss has already cost a CI round in
   the required checks are green and every conversation is resolved.
 - **`main` is the release line.** It advances only through a release pull request carrying `dev`'s
   tree — version bump, the README quickstart's `# vX.Y.Z` comment moved with it, regenerated
-  `dist/index.js`, and a fresh qualification-corpus run recorded in the PR — and every merge to
-  `main` is tagged `vX.Y.Z`. Consumers pin full tag SHAs, so `main` is the audit trail ("every
+  `dist/index.js`, a fresh qualification-corpus run recorded in the PR, and a GREEN consumer-seed
+  gate (`npm run corpus:seed -- --repo <consumer-checkout>`, evidence in
+  `corpus/evidence/seed-gate-*.md`) run with the release candidate's own tree — and every merge to
+  `main` is tagged `vX.Y.Z`. The seed gate exists because the corpus measures synthetic fixtures;
+  the gate proves the shipping reviewer still finds a planted defect in the consumer's real code,
+  through the real CLI surface. No release without it. Consumers pin full tag SHAs, so `main` is the audit trail ("every
   commit is a qualified release"), not a consumer surface. From the second release
   onward that pull request comes from a `release/vX.Y.Z` branch cut from `main`, not from `dev`
   directly: each release squash leaves a commit on `main` whose content already exists in `dev`'s
