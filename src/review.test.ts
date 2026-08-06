@@ -1425,17 +1425,21 @@ describe("performReview: review-cache memoization end to end", () => {
     });
 
     /**
-     * The Keiko#3002 cost fix (2026-08-06): a FINISHED first attempt is settled on, never re-run.
-     * Its reservations are deterministic facts about the change's content — measured in
-     * production, every resume re-dispatched ~all files for ~0.76M tokens and reproduced the
-     * identical failure set — so the only thing a second dispatch buys is the same answer twice.
+     * The Keiko#3002 cost fix, corrected on 2026-08-06 by Keiko#3011.
+     *
+     * "A finished first attempt is settled on, never re-run" was measured against a FULL
+     * re-dispatch (~all files, ~0.76M tokens, identical failures reproduced) and generalised one
+     * step too far. When the engine NAMES its casualties, the gap has an identity, and
+     * re-dispatching only those paths is a different trade entirely: on Keiko#3011 two files out
+     * of nineteen sent a 1.6M-token review to `incomplete` because nothing retried them.
+     *
+     * The three tests below pin the corrected rule from both ends — the minority gap is retried,
+     * the broad failure is still refused, and a successful retry actually closes the settlement.
      */
-    it("skips the resume when the first attempt finished with per-file errors, and settles the gap", async () => {
-      const engineDigest = requireEngineDigest();
-      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      const finished = JSON.stringify({
+    function finishedWithFailures(failedPaths: readonly string[], filesReviewed: number): string {
+      return JSON.stringify({
         status: "completed_with_errors",
-        summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+        summary: { files_reviewed: filesReviewed, total_tokens: 60_000, budget_exceeded: false },
         comments: [
           {
             path: "src/a.ts",
@@ -1446,23 +1450,195 @@ describe("performReview: review-cache memoization end to end", () => {
             category: "bug",
           },
         ],
-        warnings: [
-          { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
-        ],
+        warnings: failedPaths.map((file) => ({
+          type: "subtask_error",
+          file,
+          message: "main_task did not complete",
+        })),
       });
-      runEngineMock.mockResolvedValueOnce({ stdout: finished, ruleDigest: engineDigest });
+    }
+
+    it("retries ONLY the paths a finished run named as failed, instead of settling the gap unreviewed", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // One of two reviewable paths failed: a minority gap with a known identity.
+      runEngineMock.mockResolvedValueOnce({
+        stdout: finishedWithFailures(["src/b.ts"], 2),
+        ruleDigest: engineDigest,
+      });
+      // The retry still cannot finish it — the gap stands, but it was paid for once, not never.
+      runEngineMock.mockResolvedValueOnce({
+        stdout: finishedWithFailures(["src/b.ts"], 1),
+        ruleDigest: engineDigest,
+      });
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      // The second dispatch is aimed, not repeated: everything the first attempt did NOT lose is
+      // excluded from it. Without this the retry would re-buy the whole review — the exact cost
+      // the blanket skip was introduced to avoid.
+      const second = runEngineMock.mock.calls[1]?.[0] as {
+        mechanicallyCleanPaths: readonly string[];
+      };
+      expect(second.mechanicallyCleanPaths).toContain("src/a.ts");
+      expect(second.mechanicallyCleanPaths).not.toContain("src/b.ts");
+
+      const codes = diagnostics.drain().map((record) => record.code);
+      expect(codes).toContain("engine.resumed_gap_targeted");
+      expect(codes).not.toContain("engine.resume_skipped_run_completed");
+      expect(report.outcome).toBe("incomplete");
+      expect(report.reason).toBe("settlement.incomplete.coverage_gap");
+    });
+
+    it("settles complete when the targeted retry closes the gap", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // Deliberately finding-free on both attempts: this test is about the SETTLEMENT the retry
+      // produces, and a published finding would drag the mocked publication layer's own outcome
+      // (`settlement.incomplete.publication_degraded`) into an assertion that is not about it.
+      runEngineMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          status: "completed_with_errors",
+          summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+          comments: [],
+          warnings: [
+            { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+          ],
+        }),
+        ruleDigest: engineDigest,
+      });
+      // The retry reviews the one path it was aimed at, and reports no casualties.
+      runEngineMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          status: "success",
+          summary: { files_reviewed: 1, total_tokens: 20_000, budget_exceeded: false },
+          comments: [],
+          warnings: [],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      // This is the whole point of the change: a review that used to be permanently incomplete
+      // over a minority of named files now finishes.
+      expect(report.reason).toBeUndefined();
+      expect(report.outcome).toBe("complete");
+      expect(diagnostics.drain().map((r) => r.code)).toContain("engine.resumed_gap_targeted");
+    });
+
+    it("prices a targeted round from the gap it dispatches, not from the first attempt's leftovers", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // The Keiko#3008 shape (2026-08-06): the first attempt spends nearly the whole allotment,
+      // so the old floor-fraction handed its retry a budget sized to what was LEFT rather than to
+      // the work it had to do. One file to review must get one file's worth of headroom.
+      runEngineMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          status: "completed_with_errors",
+          // Most of the allotment gone, yet nowhere near the consumer's own 2M ceiling — exactly
+          // the shape where the old floor-fraction shrank the retry as the review grew.
+          summary: { files_reviewed: 2, total_tokens: 900_000, budget_exceeded: false },
+          comments: [],
+          warnings: [
+            { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+          ],
+        }),
+        ruleDigest: engineDigest,
+      });
+      runEngineMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          status: "success",
+          summary: { files_reviewed: 1, total_tokens: 50_000, budget_exceeded: false },
+          comments: [],
+          warnings: [],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      await performReview(baseRequest(undefined), createSilentDiagnostics());
+
+      const second = runEngineMock.mock.calls[1]?.[0] as { allottedBudget: number };
+      // One file at PER_FILE_TOKENS x ALLOTMENT_MARGIN — not a fraction of a nearly-spent
+      // allotment, which is what produced the 399k-for-four-files round that threw.
+      expect(second.allottedBudget).toBe(130_000);
+    });
+
+    it("never lets a targeted round outspend what the consumer's ceiling has left", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // 1.9M of the 2M ceiling already spent: the round is worth 130k and may have 100k. Pricing
+      // by the gap must never turn a stop-loss into a blank cheque.
+      runEngineMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          status: "completed_with_errors",
+          summary: { files_reviewed: 2, total_tokens: 1_900_000, budget_exceeded: false },
+          comments: [],
+          warnings: [
+            { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+          ],
+        }),
+        ruleDigest: engineDigest,
+      });
+      runEngineMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          status: "success",
+          summary: { files_reviewed: 1, total_tokens: 10_000, budget_exceeded: false },
+          comments: [],
+          warnings: [],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      await performReview(baseRequest(undefined), createSilentDiagnostics());
+
+      const second = runEngineMock.mock.calls[1]?.[0] as { allottedBudget: number };
+      expect(second.allottedBudget).toBe(100_000);
+    });
+
+    it("keeps retrying while the gap shrinks, and stops the moment it does not", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // Round 0 loses one of two paths; round 1 returns the SAME casualty. That is the
+      // deterministic per-file failure, recognised one round later — the loop must stop there
+      // rather than buying two more rounds of the identical answer.
+      runEngineMock.mockResolvedValue({
+        stdout: finishedWithFailures(["src/b.ts"], 2),
+        ruleDigest: engineDigest,
+      });
+
+      const diagnostics = createSilentDiagnostics();
+      await performReview(baseRequest(undefined), diagnostics);
+
+      // First dispatch plus exactly one targeted round — never the cap of three.
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      const codes = diagnostics.drain().map((record) => record.code);
+      expect(codes).toContain("engine.resume_gap_not_shrinking");
+    });
+
+    it("still refuses a wholesale retry when the failures are not a minority", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // Both reviewable paths failed. Retrying is the full re-dispatch the Keiko#3002 measurement
+      // priced at ~0.76M tokens for the same answer — the blanket refusal still governs here.
+      runEngineMock.mockResolvedValueOnce({
+        stdout: finishedWithFailures(["src/a.ts", "src/b.ts"], 2),
+        ruleDigest: engineDigest,
+      });
 
       const diagnostics = createSilentDiagnostics();
       const report = await performReview(baseRequest(undefined), diagnostics);
 
       expect(runEngineMock).toHaveBeenCalledTimes(1);
       expect(report.outcome).toBe("incomplete");
-      // A coverage gap, not an engine failure: the verdicts survive and the store keeps them.
       expect(report.reason).toBe("settlement.incomplete.coverage_gap");
 
       const codes = diagnostics.drain().map((record) => record.code);
-      expect(codes).not.toContain("engine.resumed_once");
       expect(codes).toContain("engine.resume_skipped_run_completed");
+      expect(codes).not.toContain("engine.resumed_gap_targeted");
       expect(codes).toContain("engine.status.completed_with_errors");
     });
   });

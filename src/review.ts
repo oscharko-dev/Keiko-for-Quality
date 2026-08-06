@@ -36,8 +36,18 @@ import {
   type RunStatus,
 } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
-import { EngineRunError, runEngine, type EngineRunOptions } from "./engine/run.js";
-import { settle, verdictsSurviveIncompleteness, type Settlement } from "./engine/settle.js";
+import {
+  EngineRunError,
+  runEngine,
+  type EngineRunOptions,
+  type EngineRunOutput,
+} from "./engine/run.js";
+import {
+  engineFailurePaths,
+  settle,
+  verdictsSurviveIncompleteness,
+  type Settlement,
+} from "./engine/settle.js";
 import { readTextAtCommit, type GitContext } from "./git/plumbing.js";
 import { runChangePass, type ChangedFile } from "./contracts/change-pass.js";
 import {
@@ -290,6 +300,25 @@ export interface LocalReviewReport {
 }
 
 /**
+ * Reviewable paths an EARLIER engine attempt of this same run already covered, credited to the
+ * settlement but invisible to the report without this (2026-08-06, found by the completion gate on
+ * its first real run).
+ *
+ * `executeEngine` folds these into the set it hands `settle()`, so the settlement's own arithmetic
+ * is right: after a targeted gap resume it compares the second dispatch against the gap alone. But
+ * `dispatchedMinusFailed` deliberately EXCLUDES memoized paths from `coveredPaths` — they were not
+ * covered by the dispatch it is describing — and the report adds back only `memo.hitPaths`, the
+ * review-CACHE hits. A resume-credited path is neither, so it fell through both: a run that
+ * reviewed eighteen of nineteen files reported `reviewed 1`, with a numerator in the resume's frame
+ * and a denominator in the pull request's.
+ *
+ * A mutable set threaded through the run context for the same reason `SpendLedger` is: the fact is
+ * produced deep inside the engine stage and consumed by the report, and passing it back up through
+ * every intermediate signature would be a larger change than the fact deserves.
+ */
+type CreditedPaths = Set<string>;
+
+/**
  * Accumulates one run's real spend across the engine, classification repair, and the publish-time
  * classification audit (v0.12.0).
  *
@@ -340,6 +369,8 @@ interface ReviewRun {
   readonly request: ReviewRequest;
   readonly ledger: SpendLedger;
   readonly diagnostics: Diagnostics;
+  /** See `CreditedPaths` — filled by `executeEngine`, read by the report. */
+  readonly credited: CreditedPaths;
 }
 
 /**
@@ -354,6 +385,8 @@ interface LocalRun {
   readonly request: LocalReviewRequest;
   readonly ledger: SpendLedger;
   readonly diagnostics: Diagnostics;
+  /** See `CreditedPaths` — filled by `executeEngine`, read by the report. */
+  readonly credited: CreditedPaths;
   /** `promptIdentityDigest` — identifies the guidance this run reviewed under. */
   readonly ruleDigest: string;
   /** The pinned engine's version tag (`ENGINE_PIN.version`) this run executes under. */
@@ -880,12 +913,49 @@ function computeEngineBudget(
   return { excluded, allottedBudget };
 }
 
+/**
+ * Books a propagating `EngineRunError`'s wire-counted spend (2026-08-06) — the ONE booking site
+ * for a thrown-and-propagated attempt, which is what stops an incomplete run's report from
+ * saying `spend 0` while `model.usage` counted thousands of real tokens. The absorbed-failure
+ * paths inside `runEngineWithOneResume`/`attemptResume` book their own, so nothing is counted
+ * twice; anything that is not an `EngineRunError` either already booked (`parseBooked`) or never
+ * reached an invocation that could spend.
+ */
+function bookPropagatedEngineFailure(error: unknown, ledger: SpendLedger): void {
+  if (error instanceof EngineRunError) ledger.engine += error.wireTokens ?? 0;
+}
+
+/** The invocation options `executeEngine` hands `runEngineWithOneResume` — pure assembly, split
+ *  out solely for that function's own line budget. */
+function engineInvocationOptions(
+  request: PipelineRequest,
+  inventory: Inventory,
+  binaryPath: string,
+  allottedBudget: number,
+  excluded: readonly string[],
+): EngineRunOptions {
+  return {
+    binaryPath,
+    repositoryPath: request.repositoryPath,
+    pair: inventory.pair,
+    config: request.config,
+    profile: request.profile,
+    guidelines: request.guidelines,
+    env: request.env,
+    pathValue: request.pathValue,
+    ...(request.changeIntent === undefined ? {} : { changeIntent: request.changeIntent }),
+    allottedBudget,
+    mechanicallyCleanPaths: excluded,
+  };
+}
+
 async function executeEngine(
   request: PipelineRequest,
   inventory: Inventory,
   memo: MemoContext,
   ledger: SpendLedger,
   diagnostics: Diagnostics,
+  credited: CreditedPaths,
 ): Promise<Settlement> {
   const workspace = await mkdtemp(join(tmpdir(), "kfq-engine-bin-"));
   try {
@@ -897,22 +967,21 @@ async function executeEngine(
       engineTokens,
       alreadyReviewedPaths,
     } = await runEngineWithOneResume(
-      {
-        binaryPath: engine.binaryPath,
-        repositoryPath: request.repositoryPath,
-        pair: inventory.pair,
-        config: request.config,
-        profile: request.profile,
-        guidelines: request.guidelines,
-        env: request.env,
-        pathValue: request.pathValue,
-        ...(request.changeIntent === undefined ? {} : { changeIntent: request.changeIntent }),
-        allottedBudget,
-        mechanicallyCleanPaths: excluded,
-      },
+      engineInvocationOptions(request, inventory, engine.binaryPath, allottedBudget, excluded),
       diagnostics,
+      ledger,
+      inventory.reviewablePaths,
     );
     ledger.engine += engineTokens;
+    // Findings this adapter refused while keeping the run (see `EngineResult.rejectedFindings`).
+    // Recorded only when non-zero: a zero here is the ordinary case, and a line for it would
+    // bury the one occurrence that matters under nineteen that do not.
+    if (parsed.rejectedFindings > 0) {
+      diagnostics.record("engine.result.findings_rejected", {
+        headSha: inventory.pair.head,
+        counts: { rejected: parsed.rejectedFindings },
+      });
+    }
     const { result: classified, classifyTokens } = await repairEngineFindings(
       parsed,
       request,
@@ -923,11 +992,17 @@ async function executeEngine(
     // its own dispatch — see `ResumeOutcome`'s doc comment) tells `settle()` those paths are
     // covered by the FIRST attempt, not by the returned result's own coverage, exactly the same
     // "covered by other means" contract `memo.hitPaths` already establishes for a cache hit.
+    // Recorded for the report as well as handed to `settle()`: these paths are covered, and a
+    // report that omitted them would understate its own coverage (see `CreditedPaths`).
+    for (const path of alreadyReviewedPaths) credited.add(path);
     const memoizedForSettlement =
       alreadyReviewedPaths.length === 0
         ? memo.hitPaths
         : new Set([...memo.hitPaths, ...alreadyReviewedPaths]);
     return settle(inventory, classified, request.profile, request.config, memoizedForSettlement);
+  } catch (error) {
+    bookPropagatedEngineFailure(error, ledger);
+    throw error;
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -1449,11 +1524,20 @@ const RESUME_FLOOR_FRACTION = 0.25;
  * fund a second opinion with. Resuming anyway would only re-pay for ground the first attempt
  * already covered and settle incomplete regardless — cost with no chance of a different outcome.
  *
- * `engineTokens` (v0.12.0) is the cumulative spend across every attempt that actually ran, not
- * just the one whose result stands: a resumed run paid for both attempts, and `run.spend` has to
- * say so rather than under-report by the size of the discarded first one. A skipped resume is one
- * attempt, so it is exactly that attempt's own total — never a guess at what a second would have
- * cost.
+ * `engineTokens` (v0.12.0) is the cumulative SELF-REPORTED spend across every attempt whose
+ * parsed result stands behind the returned outcome: a resumed run paid for both attempts, and
+ * `run.spend` has to say so rather than under-report by the size of the discarded first one. A
+ * skipped resume is one attempt, so it is exactly that attempt's own total — never a guess at
+ * what a second would have cost.
+ *
+ * Attempts that FAIL never appear in `engineTokens` — a thrown invocation reports no total and a
+ * malformed one's total cannot be trusted — but their cost is real, so it enters the ledger
+ * directly at the failure site instead (2026-08-06), wire-counted by the proxy
+ * (`EngineRunError.wireTokens` / `EngineRunOutput.wireTokens`): the absorbed-first-attempt catch
+ * below, `attemptResume`'s own catch, `parseBooked`, and — for errors that propagate out of this
+ * function entirely — `executeEngine`'s catch. One site per failure shape, so no attempt is ever
+ * counted twice, and an incomplete run's report now carries what it measurably burned instead of
+ * a zero.
  */
 /**
  * `alreadyReviewedPaths` is the fact `executeEngine` needs and this function alone can produce: the
@@ -1525,6 +1609,219 @@ function resumeWorthwhile(status: RunStatus): boolean {
   return status === "failed" || status === "unknown";
 }
 
+/**
+ * Parses an invocation's stdout, booking its wire-counted spend into the ledger when — and only
+ * when — validation refuses the result (2026-08-06). A malformed result is rejected, never
+ * repaired, but the invocation that produced it made real, billable model calls, and its own
+ * `total_tokens` field is exactly what cannot be trusted at that point: the proxy's wire count
+ * (`EngineRunOutput.wireTokens`) is the one measured number left. On the success path the parsed
+ * total flows through `ResumeOutcome.engineTokens` unchanged — this helper books nothing there,
+ * so the qualified success-path accounting keeps its measurement basis.
+ */
+function parseBooked(output: EngineRunOutput, ledger: SpendLedger): EngineResult {
+  try {
+    return parseEngineResult(output.stdout);
+  } catch (error) {
+    ledger.engine += output.wireTokens ?? 0;
+    throw error;
+  }
+}
+
+/**
+ * How much of a finished run may be missing before a targeted resume stops being worth it.
+ *
+ * `resumeWorthwhile`'s blanket refusal was measured on a FULL re-dispatch (Keiko#3002: ~all files
+ * re-reviewed for ~0.76M tokens, identical failures reproduced), and for a broad failure that
+ * measurement still holds — if most of the review fell over, re-dispatching most of it is the
+ * same bad trade under a new name. The trade only inverts when the casualties are a minority the
+ * engine itself named: two files out of nineteen (Keiko#3011) cost a proportional share to retry
+ * and decide whether a 1.6M-token review settles complete or incomplete.
+ */
+const TARGETED_GAP_MAX_FRACTION = 0.5;
+
+/**
+ * How many targeted rounds a finished run may buy before the gap it still reports is accepted.
+ *
+ * Three, and the number comes from a measurement rather than a preference: the completion gate's
+ * first real run showed a nineteen-file review losing two files, one round recovering one, and the
+ * run settling incomplete over the single file that remained. A cap of one leaves exactly that
+ * kind of run permanently unfinishable; an uncapped loop would re-buy a deterministic per-file
+ * failure forever. Each round is bounded twice over anyway — by the shrinking gap it dispatches
+ * and by the shrink check in `settleFinishedRun`, which stops the moment a round stops helping.
+ */
+const TARGETED_GAP_MAX_ROUNDS = 3;
+
+/**
+ * The paths a targeted gap resume should re-dispatch, or `undefined` when this run is not a
+ * candidate for one.
+ *
+ * Three conditions, each a refusal for its own reason: the engine must have NAMED its casualties
+ * (an unnamed gap has nothing to aim at), at least one path must have survived (nothing to credit
+ * otherwise, and a total failure is the broad case `TARGETED_GAP_MAX_FRACTION` defers to), and the
+ * casualties must be a minority of the reviewable set.
+ */
+function targetedGapPaths(
+  result: EngineResult,
+  reviewablePaths: ReadonlySet<string>,
+): ReadonlySet<string> | undefined {
+  if (reviewablePaths.size === 0) return undefined;
+  const failed = new Set<string>();
+  for (const path of engineFailurePaths(result)) {
+    // Only paths this run was actually asked to review: a warning naming a file outside the
+    // reviewable set cannot be closed by re-dispatching it, and crediting the rest against a
+    // phantom would misstate what the first attempt covered.
+    if (reviewablePaths.has(path)) failed.add(path);
+  }
+  if (failed.size === 0 || failed.size >= reviewablePaths.size) return undefined;
+  if (failed.size > reviewablePaths.size * TARGETED_GAP_MAX_FRACTION) return undefined;
+  return failed;
+}
+
+/**
+ * What a GENERAL resume (the `failed`/`unknown` path, not the targeted one) may skip and spend.
+ *
+ * `alreadyReviewedPaths` applies the same bar `memoizablePaths` (engine/settle.ts) uses: a finding
+ * proves the engine opened the file, unless the manifest says that same file's review itself
+ * failed, in which case the finding might be a partial verdict from before the failure and the
+ * path is not safe to skip.
+ */
+function planGeneralResume(
+  parsed: EngineResult,
+  options: EngineRunOptions,
+): { alreadyReviewedPaths: readonly string[]; remaining: number } {
+  return {
+    alreadyReviewedPaths: parsed.findings
+      .filter((f) => !parsed.coverage.failed.some((c) => c.path === f.path))
+      .map((f) => f.path as string),
+    remaining: clamp(
+      options.allottedBudget - parsed.totalTokens,
+      Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION),
+      options.allottedBudget,
+    ),
+  };
+}
+
+/**
+ * What one targeted round may spend — priced from the GAP it dispatches, not from what the first
+ * attempt happened to leave.
+ *
+ * `RESUME_FLOOR_FRACTION` was sized for a resume that re-dispatches the WHOLE review, where "a
+ * fraction of the original allotment" is the right shape. A targeted round dispatches k files, and
+ * pricing it off the first attempt's leftovers gets the arithmetic exactly backwards: the more the
+ * first attempt spent — which is to say, the larger the review — the less its retry gets. Measured
+ * on Keiko#3008 (2026-08-06): twelve files, four lost, the first attempt spent 2.58M, and the round
+ * that had to review four files was handed 399k. It threw, the gap did not shrink, and the review
+ * settled incomplete over a budget that never matched its work.
+ *
+ * Priced instead like any other dispatch of k files — `PER_FILE_TOKENS` with the same
+ * `ALLOTMENT_MARGIN` the whole-review estimate uses — and bounded twice: never below the old floor
+ * (a one-file round still gets real headroom), and never past what the consumer's own ceiling has
+ * left unspent. The second bound is what keeps rounds from turning a stop-loss into a blank cheque.
+ */
+function targetedRoundBudget(gapSize: number, spent: number, options: EngineRunOptions): number {
+  const priced = Math.round(gapSize * PER_FILE_TOKENS * ALLOTMENT_MARGIN);
+  const floor = Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION);
+  const headroom = Math.max(0, options.config.tokenBudget - spent);
+  return clamp(Math.min(priced, headroom), Math.min(floor, headroom), options.config.tokenBudget);
+}
+
+/** What a finished-run decision needs beyond the parsed result itself. */
+interface FinishedRunContext {
+  readonly options: EngineRunOptions;
+  readonly diagnostics: Diagnostics;
+  readonly ledger: SpendLedger;
+  readonly reviewablePaths: ReadonlySet<string>;
+  readonly firstAttemptTokens: number;
+}
+
+/**
+ * Every outcome a non-success first attempt can reach WITHOUT a general resume, or `undefined`
+ * when the caller should fall through to one.
+ *
+ * Two cases, each with its own recorded reason. A budget-exhausted attempt gets no second opinion
+ * at all: a resume cannot review more of a change than the budget allows, it can only re-pay for
+ * what the first one did and settle incomplete anyway. A FINISHED attempt is not resumed
+ * WHOLESALE either (`resumeWorthwhile`, and the Keiko#3002 measurement behind it) — but when it
+ * named its own casualties, those paths alone are worth a second dispatch (`settleFinishedRun`).
+ */
+async function decideAfterFirstAttempt(
+  parsed: EngineResult,
+  context: FinishedRunContext,
+): Promise<ResumeOutcome | undefined> {
+  const { options, diagnostics, firstAttemptTokens } = context;
+  // Its own code rather than a borrowed one: `resumed_once` means a resume ran, and an absent
+  // line would leave an operator unable to tell a run that never needed one from a run that was
+  // denied one — exactly the question a budget-truncated review raises.
+  if (parsed.budgetExceeded) {
+    diagnostics.record("engine.resume_skipped_budget_exceeded", {
+      counts: { spent: firstAttemptTokens, allotted: options.allottedBudget },
+    });
+    return { result: parsed, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
+  }
+  if (!resumeWorthwhile(parsed.status)) return await settleFinishedRun(parsed, context);
+  return undefined;
+}
+
+/**
+ * The two ways a FINISHED first attempt can end: settled as-is, or retried at exactly the paths it
+ * disowned. Everything the first attempt did NOT lose is credited as already reviewed, which is
+ * what keeps the settlement's arithmetic honest — `executeEngine` folds that set into
+ * `memoizedForSettlement`, so `settle()` compares the second dispatch against the gap alone
+ * rather than against the whole inventory. The decision itself lives in `targetedGapPaths`.
+ */
+async function settleFinishedRun(
+  parsed: EngineResult,
+  context: FinishedRunContext,
+): Promise<ResumeOutcome> {
+  const { options, diagnostics, ledger, reviewablePaths, firstAttemptTokens } = context;
+  let standing = parsed;
+  let spent = firstAttemptTokens;
+  let outcome: ResumeOutcome | undefined;
+
+  // Rounds, not a single retry, because one round measurably does not finish the job: on the
+  // completion gate's first real measurement a nineteen-file review lost two files, the targeted
+  // retry recovered ONE, and the run settled incomplete over the single file still missing. Each
+  // round costs only its own shrinking gap, so the second round on one file is a rounding error
+  // against the 1.6M-token review it decides.
+  for (let round = 1; round <= TARGETED_GAP_MAX_ROUNDS; round += 1) {
+    const targeted = targetedGapPaths(standing, reviewablePaths);
+    if (targeted === undefined) break;
+    const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
+    const remaining = targetedRoundBudget(targeted.size, spent, options);
+    diagnostics.record("engine.resumed_gap_targeted", {
+      counts: { round, targeted: targeted.size, covered: covered.length, remaining },
+    });
+    const attempt = await attemptResume(
+      options,
+      diagnostics,
+      remaining,
+      spent,
+      standing,
+      covered,
+      ledger,
+    );
+    // The gap must SHRINK to justify another round. A round that returns the same casualties (or
+    // more) is the deterministic per-file failure `resumeWorthwhile` already refuses to re-buy —
+    // paying for it twice more would reproduce the Keiko#3002 waste at a smaller scale.
+    const before = targeted.size;
+    const after = targetedGapPaths(attempt.result, reviewablePaths)?.size ?? 0;
+    outcome = attempt;
+    spent = attempt.engineTokens;
+    standing = attempt.result;
+    if (after === 0 || after >= before) {
+      if (after > 0 && after >= before) {
+        diagnostics.record("engine.resume_gap_not_shrinking", {
+          counts: { round, before, after },
+        });
+      }
+      break;
+    }
+  }
+
+  if (outcome === undefined) return finishedRunOutcome(diagnostics, parsed, options);
+  return outcome;
+}
+
 /** The denied-resume outcome for a finished first attempt — recorded, then settled on as-is. */
 function finishedRunOutcome(
   diagnostics: Diagnostics,
@@ -1551,6 +1848,7 @@ async function attemptResume(
   firstAttemptTokens: number,
   firstResult: EngineResult | undefined,
   alreadyReviewedPaths: readonly string[],
+  ledger: SpendLedger,
 ): Promise<ResumeOutcome> {
   try {
     // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
@@ -1568,7 +1866,7 @@ async function attemptResume(
       },
       diagnostics,
     );
-    const parsedSecond = parseEngineResult(second.stdout);
+    const parsedSecond = parseBooked(second, ledger);
     recordEngineStatus(diagnostics, parsedSecond, options.pair.head);
     const merged =
       firstResult === undefined
@@ -1587,7 +1885,20 @@ async function attemptResume(
     // are still trustworthy. Rethrown, too, when there is nothing to fall back to: a first attempt
     // that itself threw leaves `firstResult` undefined, and the caller's own handling of that case
     // is unchanged from before this fallback existed.
-    if (!(error instanceof EngineRunError) || firstResult === undefined) throw error;
+    if (!(error instanceof EngineRunError) || firstResult === undefined) {
+      // This throw ends the whole run, and `engineTokens` will never be returned — so the first
+      // attempt's own measured total must be booked HERE or vanish from the ledger entirely. A
+      // propagating `EngineRunError`'s own wire count is deliberately NOT booked here:
+      // `executeEngine`'s catch is that error's one booking site (see there), and a
+      // `ValidationError` already booked its invocation's wire count in `parseBooked`.
+      ledger.engine += firstAttemptTokens;
+      throw error;
+    }
+    // The absorbed failure's wire-counted spend (2026-08-06): this second invocation made real
+    // model calls before failing, its error never propagates (the fallback below stands), so this
+    // is the one place its cost can enter the ledger. `firstAttemptTokens` stays in the returned
+    // `engineTokens`, exactly as before.
+    ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resume_failed", { counts: { spent: firstAttemptTokens } });
     // The returned result is `firstResult` UNCHANGED — its own coverage already accounts for
     // everything IT dispatched, so there is nothing narrower than usual for `settle()` to be told
@@ -1597,66 +1908,62 @@ async function attemptResume(
   }
 }
 
+/**
+ * The four values this function carries across the first attempt, and why each starts where it
+ * does — all four encode the same rule: before an attempt has reported something, this function
+ * claims nothing.
+ *
+ * - `remaining` — what a resume may spend, floored at `RESUME_FLOOR_FRACTION` of THIS review's own
+ *   allotment (see that constant) rather than a whole-review ceiling held across attempts. A
+ *   thrown run reports no token total, so the full allotment stands: nothing measured says it was
+ *   spent.
+ * - `firstAttemptTokens` — the same honesty about spend. A thrown first attempt leaves no parsed
+ *   result behind, so it contributes zero rather than a guess.
+ * - `firstResult` — the first attempt's parsed result, kept so a second-attempt failure or a
+ *   resumed dispatch has something real to fall back to or exclude from. `undefined` means there
+ *   is nothing to fall back to: either no resume was needed (a success returns directly) or the
+ *   first attempt itself threw.
+ * - `alreadyReviewedPaths` — paths a resumed dispatch must skip because the first attempt proved
+ *   it opened them, computed alongside `firstResult` from the same evidence.
+ */
 async function runEngineWithOneResume(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
+  ledger: SpendLedger,
+  reviewablePaths: ReadonlySet<string>,
 ): Promise<ResumeOutcome> {
-  // The resume runs on what the first attempt left, floored at RESUME_FLOOR_FRACTION of THIS
-  // review's own allotment (see that constant's own comment) rather than a literal whole-review
-  // ceiling held across attempts — that claim was never actually true of the old flat floor either.
-  // A thrown run reports no token total, so the full allotment stands there — nothing measured
-  // says it was spent.
+  // See this function's doc comment for what each of these four means before the first attempt
+  // has run, and why every one of them starts at the honest "nothing measured yet" value.
   let remaining = options.allottedBudget;
-  // Same honesty as the allotment above: a thrown first attempt leaves no parsed result behind,
-  // so it contributes nothing measured to the total rather than a guess.
   let firstAttemptTokens = 0;
-  // The first attempt's own parsed result, kept so a second-attempt failure or a resumed dispatch
-  // has something real to fall back to or exclude from — see this function's own doc comment.
-  // `undefined` means there is nothing to fall back to: either no resume is needed (the first
-  // attempt succeeded, which returns directly below) or the first attempt itself threw.
   let firstResult: EngineResult | undefined;
-  // Paths the resumed dispatch must skip because the first attempt already opened them and
-  // produced a finding — computed once, alongside `firstResult`, from the same evidence.
   let alreadyReviewedPaths: readonly string[] = [];
   try {
     const first = await runEngine(options, diagnostics);
-    const parsed = parseEngineResult(first.stdout);
+    const parsed = parseBooked(first, ledger);
     recordEngineStatus(diagnostics, parsed, options.pair.head);
     if (parsed.status === "success") {
       return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
     }
     firstAttemptTokens = parsed.totalTokens;
     firstResult = parsed;
-    // No second opinion for a first attempt that already reports its budget exceeded (see this
-    // function's own doc comment). It gets its own code rather than borrowing one: `resumed_once`
-    // means a resume ran, and an absent line would leave an operator unable to tell a run that
-    // never needed a resume from one that was denied it — which is exactly the question a
-    // budget-truncated review raises.
-    if (parsed.budgetExceeded) {
-      diagnostics.record("engine.resume_skipped_budget_exceeded", {
-        counts: { spent: firstAttemptTokens, allotted: options.allottedBudget },
-      });
-      return { result: parsed, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
-    }
-    // A finished run is not resumed either (2026-08-06) — see `resumeWorthwhile` for the measured
-    // cost of doing so. Settlement decides what the finished result means; this function's only
-    // question is whether a second dispatch could change the answer, and for a deterministic
-    // per-file failure it cannot.
-    if (!resumeWorthwhile(parsed.status)) return finishedRunOutcome(diagnostics, parsed, options);
-    // The same bar `memoizablePaths` (engine/settle.ts) uses: a finding proves the engine opened
-    // the file, unless the manifest says that same file's review itself failed, in which case the
-    // finding might be a partial verdict from before the failure and the path is not safe to skip.
-    alreadyReviewedPaths = parsed.findings
-      .filter((f) => !parsed.coverage.failed.some((c) => c.path === f.path))
-      .map((f) => f.path as string);
-    remaining = clamp(
-      options.allottedBudget - parsed.totalTokens,
-      Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION),
-      options.allottedBudget,
-    );
+    const decided = await decideAfterFirstAttempt(parsed, {
+      options,
+      diagnostics,
+      ledger,
+      reviewablePaths,
+      firstAttemptTokens,
+    });
+    if (decided !== undefined) return decided;
+    ({ alreadyReviewedPaths, remaining } = planGeneralResume(parsed, options));
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   } catch (error) {
     if (!(error instanceof EngineRunError)) throw error;
+    // The absorbed first attempt's wire-counted spend (2026-08-06): this error never propagates —
+    // the resume below IS the recovery — so `executeEngine`'s propagated-error booking never sees
+    // it, and this catch is its one chance to reach the ledger. Nothing self-reported exists to
+    // conflict with: a thrown attempt has no parsed `total_tokens` at all.
+    ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   }
   return attemptResume(
@@ -1666,6 +1973,7 @@ async function runEngineWithOneResume(
     firstAttemptTokens,
     firstResult,
     alreadyReviewedPaths,
+    ledger,
   );
 }
 
@@ -2400,6 +2708,7 @@ async function settleOrReport(
       memo,
       run.ledger,
       run.diagnostics,
+      run.credited,
     );
     run.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
@@ -2519,7 +2828,7 @@ async function performReviewInner(
   ledger: SpendLedger,
 ): Promise<ReviewReport> {
   const started = Date.now();
-  const run: ReviewRun = { request, ledger, diagnostics };
+  const run: ReviewRun = { request, ledger, diagnostics, credited: new Set() };
   diagnostics.record("run.started", { headSha: request.head });
 
   const ctx = gitContext(request);
@@ -2770,6 +3079,7 @@ async function localSettleOrReport(
       memo,
       run.ledger,
       run.diagnostics,
+      run.credited,
     );
     run.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
@@ -2896,8 +3206,8 @@ async function localSettleReport(
 ): Promise<LocalReviewReport> {
   if (settlement.status === "incomplete") {
     const reviewed = verdictsSurviveIncompleteness(settlement.reason)
-      ? settlement.coveredPaths.size + memo.hitPaths.size
-      : memo.hitPaths.size;
+      ? settlement.coveredPaths.size + memo.hitPaths.size + run.credited.size
+      : memo.hitPaths.size + run.credited.size;
     // Same reasoning as `performReviewInner`'s identical branch: the deterministic gates cost no
     // model tokens and depend on nothing the engine settlement decided, so an incomplete run still
     // gets their coverage. Merged into `findings` only, never `fresh`.
@@ -2965,6 +3275,7 @@ export async function performLocalReview(
       diagnostics,
       ruleDigest,
       engineVersion,
+      credited: new Set(),
     });
   } finally {
     // Identical guard to `performReview`'s own `finally` block: a pre-engine incomplete report or an

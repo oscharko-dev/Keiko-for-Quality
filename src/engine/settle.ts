@@ -168,8 +168,13 @@ const SUBTASK_FAILURE_WARNING_TYPES: ReadonlySet<string> = new Set<string>([
  *
  * A warning of a failure type without a `file` contributes nothing here; it stays visible to
  * `unlistedWarnings`, which fails the run closed on anything it cannot attribute.
+ *
+ * Exported (2026-08-06) because the settlement is no longer the only stage that needs this set.
+ * `review.ts` aims its targeted gap resume at exactly these paths, and it must aim at the SAME
+ * set this module settles against — a resume that re-dispatched a different set than the one the
+ * settlement counts would close a gap the settlement never had, or miss the one it did.
  */
-function engineFailurePaths(result: EngineResult): ReadonlySet<string> {
+export function engineFailurePaths(result: EngineResult): ReadonlySet<string> {
   const failed = new Set<string>();
   for (const warning of result.warnings) {
     if (SUBTASK_FAILURE_WARNING_TYPES.has(warning.type) && warning.file !== "") {
