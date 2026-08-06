@@ -1,4 +1,4 @@
-// Keiko for Quality CLI 0.19.1 — generated bundle, do not edit.
+// Keiko for Quality CLI 0.19.2 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/cli.ts
@@ -729,30 +729,40 @@ function parseLine(value, field) {
   return value;
 }
 function parseFindings2(value, field) {
-  if (value === void 0 || value === null) return [];
-  return asArray(value, field, LIMITS.maxFindings).map((entry, i) => {
-    const scope = `${field}[${String(i)}]`;
-    const object = asObject(entry, scope);
-    const start = parseLine(object.start_line, `${scope}.start_line`);
-    const end = parseLine(object.end_line, `${scope}.end_line`);
-    if (end < start) throw new ValidationError(`${scope}.end_line`);
-    const path = repoPath(asString(object.path, `${scope}.path`), `${scope}.path`);
-    const content = asString(object.content, `${scope}.content`, LIMITS.maxBodyChars);
-    const severity = optionalToken2(object.severity);
-    const category = optionalToken2(object.category);
-    const unwrapped = unwrapEnvelopeContent(content, `${scope}.content`);
-    if (unwrapped === void 0) {
-      return { path, content, startLine: start, endLine: end, severity, category };
+  if (value === void 0 || value === null) return { findings: [], rejected: 0 };
+  const findings = [];
+  let rejected = 0;
+  asArray(value, field, LIMITS.maxFindings).forEach((entry, i) => {
+    try {
+      findings.push(parseOneFinding(entry, `${field}[${String(i)}]`));
+    } catch (error) {
+      if (!(error instanceof ValidationError)) throw error;
+      rejected += 1;
     }
-    return {
-      path: unwrapped.path ?? path,
-      content: unwrapped.content,
-      startLine: unwrapped.startLine ?? start,
-      endLine: unwrapped.endLine ?? end,
-      severity: unwrapped.severity ?? severity,
-      category: unwrapped.category ?? category
-    };
   });
+  return { findings, rejected };
+}
+function parseOneFinding(entry, scope) {
+  const object = asObject(entry, scope);
+  const start = parseLine(object.start_line, `${scope}.start_line`);
+  const end = parseLine(object.end_line, `${scope}.end_line`);
+  if (end < start) throw new ValidationError(`${scope}.end_line`);
+  const path = repoPath(asString(object.path, `${scope}.path`), `${scope}.path`);
+  const content = asString(object.content, `${scope}.content`, LIMITS.maxBodyChars);
+  const severity = optionalToken2(object.severity);
+  const category = optionalToken2(object.category);
+  const unwrapped = unwrapEnvelopeContent(content, `${scope}.content`);
+  if (unwrapped === void 0) {
+    return { path, content, startLine: start, endLine: end, severity, category };
+  }
+  return {
+    path: unwrapped.path ?? path,
+    content: unwrapped.content,
+    startLine: unwrapped.startLine ?? start,
+    endLine: unwrapped.endLine ?? end,
+    severity: unwrapped.severity ?? severity,
+    category: unwrapped.category ?? category
+  };
 }
 function optionalToken2(value) {
   if (typeof value !== "string" || value.length === 0 || value.length > 64) return void 0;
@@ -842,6 +852,7 @@ function parseEngineResult(text) {
   const summary = parseSummary(root.summary);
   const rawStatus = root.status;
   const status = typeof rawStatus === "string" && RUN_STATUSES.has(rawStatus) ? rawStatus : "unknown";
+  const comments = parseFindings2(root.comments, "result.comments");
   return {
     manifestPresent,
     status,
@@ -849,10 +860,11 @@ function parseEngineResult(text) {
     schemaVersion: manifestPresent ? asString(manifest.schema_version, "result.manifest.schema_version", 128) : "",
     terminalState: parseTerminalState(manifest.terminal_state),
     coverage: manifestPresent ? parseCoverage(manifest.coverage, "result.manifest.coverage") : { selected: [], completed: [], reused: [], failed: [], waived: [] },
-    findings: parseFindings2(root.comments, "result.comments"),
+    findings: comments.findings,
     warnings: parseWarnings(root.warnings, "result.warnings"),
     totalTokens: summary.totalTokens,
-    budgetExceeded: summary.budgetExceeded
+    budgetExceeded: summary.budgetExceeded,
+    rejectedFindings: comments.rejected
   };
 }
 
@@ -1456,6 +1468,29 @@ var REASON_CODES = [
   // the second attempt was pure re-payment. A finished run settles on what it earned; the gap it
   // reports is the next push's (store-discounted) work, not this run's to re-buy.
   "engine.resume_skipped_run_completed",
+  // The TARGETED resume the rule above used to forbid (2026-08-06, Keiko#3011).
+  //
+  // "Do not resume a finished run" was measured against a FULL re-dispatch and generalised one step
+  // too far. A finished run that names its own casualties — `subtask_error`,
+  // `scan_subtask_error`, `token_threshold_exceeded` all carry the failing `file` — leaves a gap
+  // whose IDENTITY is known, not merely its size. Re-dispatching only those paths is a different
+  // trade entirely from re-buying the whole review: on Keiko#3011, two files out of nineteen
+  // failed and the blanket rule sent a 1.6M-token review to `incomplete` rather than spend a
+  // proportional share on the two that were missing.
+  // `counts.targeted` is how many paths the second dispatch was pointed at, `counts.covered` how
+  // many the first attempt is credited with — their sum is the reviewable set the settlement then
+  // reconciles against.
+  "engine.resumed_gap_targeted",
+  // A targeted round that bought nothing (2026-08-06): the gap it dispatched came back the same
+  // size or larger. That is the deterministic per-file failure `resumeWorthwhile` already refuses
+  // to re-buy, recognised one round later, so the loop stops there rather than paying for it twice
+  // more. `before`/`after` are the gap sizes on either side of the round that gave up.
+  "engine.resume_gap_not_shrinking",
+  // Findings this adapter refused while keeping the run (2026-08-06, Keiko#3011) — see
+  // `EngineResult.rejectedFindings` for the incident. Recorded only when non-zero, and a count
+  // rather than a reason because diagnostics carry no free text: the alternative to this line is
+  // not a better message, it is silently losing findings.
+  "engine.result.findings_rejected",
   // Run-level spend accounting (v0.12.0): one record per engine execution naming what the review
   // actually cost — the engine's own reported total plus the classification side-calls. The parts
   // stay separate because they answer different questions (engine behaviour vs. adapter-added
@@ -2573,8 +2608,14 @@ function contractPairsSection(pairs) {
     ...lines
   ].join("\n");
 }
+var NO_CONVENTIONS = Object.freeze({ nodeNextEsm: false });
+var NODE_NEXT_ESM_FACT = 'This repository\'s own `tsconfig.json` sets `moduleResolution` and `module` to `NodeNext`, and its `package.json` declares `"type": "module"`. Under that combination, a `.js` file extension inside a relative TypeScript import specifier \u2014 for example `from "./foo.js"` inside a `.ts` file \u2014 is the correct, required NodeNext/ESM spelling this project\'s own build already relies on. It is not a defect.';
+function repoConventionsSection(conventions) {
+  if (!conventions.nodeNextEsm) return "";
+  return ["", "## This repository's module conventions", "", NODE_NEXT_ESM_FACT].join("\n");
+}
 var NO_GUIDELINES = Object.freeze({ paths: Object.freeze([]) });
-function buildRuleFile(profile, guidelines = NO_GUIDELINES, mechanicallyClean = []) {
+function buildRuleFile(profile, guidelines = NO_GUIDELINES, mechanicallyClean = [], conventions = NO_CONVENTIONS) {
   const include = [...profile.profile.reviewRelevant];
   if (include.length === 0) {
     throw new TypeError("profile.reviewRelevant must declare at least one pattern");
@@ -2583,7 +2624,7 @@ function buildRuleFile(profile, guidelines = NO_GUIDELINES, mechanicallyClean = 
     rules: [
       {
         path: "**/*",
-        rule: CATCH_ALL_RULE + guidanceSection(guidelines) + pathInstructionsSection(profile.profile.pathInstructions) + contractPairsSection(profile.profile.contractPairs ?? []),
+        rule: CATCH_ALL_RULE + guidanceSection(guidelines) + pathInstructionsSection(profile.profile.pathInstructions) + contractPairsSection(profile.profile.contractPairs ?? []) + repoConventionsSection(conventions),
         // `false` is load-bearing, measured on 2026-08-03. With `true` the engine appends its
         // built-in per-language checklist AFTER this rule — the last text before the model
         // answers, the position it weights most — and that checklist is neither versioned nor
@@ -2879,10 +2920,20 @@ function startModelProxy(options2) {
 // src/engine/run.ts
 var EngineRunError = class extends Error {
   reason;
-  constructor(reason) {
+  /**
+   * What the failed invocation measurably cost on the wire — the loopback proxy's prompt plus
+   * completion counts at the moment of failure (2026-08-06): a run that times out or exits
+   * nonzero may still have made real, billable model calls, and a caller accounting spend has
+   * nothing else to bill them from, because a failed engine never reports a token total of its
+   * own. Absent — not zero — when no proxy counted (the anthropic path, or a spawn that failed
+   * before the proxy existed): "unmeasured" and "free" must stay distinguishable.
+   */
+  wireTokens;
+  constructor(reason, wireTokens) {
     super(reason);
     this.name = "EngineRunError";
     this.reason = reason;
+    if (wireTokens !== void 0) this.wireTokens = wireTokens;
   }
 };
 function engineEnvironment(options2, token, home) {
@@ -2987,6 +3038,11 @@ function failureReason(error) {
   if (!(error instanceof ExecFailure)) return "engine.run.spawn_failed";
   return error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit";
 }
+function proxyWireTokens(proxy) {
+  if (proxy === void 0) return void 0;
+  const usage = proxy.usage();
+  return usage.prompt + usage.completion;
+}
 async function runEngine(options2, diagnostics) {
   const token = readModelToken(options2.config, options2.env);
   if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
@@ -3012,14 +3068,19 @@ async function runEngine(options2, diagnostics) {
       durationMs: Date.now() - started,
       counts: { bytes: result.stdout.byteLength, budget: options2.allottedBudget }
     });
-    return { stdout: result.stdout.toString("utf8"), ruleDigest };
+    const wireTokens = proxyWireTokens(proxy);
+    return {
+      stdout: result.stdout.toString("utf8"),
+      ruleDigest,
+      ...wireTokens === void 0 ? {} : { wireTokens }
+    };
   } catch (error) {
     const reason = failureReason(error);
     diagnostics.record(reason, {
       headSha: options2.pair.head,
       durationMs: Date.now() - started
     });
-    throw new EngineRunError(reason);
+    throw new EngineRunError(reason, proxyWireTokens(proxy));
   } finally {
     recordModelUsage(diagnostics, proxy, options2);
     await proxy?.close();
@@ -4311,6 +4372,21 @@ async function planPublication(context, findings, diagnostics, prefetch) {
 // src/publish/substantiate.ts
 var SUBSTANTIATION_VERDICTS = ["grounded", "vague", "unsupported"];
 var CONSEQUENCE_VERDICTS = ["actionable", "nitpick"];
+var SUBSTANTIATION_STRICTNESS_LEVELS = [
+  "lenient",
+  "default",
+  "strict",
+  "paranoid"
+];
+var STRICTNESS_ENV_VAR = "KFQ_SUBSTANTIATION_STRICTNESS";
+var DEFAULT_STRICTNESS = "default";
+function isSubstantiationStrictness(value) {
+  return SUBSTANTIATION_STRICTNESS_LEVELS.includes(value);
+}
+function resolveSubstantiationStrictness(env = process.env) {
+  const raw = (env[STRICTNESS_ENV_VAR] ?? "").trim().toLowerCase();
+  return isSubstantiationStrictness(raw) ? raw : DEFAULT_STRICTNESS;
+}
 var CIRCUMSTANCE = /(^|[.!?]\s|\*\*\s*)(When|If|Once|After|While|Whenever|Because)\s+[a-z`]|\b(on every (call|run|request|invocation)|for all inputs|on all paths|in every case)\b/imu;
 var LOCATION = /`[A-Za-z_$][\w$.]*`|\b[\w./-]+\.[a-z]{2,4}\b|\bline \d+|:\d+\b/u;
 var DIFF_LINE = /^[+-]\s{2,}\S/u;
@@ -4451,29 +4527,61 @@ function extractFrom(text, vocabulary) {
   const value = matches.at(-1)?.[1];
   return vocabulary.includes(value ?? "") ? value : void 0;
 }
-async function judgeOne(finding, readHunk, deps) {
+function dropsOnUndecidedJudge(strictness) {
+  return strictness === "strict" || strictness === "paranoid";
+}
+function dropsOnUnreadableHunk(strictness) {
+  return strictness === "paranoid";
+}
+function consequenceAxisEnabled(strictness) {
+  return strictness !== "lenient";
+}
+async function judgeOne(finding, readHunk, deps, strictness) {
   const dossier = buildDossier(finding.content);
   if (!needsJudging(dossier)) return { finding, disposition: "kept", tokens: 0 };
   const hunk = readHunk(finding);
-  if (hunk === "") return { finding, disposition: "undecided", tokens: 0 };
+  if (hunk === "") {
+    return {
+      finding: dropsOnUnreadableHunk(strictness) ? void 0 : finding,
+      disposition: "undecided",
+      tokens: 0
+    };
+  }
   const first = await requestText(buildJudgePrompt(finding, hunk, dossier), deps);
   const verdict = extractVerdict(first.text);
-  if (verdict === void 0) return { finding, disposition: "undecided", tokens: first.tokens };
-  if (verdict === "grounded") return await weighConsequence(finding, hunk, deps, first.tokens);
+  if (verdict === void 0) {
+    return {
+      finding: dropsOnUndecidedJudge(strictness) ? void 0 : finding,
+      disposition: "undecided",
+      tokens: first.tokens
+    };
+  }
+  if (verdict === "grounded") {
+    return await weighConsequence(finding, hunk, deps, first.tokens, strictness);
+  }
   if (verdict === "unsupported") {
     return { finding: void 0, disposition: "unsupported", tokens: first.tokens };
   }
-  return await repairVague(finding, hunk, deps, first.tokens);
+  return await repairVague(finding, hunk, deps, first.tokens, strictness);
 }
-async function weighConsequence(finding, hunk, deps, spentSoFar) {
+async function weighConsequence(finding, hunk, deps, spentSoFar, strictness) {
+  if (!consequenceAxisEnabled(strictness)) {
+    return { finding, disposition: "kept", tokens: spentSoFar };
+  }
   const call = await requestText(buildConsequencePrompt(finding, hunk), deps);
   const tokens = spentSoFar + call.tokens;
   const verdict = extractConsequence(call.text);
   if (verdict === "nitpick") return { finding: void 0, disposition: "nitpick", tokens };
-  if (verdict === void 0) return { finding, disposition: "undecided", tokens };
+  if (verdict === void 0) {
+    return {
+      finding: dropsOnUndecidedJudge(strictness) ? void 0 : finding,
+      disposition: "undecided",
+      tokens
+    };
+  }
   return { finding, disposition: "kept", tokens };
 }
-async function repairVague(finding, hunk, deps, spentSoFar) {
+async function repairVague(finding, hunk, deps, spentSoFar, strictness) {
   const rewrite = await requestText(buildRepairPrompt(finding, hunk), deps);
   const tokensAfterRewrite = spentSoFar + rewrite.tokens;
   const rewritten = (rewrite.text ?? "").trim();
@@ -4485,14 +4593,20 @@ async function repairVague(finding, hunk, deps, spentSoFar) {
   const tokens = tokensAfterRewrite + second.tokens;
   const verdict = extractVerdict(second.text);
   if (verdict === "grounded") {
-    const weighed = await weighConsequence(repaired, hunk, deps, tokens);
+    const weighed = await weighConsequence(repaired, hunk, deps, tokens, strictness);
     return weighed.disposition === "kept" ? { ...weighed, disposition: "repaired" } : weighed;
   }
-  if (verdict === void 0) return { finding, disposition: "undecided", tokens };
+  if (verdict === void 0) {
+    return {
+      finding: dropsOnUndecidedJudge(strictness) ? void 0 : finding,
+      disposition: "undecided",
+      tokens
+    };
+  }
   if (verdict === "unsupported") return { finding: void 0, disposition: "unsupported", tokens };
   return { finding: void 0, disposition: "vague", tokens };
 }
-async function substantiate(findings, readHunk, deps) {
+async function substantiate(findings, readHunk, deps, strictness = resolveSubstantiationStrictness()) {
   const kept = [];
   const counts = {
     repaired: 0,
@@ -4503,7 +4617,7 @@ async function substantiate(findings, readHunk, deps) {
   };
   let tokens = 0;
   for (const finding of findings) {
-    const judged = await judgeOne(finding, readHunk, deps);
+    const judged = await judgeOne(finding, readHunk, deps, strictness);
     tokens += judged.tokens;
     if (judged.finding !== void 0) kept.push(judged.finding);
     if (judged.disposition === "repaired") counts.repaired += 1;
@@ -4512,7 +4626,7 @@ async function substantiate(findings, readHunk, deps) {
     if (judged.disposition === "unsupported") counts.droppedUnsupported += 1;
     if (judged.disposition === "nitpick") counts.droppedNitpick += 1;
   }
-  return { findings: kept, ...counts, tokens };
+  return { findings: kept, ...counts, tokens, strictness };
 }
 
 // src/review.ts
@@ -4620,7 +4734,25 @@ function computeEngineBudget(request, inventory, memo) {
   );
   return { excluded, allottedBudget };
 }
-async function executeEngine(request, inventory, memo, ledger, diagnostics) {
+function bookPropagatedEngineFailure(error, ledger) {
+  if (error instanceof EngineRunError) ledger.engine += error.wireTokens ?? 0;
+}
+function engineInvocationOptions(request, inventory, binaryPath, allottedBudget, excluded) {
+  return {
+    binaryPath,
+    repositoryPath: request.repositoryPath,
+    pair: inventory.pair,
+    config: request.config,
+    profile: request.profile,
+    guidelines: request.guidelines,
+    env: request.env,
+    pathValue: request.pathValue,
+    ...request.changeIntent === void 0 ? {} : { changeIntent: request.changeIntent },
+    allottedBudget,
+    mechanicallyCleanPaths: excluded
+  };
+}
+async function executeEngine(request, inventory, memo, ledger, diagnostics, credited) {
   const workspace = await mkdtemp2(join3(tmpdir2(), "kfq-engine-bin-"));
   try {
     const engine = await acquireEngine(workspace, diagnostics);
@@ -4631,30 +4763,30 @@ async function executeEngine(request, inventory, memo, ledger, diagnostics) {
       engineTokens,
       alreadyReviewedPaths
     } = await runEngineWithOneResume(
-      {
-        binaryPath: engine.binaryPath,
-        repositoryPath: request.repositoryPath,
-        pair: inventory.pair,
-        config: request.config,
-        profile: request.profile,
-        guidelines: request.guidelines,
-        env: request.env,
-        pathValue: request.pathValue,
-        ...request.changeIntent === void 0 ? {} : { changeIntent: request.changeIntent },
-        allottedBudget,
-        mechanicallyCleanPaths: excluded
-      },
-      diagnostics
+      engineInvocationOptions(request, inventory, engine.binaryPath, allottedBudget, excluded),
+      diagnostics,
+      ledger,
+      inventory.reviewablePaths
     );
     ledger.engine += engineTokens;
+    if (parsed.rejectedFindings > 0) {
+      diagnostics.record("engine.result.findings_rejected", {
+        headSha: inventory.pair.head,
+        counts: { rejected: parsed.rejectedFindings }
+      });
+    }
     const { result: classified, classifyTokens } = await repairEngineFindings(
       parsed,
       request,
       diagnostics
     );
     ledger.classify += classifyTokens;
+    for (const path of alreadyReviewedPaths) credited.add(path);
     const memoizedForSettlement = alreadyReviewedPaths.length === 0 ? memo.hitPaths : /* @__PURE__ */ new Set([...memo.hitPaths, ...alreadyReviewedPaths]);
     return settle(inventory, classified, request.profile, request.config, memoizedForSettlement);
+  } catch (error) {
+    bookPropagatedEngineFailure(error, ledger);
+    throw error;
   } finally {
     await rm3(workspace, { recursive: true, force: true });
   }
@@ -4874,6 +5006,92 @@ function recordEngineStatus(diagnostics, result, headSha) {
 function resumeWorthwhile(status) {
   return status === "failed" || status === "unknown";
 }
+function parseBooked(output, ledger) {
+  try {
+    return parseEngineResult(output.stdout);
+  } catch (error) {
+    ledger.engine += output.wireTokens ?? 0;
+    throw error;
+  }
+}
+var TARGETED_GAP_MAX_FRACTION = 0.5;
+var TARGETED_GAP_MAX_ROUNDS = 3;
+function targetedGapPaths(result, reviewablePaths) {
+  if (reviewablePaths.size === 0) return void 0;
+  const failed = /* @__PURE__ */ new Set();
+  for (const path of engineFailurePaths(result)) {
+    if (reviewablePaths.has(path)) failed.add(path);
+  }
+  if (failed.size === 0 || failed.size >= reviewablePaths.size) return void 0;
+  if (failed.size > reviewablePaths.size * TARGETED_GAP_MAX_FRACTION) return void 0;
+  return failed;
+}
+function planGeneralResume(parsed, options2) {
+  return {
+    alreadyReviewedPaths: parsed.findings.filter((f) => !parsed.coverage.failed.some((c) => c.path === f.path)).map((f) => f.path),
+    remaining: clamp(
+      options2.allottedBudget - parsed.totalTokens,
+      Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION),
+      options2.allottedBudget
+    )
+  };
+}
+function targetedRoundBudget(gapSize, spent, options2) {
+  const priced = Math.round(gapSize * PER_FILE_TOKENS * ALLOTMENT_MARGIN);
+  const floor = Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION);
+  const headroom = Math.max(0, options2.config.tokenBudget - spent);
+  return clamp(Math.min(priced, headroom), Math.min(floor, headroom), options2.config.tokenBudget);
+}
+async function decideAfterFirstAttempt(parsed, context) {
+  const { options: options2, diagnostics, firstAttemptTokens } = context;
+  if (parsed.budgetExceeded) {
+    diagnostics.record("engine.resume_skipped_budget_exceeded", {
+      counts: { spent: firstAttemptTokens, allotted: options2.allottedBudget }
+    });
+    return { result: parsed, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
+  }
+  if (!resumeWorthwhile(parsed.status)) return await settleFinishedRun(parsed, context);
+  return void 0;
+}
+async function settleFinishedRun(parsed, context) {
+  const { options: options2, diagnostics, ledger, reviewablePaths, firstAttemptTokens } = context;
+  let standing = parsed;
+  let spent = firstAttemptTokens;
+  let outcome;
+  for (let round = 1; round <= TARGETED_GAP_MAX_ROUNDS; round += 1) {
+    const targeted = targetedGapPaths(standing, reviewablePaths);
+    if (targeted === void 0) break;
+    const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
+    const remaining = targetedRoundBudget(targeted.size, spent, options2);
+    diagnostics.record("engine.resumed_gap_targeted", {
+      counts: { round, targeted: targeted.size, covered: covered.length, remaining }
+    });
+    const attempt = await attemptResume(
+      options2,
+      diagnostics,
+      remaining,
+      spent,
+      standing,
+      covered,
+      ledger
+    );
+    const before = targeted.size;
+    const after = targetedGapPaths(attempt.result, reviewablePaths)?.size ?? 0;
+    outcome = attempt;
+    spent = attempt.engineTokens;
+    standing = attempt.result;
+    if (after === 0 || after >= before) {
+      if (after > 0 && after >= before) {
+        diagnostics.record("engine.resume_gap_not_shrinking", {
+          counts: { round, before, after }
+        });
+      }
+      break;
+    }
+  }
+  if (outcome === void 0) return finishedRunOutcome(diagnostics, parsed, options2);
+  return outcome;
+}
 function finishedRunOutcome(diagnostics, parsed, options2) {
   diagnostics.record("engine.resume_skipped_run_completed", {
     headSha: options2.pair.head,
@@ -4881,7 +5099,7 @@ function finishedRunOutcome(diagnostics, parsed, options2) {
   });
   return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
 }
-async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths) {
+async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger) {
   try {
     const second = await runEngine(
       {
@@ -4892,7 +5110,7 @@ async function attemptResume(options2, diagnostics, remaining, firstAttemptToken
       },
       diagnostics
     );
-    const parsedSecond = parseEngineResult(second.stdout);
+    const parsedSecond = parseBooked(second, ledger);
     recordEngineStatus(diagnostics, parsedSecond, options2.pair.head);
     const merged = firstResult === void 0 ? parsedSecond : mergeResumedResult(firstResult, parsedSecond, alreadyReviewedPaths);
     return {
@@ -4901,41 +5119,42 @@ async function attemptResume(options2, diagnostics, remaining, firstAttemptToken
       alreadyReviewedPaths
     };
   } catch (error) {
-    if (!(error instanceof EngineRunError) || firstResult === void 0) throw error;
+    if (!(error instanceof EngineRunError) || firstResult === void 0) {
+      ledger.engine += firstAttemptTokens;
+      throw error;
+    }
+    ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resume_failed", { counts: { spent: firstAttemptTokens } });
     return { result: firstResult, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
   }
 }
-async function runEngineWithOneResume(options2, diagnostics) {
+async function runEngineWithOneResume(options2, diagnostics, ledger, reviewablePaths) {
   let remaining = options2.allottedBudget;
   let firstAttemptTokens = 0;
   let firstResult;
   let alreadyReviewedPaths = [];
   try {
     const first = await runEngine(options2, diagnostics);
-    const parsed = parseEngineResult(first.stdout);
+    const parsed = parseBooked(first, ledger);
     recordEngineStatus(diagnostics, parsed, options2.pair.head);
     if (parsed.status === "success") {
       return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
     }
     firstAttemptTokens = parsed.totalTokens;
     firstResult = parsed;
-    if (parsed.budgetExceeded) {
-      diagnostics.record("engine.resume_skipped_budget_exceeded", {
-        counts: { spent: firstAttemptTokens, allotted: options2.allottedBudget }
-      });
-      return { result: parsed, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
-    }
-    if (!resumeWorthwhile(parsed.status)) return finishedRunOutcome(diagnostics, parsed, options2);
-    alreadyReviewedPaths = parsed.findings.filter((f) => !parsed.coverage.failed.some((c) => c.path === f.path)).map((f) => f.path);
-    remaining = clamp(
-      options2.allottedBudget - parsed.totalTokens,
-      Math.round(options2.allottedBudget * RESUME_FLOOR_FRACTION),
-      options2.allottedBudget
-    );
+    const decided = await decideAfterFirstAttempt(parsed, {
+      options: options2,
+      diagnostics,
+      ledger,
+      reviewablePaths,
+      firstAttemptTokens
+    });
+    if (decided !== void 0) return decided;
+    ({ alreadyReviewedPaths, remaining } = planGeneralResume(parsed, options2));
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   } catch (error) {
     if (!(error instanceof EngineRunError)) throw error;
+    ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   }
   return attemptResume(
@@ -4944,7 +5163,8 @@ async function runEngineWithOneResume(options2, diagnostics) {
     remaining,
     firstAttemptTokens,
     firstResult,
-    alreadyReviewedPaths
+    alreadyReviewedPaths,
+    ledger
   );
 }
 function mergeResumedResult(first, second, excludedPaths) {
@@ -5208,7 +5428,8 @@ async function localSettleOrReport(run2, inventory, memo) {
       inventory,
       memo,
       run2.ledger,
-      run2.diagnostics
+      run2.diagnostics,
+      run2.credited
     );
     run2.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
@@ -5290,7 +5511,7 @@ async function localResolveInventory(run2) {
 }
 async function localSettleReport(run2, inventory, settlement, memo, started) {
   if (settlement.status === "incomplete") {
-    const reviewed = verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths.size + memo.hitPaths.size : memo.hitPaths.size;
+    const reviewed = verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths.size + memo.hitPaths.size + run2.credited.size : memo.hitPaths.size + run2.credited.size;
     const gate = await collectGateFindings(run2.request, inventory, run2.diagnostics);
     return localIncompleteReport(
       run2,
@@ -5332,7 +5553,8 @@ async function performLocalReview(request, diagnostics) {
       ledger,
       diagnostics,
       ruleDigest,
-      engineVersion
+      engineVersion,
+      credited: /* @__PURE__ */ new Set()
     });
   } finally {
     if (ledger.engine > 0 || ledger.classify > 0) {

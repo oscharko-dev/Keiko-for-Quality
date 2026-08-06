@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { ValidationError } from "../core/brands.js";
-import { SUPPORTED_MANIFEST_SCHEMA, parseEngineResult } from "./result.js";
+import { SUPPORTED_MANIFEST_SCHEMA, parseEngineResult, type EngineResult } from "./result.js";
 
 function document(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -99,40 +99,100 @@ describe("parseEngineResult", () => {
     expect(() => parseEngineResult("")).toThrow(ValidationError);
   });
 
-  describe("finding validation", () => {
+  // Every case below pairs the malformed finding with a healthy one, and asserts BOTH halves of
+  // the 2026-08-06 fix (Keiko#3011): the malformed finding never becomes a finding, and it never
+  // takes its neighbours — or the nineteen-file, 1.76M-token review around them — down with it.
+  // Asserting only the rejection would pass just as well under the old all-or-nothing parser,
+  // which is exactly how this defect survived.
+  describe("finding validation: refuse the element, keep the run", () => {
+    const HEALTHY = {
+      path: "src/a.ts",
+      content: "This leaks the handle on the error path.",
+      start_line: 10,
+      end_line: 12,
+    };
+
+    function parseWithMalformed(malformed: Record<string, unknown>): EngineResult {
+      return parseEngineResult(document({ comments: [malformed, HEALTHY] }));
+    }
+
     it("re-validates the path rather than trusting the engine echoed it", () => {
-      const doc = document({
-        comments: [
-          { path: "../../etc/passwd", content: "x".repeat(20), start_line: 1, end_line: 1 },
-        ],
+      const result = parseWithMalformed({
+        path: "../../etc/passwd",
+        content: "x".repeat(20),
+        start_line: 1,
+        end_line: 1,
       });
-      expect(() => parseEngineResult(doc)).toThrow(ValidationError);
+      // The traversal path is gone, not merely unpublished — nothing downstream can address it.
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0]?.path).toBe("src/a.ts");
+      expect(result.rejectedFindings).toBe(1);
     });
 
-    it("rejects an inverted line range", () => {
-      const doc = document({
-        comments: [{ path: "src/a.ts", content: "x".repeat(20), start_line: 9, end_line: 3 }],
+    it("rejects an inverted line range without discarding the healthy finding", () => {
+      const result = parseWithMalformed({
+        path: "src/a.ts",
+        content: "x".repeat(20),
+        start_line: 9,
+        end_line: 3,
       });
-      expect(() => parseEngineResult(doc)).toThrow(ValidationError);
+      expect(result.findings).toHaveLength(1);
+      expect(result.findings[0]?.startLine).toBe(10);
+      expect(result.rejectedFindings).toBe(1);
     });
 
-    it("rejects a negative line number", () => {
-      const doc = document({
-        comments: [{ path: "src/a.ts", content: "x".repeat(20), start_line: -1, end_line: 1 }],
+    it("rejects a negative line number without discarding the healthy finding", () => {
+      const result = parseWithMalformed({
+        path: "src/a.ts",
+        content: "x".repeat(20),
+        start_line: -1,
+        end_line: 1,
       });
-      expect(() => parseEngineResult(doc)).toThrow(ValidationError);
+      expect(result.findings).toHaveLength(1);
+      expect(result.rejectedFindings).toBe(1);
     });
 
     // report/types.ts's `isFileLevel` sentinel is `startLine: 0, endLine: 0` TOGETHER, and it is
     // only ever constructed directly by deterministic code in review.ts — never by this parser.
     // Before this bound, `start_line: 0, end_line: 5` parsed successfully: `end < start` (the only
     // cross-field check) is false whenever `start` is 0, producing a finding neither renderer's
-    // file-level sentinel nor SARIF's spec can represent.
+    // file-level sentinel nor SARIF's spec can represent. This is the exact shape the pinned model
+    // emits, and the one that cost Keiko#3011 its entire review.
     it("rejects a start_line of 0, which the inverted-range check alone cannot catch", () => {
-      const doc = document({
-        comments: [{ path: "src/a.ts", content: "x".repeat(20), start_line: 0, end_line: 5 }],
+      const result = parseWithMalformed({
+        path: "src/a.ts",
+        content: "x".repeat(20),
+        start_line: 0,
+        end_line: 5,
       });
-      expect(() => parseEngineResult(doc)).toThrow(ValidationError);
+      expect(result.findings).toHaveLength(1);
+      expect(result.rejectedFindings).toBe(1);
+    });
+
+    it("keeps a run whose findings are ALL malformed, reporting zero findings and the count", () => {
+      const result = parseEngineResult(
+        document({
+          comments: [
+            { path: "src/a.ts", content: "x".repeat(20), start_line: 0, end_line: 5 },
+            { path: "../../etc/passwd", content: "x".repeat(20), start_line: 1, end_line: 1 },
+          ],
+        }),
+      );
+      // Zero findings is a fact about the findings, never about the run: `status` survives so
+      // settlement still judges coverage on its own terms rather than inheriting a parse failure.
+      expect(result.findings).toEqual([]);
+      expect(result.rejectedFindings).toBe(2);
+      expect(result.status).toBe("success");
+    });
+
+    it("still throws when the comments field itself is not an array", () => {
+      // An element-scoped refusal needs an element boundary. A `comments` that is not a list has
+      // none, so this stays a malformed RESULT — the distinction the fix rests on.
+      expect(() => parseEngineResult(document({ comments: "nope" }))).toThrow(ValidationError);
+    });
+
+    it("reports zero rejections for a clean document", () => {
+      expect(parseEngineResult(document()).rejectedFindings).toBe(0);
     });
 
     it("tolerates absent optional classification fields", () => {
@@ -237,7 +297,12 @@ describe("parseEngineResult", () => {
             },
           ],
         });
-        expect(() => parseEngineResult(doc)).toThrow(ValidationError);
+        // Leniency toward a vocabulary slip never extends to the structure around it: the
+        // traversal path still costs this finding its existence. What changed on 2026-08-06 is
+        // only the blast radius — the finding dies, the run does not.
+        const result = parseEngineResult(doc);
+        expect(result.findings).toEqual([]);
+        expect(result.rejectedFindings).toBe(1);
       });
     });
 
@@ -479,7 +544,12 @@ describe("parseEngineResult", () => {
             },
           ],
         });
-        expect(() => parseEngineResult(doc)).toThrow(ValidationError);
+        // The outer envelope's path is validated before unwrapping is ever considered, so a
+        // nested envelope cannot smuggle a traversal path past it. Scoped to the element since
+        // 2026-08-06 (Keiko#3011), never widened to the run.
+        const result = parseEngineResult(doc);
+        expect(result.findings).toEqual([]);
+        expect(result.rejectedFindings).toBe(1);
       });
     });
   });

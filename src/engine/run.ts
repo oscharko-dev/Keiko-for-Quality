@@ -19,10 +19,21 @@ export class EngineRunError extends Error {
     | "engine.run.spawn_failed"
     | "engine.run.nonzero_exit";
 
-  public constructor(reason: EngineRunError["reason"]) {
+  /**
+   * What the failed invocation measurably cost on the wire — the loopback proxy's prompt plus
+   * completion counts at the moment of failure (2026-08-06): a run that times out or exits
+   * nonzero may still have made real, billable model calls, and a caller accounting spend has
+   * nothing else to bill them from, because a failed engine never reports a token total of its
+   * own. Absent — not zero — when no proxy counted (the anthropic path, or a spawn that failed
+   * before the proxy existed): "unmeasured" and "free" must stay distinguishable.
+   */
+  public readonly wireTokens?: number;
+
+  public constructor(reason: EngineRunError["reason"], wireTokens?: number) {
     super(reason);
     this.name = "EngineRunError";
     this.reason = reason;
+    if (wireTokens !== undefined) this.wireTokens = wireTokens;
   }
 }
 
@@ -59,6 +70,10 @@ export interface EngineRunOptions {
 export interface EngineRunOutput {
   readonly stdout: string;
   readonly ruleDigest: Sha256;
+  /** The invocation's wire-counted spend (proxy prompt + completion) — the billable truth even
+   *  when `stdout` later fails validation and the engine's own `total_tokens` never gets read.
+   *  Absent when no proxy counted (anthropic path); see `EngineRunError.wireTokens`. */
+  readonly wireTokens?: number;
 }
 
 /**
@@ -263,6 +278,15 @@ function failureReason(error: unknown): EngineRunError["reason"] {
   return error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit";
 }
 
+/** This invocation's wire-counted spend so far, or `undefined` when no proxy counted — read for
+ *  the success output and the failure error alike, while the proxy is still open (the `finally`
+ *  below closes it). */
+function proxyWireTokens(proxy: ModelProxy | undefined): number | undefined {
+  if (proxy === undefined) return undefined;
+  const usage = proxy.usage();
+  return usage.prompt + usage.completion;
+}
+
 /**
  * Runs one review and returns its raw stdout.
  *
@@ -301,14 +325,22 @@ export async function runEngine(
       counts: { bytes: result.stdout.byteLength, budget: options.allottedBudget },
     });
 
-    return { stdout: result.stdout.toString("utf8"), ruleDigest };
+    const wireTokens = proxyWireTokens(proxy);
+    return {
+      stdout: result.stdout.toString("utf8"),
+      ruleDigest,
+      ...(wireTokens === undefined ? {} : { wireTokens }),
+    };
   } catch (error) {
     const reason = failureReason(error);
     diagnostics.record(reason, {
       headSha: options.pair.head,
       durationMs: Date.now() - started,
     });
-    throw new EngineRunError(reason);
+    // The wire count rides the error (2026-08-06): a failed invocation's real, billable spend
+    // was previously visible only in the `model.usage` diagnostic below, so an incomplete run's
+    // report said `spend 0` while the proxy had counted thousands of real tokens.
+    throw new EngineRunError(reason, proxyWireTokens(proxy));
   } finally {
     // Ordered before the close below on purpose, so the count is read while the proxy is still
     // the authority on its own totals rather than relying on `close()` leaving them readable.

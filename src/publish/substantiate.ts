@@ -68,6 +68,118 @@ export const CONSEQUENCE_VERDICTS = ["actionable", "nitpick"] as const;
 
 export type ConsequenceVerdict = (typeof CONSEQUENCE_VERDICTS)[number];
 
+/**
+ * WHETHER SUBSTANTIATION RUNS AT ITS PUBLISHED STRICTNESS, OR AT AN EXPERIMENTAL ONE.
+ *
+ * Everything above this line is qualified: `SUBSTANTIATION_VERDICTS`, the two prompts, and the
+ * disposition of every branch below were chosen, measured, and shipped as ONE fixed policy — a
+ * single point on the precision/recall trade-off McAleese et al. 2024 (arXiv:2407.00215, CriticGPT)
+ * treat as a Pareto curve rather than a setting: Force Sampling Beam Search lets a deployer choose
+ * FROM that curve, at four operating points. This module has never offered that choice — it
+ * silently picked one and shipped it. `KFQ_SUBSTANTIATION_STRICTNESS` is the instrument that makes
+ * the rest of the curve visible without moving the point already qualified.
+ *
+ * ## What actually moves
+ *
+ * Nothing here adds a new question for the judge, a new prompt, or a new verdict word — see
+ * `corpus/operating-point-sweep.mjs`'s own header for why that restraint is deliberate: a strictness
+ * axis that changed WHAT is asked would be indistinguishable from a rule change, re-litigating the
+ * whole qualification instead of isolating one lever the way this repository isolates every other
+ * measured thing. What moves is which of the SAME, ALREADY-EXISTING outcomes this module already
+ * produces on every run keeps the finding or drops it: `undecided` (a judge call came back
+ * unparseable or unreachable) and an unreadable hunk (this module's OWN instrumentation gap — no
+ * call was ever attempted). `lenient` moves a different lever, retiring the consequence/nitpick call
+ * entirely rather than sharpening a failure policy. Four ordinal points, each a strict superset of
+ * what the next stricter point publishes for a fixed set of model replies:
+ *
+ *   lenient   consequence axis SKIPPED (grounded is always kept); undecided always KEPT.
+ *   default   consequence axis runs; undecided always KEPT.                    <- today, unchanged
+ *   strict    consequence axis runs; undecided from an ACTUAL judge call DROPS.
+ *   paranoid  consequence axis runs; undecided drops, INCLUDING an unreadable hunk.
+ *
+ * ## What deliberately does not move
+ *
+ * `unsupported` is never repaired at any level — the module doc comment above already explains why
+ * rewording a claim the code contradicts is the one way this stage could make the reviewer worse,
+ * and a strictness knob that touched that decision would not be measuring the trade-off CriticGPT
+ * describes, it would be inventing a different one. `vague` still gets exactly one repair, never
+ * zero and never two, at every level, for the same reason `repairVague`'s own doc comment gives:
+ * repair-count is an unbounded-cost knob, not a precision/recall one. This axis moves ONLY the
+ * keep/drop call on outcomes that already exist — never a new dimension of judgement.
+ *
+ * ## Why an environment variable, and not an action.yml input
+ *
+ * An action.yml input is a promise: documented in the README, versioned, something a consumer's
+ * workflow file can come to depend on. This knob is the opposite — an instrument for THIS
+ * repository's own measurement work (see corpus/operating-point-sweep.mjs), never a setting a
+ * consumer should reach for. Reading `process.env` directly, under a name `action.yml` never
+ * declares, keeps it structurally invisible to the one surface consumers actually read: nothing in
+ * the action's declared inputs, `dist/index.js`'s documented interface, or the README changes. A
+ * consumer who never sets this variable — which is every consumer, since nowhere in the product's
+ * documented surface tells them to — gets exactly what shipped before this file existed. Anyone who
+ * DOES set it is, by construction, someone who read this source file first, which is the bar an
+ * experimental instrument should clear.
+ *
+ * ## Why an invalid or missing value is a silent fallback, never a warning or a failure
+ *
+ * `resolveSubstantiationStrictness` is a total function over every possible string, including
+ * `undefined`: it has exactly one error path, and that path is "return the default". A misspelled
+ * value (`Strict`, `strictt`, a trailing space some shell quoting left behind) must cost nothing —
+ * not a thrown error, not a changed review, not even a log line, because this module has no
+ * diagnostics-sink dependency to log through (see the module doc comment's "cheap first" section),
+ * and adding one only to warn about a measurement knob nobody but this repository's own tooling sets
+ * would be a product-facing side effect in service of an internal instrument.
+ *
+ * ## Why the default must stay byte-identical
+ *
+ * `"default"` is not a fourth strictness level styled to look like today's behaviour — it IS today's
+ * behaviour, unedited: every helper below returns exactly the branch this file took before this knob
+ * existed. Every qualification evidence file under corpus/evidence/qualification-*.md and every
+ * number this repository has ever published about substantiation was measured against that one fixed
+ * policy. A default that drifted would silently invalidate every one of those records the next time
+ * this module runs — not by announcing a regression, but by quietly becoming a different reviewer
+ * than the one the evidence describes. `substantiate.test.ts`'s byte-identical-default cases exist to
+ * make that drift a red test, not a discovery made by re-reading a diff.
+ */
+export const SUBSTANTIATION_STRICTNESS_LEVELS = [
+  "lenient",
+  "default",
+  "strict",
+  "paranoid",
+] as const;
+
+export type SubstantiationStrictness = (typeof SUBSTANTIATION_STRICTNESS_LEVELS)[number];
+
+/**
+ * The knob's name. `KFQ_` matches the CLI's own review-time variables (`KFQ_MODEL_ENDPOINT` and
+ * siblings — see src/cli.ts) rather than the corpus/engine `OCR_` prefix, because this fires during
+ * a review, not a corpus run — but unlike its `KFQ_MODEL_*` neighbors, it is deliberately absent
+ * from action.yml, the README, and SECURITY.md: those three name the product's actual contract, and
+ * this variable is not part of it.
+ */
+const STRICTNESS_ENV_VAR = "KFQ_SUBSTANTIATION_STRICTNESS";
+
+const DEFAULT_STRICTNESS: SubstantiationStrictness = "default";
+
+function isSubstantiationStrictness(value: string): value is SubstantiationStrictness {
+  return (SUBSTANTIATION_STRICTNESS_LEVELS as readonly string[]).includes(value);
+}
+
+/**
+ * Reads the active strictness level from the environment, or the byte-identical default for
+ * anything it does not recognise — unset, empty, mis-cased, or simply wrong. See this block's own
+ * doc comment above for why silence is the only failure mode this function has. Takes the
+ * environment as a parameter, mirroring `checkQualificationModel` (corpus/qualification-model.mjs),
+ * so a caller — this file's own default parameter below, or a test — never needs to mutate the real
+ * `process.env` to exercise a branch.
+ */
+export function resolveSubstantiationStrictness(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): SubstantiationStrictness {
+  const raw = (env[STRICTNESS_ENV_VAR] ?? "").trim().toLowerCase();
+  return isSubstantiationStrictness(raw) ? raw : DEFAULT_STRICTNESS;
+}
+
 /** Structural slice of a finding this module can judge, mirroring `ClassifiableFinding`. */
 export interface JudgeableFinding {
   readonly path: string;
@@ -155,9 +267,22 @@ export interface SubstantiationOutcome<T extends JudgeableFinding> {
   readonly droppedUnsupported: number;
   /** Dropped as accurate but not worth a reader's time — the volume axis. */
   readonly droppedNitpick: number;
-  /** Judged inconclusively — kept, never dropped on a failure this module caused. */
+  /**
+   * Judged inconclusively. At `strictness` `"default"` (and `"lenient"`) this is always kept, never
+   * dropped on a failure this module caused — see the module doc comment's "cheap first" section.
+   * `"strict"`/`"paranoid"` may drop some of these; the count itself still means exactly "how many
+   * judge calls came back unusable", independent of strictness, so a caller can always tell instrument
+   * failure from content failure by reading this field alongside `findings.length`.
+   */
   readonly undecided: number;
   readonly tokens: number;
+  /**
+   * The strictness this outcome was actually judged under — `"default"` unless a caller passed
+   * something else or `KFQ_SUBSTANTIATION_STRICTNESS` was set. Pure data: nothing in this module
+   * routes it to the diagnostics sink (see `src/publish/substantiate.ts`'s own report to whoever
+   * wires `publish.substantiated` — this field is what that wiring would read).
+   */
+  readonly strictness: SubstantiationStrictness;
 }
 
 /**
@@ -350,35 +475,87 @@ interface JudgedOne<T extends JudgeableFinding> {
 }
 
 /**
+ * Whether an outcome this module could not actually judge — a call that came back unparseable —
+ * costs the finding its place, instead of this file's long-standing default of keeping it. `default`
+ * and `lenient` answer "no", matching the ONLY policy this file had before the strictness knob
+ * existed (see its doc comment, above `SUBSTANTIATION_STRICTNESS_LEVELS`); `strict` and `paranoid`
+ * answer "yes" for a call that was actually attempted and came back unusable.
+ */
+function dropsOnUndecidedJudge(strictness: SubstantiationStrictness): boolean {
+  return strictness === "strict" || strictness === "paranoid";
+}
+
+/**
+ * Whether an UNREADABLE HUNK — this module's own instrumentation gap; no call was ever attempted —
+ * is held to the same failure policy as a judge call that ran and came back inconclusive. Kept apart
+ * from `dropsOnUndecidedJudge` on purpose: "this module could not check" and "this module asked and
+ * got nothing usable back" are different failures, and only `paranoid` refuses to tell them apart —
+ * every other level, `strict` included, still treats its own missing instrumentation as no fault of
+ * the finding's.
+ */
+function dropsOnUnreadableHunk(strictness: SubstantiationStrictness): boolean {
+  return strictness === "paranoid";
+}
+
+/**
+ * Whether the consequence/nitpick axis (`weighConsequence`) runs at all. `lenient` is the one level
+ * that retires it rather than sharpening a failure policy — the opposite direction from the other
+ * three — because it answers a different question ("is this worth a call") rather than a stricter
+ * version of the same one. A grounded finding under `lenient` publishes exactly as `weighConsequence`
+ * would have kept it on an `actionable` verdict, without spending the call to ask.
+ */
+function consequenceAxisEnabled(strictness: SubstantiationStrictness): boolean {
+  return strictness !== "lenient";
+}
+
+/**
  * One finding: dossier, judge, and at most one repair.
  *
- * The direction of every failure is the same. An unreadable hunk, a transport error, a reply that
- * is not one of the three words — all KEEP the finding and count it `undecided`. This stage exists
- * to remove findings a reader cannot check, and one this module failed to judge is not among them;
- * dropping it would let an outage quietly become a quality improvement.
+ * The direction of every failure is the same AT THIS FILE'S DEFAULT. An unreadable hunk, a transport
+ * error, a reply that is not one of the three words — all KEEP the finding and count it `undecided`
+ * at `strictness` `"default"` and `"lenient"`. This stage exists to remove findings a reader cannot
+ * check, and one this module failed to judge is not among them BY DEFAULT; dropping it would let an
+ * outage quietly become a quality improvement. `"strict"`/`"paranoid"` trade that safety for
+ * precision on purpose — see `dropsOnUndecidedJudge` and `dropsOnUnreadableHunk` above.
  */
 async function judgeOne<T extends JudgeableFinding>(
   finding: T,
   readHunk: HunkReader,
   deps: JudgeEndpoint,
+  strictness: SubstantiationStrictness,
 ): Promise<JudgedOne<T>> {
   const dossier = buildDossier(finding.content);
   // No claim to judge. Kept rather than dropped: the sanitizer owns diff-echo rejection, and two
-  // stages deciding the same thing is how they drift apart.
+  // stages deciding the same thing is how they drift apart. Not a strictness lever: see the module
+  // doc comment above `SUBSTANTIATION_STRICTNESS_LEVELS` for why this file draws that line.
   if (!needsJudging(dossier)) return { finding, disposition: "kept", tokens: 0 };
 
   const hunk = readHunk(finding);
-  if (hunk === "") return { finding, disposition: "undecided", tokens: 0 };
+  if (hunk === "") {
+    return {
+      finding: dropsOnUnreadableHunk(strictness) ? undefined : finding,
+      disposition: "undecided",
+      tokens: 0,
+    };
+  }
 
   const first = await requestText(buildJudgePrompt(finding, hunk, dossier), deps);
   const verdict = extractVerdict(first.text);
-  if (verdict === undefined) return { finding, disposition: "undecided", tokens: first.tokens };
-  if (verdict === "grounded") return await weighConsequence(finding, hunk, deps, first.tokens);
+  if (verdict === undefined) {
+    return {
+      finding: dropsOnUndecidedJudge(strictness) ? undefined : finding,
+      disposition: "undecided",
+      tokens: first.tokens,
+    };
+  }
+  if (verdict === "grounded") {
+    return await weighConsequence(finding, hunk, deps, first.tokens, strictness);
+  }
   if (verdict === "unsupported") {
     return { finding: undefined, disposition: "unsupported", tokens: first.tokens };
   }
 
-  return await repairVague(finding, hunk, deps, first.tokens);
+  return await repairVague(finding, hunk, deps, first.tokens, strictness);
 }
 
 /**
@@ -389,33 +566,50 @@ async function judgeOne<T extends JudgeableFinding>(
  * addresses volume — 31.9 comments per pull request here against a competitor's 13.3 and 9.0 — and
  * a finding dropped here is dropped for what it says, never for where it ranked.
  *
- * An inconclusive answer KEEPS the finding, like every other failure in this module: an endpoint
- * that cannot be reached must not quietly become a quality improvement.
+ * An inconclusive answer KEEPS the finding by default, like every other failure in this module: an
+ * endpoint that cannot be reached must not quietly become a quality improvement. `strict` and
+ * `paranoid` trade that safety for precision — see `dropsOnUndecidedJudge`. `lenient` never reaches
+ * this function at all: see `consequenceAxisEnabled`.
  */
 async function weighConsequence<T extends JudgeableFinding>(
   finding: T,
   hunk: string,
   deps: JudgeEndpoint,
   spentSoFar: number,
+  strictness: SubstantiationStrictness,
 ): Promise<JudgedOne<T>> {
+  // `lenient` retires this axis instead of sharpening it — see `consequenceAxisEnabled`'s own doc
+  // comment. No call spent, and the grounded verdict this function exists to weigh publishes as-is.
+  if (!consequenceAxisEnabled(strictness)) {
+    return { finding, disposition: "kept", tokens: spentSoFar };
+  }
   const call = await requestText(buildConsequencePrompt(finding, hunk), deps);
   const tokens = spentSoFar + call.tokens;
   const verdict = extractConsequence(call.text);
   if (verdict === "nitpick") return { finding: undefined, disposition: "nitpick", tokens };
-  if (verdict === undefined) return { finding, disposition: "undecided", tokens };
+  if (verdict === undefined) {
+    return {
+      finding: dropsOnUndecidedJudge(strictness) ? undefined : finding,
+      disposition: "undecided",
+      tokens,
+    };
+  }
   return { finding, disposition: "kept", tokens };
 }
 
 /**
  * The loop, reached only for `vague`: the defect stands and the writing failed, so the writing gets
  * ONE attempt. Never two — a second rewrite of a claim the judge already doubted is how a bounded
- * stage becomes an unbounded one.
+ * stage becomes an unbounded one. Fixed at every strictness level: see the module doc comment above
+ * `SUBSTANTIATION_STRICTNESS_LEVELS` for why repair count is not a lever this knob is allowed to
+ * touch.
  */
 async function repairVague<T extends JudgeableFinding>(
   finding: T,
   hunk: string,
   deps: JudgeEndpoint,
   spentSoFar: number,
+  strictness: SubstantiationStrictness,
 ): Promise<JudgedOne<T>> {
   const rewrite = await requestText(buildRepairPrompt(finding, hunk), deps);
   const tokensAfterRewrite = spentSoFar + rewrite.tokens;
@@ -434,13 +628,20 @@ async function repairVague<T extends JudgeableFinding>(
   if (verdict === "grounded") {
     // A repaired finding faces the second axis too. Nothing about restating a circumstance makes a
     // nitpick worth reading, and exempting repairs would let the loop launder them into publication.
-    const weighed = await weighConsequence(repaired, hunk, deps, tokens);
+    const weighed = await weighConsequence(repaired, hunk, deps, tokens, strictness);
     return weighed.disposition === "kept" ? { ...weighed, disposition: "repaired" } : weighed;
   }
-  // Inconclusive on the re-read keeps the ORIGINAL, not the rewrite: the rewrite was never
-  // confirmed, and publishing an unconfirmed restatement would be this stage inventing text under
-  // its own authority.
-  if (verdict === undefined) return { finding, disposition: "undecided", tokens };
+  // Inconclusive on the re-read keeps the ORIGINAL, not the rewrite, when this outcome is kept at
+  // all: the rewrite was never confirmed, and publishing an unconfirmed restatement would be this
+  // stage inventing text under its own authority. Whether it is kept or dropped follows the same
+  // `dropsOnUndecidedJudge` policy as the first judge call, above.
+  if (verdict === undefined) {
+    return {
+      finding: dropsOnUndecidedJudge(strictness) ? undefined : finding,
+      disposition: "undecided",
+      tokens,
+    };
+  }
   if (verdict === "unsupported") return { finding: undefined, disposition: "unsupported", tokens };
   return { finding: undefined, disposition: "vague", tokens };
 }
@@ -451,11 +652,20 @@ async function repairVague<T extends JudgeableFinding>(
  * Sequential, not parallel, for the reason `repairClassification` is: the list is findings rather
  * than files, and a burst of concurrent calls is what tripped the corpus against a freshly
  * provisioned deployment.
+ *
+ * `strictness` defaults to reading `KFQ_SUBSTANTIATION_STRICTNESS` from the live environment — see
+ * the doc comment above `SUBSTANTIATION_STRICTNESS_LEVELS` for the full rationale. Every existing
+ * caller (`src/review.ts`, unedited by this change) calls this with three arguments and therefore
+ * always resolves through that same default, which is what keeps its behaviour byte-identical to
+ * before this parameter existed: `substantiate.test.ts`'s "byte-identical default" cases pin exactly
+ * that. A caller — a test, or a future measurement harness — that needs a specific level regardless
+ * of the environment passes it explicitly instead.
  */
 export async function substantiate<T extends JudgeableFinding>(
   findings: readonly T[],
   readHunk: HunkReader,
   deps: JudgeEndpoint,
+  strictness: SubstantiationStrictness = resolveSubstantiationStrictness(),
 ): Promise<SubstantiationOutcome<T>> {
   const kept: T[] = [];
   const counts = {
@@ -468,7 +678,7 @@ export async function substantiate<T extends JudgeableFinding>(
   let tokens = 0;
 
   for (const finding of findings) {
-    const judged = await judgeOne(finding, readHunk, deps);
+    const judged = await judgeOne(finding, readHunk, deps, strictness);
     tokens += judged.tokens;
     if (judged.finding !== undefined) kept.push(judged.finding);
     if (judged.disposition === "repaired") counts.repaired += 1;
@@ -478,5 +688,5 @@ export async function substantiate<T extends JudgeableFinding>(
     if (judged.disposition === "nitpick") counts.droppedNitpick += 1;
   }
 
-  return { findings: kept, ...counts, tokens };
+  return { findings: kept, ...counts, tokens, strictness };
 }
