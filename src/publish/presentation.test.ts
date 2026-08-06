@@ -145,6 +145,37 @@ describe("composeIncompleteNotice", () => {
   it("ends with the marker", () => {
     expect(notice.trimEnd().endsWith(`<!-- ${MARKER} -->`)).toBe(true);
   });
+
+  // The counts are what separates "one file is still owed" from "nothing was reviewed" — the
+  // question none of Keiko#3002's eight notices could answer (2026-08-06).
+  it("names the gap when the settlement measured one", () => {
+    const withGap = composeIncompleteNotice("settlement.incomplete.coverage_gap", MARKER, {
+      gap: 5,
+      reviewable: 33,
+      reviewed: 28,
+    });
+    expect(withGap).toContain("5 of 33 reviewable file(s) remain unreviewed");
+    expect(isIncompleteNoticeBody(withGap)).toBe(true);
+  });
+
+  it("falls back to the reviewed/expected pair when that is all the settlement measured", () => {
+    const withCounts = composeIncompleteNotice(
+      "settlement.incomplete.engine_status_not_success",
+      MARKER,
+      { reviewed: 1, expected: 2 },
+    );
+    expect(withCounts).toContain("1 of 2 expected files reviewed");
+    expect(isIncompleteNoticeBody(withCounts)).toBe(true);
+  });
+
+  it("renders no gap sentence for counts it does not recognise", () => {
+    const unknownCounts = composeIncompleteNotice("settlement.incomplete.engine_error", MARKER, {
+      flood: 1200,
+    });
+    expect(unknownCounts).toBe(
+      composeIncompleteNotice("settlement.incomplete.engine_error", MARKER),
+    );
+  });
 });
 
 describe("isIncompleteNoticeBody", () => {

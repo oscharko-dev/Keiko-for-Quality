@@ -1,0 +1,78 @@
+{
+  "status": "completed_with_errors",
+  "summary": {
+    "files_reviewed": 33,
+    "comments": 4,
+    "total_tokens": 3922053,
+    "input_tokens": 3797236,
+    "output_tokens": 124817,
+    "elapsed": "4m56s"
+  },
+  "tool_calls": {
+    "total": 126,
+    "by_tool": {
+      "code_comment": 12,
+      "code_search": 67,
+      "file_find": 19,
+      "file_read": 28
+    }
+  },
+  "comments": [
+    {
+      "path": "src/file-a.ts",
+      "content": "Redacted finding body for the fixture; only shape matters here.",
+      "existing_code": "  return value;",
+      "start_line": 46,
+      "end_line": 46
+    },
+    {
+      "path": "src/file-a.ts",
+      "content": "Redacted finding body for the fixture; only shape matters here.",
+      "existing_code": "  return value;",
+      "start_line": 46,
+      "end_line": 46
+    },
+    {
+      "path": "src/file-b.ts",
+      "content": "Redacted finding body for the fixture; only shape matters here.",
+      "existing_code": "  return value;",
+      "start_line": 200,
+      "end_line": 200
+    },
+    {
+      "path": "src/file-c.mjs",
+      "content": "Redacted finding body for the fixture; only shape matters here.",
+      "existing_code": "  return value;",
+      "start_line": 22,
+      "end_line": 22
+    }
+  ],
+  "warnings": [
+    {
+      "type": "subtask_error",
+      "file": "src/file-d.json",
+      "message": "main_task did not complete before stopping"
+    },
+    {
+      "type": "subtask_error",
+      "file": "src/file-b.ts",
+      "message": "main_task did not complete before stopping"
+    },
+    {
+      "type": "subtask_error",
+      "file": "src/file-e.mjs",
+      "message": "main_task did not complete before stopping"
+    },
+    {
+      "type": "subtask_error",
+      "file": "src/file-f.mjs",
+      "message": "main_task did not complete before stopping"
+    },
+    {
+      "type": "subtask_error",
+      "file": "src/file-g.json",
+      "message": "main_task did not complete before stopping"
+    }
+  ],
+  "session_id": "00000000-0000-0000-0000-000000000000"
+}

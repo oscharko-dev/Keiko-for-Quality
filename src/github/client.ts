@@ -115,6 +115,7 @@ export interface ReviewCommentApi {
     number: number,
     identity: string,
     isNoticeBody: (body: string) => boolean,
+    currentHead: string,
   ): Promise<{ readonly attempted: number; readonly resolved: number }>;
 }
 
@@ -237,7 +238,7 @@ const RESOLVED_THREADS_QUERY = `query($owner: String!, $repo: String!, $number: 
           id
           isResolved
           isOutdated
-          comments(first: 100) { nodes { databaseId author { login } body } }
+          comments(first: 100) { nodes { databaseId author { login } body originalCommit { oid } } }
           lastComment: comments(last: 1) { nodes { author { login } body } }
         }
         pageInfo { hasNextPage endCursor }
@@ -255,6 +256,7 @@ interface ReviewThreadNode {
       readonly databaseId?: unknown;
       readonly author?: { readonly login?: unknown } | null;
       readonly body?: unknown;
+      readonly originalCommit?: { readonly oid?: unknown } | null;
     }[];
   };
   readonly lastComment?: {
@@ -336,35 +338,53 @@ function collectThreadOverlays(
  * of `resolveSupersededOwnNotices`, split out so it can be unit-tested against raw query nodes the
  * same way `collectThreadOverlays` already is.
  *
- * A thread qualifies on three independent facts, all conjunctive: GitHub reports it OUTDATED (a
- * later push moved the diff hunk this thread anchored — so whatever it says is about a commit that
- * is no longer HEAD), still UNRESOLVED (nobody has already closed it, by hand or otherwise — a
- * resolved thread is not this function's concern either way), and it carries at least one comment
- * authored by `identity` whose body `isNoticeBody` recognises as this reviewer's own incomplete-
- * review notice — never a finding, however outdated: a finding is an open question for a human, and
- * auto-resolving it would defeat the entire point of raising it (Keiko-for-Quality#38's contract
- * that a merely-outdated thread must not read as answered applies with even more force to a thread
- * this function would resolve outright, not just treat as ineligible for a later match). Checked
+ * A thread must be UNRESOLVED (nobody has already closed it, by hand or otherwise — a resolved
+ * thread is not this function's concern either way) and carry at least one comment authored by
+ * `identity` whose body `isNoticeBody` recognises as this reviewer's own incomplete-review notice
+ * — never a finding, however stale: a finding is an open question for a human, and auto-resolving
+ * it would defeat the entire point of raising it (Keiko-for-Quality#38's contract that a
+ * merely-outdated thread must not read as answered applies with even more force to a thread this
+ * function would resolve outright, not just treat as ineligible for a later match). Checked
  * across the thread's own first 100 comments, not just its first: a human may have replied to the
- * notice before this reviewer ever revisits the pull request, which still leaves the notice itself,
- * wherever it sits in the thread, exactly as stale.
+ * notice before this reviewer ever revisits the pull request, which still leaves the notice
+ * itself, wherever it sits in the thread, exactly as stale.
+ *
+ * Supersession itself is proved by either of two independent facts (2026-08-06):
+ *
+ * - GitHub reports the thread OUTDATED — a later push moved the diff hunk it anchored. This was
+ *   the only criterion until Keiko#3002 accumulated eight unresolved notices on one pull request:
+ *   a notice is published as a FILE-level comment (no line), and GitHub never marks a file-level
+ *   thread outdated, so no notice ever qualified.
+ * - The notice's own `originalCommit` differs from the head this run reviewed — the notice speaks
+ *   about a commit that is no longer HEAD, which is the same fact `isOutdated` proves for
+ *   line-anchored threads, read directly off the comment where GitHub offers no flag. A missing or
+ *   empty oid contributes nothing, so an API shape this code has never seen degrades to the old
+ *   behaviour rather than to a wrong resolution. A notice at the CURRENT head never qualifies
+ *   under this clause, which is what keeps this pass from resolving the notice the running
+ *   settlement just published.
  */
 function collectResolvableNoticeThreadIds(
   nodes: readonly ReviewThreadNode[],
   identity: string,
   isNoticeBody: (body: string) => boolean,
+  currentHead: string,
   into: string[],
 ): void {
   for (const node of nodes) {
-    if (node.isOutdated !== true || node.isResolved === true) continue;
+    if (node.isResolved === true) continue;
     if (typeof node.id !== "string") continue;
-    const hasOwnNotice = (node.comments?.nodes ?? []).some(
+    const ownNotices = (node.comments?.nodes ?? []).filter(
       (comment) =>
         comment.author?.login === identity &&
         typeof comment.body === "string" &&
         isNoticeBody(comment.body),
     );
-    if (hasOwnNotice) into.push(node.id);
+    if (ownNotices.length === 0) continue;
+    const supersededByHead = ownNotices.some((comment) => {
+      const oid = comment.originalCommit?.oid;
+      return typeof oid === "string" && oid !== "" && oid !== currentHead;
+    });
+    if (node.isOutdated === true || supersededByHead) into.push(node.id);
   }
 }
 
@@ -616,6 +636,7 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     number: number,
     identity: string,
     isNoticeBody: (body: string) => boolean,
+    currentHead: string,
   ): Promise<readonly string[]> {
     const ids: string[] = [];
     try {
@@ -629,7 +650,13 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
         })) as ReviewThreadsResponse;
         const threads = reviewThreadsPage(raw);
         if (threads === undefined) break;
-        collectResolvableNoticeThreadIds(threads.nodes ?? [], identity, isNoticeBody, ids);
+        collectResolvableNoticeThreadIds(
+          threads.nodes ?? [],
+          identity,
+          isNoticeBody,
+          currentHead,
+          ids,
+        );
         const next = nextThreadsCursor(threads);
         if (next === undefined) break;
         cursor = next;
@@ -682,8 +709,15 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     number: number,
     identity: string,
     isNoticeBody: (body: string) => boolean,
+    currentHead: string,
   ): Promise<{ readonly attempted: number; readonly resolved: number }> {
-    const ids = await this.fetchResolvableNoticeThreadIds(ref, number, identity, isNoticeBody);
+    const ids = await this.fetchResolvableNoticeThreadIds(
+      ref,
+      number,
+      identity,
+      isNoticeBody,
+      currentHead,
+    );
     let resolved = 0;
     for (const threadId of ids) {
       if (await this.resolveThread(threadId)) resolved += 1;
