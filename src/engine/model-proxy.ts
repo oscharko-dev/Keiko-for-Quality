@@ -486,18 +486,31 @@ async function fetchWithCacheKeyFallback(
     return retryWithoutCacheKey(doFetch, url, request, options, usage, latch);
   }
   if (upstream.status === 400 && isChatCompletionsPath(request.path)) {
-    // A 400 without the key on it — but the body was still THIS PROXY'S rewrite (temperature,
-    // seed, intent). Before booking the provider's refusal as the request's own fault, spend one
-    // attempt on the engine's unmodified original: if that heals it, the rejection was ours.
-    // Gated on the rewrite having actually changed the bytes — when `pinSampling` passed a
-    // non-JSON body through untouched, the "original" would be the identical refused request, and
-    // repeating it verbatim buys wall-clock for nothing.
-    if (pinned === undefined || pinned.body === request.body) {
-      return persistedBadRequest(upstream, usage);
-    }
-    return retryWithOriginalBody(doFetch, url, request, usage);
+    return healUnkeyedBadRequest(doFetch, url, request, usage, upstream, pinned);
   }
   return upstream;
+}
+
+/**
+ * A 400 without the key on it — but the body was still THIS PROXY'S rewrite (temperature, seed,
+ * intent). Before booking the provider's refusal as the request's own fault, spend one attempt on
+ * the engine's unmodified original: if that heals it, the rejection was ours. Gated on the
+ * rewrite having actually changed the bytes — when `pinSampling` passed a non-JSON body through
+ * untouched, the "original" would be the identical refused request, and repeating it verbatim
+ * buys wall-clock for nothing.
+ */
+async function healUnkeyedBadRequest(
+  doFetch: typeof fetch,
+  url: string,
+  request: ChatCompletionsRequest,
+  usage: MutableUsage,
+  upstream: Response,
+  pinned: PinnedBody | undefined,
+): Promise<Response> {
+  if (pinned === undefined || pinned.body === request.body) {
+    return persistedBadRequest(upstream, usage);
+  }
+  return retryWithOriginalBody(doFetch, url, request, usage);
 }
 
 /**
