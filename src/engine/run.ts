@@ -227,7 +227,19 @@ function recordModelUsage(
       // Always present, even at 0: "no model call was refused" is a fact worth one word, and its
       // absence is what let Keiko#3002's persisted 400s masquerade as cache-key noise.
       bad_request_persisted: usage.badRequestPersisted,
+      // Calls the second healing stage saved by re-sending the engine's original body — each one
+      // ran without the sampling pin, which this ledger must show (2026-08-06, Keiko#3008).
+      ...(usage.rewriteRejected > 0 ? { rewrite_rejected: usage.rewriteRejected } : {}),
       // Only when a persisted 400's body named them — see `recordBadRequestNumbers`.
+      ...(usage.badRequestContentFilter > 0
+        ? { bad_request_content_filter: usage.badRequestContentFilter }
+        : {}),
+      ...(usage.badRequestUnknownParameter > 0
+        ? { bad_request_unknown_parameter: usage.badRequestUnknownParameter }
+        : {}),
+      ...(usage.badRequestContextLength > 0
+        ? { bad_request_context_length: usage.badRequestContextLength }
+        : {}),
       ...(usage.badRequestContextLimit > 0
         ? { bad_request_context_limit: usage.badRequestContextLimit }
         : {}),

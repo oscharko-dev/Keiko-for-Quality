@@ -459,10 +459,34 @@ describe("counted settlement (no manifest)", () => {
       });
       if (outcome.status !== "incomplete") return;
       expect(outcome.counts).toEqual({ gap: 1, reviewable: 3, reviewed: 2 });
-      // The verdicts survive — and the failed file's own finding is NOT frozen as its verdict:
-      // the warning is the manifest-less release's only failed-list, and `memoizablePaths`
-      // subtracts it exactly like a manifest `failed` entry.
+      // The verdicts survive, the failed file's own finding is NOT frozen as its verdict — and
+      // the clean completion WITHOUT a finding is covered too (2026-08-06): the dispatch count
+      // corroborates a full dispatch, the warnings name every failure, so `src/c.ts`'s silence is
+      // the engine's own account of a clean review, not an absence of evidence. Keiko#3008
+      // memoized zero of twelve files for want of exactly this.
       expect(outcome.findings).toHaveLength(2);
+      expect([...outcome.coveredPaths].sort()).toEqual(["src/a.ts", "src/c.ts"]);
+    });
+
+    it("falls back to finding-proven coverage when the dispatch count does not corroborate", () => {
+      // filesReviewed 2 < expected 3: the engine's own filters dropped something unnamed, so the
+      // complement identity is void and only the finding-proven path may be memoized.
+      const outcome = settle(
+        inventory(["src/a.ts", "src/b.ts", "src/c.ts"]),
+        released({
+          status: "completed_with_errors",
+          filesReviewed: 2,
+          warnings: [{ type: "subtask_error", file: "src/b.ts" }],
+          findings: [finding("src/a.ts")],
+        }),
+        PROFILE,
+        CONFIG,
+      );
+      expect(outcome).toMatchObject({
+        status: "incomplete",
+        reason: "settlement.incomplete.coverage_gap",
+      });
+      if (outcome.status !== "incomplete") return;
       expect([...outcome.coveredPaths]).toEqual(["src/a.ts"]);
     });
 
