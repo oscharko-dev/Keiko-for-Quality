@@ -1701,6 +1701,30 @@ function planGeneralResume(
   };
 }
 
+/**
+ * What one targeted round may spend — priced from the GAP it dispatches, not from what the first
+ * attempt happened to leave.
+ *
+ * `RESUME_FLOOR_FRACTION` was sized for a resume that re-dispatches the WHOLE review, where "a
+ * fraction of the original allotment" is the right shape. A targeted round dispatches k files, and
+ * pricing it off the first attempt's leftovers gets the arithmetic exactly backwards: the more the
+ * first attempt spent — which is to say, the larger the review — the less its retry gets. Measured
+ * on Keiko#3008 (2026-08-06): twelve files, four lost, the first attempt spent 2.58M, and the round
+ * that had to review four files was handed 399k. It threw, the gap did not shrink, and the review
+ * settled incomplete over a budget that never matched its work.
+ *
+ * Priced instead like any other dispatch of k files — `PER_FILE_TOKENS` with the same
+ * `ALLOTMENT_MARGIN` the whole-review estimate uses — and bounded twice: never below the old floor
+ * (a one-file round still gets real headroom), and never past what the consumer's own ceiling has
+ * left unspent. The second bound is what keeps rounds from turning a stop-loss into a blank cheque.
+ */
+function targetedRoundBudget(gapSize: number, spent: number, options: EngineRunOptions): number {
+  const priced = Math.round(gapSize * PER_FILE_TOKENS * ALLOTMENT_MARGIN);
+  const floor = Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION);
+  const headroom = Math.max(0, options.config.tokenBudget - spent);
+  return clamp(Math.min(priced, headroom), Math.min(floor, headroom), options.config.tokenBudget);
+}
+
 /** What a finished-run decision needs beyond the parsed result itself. */
 interface FinishedRunContext {
   readonly options: EngineRunOptions;
@@ -1763,11 +1787,7 @@ async function settleFinishedRun(
     const targeted = targetedGapPaths(standing, reviewablePaths);
     if (targeted === undefined) break;
     const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
-    const remaining = clamp(
-      options.allottedBudget - spent,
-      Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION),
-      options.allottedBudget,
-    );
+    const remaining = targetedRoundBudget(targeted.size, spent, options);
     diagnostics.record("engine.resumed_gap_targeted", {
       counts: { round, targeted: targeted.size, covered: covered.length, remaining },
     });
