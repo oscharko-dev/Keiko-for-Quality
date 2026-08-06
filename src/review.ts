@@ -300,6 +300,25 @@ export interface LocalReviewReport {
 }
 
 /**
+ * Reviewable paths an EARLIER engine attempt of this same run already covered, credited to the
+ * settlement but invisible to the report without this (2026-08-06, found by the completion gate on
+ * its first real run).
+ *
+ * `executeEngine` folds these into the set it hands `settle()`, so the settlement's own arithmetic
+ * is right: after a targeted gap resume it compares the second dispatch against the gap alone. But
+ * `dispatchedMinusFailed` deliberately EXCLUDES memoized paths from `coveredPaths` — they were not
+ * covered by the dispatch it is describing — and the report adds back only `memo.hitPaths`, the
+ * review-CACHE hits. A resume-credited path is neither, so it fell through both: a run that
+ * reviewed eighteen of nineteen files reported `reviewed 1`, with a numerator in the resume's frame
+ * and a denominator in the pull request's.
+ *
+ * A mutable set threaded through the run context for the same reason `SpendLedger` is: the fact is
+ * produced deep inside the engine stage and consumed by the report, and passing it back up through
+ * every intermediate signature would be a larger change than the fact deserves.
+ */
+type CreditedPaths = Set<string>;
+
+/**
  * Accumulates one run's real spend across the engine, classification repair, and the publish-time
  * classification audit (v0.12.0).
  *
@@ -350,6 +369,8 @@ interface ReviewRun {
   readonly request: ReviewRequest;
   readonly ledger: SpendLedger;
   readonly diagnostics: Diagnostics;
+  /** See `CreditedPaths` — filled by `executeEngine`, read by the report. */
+  readonly credited: CreditedPaths;
 }
 
 /**
@@ -364,6 +385,8 @@ interface LocalRun {
   readonly request: LocalReviewRequest;
   readonly ledger: SpendLedger;
   readonly diagnostics: Diagnostics;
+  /** See `CreditedPaths` — filled by `executeEngine`, read by the report. */
+  readonly credited: CreditedPaths;
   /** `promptIdentityDigest` — identifies the guidance this run reviewed under. */
   readonly ruleDigest: string;
   /** The pinned engine's version tag (`ENGINE_PIN.version`) this run executes under. */
@@ -932,6 +955,7 @@ async function executeEngine(
   memo: MemoContext,
   ledger: SpendLedger,
   diagnostics: Diagnostics,
+  credited: CreditedPaths,
 ): Promise<Settlement> {
   const workspace = await mkdtemp(join(tmpdir(), "kfq-engine-bin-"));
   try {
@@ -968,6 +992,9 @@ async function executeEngine(
     // its own dispatch — see `ResumeOutcome`'s doc comment) tells `settle()` those paths are
     // covered by the FIRST attempt, not by the returned result's own coverage, exactly the same
     // "covered by other means" contract `memo.hitPaths` already establishes for a cache hit.
+    // Recorded for the report as well as handed to `settle()`: these paths are covered, and a
+    // report that omitted them would understate its own coverage (see `CreditedPaths`).
+    for (const path of alreadyReviewedPaths) credited.add(path);
     const memoizedForSettlement =
       alreadyReviewedPaths.length === 0
         ? memo.hitPaths
@@ -1613,6 +1640,18 @@ function parseBooked(output: EngineRunOutput, ledger: SpendLedger): EngineResult
 const TARGETED_GAP_MAX_FRACTION = 0.5;
 
 /**
+ * How many targeted rounds a finished run may buy before the gap it still reports is accepted.
+ *
+ * Three, and the number comes from a measurement rather than a preference: the completion gate's
+ * first real run showed a nineteen-file review losing two files, one round recovering one, and the
+ * run settling incomplete over the single file that remained. A cap of one leaves exactly that
+ * kind of run permanently unfinishable; an uncapped loop would re-buy a deterministic per-file
+ * failure forever. Each round is bounded twice over anyway — by the shrinking gap it dispatches
+ * and by the shrink check in `settleFinishedRun`, which stops the moment a round stops helping.
+ */
+const TARGETED_GAP_MAX_ROUNDS = 3;
+
+/**
  * The paths a targeted gap resume should re-dispatch, or `undefined` when this run is not a
  * candidate for one.
  *
@@ -1711,29 +1750,56 @@ async function settleFinishedRun(
   context: FinishedRunContext,
 ): Promise<ResumeOutcome> {
   const { options, diagnostics, ledger, reviewablePaths, firstAttemptTokens } = context;
-  const targeted = targetedGapPaths(parsed, reviewablePaths);
-  if (targeted === undefined) return finishedRunOutcome(diagnostics, parsed, options);
-  // Everything the first attempt did NOT lose. `executeEngine` folds this into
-  // `memoizedForSettlement`, which is what keeps the settlement comparing the second dispatch
-  // against the gap alone instead of against the whole inventory.
-  const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
-  const remaining = clamp(
-    options.allottedBudget - parsed.totalTokens,
-    Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION),
-    options.allottedBudget,
-  );
-  diagnostics.record("engine.resumed_gap_targeted", {
-    counts: { targeted: targeted.size, covered: covered.length, remaining },
-  });
-  return await attemptResume(
-    options,
-    diagnostics,
-    remaining,
-    firstAttemptTokens,
-    parsed,
-    covered,
-    ledger,
-  );
+  let standing = parsed;
+  let spent = firstAttemptTokens;
+  let outcome: ResumeOutcome | undefined;
+
+  // Rounds, not a single retry, because one round measurably does not finish the job: on the
+  // completion gate's first real measurement a nineteen-file review lost two files, the targeted
+  // retry recovered ONE, and the run settled incomplete over the single file still missing. Each
+  // round costs only its own shrinking gap, so the second round on one file is a rounding error
+  // against the 1.6M-token review it decides.
+  for (let round = 1; round <= TARGETED_GAP_MAX_ROUNDS; round += 1) {
+    const targeted = targetedGapPaths(standing, reviewablePaths);
+    if (targeted === undefined) break;
+    const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
+    const remaining = clamp(
+      options.allottedBudget - spent,
+      Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION),
+      options.allottedBudget,
+    );
+    diagnostics.record("engine.resumed_gap_targeted", {
+      counts: { round, targeted: targeted.size, covered: covered.length, remaining },
+    });
+    const attempt = await attemptResume(
+      options,
+      diagnostics,
+      remaining,
+      spent,
+      standing,
+      covered,
+      ledger,
+    );
+    // The gap must SHRINK to justify another round. A round that returns the same casualties (or
+    // more) is the deterministic per-file failure `resumeWorthwhile` already refuses to re-buy —
+    // paying for it twice more would reproduce the Keiko#3002 waste at a smaller scale.
+    const before = targeted.size;
+    const after = targetedGapPaths(attempt.result, reviewablePaths)?.size ?? 0;
+    outcome = attempt;
+    spent = attempt.engineTokens;
+    standing = attempt.result;
+    if (after === 0 || after >= before) {
+      if (after > 0 && after >= before) {
+        diagnostics.record("engine.resume_gap_not_shrinking", {
+          counts: { round, before, after },
+        });
+      }
+      break;
+    }
+  }
+
+  if (outcome === undefined) return finishedRunOutcome(diagnostics, parsed, options);
+  return outcome;
 }
 
 /** The denied-resume outcome for a finished first attempt — recorded, then settled on as-is. */
@@ -2622,6 +2688,7 @@ async function settleOrReport(
       memo,
       run.ledger,
       run.diagnostics,
+      run.credited,
     );
     run.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
@@ -2741,7 +2808,7 @@ async function performReviewInner(
   ledger: SpendLedger,
 ): Promise<ReviewReport> {
   const started = Date.now();
-  const run: ReviewRun = { request, ledger, diagnostics };
+  const run: ReviewRun = { request, ledger, diagnostics, credited: new Set() };
   diagnostics.record("run.started", { headSha: request.head });
 
   const ctx = gitContext(request);
@@ -2992,6 +3059,7 @@ async function localSettleOrReport(
       memo,
       run.ledger,
       run.diagnostics,
+      run.credited,
     );
     run.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
@@ -3118,8 +3186,8 @@ async function localSettleReport(
 ): Promise<LocalReviewReport> {
   if (settlement.status === "incomplete") {
     const reviewed = verdictsSurviveIncompleteness(settlement.reason)
-      ? settlement.coveredPaths.size + memo.hitPaths.size
-      : memo.hitPaths.size;
+      ? settlement.coveredPaths.size + memo.hitPaths.size + run.credited.size
+      : memo.hitPaths.size + run.credited.size;
     // Same reasoning as `performReviewInner`'s identical branch: the deterministic gates cost no
     // model tokens and depend on nothing the engine settlement decided, so an incomplete run still
     // gets their coverage. Merged into `findings` only, never `fresh`.
@@ -3187,6 +3255,7 @@ export async function performLocalReview(
       diagnostics,
       ruleDigest,
       engineVersion,
+      credited: new Set(),
     });
   } finally {
     // Identical guard to `performReview`'s own `finally` block: a pre-engine incomplete report or an

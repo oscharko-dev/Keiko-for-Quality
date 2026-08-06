@@ -1530,6 +1530,26 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(diagnostics.drain().map((r) => r.code)).toContain("engine.resumed_gap_targeted");
     });
 
+    it("keeps retrying while the gap shrinks, and stops the moment it does not", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // Round 0 loses one of two paths; round 1 returns the SAME casualty. That is the
+      // deterministic per-file failure, recognised one round later — the loop must stop there
+      // rather than buying two more rounds of the identical answer.
+      runEngineMock.mockResolvedValue({
+        stdout: finishedWithFailures(["src/b.ts"], 2),
+        ruleDigest: engineDigest,
+      });
+
+      const diagnostics = createSilentDiagnostics();
+      await performReview(baseRequest(undefined), diagnostics);
+
+      // First dispatch plus exactly one targeted round — never the cap of three.
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      const codes = diagnostics.drain().map((record) => record.code);
+      expect(codes).toContain("engine.resume_gap_not_shrinking");
+    });
+
     it("still refuses a wholesale retry when the failures are not a minority", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });

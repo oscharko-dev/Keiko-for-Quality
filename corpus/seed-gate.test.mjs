@@ -7,6 +7,9 @@ import {
   applySeed,
   assertSeedCaseShape,
   evaluateAttempt,
+  isMultiStep,
+  locateSeedRange,
+  observedPathOf,
   renderEvidence,
   settleCase,
   summarizeGate,
@@ -74,6 +77,86 @@ test("assertSeedCaseShape refuses every other malformed shape, each with its own
     () => assertSeedCaseShape([{ ...CASE_FIXTURE, required: "yes" }]),
     /explicit boolean/,
   );
+});
+
+// The multi-push shape (PRWeaver, arXiv:2608.02693). Its whole point is that the LAST push does
+// not touch the observed file, so the validator must accept exactly that — while still refusing a
+// case that never plants anything in the file it claims to watch.
+const OTHER_FILE = "packages/example/src/caller.ts";
+
+const MULTI_FIXTURE = {
+  id: "multi-fixture",
+  tier: 2,
+  required: false,
+  rationale: "fixture",
+  observedFile: SEEDED_FILE,
+  steps: [
+    {
+      label: "push 1",
+      edits: [
+        { file: SEEDED_FILE, find: "const guard = true;", replace: "const guard = flag();" },
+        { file: OTHER_FILE, find: "const flag = () => false;", replace: "const flag = () => cfg;" },
+      ],
+    },
+    {
+      label: "push 2",
+      edits: [{ file: OTHER_FILE, find: "const cfg = false;", replace: "const cfg = env.X;" }],
+    },
+  ],
+};
+
+test("a multi-push case is accepted, and identified as one", () => {
+  const cases = [MULTI_FIXTURE];
+  assert.equal(assertSeedCaseShape(cases), cases);
+  assert.equal(isMultiStep(MULTI_FIXTURE), true);
+  assert.equal(isMultiStep(CASE_FIXTURE), false);
+  assert.equal(observedPathOf(MULTI_FIXTURE), SEEDED_FILE);
+  assert.equal(observedPathOf(CASE_FIXTURE), SEEDED_FILE);
+});
+
+test("the two case forms are mutually exclusive", () => {
+  assert.throws(
+    () => assertSeedCaseShape([{ ...MULTI_FIXTURE, file: SEEDED_FILE, find: "a", replace: "b" }]),
+    /pick one form/,
+  );
+});
+
+test("a multi-push case must plant something in the file it watches", () => {
+  assert.throws(
+    () => assertSeedCaseShape([{ ...MULTI_FIXTURE, observedFile: "packages/example/src/nope.ts" }]),
+    /no edit touches observedFile/,
+  );
+});
+
+test("a multi-push case needs at least two steps and an observedFile", () => {
+  assert.throws(
+    () => assertSeedCaseShape([{ ...MULTI_FIXTURE, steps: [MULTI_FIXTURE.steps[0]] }]),
+    /at least 2 steps/,
+  );
+  const withoutObserved = { ...MULTI_FIXTURE };
+  delete withoutObserved.observedFile;
+  assert.throws(() => assertSeedCaseShape([withoutObserved]), /needs an observedFile/);
+});
+
+test("locateSeedRange finds the planted text in the final tree, or refuses to guess", () => {
+  const content = "line one\nline two\nconst guard = flag();\nline four\n";
+  assert.deepEqual(locateSeedRange(content, "const guard = flag();"), {
+    seedStartLine: 3,
+    seedEndLine: 3,
+  });
+  // Absent and ambiguous both yield no range: a line anchor nobody established is never asserted.
+  assert.equal(locateSeedRange(content, "not here"), undefined);
+  assert.equal(
+    locateSeedRange(`${content}const guard = flag();\n`, "const guard = flag();"),
+    undefined,
+  );
+});
+
+test("an attempt with no located range still passes on the file, without a line anchor", () => {
+  const report = reportWith({ findings: [findingAt(SEEDED_FILE, 12, 14)] });
+  const grade = evaluateAttempt(report, MULTI_FIXTURE, undefined);
+  assert.equal(grade.found, true);
+  assert.equal(grade.lineAnchored, false);
 });
 
 test("applySeed replaces exactly once and reports 1-based lines", () => {

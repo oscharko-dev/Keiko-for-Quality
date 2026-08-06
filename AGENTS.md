@@ -21,16 +21,33 @@ deliberately separate, not-yet-scoped decision, left alone so the qualification 
 release keeps the same measurement basis it was recorded under (see `corpus/run.mjs`'s own header
 comment).
 
-## Three commands spend real money
+## Four commands spend real money
 
-`npm run corpus`, `npm run corpus:real`, and `npm run corpus:seed` call a real model over a real
-endpoint — `corpus:real` against however many commits you point it at (its own header comment
-records a real multi-file commit running to several hundred thousand tokens), `corpus:seed` once
-per attempt per seed case against a consumer checkout. None is part of `verify` for that reason.
-Do not run any of them without the user's explicit go-ahead, and do not reach for one to "double
-check" an ordinary change — the deterministic half of the corpus (inventory, placement,
-sanitization, settlement) already runs under `npm test`, and the seed gate's own grading logic is
-hermetically covered by `corpus/seed-gate.test.mjs`.
+`npm run corpus`, `npm run corpus:real`, `npm run corpus:seed`, and `npm run corpus:completion`
+call a real model over a real endpoint — `corpus:real` against however many commits you point it
+at (its own header comment records a real multi-file commit running to several hundred thousand
+tokens), `corpus:seed` once per attempt per seed case, and `corpus:completion` **the most of all**:
+one full-size pull-request review per run, measured at 1.1M–1.7M tokens each on Keiko#3011. Every
+one of them has a `--dry-run` or a cost line; use it first. None is part of `verify` for that
+reason. Do not run any of them without the user's explicit go-ahead, and do not reach for one to
+"double check" an ordinary change — the deterministic half of the corpus (inventory, placement,
+sanitization, settlement) already runs under `npm test`, and both gates' grading logic is
+hermetically covered by `corpus/seed-gate.test.mjs` and `corpus/completion-gate.test.mjs`.
+
+## Recall gates cannot see a reviewer that does not finish
+
+The corpus and the consumer-seed gate both ask "does it FIND the defect?", and both run on one- or
+two-file diffs. On 2026-08-06 both were green while production could not complete a nineteen-file
+review at all — Keiko#3011 burned 1.76M tokens in CI and settled `engine_error`, and 1.63M locally
+and settled `coverage_gap`. Neither gate could have caught either, because neither had ever run a
+review large enough to fail that way. Green was true and useless.
+
+`npm run corpus:completion` is the answer to that, and it measures a different quantity: the
+**rate** at which reviews of real, full-size pull requests run to completion. Read it as a rate and
+never as a verdict — a re-run of that same pull request settled `complete` minutes later with the
+new retry path never firing, same input, same model. `incomplete-never-clean` stays correct; an
+engine that genuinely cannot finish a file should say so. But a reviewer that says it nine times in
+ten is worthless however honest each label is. The rate is the product; the label is its honesty.
 
 The free half of the corpus is inside `verify`: `test:corpus` runs the hermetic `corpus/*.test.mjs`
 suites under `node --test`, in the chain between `npm test` and `build`, so a red corpus test fails
@@ -131,7 +148,10 @@ with the source that produced it. This exact miss has already cost a CI round in
   `corpus/evidence/seed-gate-*.md`) run with the release candidate's own tree — and every merge to
   `main` is tagged `vX.Y.Z`. The seed gate exists because the corpus measures synthetic fixtures;
   the gate proves the shipping reviewer still finds a planted defect in the consumer's real code,
-  through the real CLI surface. No release without it. Consumers pin full tag SHAs, so `main` is the audit trail ("every
+  through the real CLI surface. No release without it. Since 2026-08-06 a release also carries a
+  **completion measurement** (`npm run corpus:completion`, evidence in
+  `corpus/evidence/completion-*.md`): the seed gate proves the reviewer can find things, and only
+  this one proves it can finish. Both, or no release. Consumers pin full tag SHAs, so `main` is the audit trail ("every
   commit is a qualified release"), not a consumer surface. From the second release
   onward that pull request comes from a `release/vX.Y.Z` branch cut from `main`, not from `dev`
   directly: each release squash leaves a commit on `main` whose content already exists in `dev`'s
