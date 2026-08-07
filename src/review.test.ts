@@ -82,16 +82,30 @@ function requireEngineDigest(): Sha256 {
 
 describe("computeAllottedBudget", () => {
   it("matches the worked example: the measured 37-file live run (Keiko#2970)", () => {
-    // 1.3 * (37 * 100_000 + 4_594 * 60) = 1.3 * (3_700_000 + 275_640) = 1.3 * 3_975_640 =
-    // 5_168_332 — above that run's real 3,843,796-token spend, which the previous 64k constant
-    // priced at 3,436,732 and thereby truncated into an incomplete settlement four pushes running.
-    expect(computeAllottedBudget(6_000_000, 37, 4_594)).toBe(5_168_332);
+    // 1.3 * (37 * 200_000 + 4_594 * 60) = 1.3 * (7_400_000 + 275_640) = 9_978_332, past
+    // ALLOTMENT_CEILING and then past the consumer's own 6M — so the clamp decides. The per-file
+    // price doubled with the round ceiling (see `allottedPerFile`), which is exactly the coupling
+    // this suite now pins: 37 files allowed sixty rounds each is a change the consumer's ceiling
+    // governs, not the size term.
+    expect(computeAllottedBudget(6_000_000, 37, 4_594)).toBe(6_000_000);
+  });
+
+  // The defect this coupling exists to prevent, stated as a test rather than a comment: on
+  // 2026-08-06 the tool-round ceiling doubled and this price did not follow, so Keiko#3008 stopped
+  // settling `coverage_gap` and started settling `budget_exceeded` — 3.2M spent against a 1.59M
+  // allotment still priced for half the conversation length the engine now permits. A future
+  // change to either number must move this expectation, which is the point.
+  it("prices a file at the round ceiling actually in force, not the one it was calibrated under", () => {
+    // 12 files, the Keiko#3008 shape: 1.3 * (12 * 200_000 + 400 * 60) = 3_151_200 — comfortably
+    // above the 3.2M-class spend that blew the old 1.59M allotment.
+    expect(computeAllottedBudget(6_000_000, 12, 400)).toBe(3_151_200);
   });
 
   it("hands a change past the ceiling the consumer's whole budget rather than a fraction of it", () => {
-    // 1.3 * (55 * 100_000 + 1_374 * 60) = 7_257_172, past ALLOTMENT_CEILING — so the clamp, and
-    // then the consumer's own 6M ceiling, decide. Past ~46 files the size term stops discriminating
-    // and every change is held to the configured budget, which is the consumer's call to make.
+    // 1.3 * (55 * 200_000 + 1_374 * 60) = 14_407_172, past ALLOTMENT_CEILING — so the clamp, and
+    // then the consumer's own 6M ceiling, decide. The size term stops discriminating earlier now
+    // that a file is priced at sixty rounds, and every larger change is held to the configured
+    // budget, which is the consumer's call to make.
     expect(computeAllottedBudget(6_000_000, 55, 1_374)).toBe(6_000_000);
   });
 
@@ -100,8 +114,10 @@ describe("computeAllottedBudget", () => {
   });
 
   it("floors a tiny change rather than starving it", () => {
-    // 1.3 * (1 * 100_000 + 5 * 60) = 1.3 * 100_300 = 130_390, below the 150_000 floor.
-    expect(computeAllottedBudget(2_000_000, 1, 5)).toBe(150_000);
+    // 1.3 * (1 * 200_000 + 5 * 60) = 1.3 * 200_300 = 260_390 — now above the 150_000 floor, so
+    // the floor no longer binds for a one-file change. Kept as the floor's own regression guard:
+    // it must still bind for a change small enough to fall under it.
+    expect(computeAllottedBudget(2_000_000, 1, 5)).toBe(260_390);
   });
 
   it("does not let the floor exceed a ceiling configured below it", () => {
@@ -1598,20 +1614,52 @@ describe("performReview: review-cache memoization end to end", () => {
       await performReview(baseRequest(undefined), createSilentDiagnostics());
 
       const second = runEngineMock.mock.calls[1]?.[0] as { allottedBudget: number };
-      // One file at PER_FILE_TOKENS x ALLOTMENT_MARGIN — not a fraction of a nearly-spent
-      // allotment, which is what produced the 399k-for-four-files round that threw.
-      expect(second.allottedBudget).toBe(130_000);
+      // One file at `allottedPerFile()` x ALLOTMENT_MARGIN — priced at the tool-round ceiling in
+      // force, not at a fraction of a nearly-spent allotment, which is what produced the
+      // 399k-for-four-files round that threw.
+      expect(second.allottedBudget).toBe(260_000);
+    });
+
+    it("dispatches NO round once the ceiling is exhausted, because 0 means unlimited downstream", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // The Keiko#3008 shape (2026-08-06): the first attempt has already spent past the 2M
+      // ceiling. A budget rendered as a number here would be 0, and the engine's own
+      // `--max-tokens-budget` help reads `0 = unlimited` — so the one run that most needs a bound
+      // would proceed without one. It spent 9.07M against a 6M ceiling before this test existed.
+      runEngineMock.mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          status: "completed_with_errors",
+          summary: { files_reviewed: 2, total_tokens: 2_500_000, budget_exceeded: false },
+          comments: [],
+          warnings: [
+            { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+          ],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      const diagnostics = createSilentDiagnostics();
+      await performReview(baseRequest(undefined), diagnostics);
+
+      // Exactly one dispatch: the first attempt. No round was funded, so none was sent.
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
+      const codes = diagnostics.drain().map((record) => record.code);
+      expect(codes).toContain("engine.resume_skipped_budget_exhausted");
+      expect(codes).not.toContain("engine.resumed_gap_targeted");
     });
 
     it("never lets a targeted round outspend what the consumer's ceiling has left", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      // 1.9M of the 2M ceiling already spent: the round is worth 130k and may have 100k. Pricing
-      // by the gap must never turn a stop-loss into a blank cheque.
+      // 1.8M of the 2M ceiling already spent: the round is worth 260k and may have 200k. Pricing
+      // by the gap must never turn a stop-loss into a blank cheque. (Headroom is deliberately
+      // above ALLOTMENT_FLOOR — below it no round is dispatched at all, which its own test
+      // covers.)
       runEngineMock.mockResolvedValueOnce({
         stdout: JSON.stringify({
           status: "completed_with_errors",
-          summary: { files_reviewed: 2, total_tokens: 1_900_000, budget_exceeded: false },
+          summary: { files_reviewed: 2, total_tokens: 1_800_000, budget_exceeded: false },
           comments: [],
           warnings: [
             { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
@@ -1632,7 +1680,7 @@ describe("performReview: review-cache memoization end to end", () => {
       await performReview(baseRequest(undefined), createSilentDiagnostics());
 
       const second = runEngineMock.mock.calls[1]?.[0] as { allottedBudget: number };
-      expect(second.allottedBudget).toBe(100_000);
+      expect(second.allottedBudget).toBe(200_000);
     });
 
     it("keeps retrying while the gap shrinks, and stops the moment it does not", async () => {
