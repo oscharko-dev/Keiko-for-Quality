@@ -38,6 +38,7 @@ import {
 import { promptIdentityDigest } from "./engine/rule-identity.js";
 import {
   EngineRunError,
+  MAX_TOOL_ROUNDS_PER_FILE,
   runEngine,
   type EngineRunOptions,
   type EngineRunOutput,
@@ -428,6 +429,35 @@ interface LocalRun {
 const PER_FILE_TOKENS = 100_000;
 
 /**
+ * The tool-round ceiling this per-file price was calibrated under — the engine's own embedded
+ * default (`MAX_TOOL_REQUEST_TIMES: 30`, `task_template.json` at v1.8.4).
+ *
+ * Named here rather than left implicit because on 2026-08-06 the two drifted apart and the
+ * measurement caught it. Raising the ceiling to 60 (`MAX_TOOL_ROUNDS_PER_FILE`, engine/run.ts)
+ * without touching this price did not fix Keiko#3008 — it MOVED the failure: run 1 stopped
+ * settling `coverage_gap` and started settling `budget_exceeded` instead, spending 3.2M against
+ * an allotment of 1.59M that was still priced for half the conversation length it now permits.
+ *
+ * A per-file price and a per-file round ceiling are two statements about the same thing, so
+ * `allottedPerFile` below derives one from the other instead of letting a future change to either
+ * silently invalidate the calibration behind this constant.
+ */
+const CALIBRATED_TOOL_ROUNDS = 30;
+
+/**
+ * The per-file price at the round ceiling actually in force.
+ *
+ * Deliberately NOT a second hand-tuned constant: the 100k above was measured against 30 rounds,
+ * and the only honest way to keep it meaningful when the ceiling moves is to scale it by the same
+ * factor. This over-provisions slightly — a file rarely uses every round it is allowed — but the
+ * asymmetry `PER_FILE_TOKENS`'s own comment records still holds: headroom a run does not need
+ * costs nothing, and hitting the stop-loss costs the entire run.
+ */
+function allottedPerFile(): number {
+  return (PER_FILE_TOKENS * MAX_TOOL_ROUNDS_PER_FILE) / CALIBRATED_TOOL_ROUNDS;
+}
+
+/**
  * A weak secondary term, in tokens per changed line.
  *
  * Deliberately small relative to `PER_FILE_TOKENS`: line count is a poor predictor of spend next to
@@ -506,7 +536,7 @@ export function computeAllottedBudget(
 ): number {
   const sizeScaled =
     ALLOTMENT_MARGIN *
-    (reviewableFileCount * PER_FILE_TOKENS + reviewableChangedLines * PER_LINE_TOKENS);
+    (reviewableFileCount * allottedPerFile() + reviewableChangedLines * PER_LINE_TOKENS);
   const clamped = clamp(sizeScaled, ALLOTMENT_FLOOR, ALLOTMENT_CEILING);
   return Math.round(Math.min(tokenBudget, clamped));
 }
@@ -1725,11 +1755,30 @@ function planGeneralResume(
  * `ALLOTMENT_MARGIN` the whole-review estimate uses — and bounded twice: never below the old floor
  * (a one-file round still gets real headroom), and never past what the consumer's own ceiling has
  * left unspent. The second bound is what keeps rounds from turning a stop-loss into a blank cheque.
+ *
+ * `undefined` — no round at all — when the ceiling has nothing left to give, and this return is
+ * load-bearing rather than tidy. `--max-tokens-budget 0` does not mean "spend nothing" to the
+ * engine; its own flag help reads `0 = unlimited`. So an exhausted headroom rendered as a number
+ * hands the very run that already overspent an UNBOUNDED dispatch — the exact inversion of the
+ * bound this function exists to apply. Measured on Keiko#3008 (2026-08-06): a run 8.79M into a
+ * 6M ceiling dispatched round 2 with `remaining: 0` and finished having spent 9.07M.
  */
-function targetedRoundBudget(gapSize: number, spent: number, options: EngineRunOptions): number {
-  const priced = Math.round(gapSize * PER_FILE_TOKENS * ALLOTMENT_MARGIN);
+function targetedRoundBudget(
+  gapSize: number,
+  spent: number,
+  options: EngineRunOptions,
+): number | undefined {
+  // `allottedPerFile()`, not the raw `PER_FILE_TOKENS`: a retried file runs under the SAME
+  // tool-round ceiling as every other, so pricing it at the pre-2026-08-06 calibration would
+  // reintroduce, one function over, exactly the drift that constant now exists to prevent.
+  const priced = Math.round(gapSize * allottedPerFile() * ALLOTMENT_MARGIN);
   const floor = Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION);
   const headroom = Math.max(0, options.config.tokenBudget - spent);
+  // `ALLOTMENT_FLOOR` is this repository's own answer to "the least a review can be given and
+  // still be a review", so it is also the least a ROUND can be given. Below it the round would
+  // either be dispatched with a budget that cannot finish one file, or — at exactly zero — with
+  // no budget at all, which the engine reads as unlimited.
+  if (headroom < ALLOTMENT_FLOOR) return undefined;
   return clamp(Math.min(priced, headroom), Math.min(floor, headroom), options.config.tokenBudget);
 }
 
@@ -1777,6 +1826,31 @@ async function decideAfterFirstAttempt(
  * `memoizedForSettlement`, so `settle()` compares the second dispatch against the gap alone
  * rather than against the whole inventory. The decision itself lives in `targetedGapPaths`.
  */
+/**
+ * Whether another round is justified: the gap must have SHRUNK.
+ *
+ * A round that returns the same casualties — or more — is the deterministic per-file failure
+ * `resumeWorthwhile` already refuses to re-buy, recognised one round later. Paying for it twice
+ * more would reproduce the Keiko#3002 waste at a smaller scale, so the loop stops and says why.
+ * A gap of zero also stops it, and silently: nothing was left unreviewed, which is the outcome
+ * rounds exist to reach rather than a condition worth a diagnostic.
+ */
+function gapShrank(
+  before: number,
+  result: EngineResult,
+  reviewablePaths: ReadonlySet<string>,
+  diagnostics: Diagnostics,
+  round: number,
+): boolean {
+  const after = targetedGapPaths(result, reviewablePaths)?.size ?? 0;
+  if (after === 0) return false;
+  if (after >= before) {
+    diagnostics.record("engine.resume_gap_not_shrinking", { counts: { round, before, after } });
+    return false;
+  }
+  return true;
+}
+
 async function settleFinishedRun(
   parsed: EngineResult,
   context: FinishedRunContext,
@@ -1796,6 +1870,16 @@ async function settleFinishedRun(
     if (targeted === undefined) break;
     const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
     const remaining = targetedRoundBudget(targeted.size, spent, options);
+    // The consumer's ceiling has nothing left to fund a round with. Stopping here is the whole
+    // point: a run that already overspent must not be handed an unbounded dispatch (see
+    // `targetedRoundBudget`), and the gap it still reports is the next push's work, not this
+    // run's to buy at any price.
+    if (remaining === undefined) {
+      diagnostics.record("engine.resume_skipped_budget_exhausted", {
+        counts: { round, targeted: targeted.size, spent },
+      });
+      break;
+    }
     diagnostics.record("engine.resumed_gap_targeted", {
       counts: { round, targeted: targeted.size, covered: covered.length, remaining },
     });
@@ -1808,22 +1892,10 @@ async function settleFinishedRun(
       covered,
       ledger,
     );
-    // The gap must SHRINK to justify another round. A round that returns the same casualties (or
-    // more) is the deterministic per-file failure `resumeWorthwhile` already refuses to re-buy —
-    // paying for it twice more would reproduce the Keiko#3002 waste at a smaller scale.
-    const before = targeted.size;
-    const after = targetedGapPaths(attempt.result, reviewablePaths)?.size ?? 0;
     outcome = attempt;
     spent = attempt.engineTokens;
     standing = attempt.result;
-    if (after === 0 || after >= before) {
-      if (after > 0 && after >= before) {
-        diagnostics.record("engine.resume_gap_not_shrinking", {
-          counts: { round, before, after },
-        });
-      }
-      break;
-    }
+    if (!gapShrank(targeted.size, attempt.result, reviewablePaths, diagnostics, round)) break;
   }
 
   if (outcome === undefined) return finishedRunOutcome(diagnostics, parsed, options);
