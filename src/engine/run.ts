@@ -67,6 +67,20 @@ export interface EngineRunOptions {
   readonly samplingSeed?: number;
 }
 
+/**
+ * Requests the provider refused outright because they did not fit its context window.
+ *
+ * Carried out of the proxy for the same reason `wireTokens` is: the settlement decision needs it
+ * and the diagnostic stream is not a channel back into the product. `limit` and `requested` are the
+ * provider's own figures from the most recent such refusal, or 0 when it named none — numbers only,
+ * never any part of the body they came from.
+ */
+export interface ContextLengthRefusals {
+  readonly count: number;
+  readonly limit: number;
+  readonly requested: number;
+}
+
 export interface EngineRunOutput {
   readonly stdout: string;
   readonly ruleDigest: Sha256;
@@ -74,6 +88,18 @@ export interface EngineRunOutput {
    *  when `stdout` later fails validation and the engine's own `total_tokens` never gets read.
    *  Absent when no proxy counted (anthropic path); see `EngineRunError.wireTokens`. */
   readonly wireTokens?: number;
+  /**
+   * Present only when the provider refused at least one request as too large (2026-08-07).
+   *
+   * Measured across 27 full-size reviews of real pull requests: every one of the 21 that ran to
+   * completion had zero persisted 400s, and every one of the 6 that did not had at least one — five
+   * of them refusals of exactly this kind. It is the cleanest separator this project has found, and
+   * until now it reached only the `model.usage` diagnostic, so a run settled `coverage_gap` while
+   * the actual cause — one file that cannot fit in the model's context — went unnamed. A retry
+   * cannot fix a file that is too big, which makes naming it the difference between an operator who
+   * knows to split or exclude it and one who re-runs the review and pays again for the same gap.
+   */
+  readonly contextLengthRefusals?: ContextLengthRefusals;
 }
 
 /**
@@ -320,6 +346,19 @@ function proxyWireTokens(proxy: ModelProxy | undefined): number | undefined {
   return usage.prompt + usage.completion;
 }
 
+/** `undefined` when nothing was refused for size — the settlement should say nothing rather than
+ *  report a zero, the same discipline `parseToolCalls` applies to an absent tally. */
+function proxyContextRefusals(proxy: ModelProxy | undefined): ContextLengthRefusals | undefined {
+  if (proxy === undefined) return undefined;
+  const usage = proxy.usage();
+  if (usage.badRequestContextLength === 0) return undefined;
+  return {
+    count: usage.badRequestContextLength,
+    limit: usage.badRequestContextLimit,
+    requested: usage.badRequestRequestedTokens,
+  };
+}
+
 /**
  * Runs one review and returns its raw stdout.
  *
@@ -359,10 +398,12 @@ export async function runEngine(
     });
 
     const wireTokens = proxyWireTokens(proxy);
+    const contextLengthRefusals = proxyContextRefusals(proxy);
     return {
       stdout: result.stdout.toString("utf8"),
       ruleDigest,
       ...(wireTokens === undefined ? {} : { wireTokens }),
+      ...(contextLengthRefusals === undefined ? {} : { contextLengthRefusals }),
     };
   } catch (error) {
     const reason = failureReason(error);

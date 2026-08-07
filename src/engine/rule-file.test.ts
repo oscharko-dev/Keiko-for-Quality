@@ -185,6 +185,40 @@ describe("buildRuleFile", () => {
     expect(rule).toContain("Nothing follows");
   });
 
+  /**
+   * Both clauses come from an outside assessment of Keiko#3011, where this reviewer found the most
+   * valuable defect on the pull request and then filed it at the lowest severity while proposing a
+   * fix that would have opened a wider hole than the one it closed. Pinned here because rule text
+   * is qualified configuration: a clause that quietly disappears takes its qualification with it,
+   * and nothing else in `verify` would notice.
+   */
+  it("requires a severity to establish who the defect reaches", () => {
+    const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    expect(rule).toContain("Severity is a claim about REACH");
+    // The instruction is worthless without its escape hatch: a reviewer that cannot establish the
+    // reach must SAY so rather than quietly settle on the lowest rung, which is the exact failure.
+    expect(rule).toContain("is unknown, not small");
+  });
+
+  it("forbids a suggested fix that deletes an existing check", () => {
+    const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    expect(rule).toContain("Never show a diff that DELETES a call");
+    // And names what to do instead, because a prohibition without an alternative is ignored.
+    expect(rule).toContain("state the CONSTRAINT it must satisfy");
+  });
+
+  /**
+   * A third clause was drafted with the two above and deliberately not shipped: it bounded the
+   * reviewer's repository searches on the strength of a correlation across two pull requests, and
+   * 27 full-size reviews refuted it — the runs that failed averaged 1.9-2.8 searches per file, the
+   * ones that completed reached 9.9. This asserts its absence so a later edit cannot reintroduce a
+   * refuted claim into a prompt that is paid for on every request.
+   */
+  it("carries no search-economy clause, whose evidence was withdrawn", () => {
+    const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    expect(rule).not.toContain("Spend those searches deliberately");
+  });
+
   it("never teaches an angle-bracketed Source line", () => {
     const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
     expect(rule).toContain("Source:");

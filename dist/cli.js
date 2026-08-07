@@ -2482,6 +2482,16 @@ var CATCH_ALL_RULE = [
   "   makes the block one-click applicable and is rejected before publication. A `diff` block is",
   "   shown, not applied, which is the right amount of help from a reviewer that can be wrong.",
   "   Skip it when the fix is a design decision rather than an edit.",
+  "   Never show a diff that DELETES a call to an existing check, guard, validation, or assertion in",
+  "   order to make the reported symptom go away. That is a design decision wearing the clothes of a",
+  "   one-line edit: the call stands there for reasons its call site does not show you, and cutting",
+  "   it trades a narrow defect for a wide one. Measured on Keiko#3011 (2026-08-06): a proposed fix",
+  "   for a path being wrongly rejected replaced a `guard()` call with a bare normalisation,",
+  "   discarding the NUL-byte, absolute-path, containment and symlink-target checks that came with",
+  "   it \u2014 a wider hole than the one it closed, in the module whose only job was those checks.",
+  "   When the fix has that shape, state the CONSTRAINT it must satisfy and stop there: what must",
+  "   still hold once the defect is gone. That is what the author actually needs from you, it",
+  "   follows from what you already know, and it cannot be pasted in wrong.",
   "5. **When the defect breaks a rule this repository has written down, add one last line:**",
   "   `Source: AGENTS.md` \u2014 the literal path of the guideline document (NEVER in angle brackets).",
   "   Cite only a path from the list of guideline documents above. Never cite the name of a",
@@ -2514,6 +2524,16 @@ var CATCH_ALL_RULE = [
   ' "category": "security", "severity": "critical",',
   ' "content": "Building the query out of caller-controlled text ..."}',
   "```",
+  "",
+  "Severity is a claim about REACH, so establish the reach before you choose one. Name who arrives",
+  "at the broken path and what puts them there \u2014 a caller, a configuration, an ordering, a first",
+  "run \u2014 inside the finding itself. A mechanism without a population is not a severity argument:",
+  '"fails for legitimate configurations" and "fails on first run for every install nobody has',
+  'configured yet" describe the same defect and sit three rungs apart. Measured on Keiko#3011',
+  "(2026-08-06): a breakage on the exact branch every unconfigured install takes at first start was",
+  "filed at the lowest rung, because the finding stated the mechanism and never asked who hits it.",
+  "Where you cannot establish the reach, write that into the finding rather than settling low \u2014 a",
+  "reach you did not establish is unknown, not small, and a reader can act on the difference.",
   "",
   "Calibrate severity by consequence; stop at the first test that holds:",
   "- critical \u2014 an auth check removed or bypassed; caller-controlled text reaching command, query,",
@@ -3080,6 +3100,16 @@ function proxyWireTokens(proxy) {
   const usage = proxy.usage();
   return usage.prompt + usage.completion;
 }
+function proxyContextRefusals(proxy) {
+  if (proxy === void 0) return void 0;
+  const usage = proxy.usage();
+  if (usage.badRequestContextLength === 0) return void 0;
+  return {
+    count: usage.badRequestContextLength,
+    limit: usage.badRequestContextLimit,
+    requested: usage.badRequestRequestedTokens
+  };
+}
 async function runEngine(options2, diagnostics) {
   const token = readModelToken(options2.config, options2.env);
   if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
@@ -3106,10 +3136,12 @@ async function runEngine(options2, diagnostics) {
       counts: { bytes: result.stdout.byteLength, budget: options2.allottedBudget }
     });
     const wireTokens = proxyWireTokens(proxy);
+    const contextLengthRefusals = proxyContextRefusals(proxy);
     return {
       stdout: result.stdout.toString("utf8"),
       ruleDigest,
-      ...wireTokens === void 0 ? {} : { wireTokens }
+      ...wireTokens === void 0 ? {} : { wireTokens },
+      ...contextLengthRefusals === void 0 ? {} : { contextLengthRefusals }
     };
   } catch (error) {
     const reason = failureReason(error);
@@ -4793,7 +4825,7 @@ function engineInvocationOptions(request, inventory, binaryPath, allottedBudget,
     mechanicallyCleanPaths: excluded
   };
 }
-async function executeEngine(request, inventory, memo, ledger, diagnostics, credited) {
+async function executeEngine(request, inventory, memo, ledger, diagnostics, tallies) {
   const workspace = await mkdtemp2(join3(tmpdir2(), "kfq-engine-bin-"));
   try {
     const engine = await acquireEngine(workspace, diagnostics);
@@ -4807,7 +4839,8 @@ async function executeEngine(request, inventory, memo, ledger, diagnostics, cred
       engineInvocationOptions(request, inventory, engine.binaryPath, allottedBudget, excluded),
       diagnostics,
       ledger,
-      inventory.reviewablePaths
+      inventory.reviewablePaths,
+      tallies.refusals
     );
     ledger.engine += engineTokens;
     if (parsed.rejectedFindings > 0) {
@@ -4822,7 +4855,7 @@ async function executeEngine(request, inventory, memo, ledger, diagnostics, cred
       diagnostics
     );
     ledger.classify += classifyTokens;
-    for (const path of alreadyReviewedPaths) credited.add(path);
+    for (const path of alreadyReviewedPaths) tallies.credited.add(path);
     const memoizedForSettlement = alreadyReviewedPaths.length === 0 ? memo.hitPaths : /* @__PURE__ */ new Set([...memo.hitPaths, ...alreadyReviewedPaths]);
     return settle(inventory, classified, request.profile, request.config, memoizedForSettlement);
   } catch (error) {
@@ -5057,7 +5090,13 @@ function recordEngineStatus(diagnostics, result, headSha) {
 function resumeWorthwhile(status) {
   return status === "failed" || status === "unknown";
 }
-function parseBooked(output, ledger) {
+function parseBooked(output, ledger, refusals) {
+  const refused = output.contextLengthRefusals;
+  if (refused !== void 0) {
+    refusals.count += refused.count;
+    refusals.limit = Math.max(refusals.limit, refused.limit);
+    refusals.requested = Math.max(refusals.requested, refused.requested);
+  }
   try {
     return parseEngineResult(output.stdout);
   } catch (error) {
@@ -5115,7 +5154,7 @@ function gapShrank(before, result, reviewablePaths, diagnostics, round) {
   return true;
 }
 async function settleFinishedRun(parsed, context) {
-  const { options: options2, diagnostics, ledger, reviewablePaths, firstAttemptTokens } = context;
+  const { options: options2, diagnostics, ledger, reviewablePaths, firstAttemptTokens, refusals } = context;
   let standing = parsed;
   let spent = firstAttemptTokens;
   let outcome;
@@ -5140,7 +5179,8 @@ async function settleFinishedRun(parsed, context) {
       spent,
       standing,
       covered,
-      ledger
+      ledger,
+      refusals
     );
     outcome = attempt;
     spent = attempt.engineTokens;
@@ -5157,7 +5197,7 @@ function finishedRunOutcome(diagnostics, parsed, options2) {
   });
   return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
 }
-async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger) {
+async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger, refusals) {
   try {
     const second = await runEngine(
       {
@@ -5168,7 +5208,7 @@ async function attemptResume(options2, diagnostics, remaining, firstAttemptToken
       },
       diagnostics
     );
-    const parsedSecond = parseBooked(second, ledger);
+    const parsedSecond = parseBooked(second, ledger, refusals);
     recordEngineStatus(diagnostics, parsedSecond, options2.pair.head);
     const merged = firstResult === void 0 ? parsedSecond : mergeResumedResult(firstResult, parsedSecond, alreadyReviewedPaths);
     return {
@@ -5186,14 +5226,14 @@ async function attemptResume(options2, diagnostics, remaining, firstAttemptToken
     return { result: firstResult, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
   }
 }
-async function runEngineWithOneResume(options2, diagnostics, ledger, reviewablePaths) {
+async function runEngineWithOneResume(options2, diagnostics, ledger, reviewablePaths, refusals) {
   let remaining = options2.allottedBudget;
   let firstAttemptTokens = 0;
   let firstResult;
   let alreadyReviewedPaths = [];
   try {
     const first = await runEngine(options2, diagnostics);
-    const parsed = parseBooked(first, ledger);
+    const parsed = parseBooked(first, ledger, refusals);
     recordEngineStatus(diagnostics, parsed, options2.pair.head);
     if (parsed.status === "success") {
       return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
@@ -5205,7 +5245,8 @@ async function runEngineWithOneResume(options2, diagnostics, ledger, reviewableP
       diagnostics,
       ledger,
       reviewablePaths,
-      firstAttemptTokens
+      firstAttemptTokens,
+      refusals
     });
     if (decided !== void 0) return decided;
     ({ alreadyReviewedPaths, remaining } = planGeneralResume(parsed, options2));
@@ -5222,7 +5263,8 @@ async function runEngineWithOneResume(options2, diagnostics, ledger, reviewableP
     firstAttemptTokens,
     firstResult,
     alreadyReviewedPaths,
-    ledger
+    ledger,
+    refusals
   );
 }
 function mergeResumedResult(first, second, excludedPaths) {
@@ -5487,7 +5529,7 @@ async function localSettleOrReport(run2, inventory, memo) {
       memo,
       run2.ledger,
       run2.diagnostics,
-      run2.credited
+      run2
     );
     run2.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
@@ -5612,7 +5654,8 @@ async function performLocalReview(request, diagnostics) {
       diagnostics,
       ruleDigest,
       engineVersion,
-      credited: /* @__PURE__ */ new Set()
+      credited: /* @__PURE__ */ new Set(),
+      refusals: { count: 0, limit: 0, requested: 0 }
     });
   } finally {
     if (ledger.engine > 0 || ledger.classify > 0) {

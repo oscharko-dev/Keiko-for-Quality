@@ -1703,6 +1703,51 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(codes).toContain("engine.resume_gap_not_shrinking");
     });
 
+    // Measured 2026-08-07 across 27 full-size reviews of real pull requests: all 21 that ran to
+    // completion had zero persisted 400s, and all 6 that did not had at least one — five of them
+    // refusals of exactly this kind, a file too large for the model's context window. Until this,
+    // the count reached only `model.usage`, where nothing acts on it: the run settled `coverage_gap`
+    // and the operator was told a file was missing but never that no retry could ever fetch it.
+    it("names a context-window refusal on the settlement, not only in the usage line", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValueOnce({
+        stdout: finishedWithFailures(["src/a.ts", "src/b.ts"], 2),
+        ruleDigest: engineDigest,
+        contextLengthRefusals: { count: 2, limit: 128_000, requested: 191_402 },
+      });
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(baseRequest(undefined), diagnostics);
+
+      expect(report.outcome).toBe("incomplete");
+      const settlement = diagnostics
+        .drain()
+        .find((record) => record.code === "settlement.incomplete.coverage_gap");
+      expect(settlement?.counts?.context_length_refusals).toBe(2);
+      // The provider's own figures ride along, because "too big" without a size is not actionable.
+      expect(settlement?.counts?.context_length_limit).toBe(128_000);
+      expect(settlement?.counts?.context_length_requested).toBe(191_402);
+    });
+
+    it("says nothing about refusals on a settlement that had none", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValueOnce({
+        stdout: finishedWithFailures(["src/a.ts", "src/b.ts"], 2),
+        ruleDigest: engineDigest,
+      });
+
+      const diagnostics = createSilentDiagnostics();
+      await performReview(baseRequest(undefined), diagnostics);
+
+      const settlement = diagnostics
+        .drain()
+        .find((record) => record.code === "settlement.incomplete.coverage_gap");
+      // A zero would read as "measured, and it was none". Absence reads as what it is.
+      expect(settlement?.counts?.context_length_refusals).toBeUndefined();
+    });
+
     it("still refuses a wholesale retry when the failures are not a minority", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
