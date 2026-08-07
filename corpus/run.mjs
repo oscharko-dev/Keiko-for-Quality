@@ -30,6 +30,11 @@ const { compareDeclaredContracts, describeMismatch, findUncoveredUnionMembers, d
   await import("../src/contracts/shape-gate.ts");
 const { detectPinDesync, describePinDesync } = await import("../src/contracts/pin-desync.ts");
 const { loadReviewProfile } = await import("../src/config/profile.ts");
+// The single-shot runner (feat/single-shot-review): imported so the KFQ_SINGLE_SHOT=1 branch in
+// `runEngine` below can measure the one-call-per-file mode on the SAME fixtures, graders, and
+// resume harness as the pinned binary — same import mechanism as everything above, so the corpus
+// measures the shipped runner, never a restatement of it.
+const { runSingleShotEngine } = await import("../src/engine/single-shot.ts");
 // The publisher stage: everything the gate merge (below) produces — engine plus classification
 // plus the deterministic gate — is run through the real, shipped `planPublication` before scoring,
 // never a restatement of sanitization or deduplication. Same import mechanism as everything above.
@@ -98,7 +103,9 @@ const execFileAsync = promisify(execFile);
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BINARY = process.env.OCR_BINARY;
-if (!BINARY) {
+// The single-shot mode never spawns the binary, so demanding one would block the measurement it
+// exists for; every other invocation keeps the guard exactly as it was.
+if (!BINARY && process.env.KFQ_SINGLE_SHOT !== "1") {
   console.error("OCR_BINARY must point at the pinned engine binary");
   process.exit(2);
 }
@@ -428,7 +435,62 @@ async function planCaseFindings(testCase, findings) {
   return await planPublication(context, findings, createSilentDiagnostics(), EMPTY_PREFETCH);
 }
 
+/**
+ * The KFQ_SINGLE_SHOT=1 branch of `runEngine`: the one-call-per-file runner over the identical
+ * fixture commit (HEAD~1..HEAD, exactly what `engineArguments` hands the binary), the identical
+ * profile-derived rule (both paths route through the production `buildRuleFile`), the identical
+ * sampling pin threaded as `samplingSeed`, and the identical harness around it — the caller's
+ * retry/resume mirror sees the same stdout shape either way. Additive and env-gated: with the
+ * flag unset, not one byte of the frozen measurement basis below changes.
+ *
+ * Motivated the same day it was built (2026-08-07): the agentic loop spent 2.17M tokens against a
+ * 1.27M allotment on this product's own pull request and settled coverage_gap twice, and the
+ * single-shot smoke on the same commit ran complete at 132k. Recall is the open question, and this
+ * branch is what lets the 32-case corpus answer it on the same measurement basis as every
+ * qualification before it.
+ */
+async function runSingleShotForCorpus(dir, seed, budgetTokens) {
+  const git = (args) =>
+    execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { PATH: FIXED_PATH } }).trim();
+  const head = git(["rev-parse", "HEAD"]);
+  const base = git(["rev-parse", "HEAD~1"]);
+  const profile = loadReviewProfile(readFileSync(join(HERE, "profile.json"), "utf8"));
+  const allotted = budgetTokens ?? 6_000_000;
+  const output = await runSingleShotEngine(
+    {
+      binaryPath: "/unused-in-single-shot",
+      repositoryPath: dir,
+      pair: { base: commitSha(base), head: commitSha(head), mergeBase: commitSha(base) },
+      config: {
+        protocol: "openai",
+        endpoint: process.env.OCR_LLM_URL ?? "",
+        model: process.env.OCR_LLM_MODEL ?? "",
+        tokenEnvName: "OCR_LLM_TOKEN",
+        language: "English",
+        concurrency: 2,
+        fileTimeoutSeconds: 180,
+        reviewTimeoutSeconds: 1800,
+        tokenBudget: allotted,
+        maxFindings: 50,
+        renameDetectionPercent: 50,
+      },
+      profile,
+      guidelines: { paths: [] },
+      env: process.env,
+      pathValue: FIXED_PATH,
+      allottedBudget: allotted,
+      mechanicallyCleanPaths: [],
+      samplingSeed: seed,
+    },
+    createSilentDiagnostics(),
+  );
+  return JSON.parse(output.stdout);
+}
+
 async function runEngine(dir, seed = 42, budgetTokens = undefined) {
+  if (process.env.KFQ_SINGLE_SHOT === "1") {
+    return await runSingleShotForCorpus(dir, seed, budgetTokens);
+  }
   const home = mkdtempSync(join(tmpdir(), "kfq-home-"));
   // The production sampling pin (src/engine/model-proxy.ts, temperature 0) — the corpus measures
   // the pipeline that ships, and the pin is precisely what makes "twice in a row" meaningful.
@@ -957,7 +1019,10 @@ if (measured) {
 }
 
 const binding = buildBinding({
-  binary: BINARY,
+  // In single-shot mode the "engine" is the shipped runner source, and hashing exactly that file
+  // is the same claim the binary digest makes on the classic path: this is the code whose
+  // judgement the numbers describe. `BINARY` still wins whenever it is set.
+  binary: BINARY ?? join(HERE, "..", "src", "engine", "single-shot.ts"),
   rule: RULE,
   model: process.env.OCR_LLM_MODEL ?? "",
   protocol: process.env.OCR_USE_ANTHROPIC === "true" ? "anthropic" : "openai",

@@ -2974,6 +2974,9 @@ function promptIdentityDigest(profile, guidelines) {
   return sha256(createHash4("sha256").update(body).digest("hex"));
 }
 
+// src/engine/single-shot.ts
+import { createHash as createHash6, randomUUID } from "node:crypto";
+
 // src/engine/run.ts
 import { createHash as createHash5 } from "node:crypto";
 import { mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
@@ -3447,6 +3450,381 @@ async function runEngine(options2, diagnostics) {
     await proxy?.close();
     await rm2(home, { recursive: true, force: true });
   }
+}
+
+// src/engine/single-shot.ts
+var TEMPERATURE = 0;
+var DEFAULT_SEED = 42;
+var MAX_COMPLETION_TOKENS = 3e3;
+var RETRIES_PER_FILE = 1;
+var MAX_DIFF_CHARS = 6e4;
+var CATEGORIES = "bug, security, performance, maintainability, test, documentation, other";
+var SEVERITIES = "critical, high, medium, low";
+function renderNumberedHunks(fileDiff) {
+  const lines = fileDiff.split("\n");
+  const out = [];
+  let newLine = 0;
+  let newBody = [];
+  let oldBody = [];
+  const flush = () => {
+    if (newBody.length === 0 && oldBody.length === 0) return;
+    out.push("__new hunk__");
+    out.push(...newBody);
+    if (oldBody.length > 0) {
+      out.push("__old hunk__");
+      out.push(...oldBody);
+    }
+    newBody = [];
+    oldBody = [];
+  };
+  for (const line of lines) {
+    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    if (header !== null) {
+      flush();
+      newLine = Number(header[1]);
+      continue;
+    }
+    if (newLine === 0) continue;
+    if (line.startsWith("+")) {
+      newBody.push(`${String(newLine)} +${line.slice(1)}`);
+      newLine += 1;
+    } else if (line.startsWith("-")) {
+      oldBody.push(`-${line.slice(1)}`);
+    } else if (line.startsWith(" ") || line === "") {
+      newBody.push(`${String(newLine)}  ${line.slice(1)}`);
+      newLine += 1;
+    }
+  }
+  flush();
+  return out.join("\n");
+}
+function splitFileDiffs(diffText) {
+  const byPath = /* @__PURE__ */ new Map();
+  const parts = diffText.split(/^diff --git /m).slice(1);
+  for (const part of parts) {
+    const newName = /^\+\+\+ (?:b\/)?(.+)$/m.exec(part);
+    if (newName === null) continue;
+    const path = newName[1]?.trim();
+    if (path === void 0 || path === "/dev/null") continue;
+    byPath.set(path, part);
+  }
+  return byPath;
+}
+function systemPrompt(rule) {
+  return [
+    "You are reviewing one file's change in a single reply. There are NO tools in this mode: you",
+    "cannot search or read the repository, and everything you may consult is already in this",
+    "prompt \u2014 the numbered diff, and a `<repository_context>` block of precomputed lookups when",
+    "present. Where the review guidance below speaks of searching the repository or spending tool",
+    "calls, read it as: consult the provided context. Scope every claim to what the diff and that",
+    'context substantiate; state a negative ("no caller", "unreachable") only as far as the',
+    "provided context shows it, and say so.",
+    "",
+    "Diff format: `__new hunk__` lines carry the ABSOLUTE line number in the new file, additions",
+    "marked `+`; `__old hunk__` shows removed lines. Cite `start_line`/`end_line` from the",
+    "numbered lines only.",
+    "",
+    "Reply with ONLY a JSON array, no prose around it. Each element:",
+    `{"start_line": N, "end_line": N, "category": one of ${CATEGORIES},`,
+    ` "severity": one of ${SEVERITIES}, "content": "the finding body"}.`,
+    "An empty array [] is the correct reply for a clean change \u2014 silence is a valid review.",
+    "",
+    "--- review guidance begins ---",
+    rule,
+    "--- review guidance ends ---"
+  ].join("\n");
+}
+function userPrompt(dispatch, pack, others) {
+  return [
+    "<other_changed_files>",
+    others,
+    "</other_changed_files>",
+    "",
+    `<current_file_path>${dispatch.path}</current_file_path>`,
+    "",
+    "<current_file_diff>",
+    dispatch.renderedDiff,
+    "</current_file_diff>",
+    ...pack === void 0 ? [] : ["", pack],
+    "",
+    "Review the change in <current_file_diff> now and reply with the JSON array."
+  ].join("\n");
+}
+function positiveInt(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 1 ? value : void 0;
+}
+function nonEmptyString(value) {
+  return typeof value === "string" && value !== "" ? value : void 0;
+}
+function parseFindingEntry(entry, path) {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return void 0;
+  const record = entry;
+  const start = positiveInt(record.start_line);
+  const end = positiveInt(record.end_line);
+  const content = nonEmptyString(record.content);
+  if (start === void 0 || end === void 0 || end < start || content === void 0) {
+    return void 0;
+  }
+  const category = nonEmptyString(record.category);
+  const severity = nonEmptyString(record.severity);
+  return {
+    // The reviewed path is authoritative, exactly as the engine's own loop overrides a
+    // hallucinated `path` argument on `code_comment`.
+    path,
+    content,
+    start_line: start,
+    end_line: end,
+    ...category === void 0 ? {} : { category },
+    ...severity === void 0 ? {} : { severity }
+  };
+}
+function parseFindingsReply(reply, path) {
+  const unfenced = /^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$/.exec(reply);
+  const text = (unfenced?.[1] ?? reply).trim();
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return void 0;
+  }
+  if (!Array.isArray(parsed)) return void 0;
+  const comments = [];
+  for (const entry of parsed) {
+    const comment = parseFindingEntry(entry, path);
+    if (comment === void 0) return void 0;
+    comments.push(comment);
+  }
+  return comments;
+}
+function dispatchPaths(options2, changedPaths) {
+  const mechanicallyClean = new Set(options2.mechanicallyCleanPaths);
+  return changedPaths.filter(
+    (path) => options2.profile.reviewRelevant.matches(path) && !options2.profile.generated.matches(path) && !mechanicallyClean.has(path)
+  );
+}
+async function gitDiff(options2) {
+  try {
+    const result = await run(
+      "git",
+      [
+        "--no-pager",
+        "diff",
+        "--no-color",
+        "--unified=3",
+        options2.pair.mergeBase,
+        options2.pair.head
+      ],
+      {
+        cwd: options2.repositoryPath,
+        timeoutMs: 3e4,
+        maxBuffer: 64 * 1024 * 1024,
+        env: { PATH: options2.pathValue, LC_ALL: "C" }
+      }
+    );
+    return result.stdout.toString("utf8");
+  } catch {
+    return void 0;
+  }
+}
+var FAILED_REPLY = {
+  content: void 0,
+  promptTokens: 0,
+  completionTokens: 0,
+  transportFailure: true
+};
+function parseModelResponse(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return FAILED_REPLY;
+  }
+  const record = parsed;
+  const content = record.choices?.[0]?.message?.content;
+  return {
+    content: typeof content === "string" ? content : void 0,
+    promptTokens: typeof record.usage?.prompt_tokens === "number" ? record.usage.prompt_tokens : 0,
+    completionTokens: typeof record.usage?.completion_tokens === "number" ? record.usage.completion_tokens : 0,
+    transportFailure: false
+  };
+}
+async function callModel(endpoint, token, model, seed, system, user, fetchImpl) {
+  try {
+    const response = await fetchImpl(`${endpoint.replace(/\/+$/, "")}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${token}`,
+        "api-key": token
+      },
+      body: JSON.stringify({
+        model,
+        temperature: TEMPERATURE,
+        seed,
+        max_tokens: MAX_COMPLETION_TOKENS,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user }
+        ]
+      })
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      return {
+        ...FAILED_REPLY,
+        transportFailure: response.status === 429 || response.status >= 500
+      };
+    }
+    return parseModelResponse(text);
+  } catch {
+    return FAILED_REPLY;
+  }
+}
+async function inPool(items, width, work) {
+  let cursor = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(width, items.length)) }, async () => {
+    for (; ; ) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) return;
+      const item = items[index];
+      if (item !== void 0) await work(item);
+    }
+  });
+  await Promise.all(workers);
+}
+function ruleDigestFor(options2) {
+  const rule = buildRuleFile(options2.profile, options2.guidelines, options2.mechanicallyCleanPaths);
+  return sha256(createHash6("sha256").update(serializeRuleFile(rule)).digest("hex"));
+}
+async function prepareDispatches(options2) {
+  const diffText = await gitDiff(options2);
+  if (diffText === void 0) throw new EngineRunError("engine.run.spawn_failed");
+  const fragments = splitFileDiffs(diffText);
+  return dispatchPaths(options2, [...fragments.keys()]).map((path) => {
+    const rendered = renderNumberedHunks(fragments.get(path) ?? "");
+    const bounded = rendered.length > MAX_DIFF_CHARS ? `${rendered.slice(0, MAX_DIFF_CHARS)}
+(truncated: diff exceeds the prompt budget)` : rendered;
+    return { path, renderedDiff: bounded };
+  });
+}
+function budgetStopped(state, dispatch) {
+  if (!state.spendStopped && state.usage.prompt + state.usage.completion < state.options.allottedBudget) {
+    return false;
+  }
+  state.spendStopped = true;
+  state.warnings.push({
+    type: "subtask_error",
+    file: dispatch.path,
+    message: "single_shot budget stop before dispatch"
+  });
+  return true;
+}
+async function reviewOneFile(state, dispatch) {
+  if (budgetStopped(state, dispatch)) return;
+  const others = state.paths.filter((path) => path !== dispatch.path).join("\n");
+  const pack = state.options.contextPacks?.get(dispatch.path);
+  const user = userPrompt(dispatch, pack, others);
+  let reply;
+  for (let attempt = 0; attempt <= RETRIES_PER_FILE; attempt += 1) {
+    reply = await callModel(
+      state.options.config.endpoint,
+      state.token,
+      state.options.config.model,
+      state.seed,
+      state.system,
+      user,
+      state.fetchImpl
+    );
+    state.usage.requests += 1;
+    state.usage.prompt += reply.promptTokens;
+    state.usage.completion += reply.completionTokens;
+    if (reply.content !== void 0 || !reply.transportFailure) break;
+  }
+  const content = reply?.content;
+  if (content === void 0) {
+    state.warnings.push({
+      type: "subtask_error",
+      file: dispatch.path,
+      message: "single_shot model call failed"
+    });
+    return;
+  }
+  const parsed = parseFindingsReply(content, dispatch.path);
+  if (parsed === void 0) {
+    state.warnings.push({
+      type: "subtask_error",
+      file: dispatch.path,
+      message: "single_shot reply was not a findings array"
+    });
+    return;
+  }
+  state.comments.push(...parsed);
+}
+function assembleStdout(state, dispatched, startedMs) {
+  const totalTokens = state.usage.prompt + state.usage.completion;
+  return JSON.stringify({
+    status: state.warnings.length === 0 ? "success" : "completed_with_errors",
+    summary: {
+      files_reviewed: dispatched,
+      comments: state.comments.length,
+      total_tokens: totalTokens,
+      input_tokens: state.usage.prompt,
+      output_tokens: state.usage.completion,
+      elapsed: `${String(Math.max(1, Math.round((Date.now() - startedMs) / 1e3)))}s`
+    },
+    tool_calls: { total: 0, by_tool: {} },
+    comments: state.comments,
+    warnings: state.warnings,
+    session_id: randomUUID()
+  });
+}
+async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
+  const token = readModelToken(options2.config, options2.env);
+  if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
+  const started = Date.now();
+  const ruleDigest = ruleDigestFor(options2);
+  const rule = buildRuleFile(options2.profile, options2.guidelines, options2.mechanicallyCleanPaths).rules[0]?.rule;
+  if (rule === void 0) throw new EngineRunError("engine.run.spawn_failed");
+  const dispatches = await prepareDispatches(options2);
+  const state = {
+    options: options2,
+    token,
+    system: systemPrompt(rule),
+    paths: dispatches.map((dispatch) => dispatch.path),
+    seed: options2.samplingSeed ?? DEFAULT_SEED,
+    fetchImpl,
+    usage: { prompt: 0, completion: 0, requests: 0 },
+    comments: [],
+    warnings: [],
+    spendStopped: false
+  };
+  await inPool(
+    dispatches,
+    options2.config.concurrency,
+    (dispatch) => reviewOneFile(state, dispatch)
+  );
+  const stdout = assembleStdout(state, dispatches.length, started);
+  diagnostics.record("engine.run.completed", {
+    headSha: options2.pair.head,
+    digest: ruleDigest,
+    durationMs: Date.now() - started,
+    counts: { bytes: Buffer.byteLength(stdout, "utf8"), budget: options2.allottedBudget }
+  });
+  diagnostics.record("model.usage", {
+    headSha: options2.pair.head,
+    counts: {
+      requests: state.usage.requests,
+      prompt: state.usage.prompt,
+      completion: state.usage.completion,
+      cached: 0,
+      context_pack_injected: options2.contextPacks === void 0 ? 0 : dispatches.length,
+      cache_key_rejected: 0,
+      bad_request_persisted: 0
+    }
+  });
+  const totalTokens = state.usage.prompt + state.usage.completion;
+  return { stdout, ruleDigest, wireTokens: totalTokens };
 }
 
 // src/contracts/change-pass.ts
@@ -5130,6 +5508,10 @@ async function dispatchContextPacks(request, inventory, excluded) {
     pathValue: request.pathValue
   });
 }
+function invokeEngine(options2, diagnostics) {
+  if (options2.env.KFQ_SINGLE_SHOT === "1") return runSingleShotEngine(options2, diagnostics);
+  return runEngine(options2, diagnostics);
+}
 async function preparedInvocation(request, inventory, memo, ledger, binaryPath) {
   const { excluded, allottedBudget } = computeEngineBudget(request, inventory, memo);
   ledger.allotted = allottedBudget;
@@ -5499,7 +5881,7 @@ function finishedRunOutcome(diagnostics, parsed, options2) {
 }
 async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger) {
   try {
-    const second = await runEngine(
+    const second = await invokeEngine(
       {
         ...options2,
         samplingSeed: RESUME_SEED,
@@ -5532,7 +5914,7 @@ async function runEngineWithOneResume(options2, diagnostics, ledger, reviewableP
   let firstResult;
   let alreadyReviewedPaths = [];
   try {
-    const first = await runEngine(options2, diagnostics);
+    const first = await invokeEngine(options2, diagnostics);
     const parsed = parseBooked(first, ledger);
     recordEngineStatus(diagnostics, parsed, options2.pair.head);
     if (parsed.status === "success") {

@@ -87,6 +87,30 @@ What the runs DO establish:
   question tracked separately), or an n≥3-per-configuration measurement program, which is a
   budget decision recorded here rather than made unilaterally.
 
+## Addendum, same day: the single-shot smoke
+
+The four runs above measure variations of the agentic loop. The consumer's own CI then supplied
+the decisive fifth data point: reviewing this branch's own pull request, the loop spent
+2,171,343 tokens against a 1,268,982-token allotment and settled `coverage_gap` — twice, on
+consecutive heads. That is the architecture, not a parameter, so the next candidate changed the
+architecture: `KFQ_SINGLE_SHOT=1` (one model call per file, PR-Agent's assembly grafted onto
+this pipeline, engine-compatible output — see `single-shot.ts`).
+
+Smoke on the identical commit, identical binding:
+
+|              | agentic baseline (dev) | single-shot (b618d60) |
+| ------------ | ---------------------- | --------------------- |
+| outcome      | complete, 19 files     | complete, 19 files    |
+| findings     | 0                      | 0                     |
+| total tokens | 1,478,981              | **132,132 (−91.1%)**  |
+| wall-clock   | 2:29                   | **0:31**              |
+
+One run, and the variance caveat above applies to it exactly as it applies to every other
+single run in this file — with one structural exception: the cost bound is arithmetic, not
+sampled. A single-shot review of N files cannot spend more than N × (prompt + completion cap),
+because there is no loop to grow. What one run cannot establish is recall; the seed gate and
+the qualification corpus own that question, and no default flips before they answer it.
+
 ## What this deliberately does not claim
 
 No completion-rate improvement is claimed anywhere in this change, and no recall effect is
