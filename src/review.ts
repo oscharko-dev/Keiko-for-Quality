@@ -37,6 +37,7 @@ import {
   type RunStatus,
 } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
+import { runSingleShotEngine } from "./engine/single-shot.js";
 import {
   EngineRunError,
   MAX_TOOL_ROUNDS_PER_FILE,
@@ -1013,6 +1014,24 @@ async function dispatchContextPacks(
     paths,
     pathValue: request.pathValue,
   });
+}
+
+/**
+ * The one place both engine attempts (first dispatch and targeted resume) choose their runner.
+ *
+ * `KFQ_SINGLE_SHOT=1` selects the single-shot runner (`single-shot.ts`) — one model call per
+ * file, engine-compatible output, no tool loop — behind the same escape-hatch pattern as
+ * `KFQ_CONTEXT_PACKS`. Everything downstream (parse, settle, resume, publish, store) is runner-
+ * agnostic by construction: both produce the stdout shape `result.ts` parses. The targeted-gap
+ * resume therefore works unchanged in single-shot mode, retrying exactly the files whose calls
+ * failed.
+ */
+function invokeEngine(
+  options: EngineRunOptions,
+  diagnostics: Diagnostics,
+): Promise<EngineRunOutput> {
+  if (options.env.KFQ_SINGLE_SHOT === "1") return runSingleShotEngine(options, diagnostics);
+  return runEngine(options, diagnostics);
 }
 
 /** The budget booking plus the fully assembled invocation — the two preparations that share one
@@ -1995,7 +2014,7 @@ async function attemptResume(
     // the one bounded retry is what turns it into a second opinion. `mechanicallyCleanPaths` is
     // widened, never replaced: the resume must still skip everything the first dispatch already
     // excluded (renames, cache hits) on top of what the first ATTEMPT now proves was reviewed.
-    const second = await runEngine(
+    const second = await invokeEngine(
       {
         ...options,
         samplingSeed: RESUME_SEED,
@@ -2077,7 +2096,7 @@ async function runEngineWithOneResume(
   let firstResult: EngineResult | undefined;
   let alreadyReviewedPaths: readonly string[] = [];
   try {
-    const first = await runEngine(options, diagnostics);
+    const first = await invokeEngine(options, diagnostics);
     const parsed = parseBooked(first, ledger);
     recordEngineStatus(diagnostics, parsed, options.pair.head);
     if (parsed.status === "success") {
