@@ -732,3 +732,40 @@ describe("run status vocabulary", () => {
     expect(parsed.status).toBe("unknown");
   });
 });
+
+// Rounds are spent on tool calls, so the engine's own tally is the only thing that can answer why
+// a file exhausted its ceiling. It has emitted this since v1.8.4 and this adapter never read it.
+describe("tool-call tally", () => {
+  it("reads the engine's total and per-tool breakdown", () => {
+    const result = parseEngineResult(
+      document({ tool_calls: { total: 47, by_tool: { search_repo: 31, read_file: 16 } } }),
+    );
+    expect(result.toolCalls.total).toBe(47);
+    expect(result.toolCalls.byTool).toEqual({ search_repo: 31, read_file: 16 });
+  });
+
+  it("reports zeroes rather than throwing when the engine sends no tally", () => {
+    expect(parseEngineResult(document()).toolCalls).toEqual({ total: 0, byTool: {} });
+    expect(parseEngineResult(document({ tool_calls: null })).toolCalls.total).toBe(0);
+  });
+
+  it("never lets a malformed tally cost a run its verdict", () => {
+    const result = parseEngineResult(
+      document({ tool_calls: { total: "many", by_tool: { read_file: "lots" } } }),
+    );
+    expect(result.toolCalls.total).toBe(0);
+    expect(result.toolCalls.byTool).toEqual({});
+    expect(result.status).toBe("success");
+  });
+
+  it("drops a tool name that could not be a diagnostic key", () => {
+    // Names come from the engine's fixed tool set, not from candidate content — but a key lands in
+    // a log the consumer's whole organization reads, so the shape is enforced rather than trusted.
+    const result = parseEngineResult(
+      document({
+        tool_calls: { total: 3, by_tool: { read_file: 2, "../../etc/passwd": 1, "no spaces": 1 } },
+      }),
+    );
+    expect(result.toolCalls.byTool).toEqual({ read_file: 2 });
+  });
+});

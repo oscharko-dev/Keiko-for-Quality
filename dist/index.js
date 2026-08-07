@@ -827,6 +827,22 @@ function parseWarnings(value, field) {
     };
   });
 }
+function parseToolCalls(value) {
+  if (value === void 0 || value === null) return { total: 0, byTool: {} };
+  const object = asObject(value, "result.tool_calls");
+  const total = typeof object.total === "number" && Number.isFinite(object.total) ? Math.max(0, Math.trunc(object.total)) : 0;
+  return { total, byTool: parseByTool(object.by_tool) };
+}
+function parseByTool(raw) {
+  const byTool = {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return byTool;
+  for (const [name, count] of Object.entries(raw)) {
+    const usable = typeof count === "number" && Number.isFinite(count);
+    if (usable && TOOL_NAME.test(name)) byTool[name] = Math.max(0, Math.trunc(count));
+  }
+  return byTool;
+}
+var TOOL_NAME = /^[a-z][a-z0-9_]{0,63}$/i;
 function parseSummary(value) {
   if (value === void 0 || value === null) {
     return { totalTokens: 0, budgetExceeded: false, filesReviewed: 0 };
@@ -867,7 +883,8 @@ function parseEngineResult(text3) {
     warnings: parseWarnings(root.warnings, "result.warnings"),
     totalTokens: summary.totalTokens,
     budgetExceeded: summary.budgetExceeded,
-    rejectedFindings: comments.rejected
+    rejectedFindings: comments.rejected,
+    toolCalls: parseToolCalls(root.tool_calls)
   };
 }
 
@@ -6041,6 +6058,12 @@ function recordEngineStatus(diagnostics, result, headSha) {
     findings: result.findings.length,
     warnings: result.warnings.length
   };
+  if (result.toolCalls.total > 0) {
+    counts.tool_calls = result.toolCalls.total;
+    for (const [name, calls] of Object.entries(result.toolCalls.byTool)) {
+      counts[`tool_${name}`] = calls;
+    }
+  }
   for (const warning of result.warnings) {
     const key = `warnings_${warning.type}`;
     counts[key] = (counts[key] ?? 0) + 1;
