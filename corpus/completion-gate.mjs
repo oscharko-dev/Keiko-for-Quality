@@ -161,9 +161,36 @@ function resolveTarget(repoPath, prNumber, baseRef) {
   return { label: `PR #${String(prNumber)}`, prNumber, head, base, files };
 }
 
+/**
+ * The review profile, taken from the BASE and written beside the worktree.
+ *
+ * The gate used to let the CLI find the profile inside the checked-out candidate, which was wrong
+ * twice over. Practically: two pull requests in the first full-spectrum run predate the profile
+ * existing in that repository at all, so both failed with "cannot read profile" and were scored as
+ * measurement failures rather than as the completions they would have been. Structurally, and
+ * worse: production reads the profile from the protected base — that is the whole point of
+ * `pull_request_target` — so a harness reading it from the candidate is not measuring the product,
+ * it is measuring a configuration the candidate controls.
+ *
+ * `undefined` when the base has no profile either; the caller then lets the CLI use its default,
+ * because a base without a profile is a real configuration rather than a harness failure.
+ */
+function baseProfilePath(repoPath, base, workDir) {
+  const target = join(workDir, "base-profile.json");
+  try {
+    writeFileSync(target, git(repoPath, ["show", `${base}:${PROFILE_IN_REPO}`]), "utf8");
+    return target;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Where a consumer's review profile lives, by the convention the action's own default names. */
+const PROFILE_IN_REPO = ".github/keiko-for-quality.json";
+
 /** One CLI run against one target; never throws — an unusable run becomes a measurement failure
  *  rather than an incomplete, so a broken harness cannot masquerade as a broken product. */
-function runOnce(target, repoPath, workDir, index, tokenBudget) {
+function runOnce(target, repoPath, workDir, index, tokenBudget, profilePath) {
   const worktree = join(workDir, `wt-${String(index)}`);
   const reportPath = join(workDir, `report-${String(index)}.json`);
   try {
@@ -192,6 +219,10 @@ function runOnce(target, repoPath, workDir, index, tokenBudget) {
         // Production parity — see CONSUMER_TOKEN_BUDGET.
         "--token-budget",
         String(tokenBudget),
+        // From the BASE, never the candidate — see `baseProfilePath`. Omitted when the base has
+        // none, so the CLI falls back to its own default rather than being handed a path to
+        // nothing.
+        ...(profilePath === undefined ? [] : ["--profile", profilePath]),
       ],
       { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"], timeout: CHILD_TIMEOUT_MS },
     );
@@ -210,11 +241,12 @@ function runOnce(target, repoPath, workDir, index, tokenBudget) {
 
 function runTarget(target, repoPath, runs, tokenBudget) {
   const workDir = mkdtempSync(join(tmpdir(), `kfq-completion-${String(target.prNumber)}-`));
+  const profilePath = baseProfilePath(repoPath, target.base, workDir);
   const attempts = [];
   try {
     for (let index = 1; index <= runs; index += 1) {
       console.error(`completion-gate: ${target.label} run ${String(index)}/${String(runs)}`);
-      const attempt = runOnce(target, repoPath, workDir, index, tokenBudget);
+      const attempt = runOnce(target, repoPath, workDir, index, tokenBudget, profilePath);
       attempts.push(attempt);
       const why = attempt.reason === undefined ? "" : ` (${attempt.reason})`;
       console.error(
@@ -277,9 +309,14 @@ function main() {
     return;
   }
 
-  const results = targets.map((target) =>
-    runTarget(target, args.repo, args.runs, args.tokenBudget),
-  );
+  // `changedLines` is carried onto the result, not left on the target, because `stratify` groups
+  // results and a class it cannot read collapses every run into one bucket — which is exactly what
+  // happened on the first full-spectrum run: the table was suppressed and the measurement lost the
+  // dimension it was taken to answer.
+  const results = targets.map((target) => ({
+    ...runTarget(target, args.repo, args.runs, args.tokenBudget),
+    changedLines: target.changedLines,
+  }));
   const summary = summarizeRuns(
     results.flatMap((result) => result.attempts),
     args.threshold,

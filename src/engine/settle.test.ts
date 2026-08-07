@@ -82,6 +82,7 @@ function result(overrides: Partial<EngineResult> = {}): EngineResult {
     totalTokens: 1000,
     budgetExceeded: false,
     rejectedFindings: 0,
+    toolCalls: { total: 0, byTool: {} },
     ...overrides,
   };
 }

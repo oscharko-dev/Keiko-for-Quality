@@ -3,7 +3,12 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { ValidationError } from "../core/brands.js";
-import { SUPPORTED_MANIFEST_SCHEMA, parseEngineResult, type EngineResult } from "./result.js";
+import {
+  SUPPORTED_MANIFEST_SCHEMA,
+  parseEngineResult,
+  type EngineResult,
+  type EngineWarning,
+} from "./result.js";
 
 function document(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -575,6 +580,42 @@ describe("parseEngineResult", () => {
     );
     expect(result.warnings).toEqual([{ type: "context_truncated", file: "src/a.ts" }]);
   });
+
+  // `subtask_error` is the engine's catch-all for a per-file review that did not finish, and it
+  // covers two failures with opposite answers: a tool-round ceiling reached (give the file more
+  // rounds) and a model call that failed (do not). The engine distinguishes them only in the
+  // message text, which is never carried anywhere — so the class is derived here, once.
+  describe("subtask_error cause", () => {
+    function warningWith(type: string, message: unknown): EngineWarning | undefined {
+      return parseEngineResult(document({ warnings: [{ type, message, file: "src/a.ts" }] }))
+        .warnings[0];
+    }
+
+    it("names tool-budget exhaustion from the engine's own wording", () => {
+      // Verbatim from agent.executeSubtask (v1.8.4).
+      const warning = warningWith("subtask_error", "main_task did not complete before stopping");
+      expect(warning?.cause).toBe("tool_budget");
+    });
+
+    it("classifies any other subtask failure as other, never as tool budget", () => {
+      expect(warningWith("subtask_error", "LLM completion error: 503")?.cause).toBe("other");
+      expect(warningWith("scan_subtask_error", "panic: nil map")?.cause).toBe("other");
+      // A missing message is still a subtask failure — just not one we can name.
+      expect(warningWith("subtask_error", undefined)?.cause).toBe("other");
+    });
+
+    it("leaves every other warning type unclassified rather than guessing at one", () => {
+      expect(
+        warningWith("token_threshold_exceeded", "prompt tokens exceed")?.cause,
+      ).toBeUndefined();
+      expect(warningWith("context_truncated", "m")?.cause).toBeUndefined();
+    });
+
+    it("never carries the engine's message anywhere in the parsed warning", () => {
+      const warning = warningWith("subtask_error", "main_task did not complete: /secret/path");
+      expect(JSON.stringify(warning)).not.toContain("secret");
+    });
+  });
 });
 
 /**
@@ -689,5 +730,54 @@ describe("run status vocabulary", () => {
   it("still folds a value the pinned release cannot say into unknown", () => {
     const parsed = parseEngineResult(JSON.stringify({ status: "partial", comments: [] }));
     expect(parsed.status).toBe("unknown");
+  });
+});
+
+// Rounds are spent on tool calls, so the engine's own tally is the only thing that can answer why
+// a file exhausted its ceiling. It has emitted this since v1.8.4 and this adapter never read it.
+describe("tool-call tally", () => {
+  it("reads the engine's total and per-tool breakdown", () => {
+    const result = parseEngineResult(
+      document({ tool_calls: { total: 47, by_tool: { search_repo: 31, read_file: 16 } } }),
+    );
+    expect(result.toolCalls.total).toBe(47);
+    expect(result.toolCalls.byTool).toEqual({ search_repo: 31, read_file: 16 });
+  });
+
+  it("reports zeroes rather than throwing when the engine sends no tally", () => {
+    expect(parseEngineResult(document()).toolCalls).toEqual({ total: 0, byTool: {} });
+    expect(parseEngineResult(document({ tool_calls: null })).toolCalls.total).toBe(0);
+  });
+
+  it("never lets a malformed tally cost a run its verdict", () => {
+    const result = parseEngineResult(
+      document({ tool_calls: { total: "many", by_tool: { read_file: "lots" } } }),
+    );
+    expect(result.toolCalls.total).toBe(0);
+    expect(result.toolCalls.byTool).toEqual({});
+    expect(result.status).toBe("success");
+  });
+
+  // The case above only ever sent bad VALUES inside a well-formed object. A tally of the wrong
+  // SHAPE went through `asObject`, which throws — and `parseBooked` rethrows — so a complete review
+  // was discarded to protect a diagnostic count. Found by this reviewer reviewing its own commit.
+  it("survives a tally of the wrong shape entirely, not merely bad values inside one", () => {
+    for (const malformed of ["47", 47, [1, 2, 3], true] as const) {
+      const result = parseEngineResult(document({ tool_calls: malformed }));
+      expect(result.toolCalls).toEqual({ total: 0, byTool: {} });
+      // The verdict is what was at stake: the run still parses, and its findings survive.
+      expect(result.status).toBe("success");
+    }
+  });
+
+  it("drops a tool name that could not be a diagnostic key", () => {
+    // Names come from the engine's fixed tool set, not from candidate content — but a key lands in
+    // a log the consumer's whole organization reads, so the shape is enforced rather than trusted.
+    const result = parseEngineResult(
+      document({
+        tool_calls: { total: 3, by_tool: { read_file: 2, "../../etc/passwd": 1, "no spaces": 1 } },
+      }),
+    );
+    expect(result.toolCalls.byTool).toEqual({ read_file: 2 });
   });
 });

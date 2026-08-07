@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   renderChangeIntent,
   startModelProxy,
-  withChangeIntent,
+  withContextPack,
   type ModelProxy,
 } from "./model-proxy.js";
 
@@ -125,6 +125,47 @@ describe("startModelProxy", () => {
     });
     const body = JSON.parse(captured[0]?.body ?? "{}") as { temperature?: number };
     expect(body.temperature).toBe(0);
+  });
+
+  it("injects the file's context pack on the wire and counts exactly the injected requests", async () => {
+    const upstream = await startUpstream();
+    cleanups.push(upstream.close);
+    const proxy = await startModelProxy({
+      upstreamUrl: upstream.url,
+      temperature: 0,
+      seed: 42,
+      contextPacks: new Map([["src/a.ts", "<repository_context>\nctx\n</repository_context>"]]),
+    });
+    cleanups.push(() => proxy.close());
+    const engineMessage = [
+      "<current_file_path>src/a.ts</current_file_path>",
+      "<current_file_diff>\n+ line\n</current_file_diff>",
+      "<user_task>review</user_task>",
+    ].join("\n");
+    const send = (path: string): Promise<Response> =>
+      fetch(`${proxy.url}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "m",
+          messages: [{ role: "user", content: path }],
+        }),
+      });
+    await send(engineMessage);
+    // A conversation about a file no pack exists for is forwarded untouched and never counted.
+    await send(
+      "<current_file_path>src/unknown.ts</current_file_path>\n<current_file_diff>\n</current_file_diff>",
+    );
+
+    const first = JSON.parse(upstream.captured[0]?.body ?? "{}") as {
+      messages?: { content?: string }[];
+    };
+    expect(first.messages?.[0]?.content).toContain("</current_file_diff>\n\n<repository_context>");
+    const second = JSON.parse(upstream.captured[1]?.body ?? "{}") as {
+      messages?: { content?: string }[];
+    };
+    expect(second.messages?.[0]?.content).not.toContain("<repository_context>");
+    expect(proxy.usage().contextPackInjected).toBe(1);
   });
 
   it("passes non-chat paths and non-JSON bodies through byte-identical", async () => {
@@ -281,6 +322,7 @@ describe("startModelProxy", () => {
         prompt: 20,
         completion: 4,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 1,
         rewriteRejected: 0,
         badRequestPersisted: 0,
@@ -326,6 +368,7 @@ describe("startModelProxy", () => {
         prompt: 0,
         completion: 0,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 0,
         badRequestPersisted: 1,
@@ -364,6 +407,7 @@ describe("startModelProxy", () => {
         prompt: 0,
         completion: 0,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 0,
         badRequestPersisted: 1,
@@ -402,6 +446,7 @@ describe("startModelProxy", () => {
         prompt: 0,
         completion: 0,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 0,
         badRequestPersisted: 1,
@@ -453,6 +498,7 @@ describe("startModelProxy", () => {
         prompt: 7,
         completion: 2,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 1,
         badRequestPersisted: 0,
@@ -486,6 +532,7 @@ describe("startModelProxy", () => {
         prompt: 0,
         completion: 0,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 0,
         badRequestPersisted: 1,
@@ -540,6 +587,7 @@ describe("startModelProxy", () => {
         prompt: 0,
         completion: 0,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 0,
         badRequestPersisted: 0,
@@ -578,6 +626,7 @@ describe("startModelProxy", () => {
         prompt: 17,
         completion: 8,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 0,
         badRequestPersisted: 0,
@@ -613,6 +662,7 @@ describe("startModelProxy", () => {
         prompt: 100,
         completion: 20,
         cached: 64,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 0,
         badRequestPersisted: 0,
@@ -652,6 +702,7 @@ describe("startModelProxy", () => {
         prompt: 5,
         completion: 2,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 0,
         badRequestPersisted: 0,
@@ -685,6 +736,7 @@ describe("startModelProxy", () => {
         prompt: 0,
         completion: 0,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 0,
         badRequestPersisted: 0,
@@ -715,6 +767,7 @@ describe("startModelProxy", () => {
         prompt: 0,
         completion: 0,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 0,
         badRequestPersisted: 0,
@@ -745,6 +798,7 @@ describe("startModelProxy", () => {
         prompt: 0,
         completion: 0,
         cached: 0,
+        contextPackInjected: 0,
         cacheKeyRejected: 0,
         rewriteRejected: 0,
         badRequestPersisted: 0,
@@ -758,32 +812,10 @@ describe("startModelProxy", () => {
   });
 });
 
-describe("change intent (Hu et al. 2025)", () => {
-  /**
-   * The engine sends the diff and the rule and nothing else, so the model judges a change without
-   * being told what it was meant to do. This adds the author's own stated purpose — and the
-   * position is the whole design: the engine resends a 4.5–6.6k-token rule prefix on every turn of
-   * every file, providers discount an identical prefix, and a per-pull-request preamble at index 0
-   * would make that prefix unique to one pull request. Behind the shared prefix, the discount
-   * survives.
-   */
-  it("splices the intent in before the last message, leaving the cacheable prefix untouched", () => {
-    const messages = [
-      { role: "system", content: "the 6k rule prefix" },
-      { role: "user", content: "file 1 context" },
-      { role: "user", content: "review this hunk" },
-    ];
-
-    const spliced = withChangeIntent({ messages }, "Restore the retry ceiling.");
-
-    expect(spliced?.length).toBe(4);
-    expect((spliced?.[0] as { content: string }).content).toBe("the 6k rule prefix");
-    expect((spliced?.[1] as { content: string }).content).toBe("file 1 context");
-    expect((spliced?.[2] as { content: string }).content).toContain("Restore the retry ceiling.");
-    expect((spliced?.[3] as { content: string }).content).toBe("review this hunk");
-  });
-
-  /** Author-written text is the same trust level as the diff, and says so at the point of use. */
+describe("change intent framing", () => {
+  /** Author-written text is the same trust level as the diff, and says so at the point of use.
+   *  Since v0.20.0 this rendered text rides the engine's own `--background` flag (`run.ts`)
+   *  instead of a spliced message — the frame's wording is the contract either way. */
   it("frames the stated purpose as data with an explicit delimiter", () => {
     const rendered = renderChangeIntent("Fix the thing.");
 
@@ -800,11 +832,69 @@ describe("change intent (Hu et al. 2025)", () => {
 
     expect(rendered.length).toBeLessThan(2000);
   });
+});
+
+describe("context packs", () => {
+  /** The engine-shaped first user message every main- and plan-task conversation opens with. */
+  function engineUserMessage(path: string, diff: string): string {
+    return [
+      "<other_changed_files>\nb.ts\n</other_changed_files>",
+      `<current_file_path>${path}</current_file_path>`,
+      `<current_file_diff>\n${diff}\n</current_file_diff>`,
+      "",
+      "<user_task>review it</user_task>",
+    ].join("\n");
+  }
+
+  /**
+   * The position is the whole design: appended INSIDE the first user message, immediately after
+   * the diff block, so every turn of a file's conversation carries the identical transformation
+   * and the request prefix stays byte-stable — where the old before-last-message splice moved
+   * with the conversation's tail and diverged the prefix at exactly the splice point.
+   */
+  it("appends the pack after the diff block of the first user message, in place", () => {
+    const body = {
+      messages: [
+        { role: "system", content: "the 6k rule prefix" },
+        { role: "user", content: engineUserMessage("src/a.ts", "+ new line") },
+      ],
+    };
+    const packs = new Map([["src/a.ts", "<repository_context>\npack body\n</repository_context>"]]);
+
+    expect(withContextPack(body, packs)).toBe(true);
+
+    const content = (body.messages[1] as { content: string }).content;
+    expect(content).toContain("</current_file_diff>\n\n<repository_context>\npack body");
+    // The tail of the engine's message — the task block — still follows the injected pack.
+    expect(content.indexOf("<user_task>")).toBeGreaterThan(content.indexOf("pack body"));
+    expect((body.messages[0] as { content: string }).content).toBe("the 6k rule prefix");
+  });
+
+  it("injects nothing for a path no pack was computed for, and says so", () => {
+    const body = {
+      messages: [{ role: "user", content: engineUserMessage("src/other.ts", "+ x") }],
+    };
+    const packs = new Map([["src/a.ts", "pack"]]);
+    const before = JSON.stringify(body);
+
+    expect(withContextPack(body, packs)).toBe(false);
+    expect(JSON.stringify(body)).toBe(before);
+  });
 
   /** Every failure here costs context, never the review. */
-  it("leaves a body without a usable messages array exactly as it found it", () => {
-    expect(withChangeIntent({}, "purpose")).toBeUndefined();
-    expect(withChangeIntent({ messages: [] }, "purpose")).toBeUndefined();
-    expect(withChangeIntent({ messages: "not an array" }, "purpose")).toBeUndefined();
+  it("leaves malformed shapes exactly as it found them", () => {
+    const packs = new Map([["src/a.ts", "pack"]]);
+    expect(withContextPack({}, packs)).toBe(false);
+    expect(withContextPack({ messages: "not an array" }, packs)).toBe(false);
+    expect(withContextPack({ messages: [{ role: "user", content: 7 }] }, packs)).toBe(false);
+    // A message that names the file but lost its diff block gets no guessing about position.
+    expect(
+      withContextPack(
+        {
+          messages: [{ role: "user", content: "<current_file_path>src/a.ts</current_file_path>" }],
+        },
+        packs,
+      ),
+    ).toBe(false);
   });
 });

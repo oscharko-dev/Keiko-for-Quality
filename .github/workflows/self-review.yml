@@ -1,0 +1,106 @@
+name: self-review
+
+# This reviewer, reviewing itself — the dogfooding this repository has never had.
+#
+# Everything that went wrong on 2026-08-06 was visible only on real, full-size pull requests, and
+# this repository's own pull requests are exactly that: the day's changes touched four to eight
+# files each. The corpus measures synthetic fixtures and the consumer-seed gate measures planted
+# defects; neither runs against a change somebody actually wrote. This does.
+#
+# ## The pinned release, deliberately, rather than `uses: ./`
+#
+# Reviewing a pull request with the code that pull request contains sounds like the purest
+# dogfooding available, and it is a trap this repository would have walked into the same day it
+# was built. On 2026-08-06 PR #155 fixed a parser that discarded finished reviews over one
+# malformed finding. Under `uses: ./` that pull request's own review would have been discarded by
+# the very defect it was fixing — and because findings block through GitHub's conversation
+# resolution rule, the fix for the reviewer would have been held up by the broken reviewer.
+#
+# So this pins the last published release, exactly as the consumer repository does. The reviewer
+# under test is the one consumers actually run, a broken change cannot suppress its own review,
+# and this repository gets the same view of the product it asks its consumer to live with. The
+# cost is that a change is never reviewed by itself — which is the correct trade, because the
+# release gates (corpus wave, consumer-seed gate, completion measurement) already judge a change
+# by its own code.
+#
+# ## Why `pull_request_target`
+#
+# GitHub takes the workflow definition from the protected base, so a candidate cannot alter what
+# runs here. The candidate is never checked out — the base is, and the head is fetched as Git
+# objects only (see the two checkout steps). Same posture as the consumer's workflow.
+on:
+  pull_request_target:
+    # `converted_to_draft` and `closed` produce no review of their own — the job condition rejects
+    # both. They are listed so the trigger fires at all, which starts a replacement run whose
+    # concurrency group cancels a review already in flight. Without them a pull request pulled
+    # back to draft keeps a credential-bearing review running and still able to publish onto it.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
+
+# Empty at workflow level on purpose: the one job below declares exactly what it needs, and a
+# future second job starts from nothing rather than inheriting review-grade authority.
+permissions: {}
+
+concurrency:
+  group: self-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: self review
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # A job that never starts never has the environment's secrets materialized, and its evidence
+    # is the skipped job rather than a diagnostic nobody ran to emit.
+    #
+    # `KFQ_SELF_REVIEW_ENABLED` is a non-sensitive repository VARIABLE, not a secret, because a
+    # job condition cannot read a secret. It is what lets this file merge before anyone has
+    # provisioned credentials: until the variable is set, the reviewer is visibly absent rather
+    # than noisily broken, and it publishes no required status context, so its absence blocks
+    # nothing either way.
+    if: >-
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'dev' &&
+      vars.KFQ_SELF_REVIEW_ENABLED == 'true'
+    environment: self-review
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # The BASE, never the candidate. This is the step that makes `pull_request_target` safe:
+      # nothing a contributor wrote is ever placed in the working tree of a job holding secrets.
+      - name: Check out protected base
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The candidate as Git objects only: its content becomes readable through plumbing without
+      # ever being written to disk as files.
+      - name: Fetch candidate head as Git objects
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: git fetch --quiet --no-tags --no-recurse-submodules origin "pull/${PR_NUMBER}/head"
+
+      # The pinned release — see this file's header for why this is not `uses: ./`. Advance it in
+      # the same change that tags a release, exactly as the consumer's pin is advanced.
+      - name: Review
+        uses: oscharko-dev/Keiko-for-Quality@b398ea7b9db8d6b16d5922b38ea3d8e47bd20563 # v0.19.2
+        with:
+          profile: .github/keiko-for-quality.json
+          model_endpoint: ${{ secrets.KFQ_MODEL_ENDPOINT }}
+          model_id: gpt-oss-120b
+          model_protocol: openai
+          model_token_env: KFQ_MODEL_TOKEN
+          app_id: ${{ secrets.KFQ_REVIEW_APP_ID }}
+          app_private_key: ${{ secrets.KFQ_REVIEW_APP_PRIVATE_KEY }}
+          github_token: ${{ github.token }}
+          target_branches: dev
+          # Below the consumer's 6,000,000 on purpose. This repository's pull requests are small
+          # (four to eight files on the day this was written) and this budget is a stop-loss, not
+          # an allocation — a run that does not need the headroom never spends it.
+          token_budget: 3000000
+        env:
+          KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
