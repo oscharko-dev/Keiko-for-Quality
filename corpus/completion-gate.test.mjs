@@ -313,8 +313,45 @@ test("renderEvidence names the attempts that appear in no size row", () => {
     summary: summarizeRuns(attempts, 0.8),
     strata: stratify(results, 0.8),
   });
-  assert.match(evidence, /1 attempt\(s\) appear in no row above/);
+  assert.match(evidence, /1 attempt\(s\) appear in no size class/);
   assert.match(evidence, /binary files/);
+});
+
+// The first version of the message above lived inside the size table, which only renders with more
+// than one row. So the two shapes where the dropped attempts matter MOST — a lone measurable target
+// beside a binary one, and nothing measurable at all — printed no table and said nothing. Raised by
+// CodeRabbit against the commit that added the message.
+test("dropped attempts are named even when no size table is rendered", () => {
+  const attempt = () => gradeAttempt(reportWith());
+  const render = (results) =>
+    renderEvidence({
+      dateIso: "2026-08-07",
+      gateVersion: "0.19.2",
+      reviewerTree: "abc123def456 (clean)",
+      model: "gpt-oss-120b (openai)",
+      targets: [{ label: "x", files: 1 }],
+      results: [{ label: "x", attempts: results.flatMap((r) => r.attempts) }],
+      summary: summarizeRuns(
+        results.flatMap((r) => r.attempts),
+        0.8,
+      ),
+      strata: stratify(results, 0.8),
+    });
+
+  // One row: the table is suppressed, the note is not.
+  const oneRow = render([
+    { label: "small", changedLines: 10, attempts: [attempt()] },
+    { label: "binary", changedLines: undefined, attempts: [attempt()] },
+  ]);
+  assert.doesNotMatch(oneRow, /## Rate by change size/);
+  assert.match(oneRow, /1 attempt\(s\) appear in no size class/);
+
+  // No rows at all: still said.
+  const noRows = render([
+    { label: "binary", changedLines: undefined, attempts: [attempt(), attempt()] },
+  ]);
+  assert.doesNotMatch(noRows, /## Rate by change size/);
+  assert.match(noRows, /2 attempt\(s\) appear in no size class/);
 });
 
 // `verdictFor` says INCONCLUSIVE for a straddling interval AND for no interval at all. Only the

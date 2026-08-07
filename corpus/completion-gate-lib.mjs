@@ -253,6 +253,22 @@ export function estimateSpend(targets, runs) {
  * bound, and named rather than inlined because the distinction it draws is the point: no data and
  * inconclusive data are both "we do not know", and only one of them is about an interval.
  */
+/**
+ * The attempts that landed in no size row, said out loud — whatever the table did or did not print.
+ *
+ * An empty list when every attempt found a class, or when nothing was stratified at all.
+ */
+function unstratifiableNote(strata) {
+  if (strata === undefined || !(strata.unstratifiable > 0)) return [];
+  return [
+    `**${String(strata.unstratifiable)} attempt(s) appear in no size class.** Their change size ` +
+      "could not be measured — `git diff --numstat` reports `-` for binary files — and a size " +
+      "nobody measured is not evidence about any size class. They are still counted in the " +
+      "aggregate rate.",
+    "",
+  ];
+}
+
 function inconclusiveExplanation(summary) {
   if (summary.verdict !== "INCONCLUSIVE") return [];
   if (summary.interval === undefined) {
@@ -317,17 +333,14 @@ export function renderEvidence({
           `| ${describeInterval(s.interval)} | ${s.verdict} |`,
       );
     }
-    if (strata.unstratifiable > 0) {
-      lines.push(
-        "",
-        `**${String(strata.unstratifiable)} attempt(s) appear in no row above.** Their change size ` +
-          "could not be measured — `git diff --numstat` reports `-` for binary files — and a size " +
-          "nobody measured is not evidence about any size class. They are still counted in the " +
-          "aggregate rate.",
-      );
-    }
     lines.push("");
   }
+  // OUTSIDE the table, deliberately. Placed inside it — as it first was — the count vanished in
+  // exactly the case that needs it most: one measurable target plus a binary one renders a single
+  // row, `strata.length > 1` is false, no table is printed, and the dropped attempts go unmentioned
+  // again. A fix for a silent omission that is itself silent under the commonest input is not a
+  // fix. Raised by CodeRabbit on KfQ#164, against the commit that introduced the message.
+  lines.push(...unstratifiableNote(strata));
   if (Object.keys(summary.reasons).length > 0) {
     lines.push("## Why the incomplete attempts were incomplete", "");
     for (const [reason, count] of Object.entries(summary.reasons)) {
