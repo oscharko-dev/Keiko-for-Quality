@@ -238,6 +238,13 @@ export const REASON_CODES = [
   // more. `before`/`after` are the gap sizes on either side of the round that gave up.
   "engine.resume_gap_not_shrinking",
 
+  // A targeted round the consumer's ceiling could not fund (2026-08-06). Recorded rather than
+  // left silent because the alternative reading of the same situation is far worse: the engine's
+  // `--max-tokens-budget` treats 0 as UNLIMITED, so a round dispatched on an exhausted headroom
+  // would be the one run that most needs a bound proceeding without one. Measured on Keiko#3008 —
+  // 8.79M spent against a 6M ceiling, round 2 dispatched at `remaining: 0`, run total 9.07M.
+  "engine.resume_skipped_budget_exhausted",
+
   // Findings this adapter refused while keeping the run (2026-08-06, Keiko#3011) — see
   // `EngineResult.rejectedFindings` for the incident. Recorded only when non-zero, and a count
   // rather than a reason because diagnostics carry no free text: the alternative to this line is
