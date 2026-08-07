@@ -76,8 +76,12 @@ export function summarizeAb(pairings) {
   const movedToA = pairings.filter((p) => p.verdict === "MOVED" && p.aPassed > 0);
   const rotators = pairings.filter((p) => p.verdict === "ROTATOR");
   const unmeasured = pairings.filter((p) => p.verdict === "UNMEASURED");
-  const aTokens = pairings.reduce((sum, p) => sum + p.aTokens, 0);
-  const bTokens = pairings.reduce((sum, p) => sum + p.bTokens, 0);
+  // Named for what they are. `settlePairing` stores a MEAN across repetitions, so summing those
+  // means gives the cost of one repetition over all cases — not the run's spend, which is this
+  // times `reps`. The old name said "tokens" and the renderer printed it as spend, showing a reader
+  // roughly 1/reps of what was actually paid.
+  const aTokensPerRep = pairings.reduce((sum, p) => sum + p.aTokens, 0);
+  const bTokensPerRep = pairings.reduce((sum, p) => sum + p.bTokens, 0);
   return {
     cases: pairings.length,
     movedToB: movedToB.map((p) => p.id),
@@ -85,9 +89,14 @@ export function summarizeAb(pairings) {
     rotators: rotators.map((p) => p.id),
     unmeasured: unmeasured.map((p) => p.id),
     netMoved: movedToB.length - movedToA.length,
-    aTokens,
-    bTokens,
-    tokenDelta: aTokens === 0 ? null : (bTokens - aTokens) / aTokens,
+    // Kept beside `netMoved` and never folded into it. One case gaining and one losing nets to
+    // zero, and a renderer branching on the net would announce "no case moved" directly above a
+    // list of two that did — the evidence contradicting itself in exactly the situation a reader
+    // most needs to understand.
+    movedEither: movedToB.length + movedToA.length,
+    aTokensPerRep,
+    bTokensPerRep,
+    tokenDelta: aTokensPerRep === 0 ? null : (bTokensPerRep - aTokensPerRep) / aTokensPerRep,
   };
 }
 
@@ -121,9 +130,9 @@ export function renderAbEvidence({ armA, armB, reps, pairings, summary }) {
   }
   lines.push("", "## What this says", "");
   lines.push(
-    summary.netMoved === 0
+    summary.movedEither === 0
       ? "**No case moved.** Every pairing was unanimous on both sides and agreed, or refused to hold still."
-      : `**Net ${summary.netMoved > 0 ? "+" : ""}${String(summary.netMoved)} case(s) to arm B.**`,
+      : `**${String(summary.movedEither)} case(s) moved; net ${summary.netMoved > 0 ? "+" : ""}${String(summary.netMoved)} to arm B.**`,
   );
   if (summary.movedToB.length > 0) lines.push(`- Gained under B: ${summary.movedToB.join(", ")}`);
   if (summary.movedToA.length > 0) lines.push(`- Lost under B: ${summary.movedToA.join(", ")}`);
@@ -141,8 +150,9 @@ export function renderAbEvidence({ armA, armB, reps, pairings, summary }) {
   }
   lines.push(
     "",
-    `Spend: A ${summary.aTokens.toLocaleString("en-US")} tokens, B ${summary.bTokens.toLocaleString("en-US")} ` +
-      `(${percent(summary.tokenDelta)}). A rule that buys a case at a large enough cost has not`,
+    `Spend: A ${(summary.aTokensPerRep * reps).toLocaleString("en-US")} tokens, ` +
+      `B ${(summary.bTokensPerRep * reps).toLocaleString("en-US")} (${percent(summary.tokenDelta)}). ` +
+      "A rule that buys a case at a large enough cost has not",
     "obviously won; the token column is here so that trade is visible rather than argued.",
     "",
   );

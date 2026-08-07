@@ -212,6 +212,44 @@ function baseProfilePath(repoPath, base, workDir) {
 /** Where a consumer's review profile lives, by the convention the action's own default names. */
 const PROFILE_IN_REPO = ".github/keiko-for-quality.json";
 
+/**
+ * Puts a captured stderr stream where each of its two kinds of line belongs.
+ *
+ * Diagnostics are one JSON object per line and go to the `.jsonl`, which must therefore contain
+ * NOTHING else — a file named `.jsonl` that carries prose between its objects cannot be read by the
+ * tools that name says it can.
+ *
+ * Everything else was written for a person, and goes to this process's stderr. So does the whole
+ * stream when there is no directory to file it in: capturing exists to preserve diagnostics, and a
+ * capture that swallowed them when nobody asked for a file would be strictly worse than the
+ * inherited stream it replaced.
+ */
+function forwardAndFile(stderr, diagnosticsDir, prNumber, index) {
+  const lines = stderr.split("\n").filter((line) => line !== "");
+  if (diagnosticsDir === undefined) {
+    if (lines.length > 0) process.stderr.write(`${lines.join("\n")}\n`);
+    return;
+  }
+  const diagnostics = lines.filter((line) => isJsonObject(line));
+  const spoken = lines.filter((line) => !isJsonObject(line));
+  writeFileSync(
+    join(diagnosticsDir, `pr${String(prNumber)}-run${String(index)}.jsonl`),
+    diagnostics.length === 0 ? "" : `${diagnostics.join("\n")}\n`,
+  );
+  if (spoken.length > 0) process.stderr.write(`${spoken.join("\n")}\n`);
+}
+
+/** Parsed, not merely starting with `{`: a line that only looks like JSON would still poison the
+ *  file for every reader that trusts the extension. */
+function isJsonObject(line) {
+  if (!line.startsWith("{")) return false;
+  try {
+    return typeof JSON.parse(line) === "object";
+  } catch {
+    return false;
+  }
+}
+
 /** One CLI run against one target; never throws — an unusable run becomes a measurement failure
  *  rather than an incomplete, so a broken harness cannot masquerade as a broken product. */
 function runOnce(target, repoPath, workDir, index, tokenBudget, profilePath, diagnosticsDir) {
@@ -262,19 +300,7 @@ function runOnce(target, repoPath, workDir, index, tokenBudget, profilePath, dia
       },
     );
     if (typeof child.stderr === "string") {
-      if (diagnosticsDir !== undefined) {
-        writeFileSync(
-          join(diagnosticsDir, `pr${String(target.prNumber)}-run${String(index)}.jsonl`),
-          child.stderr,
-        );
-      }
-      // Capturing must not silence a failure. Diagnostics are JSON objects, one per line; anything
-      // else the CLI said is a message meant for a person and is passed through, whether or not a
-      // diagnostics directory exists to keep the rest.
-      const spoken = child.stderr
-        .split("\n")
-        .filter((line) => line !== "" && !line.startsWith("{"));
-      if (spoken.length > 0) process.stderr.write(`${spoken.join("\n")}\n`);
+      forwardAndFile(child.stderr, diagnosticsDir, target.prNumber, index);
     }
     if (child.status === null) return measurementFailure("review CLI was killed or timed out");
     try {
@@ -374,7 +400,14 @@ function main() {
   // terminal and been truncated. Written only when `--evidence` names a home for them; without one
   // there is nowhere durable to put them and the run keeps its old behaviour.
   const diagnosticsDir = args.evidence === undefined ? undefined : `${args.evidence}.diagnostics`;
-  if (diagnosticsDir !== undefined) mkdirSync(diagnosticsDir, { recursive: true });
+  if (diagnosticsDir !== undefined) {
+    // Emptied first, not merely created. `mkdirSync` leaves whatever was there, so a later run over
+    // fewer targets or fewer attempts would sit beside stale `pr*-run*.jsonl` files from a previous
+    // measurement — and a directory whose name ties it to THIS evidence file would be describing a
+    // different one. That is the same silent-staleness this gate exists to refuse.
+    rmSync(diagnosticsDir, { recursive: true, force: true });
+    mkdirSync(diagnosticsDir, { recursive: true });
+  }
 
   // `changedLines` is carried onto the result, not left on the target, because `stratify` groups
   // results and a class it cannot read collapses every run into one bucket — which is exactly what

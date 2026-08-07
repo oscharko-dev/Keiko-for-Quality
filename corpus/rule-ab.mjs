@@ -106,8 +106,12 @@ function assertModelEnv(env) {
 }
 
 /** The rule digest a checkout would actually send, so evidence names what ran, not what was meant. */
-function ruleDigestOf(checkout, workDir, env) {
-  const probe = join(workDir, "probe.json");
+function ruleDigestOf(checkout, workDir, env, label) {
+  // Per arm, never shared. With one `probe.json` a second call that fails before `run.mjs` writes
+  // anything still reads the FIRST arm's file, parses it happily, and reports arm A's rule digest
+  // as arm B's — the `catch` never fires, and the one line whose job is to say what actually ran
+  // says something else. `observe` already avoids this with label-based filenames.
+  const probe = join(workDir, `probe-${label}.json`);
   try {
     runCase(checkout, CASES[0].id, probe, env, true);
     return JSON.parse(readFileSync(probe, "utf8")).binding?.rule ?? "unknown";
@@ -130,11 +134,38 @@ function runCase(checkout, caseId, reportPath, env, probeOnly = false) {
       cwd: checkout,
       encoding: "utf8",
       timeout: CASE_TIMEOUT_MS,
-      env: { ...env, PATH: FIXED_PATH, OCR_REPORT: reportPath },
+      // A megabyte — the default — is not enough. `run.mjs` prints a verdict line per case plus the
+      // scoreboard, and a case that goes long can exceed it; `execFileSync` then throws, `observe`
+      // catches, and a run that reached the model perfectly well is recorded as no observation at
+      // all. That is a false ROTATOR manufactured by a buffer size.
+      maxBuffer: 16 * 1024 * 1024,
+      env: childEnvironment(env, reportPath),
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
   return result;
+}
+
+/**
+ * The child's environment, built from nothing rather than spread from this process.
+ *
+ * Same discipline as `engineEnvironment` in `src/engine/run.ts`, and for the same reason: this
+ * process carries the model credential, and spreading `process.env` hands the child every secret
+ * the shell happened to be holding — a `GITHUB_TOKEN`, an `npm` credential, whatever else — none of
+ * which `run.mjs` needs. The four `OCR_*` variables and `PATH` are the whole contract.
+ */
+function childEnvironment(env, reportPath) {
+  return {
+    PATH: FIXED_PATH,
+    OCR_REPORT: reportPath,
+    OCR_BINARY: env.OCR_BINARY,
+    OCR_LLM_URL: env.OCR_LLM_URL,
+    OCR_LLM_TOKEN: env.OCR_LLM_TOKEN,
+    OCR_LLM_MODEL: env.OCR_LLM_MODEL,
+    ...(env.OCR_ALLOW_MODEL_DEVIATION === undefined
+      ? {}
+      : { OCR_ALLOW_MODEL_DEVIATION: env.OCR_ALLOW_MODEL_DEVIATION }),
+  };
 }
 
 function observe(checkout, caseId, workDir, env, label) {
@@ -161,7 +192,10 @@ function observe(checkout, caseId, workDir, env, label) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const selected = args.cases.length > 0 ? args.cases : CASES.map((c) => c.id);
+// Deduplicated: the observations Map collapses a repeated id to one slot while the loop still
+// visits it twice per repetition, so a duplicate would spend twice and report `aObserved` that no
+// longer matches `--reps`. Order is the caller's, first occurrence wins.
+const selected = [...new Set(args.cases.length > 0 ? args.cases : CASES.map((c) => c.id))];
 
 if (args.dryRun) {
   const runs = selected.length * 2 * args.reps;
@@ -205,16 +239,26 @@ try {
   );
   const summary = summarizeAb(pairings);
   const evidence = renderAbEvidence({
-    armA: { path: args.armA, ruleDigest: ruleDigestOf(args.armA, workDir, process.env) },
-    armB: { path: args.armB, ruleDigest: ruleDigestOf(args.armB, workDir, process.env) },
+    armA: { path: args.armA, ruleDigest: ruleDigestOf(args.armA, workDir, process.env, "a") },
+    armB: { path: args.armB, ruleDigest: ruleDigestOf(args.armB, workDir, process.env, "b") },
     reps: args.reps,
     pairings,
     summary,
   });
+  // Printed BEFORE any attempt to file it: the measurement is already paid for at this point, and
+  // the console is the only record that cannot fail.
   console.log(`\n${evidence}`);
   if (args.evidence !== undefined) {
-    writeFileSync(args.evidence, evidence);
-    console.log(`evidence       ${args.evidence}`);
+    try {
+      writeFileSync(args.evidence, evidence);
+      console.log(`evidence       ${args.evidence}`);
+    } catch (error) {
+      // Not exit 2, and not the undocumented 1 an escaping throw would produce: the run measured
+      // exactly what it set out to measure, and only the filing of it failed. The header documents
+      // two exit codes and this is neither of the failures they describe.
+      console.error(`rule-ab: could not write ${args.evidence}: ${String(error)}`);
+      console.error("rule-ab: the measurement above is complete; only the file was not written.");
+    }
   }
 } finally {
   rmSync(workDir, { recursive: true, force: true });
