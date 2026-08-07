@@ -6142,6 +6142,7 @@ async function engineInvocationOptions(request, inventory, binaryPath, allottedB
   };
 }
 async function dispatchContextPacks(request, inventory, excluded) {
+  if (request.env.KFQ_CONTEXT_PACKS !== "1") return /* @__PURE__ */ new Map();
   const excludedSet = new Set(excluded);
   const paths = [...inventory.reviewablePaths].filter((path) => !excludedSet.has(path));
   return collectContextPacks({

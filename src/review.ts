@@ -995,6 +995,16 @@ async function dispatchContextPacks(
   inventory: Inventory,
   excluded: readonly string[],
 ): Promise<ReadonlyMap<string, string>> {
+  // Opt-in, defaulted OFF by a measurement, not a mood (2026-08-07, four paid runs on the
+  // Keiko#3011 merge — evidence: corpus/evidence/cost-ab-2026-08-07-context-packs.md). On the
+  // live endpoint, which the same day's probe showed caches nothing, no pack configuration beat
+  // the baseline's cost, and run-to-run variance under pinned sampling (1.80M / 1.84M / 2.58M
+  // tokens, 0 to 3 findings, one commit) is far too large for any single-run comparison to
+  // license a default. The mechanism itself is built, tested, and correct; it becomes economical
+  // the day the serving path discounts a stable prefix, and until then it costs every turn. Same
+  // escape-hatch pattern as `OCR_ALLOW_MODEL_DEVIATION` in `corpus/run.mjs`: deliberate
+  // experiments set KFQ_CONTEXT_PACKS=1; nothing else pays.
+  if (request.env.KFQ_CONTEXT_PACKS !== "1") return new Map();
   const excludedSet = new Set(excluded);
   const paths = [...inventory.reviewablePaths].filter((path) => !excludedSet.has(path));
   return collectContextPacks({
