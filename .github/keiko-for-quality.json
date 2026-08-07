@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "reviewRelevant": [
+    "src/**/*.ts",
+    "corpus/**/*.mjs",
+    "scripts/**/*.mjs",
+    ".github/workflows/**/*.yml",
+    "action.yml",
+    "package.json",
+    "package-lock.json",
+    "tsconfig.json",
+    "eslint.config.js",
+    "sonar-project.properties",
+    ".github/keiko-for-quality.json"
+  ],
+  "deletionCritical": [
+    "src/**/*.test.ts",
+    "corpus/**/*.test.mjs",
+    "scripts/**/*.test.mjs",
+    ".github/workflows/**",
+    "action.yml",
+    "corpus/cases.mjs",
+    "corpus/seed-gate-cases.mjs",
+    "src/engine/pinned-release.ts"
+  ],
+  "generated": ["dist/**", "build/**", "coverage/**"],
+  "excluded": [
+    {
+      "pattern": "corpus/fixtures/**",
+      "reason": "seeded-defect fixtures are deliberately wrong code; reviewing them would report the defects the corpus exists to plant"
+    },
+    {
+      "pattern": "corpus/evidence/**",
+      "reason": "measurement records, not source; their shape is pinned by evidence-shape.mjs and their content is a fact about a run"
+    },
+    {
+      "pattern": "**/*.md",
+      "reason": "prose; AGENTS.md and CONTRIBUTING.md carry this project's reasoning and are reviewed by people"
+    },
+    {
+      "pattern": "**/*.{png,jpg,svg,ico,woff,woff2}",
+      "reason": "binary assets carry no reviewable source"
+    },
+    {
+      "pattern": "**/*",
+      "reason": "catch-all: no remaining path is treated as review-relevant by this profile"
+    }
+  ],
+  "benignWarnings": [
+    {
+      "type": "context_truncated",
+      "justification": "expected on src/review.ts and src/publish/sanitize.ts, both of which exceed the context window; the file is still reviewed, in part"
+    }
+  ],
+  "pathInstructions": [
+    {
+      "paths": ["src/engine/rule-file.ts"],
+      "instructions": "The rule text here and src/publish/sanitize.ts move together (AGENTS.md): a change to what the model may write must keep src/engine/rule-file.test.ts's example findings representative, because those examples round-trip through the real sanitizer and are the only mechanism keeping the two aligned."
+    },
+    {
+      "paths": ["src/publish/sanitize.ts"],
+      "instructions": "A check tightened here can silently discard a correct finding before publication — the failure is a finding nobody ever sees, not a visible error. Verify src/engine/rule-file.test.ts still round-trips its example findings."
+    },
+    {
+      "paths": ["src/inventory/classify.ts"],
+      "instructions": "classify() and buildRuleFile() resolve include/exclude overlap in OPPOSITE directions, and getting it wrong has broken production once. classify() checks generated first, then review-relevance, and falls back to excluded last; the engine's own layering lets exclude beat include. Re-read the other before changing either."
+    },
+    {
+      "paths": ["src/engine/pinned-release.ts"],
+      "instructions": "Every digest here must come from the upstream release's own sha256sum.txt for the named version tag. A digest that does not match what the tag actually publishes turns the integrity check into a rubber stamp."
+    },
+    {
+      "paths": ["corpus/cases.mjs"],
+      "instructions": "This file is the frozen qualification corpus. A changed case invalidates comparability with every recorded qualification, so a change here needs its own full corpus wave and an evidence file saying so."
+    },
+    {
+      "paths": ["dist/**"],
+      "instructions": "A committed build artifact. It must be regenerated from the source in the same change (npm run verify), never hand-edited: consumers execute this file, and a bundle that differs from its reviewed source is the near-miss check:bundle exists to catch."
+    }
+  ]
+}
