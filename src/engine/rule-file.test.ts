@@ -229,6 +229,33 @@ describe("buildRuleFile", () => {
   });
 
   /**
+   * The v0.20.0 context-pack paragraph names a `<repository_context>` block, and a model that
+   * consulted the pack will plausibly cite it in a finding body — the exact shape that lost the
+   * Windows-null-device finding when it was a bare `<path>`. The rule text must therefore only
+   * ever show the backticked spelling, and a representative citing finding must round-trip the
+   * REAL sanitizer in both directions: backticked publishes, bare dies as html. Same alignment
+   * contract as every example above — touch the paragraph, update this pin in the same change.
+   */
+  it("keeps the repository-context paragraph aligned with the real sanitizer", () => {
+    const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    expect(rule).toContain("`<repository_context>`");
+    // No bare spelling anywhere in the rule: strip code spans first, then look for the tag.
+    expect(rule.replaceAll(/`[^`]*`/g, "")).not.toContain("<repository_context>");
+    expect(
+      sanitizeFindingBody(
+        "Verify the caller yourself.\n\nWhen the `<repository_context>` block lists no caller " +
+          "outside this file, that grep was bounded — the deleted export may still be reachable.",
+      ).ok,
+    ).toBe(true);
+    expect(
+      sanitizeFindingBody(
+        "Verify the caller yourself.\n\nWhen the <repository_context> block lists no caller " +
+          "outside this file, that grep was bounded — the deleted export may still be reachable.",
+      ),
+    ).toEqual({ ok: false, reason: "html" });
+  });
+
+  /**
    * Alignment pins for the 2026-08-06 sanitizer relaxations (AGENTS.md: the rule text and the
    * sanitizer must move together). None of the rule's text moved — it still teaches the ideal
    * shape: backtick code, close every fence, never echo the hunk back. What moved is the
