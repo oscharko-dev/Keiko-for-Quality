@@ -366,12 +366,39 @@ interface PipelineRun {
  * `performReview`'s run: the action path's request — client, pull request, and reviewer identity
  * included — alongside the one ledger and the one sink every step of that run shares.
  */
+/**
+ * What the provider refused for size during this run, accumulated across every invocation.
+ *
+ * Mutable and run-scoped for the same reason `credited` is: it is discovered deep inside engine
+ * execution and needed at settlement, and threading it back through six signatures would buy
+ * nothing over recording it where it is found.
+ */
+interface RefusalTally {
+  count: number;
+  limit: number;
+  requested: number;
+}
+
+/**
+ * The two run-scoped accumulators engine execution fills and settlement reads.
+ *
+ * Grouped rather than passed side by side because they are the same kind of thing — a fact
+ * discovered deep inside execution that no return value carries back — and because `ReviewRun` and
+ * `LocalRun` both already satisfy this shape, so every call site passes the run itself.
+ */
+interface RunTallies {
+  readonly credited: CreditedPaths;
+  readonly refusals: RefusalTally;
+}
+
 interface ReviewRun {
   readonly request: ReviewRequest;
   readonly ledger: SpendLedger;
   readonly diagnostics: Diagnostics;
   /** See `CreditedPaths` — filled by `executeEngine`, read by the report. */
   readonly credited: CreditedPaths;
+  /** See `RefusalTally` — filled by `executeEngine`, read by `settleIncomplete`. */
+  readonly refusals: RefusalTally;
 }
 
 /**
@@ -388,6 +415,8 @@ interface LocalRun {
   readonly diagnostics: Diagnostics;
   /** See `CreditedPaths` — filled by `executeEngine`, read by the report. */
   readonly credited: CreditedPaths;
+  /** See `RefusalTally` — filled by `executeEngine`, read by `settleIncomplete`. */
+  readonly refusals: RefusalTally;
   /** `promptIdentityDigest` — identifies the guidance this run reviewed under. */
   readonly ruleDigest: string;
   /** The pinned engine's version tag (`ENGINE_PIN.version`) this run executes under. */
@@ -860,6 +889,43 @@ async function publishIncompleteSettlement(
  *   `findings` is flattened to one array, and guessing "fresh" from that array would silently
  *   re-audit a cache hit or silently skip a finding that deserved auditing.
  */
+/**
+ * What the provider refused for size, as diagnostic counts — empty when it refused nothing.
+ *
+ * Folded into EVERY incomplete settlement rather than one branch of them, because the refusal is
+ * the cause underneath whichever reason code happened to fire: the same oversized request settles
+ * `coverage_gap` on one run and `budget_exceeded` on the next, depending only on how much was spent
+ * chasing it before the ceiling hit. Measured 2026-08-07 across 27 full-size reviews of real pull
+ * requests — all 21 that completed had none of these, all 6 that did not had at least one. It is
+ * the cleanest separator this project has measured, and it was previously visible only in
+ * `model.usage`, where nothing acts on it. A retry cannot make a file fit, so naming it is the
+ * difference between an operator who splits or excludes the file and one who re-runs the review and
+ * pays again for the same gap.
+ */
+/** The run's two mutable accumulators start empty; every other field is already decided. */
+function newReviewRun(
+  request: ReviewRequest,
+  ledger: SpendLedger,
+  diagnostics: Diagnostics,
+): ReviewRun {
+  return {
+    request,
+    ledger,
+    diagnostics,
+    credited: new Set(),
+    refusals: { count: 0, limit: 0, requested: 0 },
+  };
+}
+
+function refusalCounts(refusals: RefusalTally): Record<string, number> {
+  if (refusals.count === 0) return {};
+  return {
+    context_length_refusals: refusals.count,
+    ...(refusals.limit > 0 ? { context_length_limit: refusals.limit } : {}),
+    ...(refusals.requested > 0 ? { context_length_requested: refusals.requested } : {}),
+  };
+}
+
 async function settleIncomplete(
   run: ReviewRun,
   inventory: Inventory,
@@ -868,9 +934,10 @@ async function settleIncomplete(
   batch: FindingBatch = EMPTY_BATCH,
   covered?: ReadonlySet<string>,
 ): Promise<ReviewReport> {
+  const counts = { ...(cause.counts ?? {}), ...refusalCounts(run.refusals) };
   run.diagnostics.record(cause.reason, {
     headSha: run.request.head,
-    ...(cause.counts !== undefined ? { counts: cause.counts } : {}),
+    ...(Object.keys(counts).length > 0 ? { counts } : {}),
   });
 
   // Only the settlement's own engine findings may reach the store (2026-08-06). `batch.findings`
@@ -985,7 +1052,7 @@ async function executeEngine(
   memo: MemoContext,
   ledger: SpendLedger,
   diagnostics: Diagnostics,
-  credited: CreditedPaths,
+  tallies: RunTallies,
 ): Promise<Settlement> {
   const workspace = await mkdtemp(join(tmpdir(), "kfq-engine-bin-"));
   try {
@@ -1001,6 +1068,7 @@ async function executeEngine(
       diagnostics,
       ledger,
       inventory.reviewablePaths,
+      tallies.refusals,
     );
     ledger.engine += engineTokens;
     // Findings this adapter refused while keeping the run (see `EngineResult.rejectedFindings`).
@@ -1024,7 +1092,7 @@ async function executeEngine(
     // "covered by other means" contract `memo.hitPaths` already establishes for a cache hit.
     // Recorded for the report as well as handed to `settle()`: these paths are covered, and a
     // report that omitted them would understate its own coverage (see `CreditedPaths`).
-    for (const path of alreadyReviewedPaths) credited.add(path);
+    for (const path of alreadyReviewedPaths) tallies.credited.add(path);
     const memoizedForSettlement =
       alreadyReviewedPaths.length === 0
         ? memo.hitPaths
@@ -1666,7 +1734,22 @@ function resumeWorthwhile(status: RunStatus): boolean {
  * total flows through `ResumeOutcome.engineTokens` unchanged — this helper books nothing there,
  * so the qualified success-path accounting keeps its measurement basis.
  */
-function parseBooked(output: EngineRunOutput, ledger: SpendLedger): EngineResult {
+function parseBooked(
+  output: EngineRunOutput,
+  ledger: SpendLedger,
+  refusals: RefusalTally,
+): EngineResult {
+  // Accumulated here rather than at the settlement because this is the only place the invocation's
+  // own output is in hand, and it is accumulated ACROSS invocations: a first attempt and its resume
+  // can each be refused, and a settlement that reported only the last one would understate how
+  // often the provider said no. Recorded before the parse can throw — a refusal happened whether or
+  // not the stdout it produced turns out to be readable.
+  const refused = output.contextLengthRefusals;
+  if (refused !== undefined) {
+    refusals.count += refused.count;
+    refusals.limit = Math.max(refusals.limit, refused.limit);
+    refusals.requested = Math.max(refusals.requested, refused.requested);
+  }
   try {
     return parseEngineResult(output.stdout);
   } catch (error) {
@@ -1799,6 +1882,8 @@ interface FinishedRunContext {
   readonly ledger: SpendLedger;
   readonly reviewablePaths: ReadonlySet<string>;
   readonly firstAttemptTokens: number;
+  /** See `RefusalTally`. Rides the context rather than an eighth positional argument. */
+  readonly refusals: RefusalTally;
 }
 
 /**
@@ -1865,7 +1950,7 @@ async function settleFinishedRun(
   parsed: EngineResult,
   context: FinishedRunContext,
 ): Promise<ResumeOutcome> {
-  const { options, diagnostics, ledger, reviewablePaths, firstAttemptTokens } = context;
+  const { options, diagnostics, ledger, reviewablePaths, firstAttemptTokens, refusals } = context;
   let standing = parsed;
   let spent = firstAttemptTokens;
   let outcome: ResumeOutcome | undefined;
@@ -1901,6 +1986,7 @@ async function settleFinishedRun(
       standing,
       covered,
       ledger,
+      refusals,
     );
     outcome = attempt;
     spent = attempt.engineTokens;
@@ -1939,6 +2025,7 @@ async function attemptResume(
   firstResult: EngineResult | undefined,
   alreadyReviewedPaths: readonly string[],
   ledger: SpendLedger,
+  refusals: RefusalTally,
 ): Promise<ResumeOutcome> {
   try {
     // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
@@ -1956,7 +2043,7 @@ async function attemptResume(
       },
       diagnostics,
     );
-    const parsedSecond = parseBooked(second, ledger);
+    const parsedSecond = parseBooked(second, ledger, refusals);
     recordEngineStatus(diagnostics, parsedSecond, options.pair.head);
     const merged =
       firstResult === undefined
@@ -2021,6 +2108,7 @@ async function runEngineWithOneResume(
   diagnostics: Diagnostics,
   ledger: SpendLedger,
   reviewablePaths: ReadonlySet<string>,
+  refusals: RefusalTally,
 ): Promise<ResumeOutcome> {
   // See this function's doc comment for what each of these four means before the first attempt
   // has run, and why every one of them starts at the honest "nothing measured yet" value.
@@ -2030,7 +2118,7 @@ async function runEngineWithOneResume(
   let alreadyReviewedPaths: readonly string[] = [];
   try {
     const first = await runEngine(options, diagnostics);
-    const parsed = parseBooked(first, ledger);
+    const parsed = parseBooked(first, ledger, refusals);
     recordEngineStatus(diagnostics, parsed, options.pair.head);
     if (parsed.status === "success") {
       return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
@@ -2043,6 +2131,7 @@ async function runEngineWithOneResume(
       ledger,
       reviewablePaths,
       firstAttemptTokens,
+      refusals,
     });
     if (decided !== undefined) return decided;
     ({ alreadyReviewedPaths, remaining } = planGeneralResume(parsed, options));
@@ -2064,6 +2153,7 @@ async function runEngineWithOneResume(
     firstResult,
     alreadyReviewedPaths,
     ledger,
+    refusals,
   );
 }
 
@@ -2798,7 +2888,7 @@ async function settleOrReport(
       memo,
       run.ledger,
       run.diagnostics,
-      run.credited,
+      run,
     );
     run.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
@@ -2918,7 +3008,7 @@ async function performReviewInner(
   ledger: SpendLedger,
 ): Promise<ReviewReport> {
   const started = Date.now();
-  const run: ReviewRun = { request, ledger, diagnostics, credited: new Set() };
+  const run: ReviewRun = newReviewRun(request, ledger, diagnostics);
   diagnostics.record("run.started", { headSha: request.head });
 
   const ctx = gitContext(request);
@@ -3169,7 +3259,7 @@ async function localSettleOrReport(
       memo,
       run.ledger,
       run.diagnostics,
-      run.credited,
+      run,
     );
     run.diagnostics.record(
       settlement.mode === "reconciled" ? "settlement.mode.reconciled" : "settlement.mode.counted",
@@ -3366,6 +3456,7 @@ export async function performLocalReview(
       ruleDigest,
       engineVersion,
       credited: new Set(),
+      refusals: { count: 0, limit: 0, requested: 0 },
     });
   } finally {
     // Identical guard to `performReview`'s own `finally` block: a pre-engine incomplete report or an
