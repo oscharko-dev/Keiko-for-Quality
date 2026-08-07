@@ -46,19 +46,39 @@ runner source, rule a7c82ae3d8c5, cases 437536225fb1, model gpt-oss-120b).
   through the real publisher — recorded here as the one line to watch across the next waves,
   exactly as the 60-round wave recorded its own noise uptick.
 
+## Wave two, same day — the twice-in-a-row reading
+
+|                       | wave 1  | wave 2    |
+| --------------------- | ------- | --------- |
+| recall                | 28/29   | 27/29     |
+| classified            | 27/28   | **27/27** |
+| publishable           | 39/39   | 39/39     |
+| noise                 | 3       | 3         |
+| total tokens          | 289,525 | 298,136   |
+| tokens per severe hit | 10,723  | 11,467    |
+
+Both waves sit in exactly the band the two agentic waves span (27–28 of 29, noise steady,
+publishability perfect, spend within 3% of itself). The rotation rotated, as it always has:
+`workflow-head-checkout` (missed in wave 2's main run, missed by both agentic main waves)
+**passes in isolation** under this mode — the first time the long-standing rotator has been
+found at all this week. `cleared-list-omitted-from-update`, found in wave 1, went dry in wave
+2's main run AND in isolation (two consecutive dry reads): recorded as this mode's own rotator
+candidate and the single specific case to watch, alongside the noise-3 line. The
+budget-starved case repeated its unmeasured verdict for the same calibration reason as wave 1.
+
 ## What this run establishes, and what it does not
 
-It establishes that the one-call-per-file architecture holds the recall bar of the best agentic
-wave (28/29), keeps every body publishable, anchors on real lines without a relocation pass, and
-does it at a fifth of the cheaper agentic wave's spend with a completion property the loop
-never had (arithmetic bound, 100% measured rate). It does NOT establish "twice in a row"
-(one wave, one day — the release bar stays the release bar), does not measure the budget-starved
-case, and does not settle the noise line. The default therefore stays `KFQ_SINGLE_SHOT` opt-in
-until a second wave and a green release-shaped run repeat these numbers.
+Two waves in one day establish that the one-call-per-file architecture holds the agentic recall
+band (27–28/29) with perfect publishability, steady spend, line-anchored findings without a
+relocation pass, a measured 100% completion rate, and roughly a fifth of the cheaper agentic
+wave's cost. What remains before a default flip is process, not evidence volume: a
+release-shaped run under the release checklist, the `cleared-list-omitted-from-update` rotator
+watched, the noise-3 line watched, and the budget-starved case recalibrated to prices at which
+its pressure can actually arrive.
 
 ## Spend
 
-289,525 (corpus) + 412,229 (completion gate n=3) + 59,946 (seed gate) + 7,813 (probe) + 132,132
-(smoke) = 901,645 tokens. Standing development authorization.
+Wave 1 289,525 + wave 2 298,136 + isolations 13,442 + completion gate n=3 412,229 + seed gate
+59,946 + probe 7,813 + smoke 132,132 = 1,213,223 tokens. Standing development authorization.
 
 ---
