@@ -10,6 +10,7 @@ import {
   sizeClassOf,
   stratify,
   summarizeRuns,
+  verdictFor,
   wilsonInterval,
 } from "./completion-gate-lib.mjs";
 
@@ -208,6 +209,18 @@ test("GREEN requires the interval's LOWER bound to clear the bar", () => {
   assert.equal(summarizeRuns(allComplete(4), 0.8).verdict, "INCONCLUSIVE");
   // Enough perfect runs, and the claim is finally supported by its own data.
   assert.equal(summarizeRuns(allComplete(40), 0.8).verdict, "GREEN");
+});
+
+// The boundary the prose above leaves open: does a bound that TOUCHES the bar clear it? It does
+// not. A gate that scores a tie as a pass rounds in its own favour, and this instrument exists to
+// stop exactly that. Driven directly rather than through `summarizeRuns`, because the tie is a
+// float accident no run count reproduces on purpose — which is why it is pinned here instead of
+// left for whoever eventually lands on it.
+test("a bound that merely touches the bar is not GREEN", () => {
+  assert.equal(verdictFor({ low: 0.8, high: 0.95 }, 0.8), "INCONCLUSIVE");
+  assert.equal(verdictFor({ low: 0.8000001, high: 0.95 }, 0.8), "GREEN");
+  // The RED side is already strict and stays that way: an upper bound ON the bar has not refuted it.
+  assert.equal(verdictFor({ low: 0.4, high: 0.8 }, 0.8), "INCONCLUSIVE");
 });
 
 test("the evidence says plainly when its own sample cannot decide", () => {

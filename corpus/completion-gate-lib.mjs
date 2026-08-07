@@ -191,7 +191,13 @@ export function wilsonInterval(successes, total, z = 1.96) {
  */
 export function verdictFor(interval, threshold) {
   if (interval === undefined) return "INCONCLUSIVE";
-  if (interval.low >= threshold) return "GREEN";
+  // Strictly greater, not `>=`. A bound that merely TOUCHES the threshold has not cleared it, and a
+  // gate that calls a tie a pass is a gate that rounds in its own favour — the one direction this
+  // instrument must never round. The tie is close to unreachable in practice (`low` comes out of a
+  // square root, so exact equality with 0.8 is a float accident), which is precisely why it is
+  // worth pinning: an unreachable branch is decided once, here, rather than discovered later by
+  // whoever happens to hit it.
+  if (interval.low > threshold) return "GREEN";
   if (interval.high < threshold) return "RED";
   return "INCONCLUSIVE";
 }
