@@ -2292,6 +2292,7 @@ function gitEnvironment(pathValue) {
 
 // src/engine/context-pack.ts
 var MAX_PACK_CHARS = 2400;
+var PACK_MIN_CHANGED_LINES = 50;
 var MAX_IDENTIFIERS_PER_FILE = 6;
 var MAX_IDENTIFIERS_PER_RUN = 48;
 var MAX_MATCHES_PER_IDENTIFIER = 3;
@@ -2414,7 +2415,15 @@ function extractIdentifiers(addedLines) {
   }
   return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || a[0].localeCompare(b[0])).slice(0, MAX_IDENTIFIERS_PER_FILE).map(([word]) => word);
 }
-function addedLinesByPath(diffText) {
+function bookDiffLine(current, line) {
+  if (line.startsWith("+") && !line.startsWith("+++")) {
+    current.addedLines.push(line.slice(1));
+    current.changedLines += 1;
+  } else if (line.startsWith("-") && !line.startsWith("---")) {
+    current.changedLines += 1;
+  }
+}
+function diffStatsByPath(diffText) {
   const byPath = /* @__PURE__ */ new Map();
   let current;
   for (const line of diffText.split("\n")) {
@@ -2425,13 +2434,11 @@ function addedLinesByPath(diffText) {
         continue;
       }
       const path = name.startsWith("b/") ? name.slice(2) : name;
-      current = byPath.get(path) ?? [];
+      current = byPath.get(path) ?? { addedLines: [], changedLines: 0 };
       byPath.set(path, current);
       continue;
     }
-    if (current !== void 0 && line.startsWith("+") && !line.startsWith("+++")) {
-      current.push(line.slice(1));
-    }
+    if (current !== void 0) bookDiffLine(current, line);
   }
   return byPath;
 }
@@ -2499,11 +2506,13 @@ async function git(request, args) {
     return void 0;
   }
 }
-function planIdentifiers(paths, added) {
+function planIdentifiers(paths, stats) {
   const perFile = /* @__PURE__ */ new Map();
   const searched = /* @__PURE__ */ new Set();
   for (const path of paths) {
-    const identifiers = extractIdentifiers(added.get(path) ?? []);
+    const fileStats = stats.get(path);
+    if (fileStats === void 0 || fileStats.changedLines < PACK_MIN_CHANGED_LINES) continue;
+    const identifiers = extractIdentifiers(fileStats.addedLines);
     if (identifiers.length === 0) continue;
     perFile.set(path, identifiers);
     for (const identifier of identifiers) {
@@ -2541,7 +2550,7 @@ async function collectContextPacks(request) {
     ...request.paths
   ]);
   if (diffText === void 0) return packs;
-  const { perFile, searched } = planIdentifiers(request.paths, addedLinesByPath(diffText));
+  const { perFile, searched } = planIdentifiers(request.paths, diffStatsByPath(diffText));
   if (searched.size === 0) return packs;
   const matches = await grepMatches(request, searched);
   for (const [path, identifiers] of perFile) {

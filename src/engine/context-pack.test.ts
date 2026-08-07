@@ -7,8 +7,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { commitSha } from "../core/brands.js";
 import type { ReviewPair } from "../inventory/inventory.js";
 import {
-  addedLinesByPath,
   collectContextPacks,
+  diffStatsByPath,
   extractIdentifiers,
   parseGrepLine,
   renderPack,
@@ -44,8 +44,8 @@ describe("extractIdentifiers", () => {
   });
 });
 
-describe("addedLinesByPath", () => {
-  it("splits a multi-file unified-zero diff into per-path additions", () => {
+describe("diffStatsByPath", () => {
+  it("splits a multi-file unified-zero diff into per-path additions and change counts", () => {
     const diff = [
       "diff --git a/src/a.ts b/src/a.ts",
       "--- a/src/a.ts",
@@ -60,12 +60,16 @@ describe("addedLinesByPath", () => {
       "-removed in b",
       "+replaced in b",
     ].join("\n");
-    const byPath = addedLinesByPath(diff);
-    expect(byPath.get("src/a.ts")).toEqual(["added in a", "second in a"]);
-    expect(byPath.get("src/b.ts")).toEqual(["replaced in b"]);
+    const byPath = diffStatsByPath(diff);
+    expect(byPath.get("src/a.ts")?.addedLines).toEqual(["added in a", "second in a"]);
+    expect(byPath.get("src/a.ts")?.changedLines).toBe(2);
+    expect(byPath.get("src/b.ts")?.addedLines).toEqual(["replaced in b"]);
+    // The count is insertions PLUS deletions — the engine's own plan-threshold quantity — so a
+    // rewrite that deletes as much as it adds is measured at its full size.
+    expect(byPath.get("src/b.ts")?.changedLines).toBe(2);
   });
 
-  it("ignores deletions entirely — nothing on the new side, nothing to orient about", () => {
+  it("ignores deleted files entirely — nothing on the new side, nothing to orient about", () => {
     const diff = [
       "diff --git a/src/gone.ts b/src/gone.ts",
       "--- a/src/gone.ts",
@@ -74,7 +78,7 @@ describe("addedLinesByPath", () => {
       "-a",
       "-b",
     ].join("\n");
-    expect(addedLinesByPath(diff).size).toBe(0);
+    expect(diffStatsByPath(diff).size).toBe(0);
   });
 });
 
@@ -179,13 +183,21 @@ describe("collectContextPacks", () => {
       "export function computeAllowance(ledger: number): number {\n  return ledger * 2;\n}\n",
     );
     await writeFile(join(repo, "src/consumer.ts"), "export const consumer = 1;\n");
+    await writeFile(join(repo, "src/tiny.ts"), "export const tinyThing = 1;\n");
     git(["add", "."], repo);
     git(["commit", "-q", "-m", "base", "--no-gpg-sign"], repo);
     const base = git(["rev-parse", "HEAD"], repo).trim();
-    await writeFile(
-      join(repo, "src/consumer.ts"),
-      "import { computeAllowance } from './helper.js';\nexport const consumer = computeAllowance(2);\n",
-    );
+    // The consumer's head change clears PACK_MIN_CHANGED_LINES (50); the tiny file's does not.
+    const bigChange = [
+      "import { computeAllowance } from './helper.js';",
+      ...Array.from(
+        { length: 60 },
+        (_, i) => `export const consumerCase${String(i)} = computeAllowance(${String(i)});`,
+      ),
+      "",
+    ].join("\n");
+    await writeFile(join(repo, "src/consumer.ts"), bigChange);
+    await writeFile(join(repo, "src/tiny.ts"), "export const tinyThing = computeAllowance(1);\n");
     git(["add", "."], repo);
     git(["commit", "-q", "-m", "head", "--no-gpg-sign"], repo);
     const head = git(["rev-parse", "HEAD"], repo).trim();
@@ -200,7 +212,7 @@ describe("collectContextPacks", () => {
     const packs = await collectContextPacks({
       repositoryPath: repo,
       pair,
-      paths: ["src/consumer.ts"],
+      paths: ["src/consumer.ts", "src/tiny.ts"],
       pathValue: process.env.PATH ?? "",
     });
     const pack = packs.get("src/consumer.ts");
@@ -209,6 +221,18 @@ describe("collectContextPacks", () => {
     expect(pack).toContain("src/helper.ts:1:");
     // Sightings inside the reviewed file itself never render — the model has the diff already.
     expect(pack).not.toContain("src/consumer.ts:");
+  });
+
+  it("prices no pack for a file below the engine's own plan threshold", async () => {
+    const packs = await collectContextPacks({
+      repositoryPath: repo,
+      pair,
+      paths: ["src/consumer.ts", "src/tiny.ts"],
+      pathValue: process.env.PATH ?? "",
+    });
+    // One changed line concludes in a handful of cheap rounds; a pack riding every one of them
+    // costs more than the rounds it could save (measured 2026-08-07 — see `planIdentifiers`).
+    expect(packs.has("src/tiny.ts")).toBe(false);
   });
 
   it("returns an empty map when the directory is not a repository", async () => {

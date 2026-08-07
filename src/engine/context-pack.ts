@@ -36,6 +36,15 @@
  * per file across its turns, against ~10–15k tokens for ONE avoided search round (the whole
  * conversation, resent). One avoided round per file is the break-even; the orientation phase the
  * pack replaces typically spends several.
+ *
+ * That arithmetic was then measured, and the measurement moved this module rather than the other
+ * way round: the 2026-08-07 A/B on the Keiko#3011 merge commit (19 files) priced
+ * pack-every-file at +21.8% total tokens against the same commit's baseline — while wall-clock
+ * fell 25%, which is the rounds-replaced mechanism visibly working and the no-cache endpoint
+ * pricing it negative anyway, exactly as the probe predicted for small files that conclude in a
+ * few cheap rounds. `PACK_MIN_CHANGED_LINES` is the consequence: packs go only to files at or
+ * above the engine's own plan-mode threshold, where conversations run long enough for an avoided
+ * round to outweigh the pack riding every turn.
  */
 
 import { run } from "../git/exec.js";
@@ -57,6 +66,14 @@ export interface ContextPackRequest {
  * everything above this bound raises the break-even faster than it adds orientation.
  */
 const MAX_PACK_CHARS = 2400;
+
+/**
+ * Only files with at least this many changed lines (insertions plus deletions) get a pack — the
+ * same quantity, at the same value, as the pinned engine's own `PLAN_MODE_LINE_THRESHOLD`, so the
+ * files that pay for a pack are exactly the files the engine itself considers big enough to plan
+ * for. See `planIdentifiers` for the measurement that put this gate here.
+ */
+const PACK_MIN_CHANGED_LINES = 50;
 
 /** Identifiers per file worth searching for. Six covers the hunks' working set; more mostly
  *  re-finds the same lines under different names and pays for it on every turn. */
@@ -227,17 +244,42 @@ export function extractIdentifiers(addedLines: readonly string[]): readonly stri
     .map(([word]) => word);
 }
 
+/** One file's share of the run diff — what it added, and how much it changed overall. */
+export interface FileDiffStats {
+  readonly addedLines: readonly string[];
+  /** Added plus deleted line count — the same quantity the engine's own plan-mode threshold
+   *  (`PLAN_MODE_LINE_THRESHOLD`, insertions+deletions) is defined over. */
+  readonly changedLines: number;
+}
+
 /**
- * Splits one `--unified=0` diff over many files into per-path added-line lists.
+ * Splits one `--unified=0` diff over many files into per-path stats.
  *
- * Only two shapes matter: the `+++ b/<path>` header that names the file every following hunk
- * belongs to, and `+` lines that are additions rather than the `+++` header itself. Everything
- * else — mode lines, hunk headers, deletions — is skipped, not parsed: this function's output
- * feeds a heuristic, and a diff line it misreads costs one identifier, never the run.
+ * Only three shapes matter: the `+++ b/<path>` header that names the file every following hunk
+ * belongs to, `+` lines that are additions rather than the `+++` header itself, and `-` lines
+ * that are deletions rather than the `---` header. Everything else — mode lines, hunk headers —
+ * is skipped, not parsed: this function's output feeds a heuristic, and a diff line it misreads
+ * costs one identifier, never the run.
  */
-export function addedLinesByPath(diffText: string): ReadonlyMap<string, readonly string[]> {
-  const byPath = new Map<string, string[]>();
-  let current: string[] | undefined;
+interface MutableFileDiffStats {
+  addedLines: string[];
+  changedLines: number;
+}
+
+/** Books one non-header diff line onto the current file's stats. Split from `diffStatsByPath`
+ *  purely for its complexity budget — the two prefixes are one decision each. */
+function bookDiffLine(current: MutableFileDiffStats, line: string): void {
+  if (line.startsWith("+") && !line.startsWith("+++")) {
+    current.addedLines.push(line.slice(1));
+    current.changedLines += 1;
+  } else if (line.startsWith("-") && !line.startsWith("---")) {
+    current.changedLines += 1;
+  }
+}
+
+export function diffStatsByPath(diffText: string): ReadonlyMap<string, FileDiffStats> {
+  const byPath = new Map<string, MutableFileDiffStats>();
+  let current: MutableFileDiffStats | undefined;
   for (const line of diffText.split("\n")) {
     if (line.startsWith("+++ ")) {
       const name = line.slice(4).trim();
@@ -247,13 +289,11 @@ export function addedLinesByPath(diffText: string): ReadonlyMap<string, readonly
         continue;
       }
       const path = name.startsWith("b/") ? name.slice(2) : name;
-      current = byPath.get(path) ?? [];
+      current = byPath.get(path) ?? { addedLines: [], changedLines: 0 };
       byPath.set(path, current);
       continue;
     }
-    if (current !== undefined && line.startsWith("+") && !line.startsWith("+++")) {
-      current.push(line.slice(1));
-    }
+    if (current !== undefined) bookDiffLine(current, line);
   }
   return byPath;
 }
@@ -379,12 +419,23 @@ interface IdentifierPlan {
 
 function planIdentifiers(
   paths: readonly string[],
-  added: ReadonlyMap<string, readonly string[]>,
+  stats: ReadonlyMap<string, FileDiffStats>,
 ): IdentifierPlan {
   const perFile = new Map<string, readonly string[]>();
   const searched = new Set<string>();
   for (const path of paths) {
-    const identifiers = extractIdentifiers(added.get(path) ?? []);
+    const fileStats = stats.get(path);
+    // The threshold is the whole economics, measured rather than assumed. The 2026-08-07 A/B on
+    // the Keiko#3011 merge (19 files, both runs settling complete with identical findings) priced
+    // pack-everything at +21.8% total tokens (1,478,981 → 1,801,199) while wall-clock FELL 25% —
+    // the packs do replace navigation rounds, but on an endpoint with no prompt caching every
+    // pack byte rides every turn, and a small file that concludes in a handful of cheap rounds
+    // pays more for its pack than the rounds it saves were worth. Files at or above the engine's
+    // own plan-mode threshold (50 changed lines, insertions+deletions) are the class whose
+    // conversations run long enough — and whose single avoided round costs enough — for the pack
+    // to buy more than it costs; below it, no pack, no surcharge, review unchanged.
+    if (fileStats === undefined || fileStats.changedLines < PACK_MIN_CHANGED_LINES) continue;
+    const identifiers = extractIdentifiers(fileStats.addedLines);
     if (identifiers.length === 0) continue;
     perFile.set(path, identifiers);
     for (const identifier of identifiers) {
@@ -443,7 +494,7 @@ export async function collectContextPacks(
   ]);
   if (diffText === undefined) return packs;
 
-  const { perFile, searched } = planIdentifiers(request.paths, addedLinesByPath(diffText));
+  const { perFile, searched } = planIdentifiers(request.paths, diffStatsByPath(diffText));
   if (searched.size === 0) return packs;
   const matches = await grepMatches(request, searched);
 
