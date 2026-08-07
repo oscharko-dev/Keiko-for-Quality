@@ -154,6 +154,21 @@ export interface EngineResult {
    * loses findings this way is visible instead of silent.
    */
   readonly rejectedFindings: number;
+  /**
+   * The engine's own tool-call tally for the run: total, and per tool name.
+   *
+   * The engine has emitted this since v1.8.4 (`jsonToolCalls`, cmd/opencodereview/output.go) and
+   * this adapter has never read it, which left the one question that matters for the tool-round
+   * ceiling unanswerable: rounds are consumed by tool calls, so "why did this file need sixty
+   * rounds" is really "which tool did it call sixty times". Empty when the engine reported none.
+   */
+  readonly toolCalls: ToolCallCounts;
+}
+
+/** Total tool calls and the per-tool breakdown, both from the engine's own tally. */
+export interface ToolCallCounts {
+  readonly total: number;
+  readonly byTool: Readonly<Record<string, number>>;
 }
 
 /**
@@ -444,6 +459,49 @@ function parseWarnings(value: unknown, field: string): EngineWarning[] {
   });
 }
 
+/**
+ * The engine's tool-call tally, or zeroes when it reported none.
+ *
+ * Tolerant by design, and tolerant of SHAPE, not merely of absence: this is telemetry, and a
+ * malformed tally must never cost a run its verdict. `asObject` would have thrown here, and
+ * `parseBooked` rethrows after booking spend — so a `tool_calls` field the engine emitted as a
+ * string, a number, or an array would have destroyed an otherwise complete review to protect a
+ * diagnostic count. That is the same trade `parseFindings` was rewritten to stop making
+ * (Keiko#3011, where one malformed finding discarded eighteen good ones), reintroduced one
+ * function over by the very parser written to diagnose it. Found by this reviewer reviewing
+ * itself, on the commit that added this function.
+ *
+ * Tool NAMES come from the engine's own fixed tool set, not from candidate content, but they are
+ * still filtered to a conservative identifier shape before being used as diagnostic keys — a key
+ * is a name in a log the whole organization reads.
+ */
+function parseToolCalls(value: unknown): ToolCallCounts {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { total: 0, byTool: {} };
+  }
+  const object = value as Record<string, unknown>;
+  const total =
+    typeof object.total === "number" && Number.isFinite(object.total)
+      ? Math.max(0, Math.trunc(object.total))
+      : 0;
+  return { total, byTool: parseByTool(object.by_tool) };
+}
+
+/** The per-tool half, split out to keep `parseToolCalls` under the complexity ceiling. Names come
+ *  from the engine's own fixed tool set, not from candidate content, but they are still filtered to
+ *  an identifier shape: a key lands in a log the consumer's whole organization reads. */
+function parseByTool(raw: unknown): Record<string, number> {
+  const byTool: Record<string, number> = {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return byTool;
+  for (const [name, count] of Object.entries(raw as Record<string, unknown>)) {
+    const usable = typeof count === "number" && Number.isFinite(count);
+    if (usable && TOOL_NAME.test(name)) byTool[name] = Math.max(0, Math.trunc(count));
+  }
+  return byTool;
+}
+
+const TOOL_NAME = /^[a-z][a-z0-9_]{0,63}$/i;
+
 function parseSummary(value: unknown): {
   totalTokens: number;
   budgetExceeded: boolean;
@@ -507,5 +565,6 @@ export function parseEngineResult(text: string): EngineResult {
     totalTokens: summary.totalTokens,
     budgetExceeded: summary.budgetExceeded,
     rejectedFindings: comments.rejected,
+    toolCalls: parseToolCalls(root.tool_calls),
   };
 }

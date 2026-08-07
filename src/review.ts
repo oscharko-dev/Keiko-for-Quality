@@ -1618,6 +1618,16 @@ function recordEngineStatus(
     findings: result.findings.length,
     warnings: result.warnings.length,
   };
+  // Rounds are spent on tool calls, so this is the only line that can answer why a file exhausted
+  // its ceiling: not "it needed sixty rounds" but "it called this tool sixty times". Recorded only
+  // when the engine reported a tally, so a release that stops emitting one goes quiet rather than
+  // reporting a fabricated zero.
+  if (result.toolCalls.total > 0) {
+    counts.tool_calls = result.toolCalls.total;
+    for (const [name, calls] of Object.entries(result.toolCalls.byTool)) {
+      counts[`tool_${name}`] = calls;
+    }
+  }
   for (const warning of result.warnings) {
     const key = `warnings_${warning.type}`;
     counts[key] = (counts[key] ?? 0) + 1;
