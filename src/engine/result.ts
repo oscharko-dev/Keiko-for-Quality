@@ -462,14 +462,24 @@ function parseWarnings(value: unknown, field: string): EngineWarning[] {
 /**
  * The engine's tool-call tally, or zeroes when it reported none.
  *
- * Tolerant by design, like `parseSummary` beside it: this is telemetry, and a malformed tally must
- * never cost a run its verdict. Tool NAMES come from the engine's own fixed tool set, not from
- * candidate content, but they are still filtered to a conservative identifier shape before being
- * used as diagnostic keys — a key is a name in a log the whole organization reads.
+ * Tolerant by design, and tolerant of SHAPE, not merely of absence: this is telemetry, and a
+ * malformed tally must never cost a run its verdict. `asObject` would have thrown here, and
+ * `parseBooked` rethrows after booking spend — so a `tool_calls` field the engine emitted as a
+ * string, a number, or an array would have destroyed an otherwise complete review to protect a
+ * diagnostic count. That is the same trade `parseFindings` was rewritten to stop making
+ * (Keiko#3011, where one malformed finding discarded eighteen good ones), reintroduced one
+ * function over by the very parser written to diagnose it. Found by this reviewer reviewing
+ * itself, on the commit that added this function.
+ *
+ * Tool NAMES come from the engine's own fixed tool set, not from candidate content, but they are
+ * still filtered to a conservative identifier shape before being used as diagnostic keys — a key
+ * is a name in a log the whole organization reads.
  */
 function parseToolCalls(value: unknown): ToolCallCounts {
-  if (value === undefined || value === null) return { total: 0, byTool: {} };
-  const object = asObject(value, "result.tool_calls");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { total: 0, byTool: {} };
+  }
+  const object = value as Record<string, unknown>;
   const total =
     typeof object.total === "number" && Number.isFinite(object.total)
       ? Math.max(0, Math.trunc(object.total))

@@ -758,6 +758,18 @@ describe("tool-call tally", () => {
     expect(result.status).toBe("success");
   });
 
+  // The case above only ever sent bad VALUES inside a well-formed object. A tally of the wrong
+  // SHAPE went through `asObject`, which throws — and `parseBooked` rethrows — so a complete review
+  // was discarded to protect a diagnostic count. Found by this reviewer reviewing its own commit.
+  it("survives a tally of the wrong shape entirely, not merely bad values inside one", () => {
+    for (const malformed of ["47", 47, [1, 2, 3], true] as const) {
+      const result = parseEngineResult(document({ tool_calls: malformed }));
+      expect(result.toolCalls).toEqual({ total: 0, byTool: {} });
+      // The verdict is what was at stake: the run still parses, and its findings survive.
+      expect(result.status).toBe("success");
+    }
+  });
+
   it("drops a tool name that could not be a diagnostic key", () => {
     // Names come from the engine's fixed tool set, not from candidate content — but a key lands in
     // a log the consumer's whole organization reads, so the shape is enforced rather than trusted.

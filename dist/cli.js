@@ -834,8 +834,10 @@ function parseWarnings(value, field) {
   });
 }
 function parseToolCalls(value) {
-  if (value === void 0 || value === null) return { total: 0, byTool: {} };
-  const object = asObject(value, "result.tool_calls");
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { total: 0, byTool: {} };
+  }
+  const object = value;
   const total = typeof object.total === "number" && Number.isFinite(object.total) ? Math.max(0, Math.trunc(object.total)) : 0;
   return { total, byTool: parseByTool(object.by_tool) };
 }
