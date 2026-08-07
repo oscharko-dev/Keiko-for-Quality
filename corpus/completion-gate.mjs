@@ -23,7 +23,7 @@
 // KFQ_MODEL_TOKEN_ENV. KFQ_MODEL_ID must be gpt-oss-120b (AGENTS.md).
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -214,7 +214,7 @@ const PROFILE_IN_REPO = ".github/keiko-for-quality.json";
 
 /** One CLI run against one target; never throws — an unusable run becomes a measurement failure
  *  rather than an incomplete, so a broken harness cannot masquerade as a broken product. */
-function runOnce(target, repoPath, workDir, index, tokenBudget, profilePath) {
+function runOnce(target, repoPath, workDir, index, tokenBudget, profilePath, diagnosticsDir) {
   const worktree = join(workDir, `wt-${String(index)}`);
   const reportPath = join(workDir, `report-${String(index)}.json`);
   try {
@@ -248,8 +248,34 @@ function runOnce(target, repoPath, workDir, index, tokenBudget, profilePath) {
         // nothing.
         ...(profilePath === undefined ? [] : ["--profile", profilePath]),
       ],
-      { cwd: ROOT, stdio: ["ignore", "inherit", "inherit"], timeout: CHILD_TIMEOUT_MS },
+      // stderr is CAPTURED, not inherited: `src/cli.ts` writes every diagnostic line there
+      // (`boundRunLocalReview`), and three separate multi-million-token measurements were reduced
+      // to a headline number because that stream went to a terminal which kept only its tail. The
+      // counts inside it — searches per file, tool calls, subtask errors — are the only evidence
+      // that says WHY a review did not finish. A run this expensive should leave evidence, not a
+      // verdict.
+      {
+        cwd: ROOT,
+        encoding: "utf8",
+        stdio: ["ignore", "inherit", "pipe"],
+        timeout: CHILD_TIMEOUT_MS,
+      },
     );
+    if (typeof child.stderr === "string") {
+      if (diagnosticsDir !== undefined) {
+        writeFileSync(
+          join(diagnosticsDir, `pr${String(target.prNumber)}-run${String(index)}.jsonl`),
+          child.stderr,
+        );
+      }
+      // Capturing must not silence a failure. Diagnostics are JSON objects, one per line; anything
+      // else the CLI said is a message meant for a person and is passed through, whether or not a
+      // diagnostics directory exists to keep the rest.
+      const spoken = child.stderr
+        .split("\n")
+        .filter((line) => line !== "" && !line.startsWith("{"));
+      if (spoken.length > 0) process.stderr.write(`${spoken.join("\n")}\n`);
+    }
     if (child.status === null) return measurementFailure("review CLI was killed or timed out");
     try {
       return gradeAttempt(JSON.parse(readFileSync(reportPath, "utf8")));
@@ -263,14 +289,22 @@ function runOnce(target, repoPath, workDir, index, tokenBudget, profilePath) {
   }
 }
 
-function runTarget(target, repoPath, runs, tokenBudget) {
+function runTarget(target, repoPath, runs, tokenBudget, diagnosticsDir) {
   const workDir = mkdtempSync(join(tmpdir(), `kfq-completion-${String(target.prNumber)}-`));
   const profilePath = baseProfilePath(repoPath, target.base, workDir);
   const attempts = [];
   try {
     for (let index = 1; index <= runs; index += 1) {
       console.error(`completion-gate: ${target.label} run ${String(index)}/${String(runs)}`);
-      const attempt = runOnce(target, repoPath, workDir, index, tokenBudget, profilePath);
+      const attempt = runOnce(
+        target,
+        repoPath,
+        workDir,
+        index,
+        tokenBudget,
+        profilePath,
+        diagnosticsDir,
+      );
       attempts.push(attempt);
       const why = attempt.reason === undefined ? "" : ` (${attempt.reason})`;
       console.error(
@@ -334,12 +368,20 @@ function main() {
     return;
   }
 
+  // Raw diagnostics land beside the evidence, because the evidence is a summary and a summary is
+  // not re-analysable. Three measurements costing 21.7M, 12.5M and 2.2M tokens were each reduced to
+  // a rate before anyone could ask WHY — the per-file search counts that answer it had gone to a
+  // terminal and been truncated. Written only when `--evidence` names a home for them; without one
+  // there is nowhere durable to put them and the run keeps its old behaviour.
+  const diagnosticsDir = args.evidence === undefined ? undefined : `${args.evidence}.diagnostics`;
+  if (diagnosticsDir !== undefined) mkdirSync(diagnosticsDir, { recursive: true });
+
   // `changedLines` is carried onto the result, not left on the target, because `stratify` groups
   // results and a class it cannot read collapses every run into one bucket — which is exactly what
   // happened on the first full-spectrum run: the table was suppressed and the measurement lost the
   // dimension it was taken to answer.
   const results = targets.map((target) => ({
-    ...runTarget(target, args.repo, args.runs, args.tokenBudget),
+    ...runTarget(target, args.repo, args.runs, args.tokenBudget, diagnosticsDir),
     changedLines: target.changedLines,
   }));
   const summary = summarizeRuns(
