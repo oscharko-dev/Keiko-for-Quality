@@ -2734,13 +2734,13 @@ var CATCH_ALL_RULE = [
   "means only that one grep found no other word match, so verify absence yourself before a",
   "negative-existence claim rests on it. Search for what it does not answer, nothing more.",
   "",
-  "Search in batches, not in steps. One `code_search` with `use_perl_regexp: true` and an",
-  "alternation (`alpha|beta|gamma`) answers three questions for the price of one round; one",
-  "`file_read` spanning the whole relevant range beats three small reads of the same file. Every",
-  "tool round resends the entire conversation, so a batched lookup is not a style preference \u2014 it",
-  "is the difference between a review that concludes inside its budget and one that dies",
-  "navigating.",
-  "",
+  // A second paragraph stood here through two A/B candidates (2026-08-07): "search in batches,
+  // prefer one file_read spanning the whole relevant range over three small reads". Removing it
+  // is a measured decision, not a tidy-up — with packs on 19 files the run cost +21.8% tokens
+  // over baseline, with packs on only 5 files +24.6%, which acquits the packs' standing cost and
+  // convicts the instruction: a model told to read wide obliges, every wide read lands in the
+  // conversation, and the whole heavier history is resent on every remaining turn. Fewer rounds,
+  // each round dearer — a losing trade on an endpoint the 2026-08-07 probe showed caches nothing.
   "Two failure modes, and the second is the expensive one. Not looking and staying silent loses one",
   "finding. Not looking and reporting anyway produces something that reads authoritative, costs an",
   "engineer their attention, and turns out to be wrong \u2014 and after a few of those, the true findings",
