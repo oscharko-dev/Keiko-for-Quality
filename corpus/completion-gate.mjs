@@ -23,7 +23,7 @@
 // KFQ_MODEL_TOKEN_ENV. KFQ_MODEL_ID must be gpt-oss-120b (AGENTS.md).
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -211,6 +211,40 @@ function baseProfilePath(repoPath, base, workDir) {
 
 /** Where a consumer's review profile lives, by the convention the action's own default names. */
 const PROFILE_IN_REPO = ".github/keiko-for-quality.json";
+
+/** What this gate writes into a diagnostics directory, and the only thing it will delete. */
+const DIAGNOSTICS_FILE = /^pr\d+-run\d+\.jsonl$/;
+
+/**
+ * Clears a diagnostics directory, but only one this gate itself produced.
+ *
+ * A recursive delete of a path derived from an argument deserves a look before it runs, whatever
+ * the threat model. The stated one — an attacker passing `/` — does not hold: the path is always
+ * `<evidence>.diagnostics`, so `--evidence /` names `/.diagnostics`, and the only person who can
+ * pass the argument is the developer already running this script. The real hazard is duller and
+ * likelier: a mistyped `--evidence` pointing at a directory that exists and holds something else,
+ * removed without a word.
+ *
+ * So the directory must look like this gate's own work — nothing in it but `prN-runN.jsonl` — or
+ * the run stops and says which file made it stop. Refusing to delete what it does not recognise
+ * costs one clear error message; the alternative costs whatever was in there.
+ */
+function emptyOwnDiagnostics(diagnosticsDir) {
+  let entries;
+  try {
+    entries = readdirSync(diagnosticsDir);
+  } catch {
+    return; // Nothing there yet, which is the ordinary case.
+  }
+  const foreign = entries.find((entry) => !DIAGNOSTICS_FILE.test(entry));
+  if (foreign !== undefined) {
+    fail(
+      `${diagnosticsDir} holds ${foreign}, which this gate did not write — ` +
+        "refusing to delete it. Point --evidence somewhere else, or clear the directory yourself.",
+    );
+  }
+  for (const entry of entries) rmSync(join(diagnosticsDir, entry), { force: true });
+}
 
 /**
  * Puts a captured stderr stream where each of its two kinds of line belongs.
@@ -405,7 +439,7 @@ function main() {
     // fewer targets or fewer attempts would sit beside stale `pr*-run*.jsonl` files from a previous
     // measurement — and a directory whose name ties it to THIS evidence file would be describing a
     // different one. That is the same silent-staleness this gate exists to refuse.
-    rmSync(diagnosticsDir, { recursive: true, force: true });
+    emptyOwnDiagnostics(diagnosticsDir);
     mkdirSync(diagnosticsDir, { recursive: true });
   }
 
