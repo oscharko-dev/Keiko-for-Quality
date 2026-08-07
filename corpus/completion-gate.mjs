@@ -167,9 +167,19 @@ function resolveTarget(repoPath, prNumber, baseRef) {
   // dimension the literature measures detection against, and because two twelve-file changes can
   // differ by an order of magnitude in what the reviewer actually has to read.
   const numstat = git(repoPath, ["diff", "--numstat", `${base}..${head}`]);
+  // `undefined`, not a number, when any file in the range is binary. `--numstat` writes `-` for
+  // both counts there, and `Number("-") || 0` would quietly call that file zero lines — putting a
+  // change that may be enormous into the smallest size class and reporting its completion under a
+  // heading it does not belong to. An unmeasurable size is unmeasurable; the one thing this gate
+  // must never do is answer a question it cannot compute. Raised by CodeRabbit on KfQ#164.
   let changedLines = 0;
   for (const line of numstat.split("\n")) {
+    if (line === "") continue;
     const [added, deleted] = line.split("\t");
+    if (added === "-" || deleted === "-") {
+      changedLines = undefined;
+      break;
+    }
     changedLines += (Number(added) || 0) + (Number(deleted) || 0);
   }
   return { label: `PR #${String(prNumber)}`, prNumber, head, base, files, changedLines };

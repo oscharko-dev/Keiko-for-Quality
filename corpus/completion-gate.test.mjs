@@ -276,6 +276,64 @@ test("a stratum is judged by exactly the standard the whole run is", () => {
   assert.equal(stratify(results, 0.8)[0].verdict, "INCONCLUSIVE");
 });
 
+// `git diff --numstat` writes `-` for a binary file, so a target containing one has no measurable
+// line count. Coercing that to 0 put it in the SMALLEST class — a change that may be enormous
+// reported under "<50 lines", and every rate in that row then partly about something else.
+test("a change whose size could not be measured joins no size class, and is counted out loud", () => {
+  const attempt = () => gradeAttempt(reportWith());
+  const strata = stratify(
+    [
+      { label: "measured", changedLines: 40, attempts: [attempt(), attempt()] },
+      { label: "binary", changedLines: undefined, attempts: [attempt()] },
+    ],
+    0.8,
+  );
+  // The measured target is alone in its row: 2 graded, not 3.
+  assert.equal(strata.length, 1);
+  assert.equal(strata[0].graded, 2);
+  assert.equal(strata.unstratifiable, 1);
+});
+
+// A row missing from a table reads as a row that was empty. It has to say so.
+test("renderEvidence names the attempts that appear in no size row", () => {
+  const attempt = () => gradeAttempt(reportWith());
+  const results = [
+    { label: "small", changedLines: 10, attempts: [attempt()] },
+    { label: "large", changedLines: 9000, attempts: [attempt()] },
+    { label: "binary", changedLines: undefined, attempts: [attempt()] },
+  ];
+  const attempts = results.flatMap((r) => r.attempts);
+  const evidence = renderEvidence({
+    dateIso: "2026-08-07",
+    gateVersion: "0.19.2",
+    reviewerTree: "abc123def456 (clean)",
+    model: "gpt-oss-120b (openai)",
+    targets: [{ label: "x", files: 1 }],
+    results: [{ label: "x", attempts }],
+    summary: summarizeRuns(attempts, 0.8),
+    strata: stratify(results, 0.8),
+  });
+  assert.match(evidence, /1 attempt\(s\) appear in no row above/);
+  assert.match(evidence, /binary files/);
+});
+
+// `verdictFor` says INCONCLUSIVE for a straddling interval AND for no interval at all. Only the
+// first is about an interval; asserting it for the second states something untrue in an artefact
+// whose entire job is not to.
+test("a run with nothing graded says so, instead of claiming an interval spans the bar", () => {
+  const evidence = renderEvidence({
+    dateIso: "2026-08-07",
+    gateVersion: "0.19.2",
+    reviewerTree: "abc123def456 (clean)",
+    model: "gpt-oss-120b (openai)",
+    targets: [{ label: "x", files: 1 }],
+    results: [{ label: "x", attempts: [measurementFailure("worktree add failed")] }],
+    summary: summarizeRuns([measurementFailure("worktree add failed")], 0.8),
+  });
+  assert.match(evidence, /Nothing was graded/);
+  assert.doesNotMatch(evidence, /interval spans the threshold/);
+});
+
 test("sizeClassOf places a change in exactly one class, at every boundary", () => {
   assert.equal(sizeClassOf(0).key, "lines_lt_50");
   assert.equal(sizeClassOf(49).key, "lines_lt_50");

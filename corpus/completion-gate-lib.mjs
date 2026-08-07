@@ -145,16 +145,28 @@ export function sizeClassOf(changedLines) {
  */
 export function stratify(results, threshold) {
   const byClass = new Map();
+  let unstratifiable = 0;
   for (const result of results) {
-    const key = sizeClassOf(result.changedLines ?? 0).key;
+    // A size nobody could measure buys no bucket. `?? 0` here would have been the whole defect in
+    // one character: an unmeasurable change silently becomes the smallest one, and every rate this
+    // function reports for small changes is then partly about a change that was not small.
+    if (typeof result.changedLines !== "number") {
+      unstratifiable += result.attempts.length;
+      continue;
+    }
+    const key = sizeClassOf(result.changedLines).key;
     const bucket = byClass.get(key) ?? [];
     bucket.push(...result.attempts);
     byClass.set(key, bucket);
   }
-  return SIZE_CLASSES.filter((c) => byClass.has(c.key)).map((c) => ({
+  const strata = SIZE_CLASSES.filter((c) => byClass.has(c.key)).map((c) => ({
     label: c.label,
     ...summarizeRuns(byClass.get(c.key) ?? [], threshold),
   }));
+  // Carried, never dropped: an attempt left out of every stratum is exactly the kind of quiet
+  // truncation that makes a partial table read as a complete one. `renderEvidence` prints it.
+  strata.unstratifiable = unstratifiable;
+  return strata;
 }
 
 /**
@@ -234,6 +246,27 @@ export function estimateSpend(targets, runs) {
  * its own contract (corpus/evidence-shape.mjs) and answers a different question. A completion
  * measurement must never be mistakable for a qualification.
  */
+/**
+ * Why the sample could not decide, in the words the sample has earned.
+ *
+ * An empty list for a decided verdict. Split out so `renderEvidence` stays under the complexity
+ * bound, and named rather than inlined because the distinction it draws is the point: no data and
+ * inconclusive data are both "we do not know", and only one of them is about an interval.
+ */
+function inconclusiveExplanation(summary) {
+  if (summary.verdict !== "INCONCLUSIVE") return [];
+  if (summary.interval === undefined) {
+    return [
+      "- **Nothing was graded, so there is no rate to report.** Every attempt was a measurement",
+      "  failure. This says nothing about the reviewer — fix the harness and measure again.",
+    ];
+  }
+  return [
+    "- **This sample cannot decide the question.** The interval spans the threshold, so the",
+    "  data neither supports nor refutes the bar. The answer is more runs, not a louder verdict.",
+  ];
+}
+
 export function renderEvidence({
   dateIso,
   gateVersion,
@@ -259,12 +292,11 @@ export function renderEvidence({
       `(${String(summary.complete)}/${String(summary.graded)} graded attempts) — ` +
       `**${summary.verdict}** against a ${ratePercent(summary.threshold)} threshold`,
     `- 95% interval: ${describeInterval(summary.interval)}`,
-    ...(summary.verdict === "INCONCLUSIVE"
-      ? [
-          "- **This sample cannot decide the question.** The interval spans the threshold, so the",
-          "  data neither supports nor refutes the bar. The answer is more runs, not a louder verdict.",
-        ]
-      : []),
+    // Two different undecided states, and saying the wrong one is exactly the self-deception this
+    // file exists to prevent. `verdictFor` answers INCONCLUSIVE both when the interval straddles
+    // the bar and when there is no interval at all — but "the interval spans the threshold" is a
+    // claim, and with nothing graded it is a false one. Raised by CodeRabbit on KfQ#164.
+    ...inconclusiveExplanation(summary),
     `- Measurement failures (excluded from the rate): ${String(summary.measurementFailures)}`,
     `- Total spend (tokens): ${String(summary.spendTotal)}`,
     "",
@@ -283,6 +315,15 @@ export function renderEvidence({
       lines.push(
         `| ${s.label} | ${ratePercent(s.completionRate)} (${String(s.complete)}/${String(s.graded)}) ` +
           `| ${describeInterval(s.interval)} | ${s.verdict} |`,
+      );
+    }
+    if (strata.unstratifiable > 0) {
+      lines.push(
+        "",
+        `**${String(strata.unstratifiable)} attempt(s) appear in no row above.** Their change size ` +
+          "could not be measured — `git diff --numstat` reports `-` for binary files — and a size " +
+          "nobody measured is not evidence about any size class. They are still counted in the " +
+          "aggregate rate.",
       );
     }
     lines.push("");
