@@ -73,7 +73,29 @@ export interface EngineFinding {
 export interface EngineWarning {
   readonly type: string;
   readonly file: string;
+  /**
+   * Why a `subtask_error` happened, as a closed-vocabulary class rather than the engine's own
+   * message (2026-08-06).
+   *
+   * `subtask_error` is the engine's catch-all for a per-file review that did not finish, and it
+   * covers two failures that need opposite responses. Tool-budget exhaustion — the loop counting
+   * `MaxToolRequestTimes` down to zero, surfacing as "main_task did not complete before stopping"
+   * — is answered by giving the file more rounds (`MAX_TOOL_ROUNDS_PER_FILE`, run.ts). An LLM
+   * transport error or a per-file timeout is not, and more rounds would only cost more.
+   *
+   * Without this class the two are indistinguishable in every diagnostic we emit, which means a
+   * change to the round ceiling could not be evaluated at all — the whole point of raising it.
+   * The engine's message text itself is never carried anywhere: it is matched against a fixed
+   * pattern here and reduced to a name, the same discipline `model-proxy.ts` applies to 400
+   * bodies.
+   */
+  readonly cause?: WarningCause;
 }
+
+/** Closed vocabulary for `EngineWarning.cause`. `other` means the message matched no known
+ *  pattern — deliberately not "unknown", because the engine DID say something and this adapter
+ *  simply has no name for it yet. */
+export type WarningCause = "tool_budget" | "other";
 
 export interface CoverageEntry {
   readonly path: string;
@@ -132,6 +154,21 @@ export interface EngineResult {
    * loses findings this way is visible instead of silent.
    */
   readonly rejectedFindings: number;
+  /**
+   * The engine's own tool-call tally for the run: total, and per tool name.
+   *
+   * The engine has emitted this since v1.8.4 (`jsonToolCalls`, cmd/opencodereview/output.go) and
+   * this adapter has never read it, which left the one question that matters for the tool-round
+   * ceiling unanswerable: rounds are consumed by tool calls, so "why did this file need sixty
+   * rounds" is really "which tool did it call sixty times". Empty when the engine reported none.
+   */
+  readonly toolCalls: ToolCallCounts;
+}
+
+/** Total tool calls and the per-tool breakdown, both from the engine's own tally. */
+export interface ToolCallCounts {
+  readonly total: number;
+  readonly byTool: Readonly<Record<string, number>>;
 }
 
 /**
@@ -389,18 +426,81 @@ function unwrapEnvelopeContent(content: string, field: string): UnwrappedEnvelop
   };
 }
 
+/**
+ * The one message this adapter recognises, matched against the pinned engine's own wording.
+ *
+ * `agent.executeSubtask` (v1.8.4) constructs it verbatim when `RunPerFile` returns without the
+ * model having called `task_done`, which happens exactly when the tool-round counter reaches zero.
+ * Matched loosely (case-insensitive, on the distinctive phrase) rather than by equality, so a
+ * reworded engine release degrades to `other` — an unmatched cause, never a wrong one.
+ */
+const TOOL_BUDGET_MESSAGE = /main_task did not complete/i;
+
+/** The class of a `subtask_error`, from the engine's own message. Never carries the message. */
+function classifyWarning(type: string, message: unknown): WarningCause | undefined {
+  if (type !== "subtask_error" && type !== "scan_subtask_error") return undefined;
+  if (typeof message !== "string") return "other";
+  return TOOL_BUDGET_MESSAGE.test(message) ? "tool_budget" : "other";
+}
+
 function parseWarnings(value: unknown, field: string): EngineWarning[] {
   if (value === undefined || value === null) return [];
   return asArray(value, field, LIMITS.maxWarnings).map((entry, i) => {
     const scope = `${field}[${String(i)}]`;
     const object = asObject(entry, scope);
+    const type = asString(object.type, `${scope}.type`, 200);
+    const cause = classifyWarning(type, object.message);
     return {
-      type: asString(object.type, `${scope}.type`, 200),
+      type,
       // Not a validated repository path: the engine also reports warnings without a file.
       file: typeof object.file === "string" ? object.file.slice(0, 1024) : "",
+      ...(cause === undefined ? {} : { cause }),
     };
   });
 }
+
+/**
+ * The engine's tool-call tally, or zeroes when it reported none.
+ *
+ * Tolerant by design, and tolerant of SHAPE, not merely of absence: this is telemetry, and a
+ * malformed tally must never cost a run its verdict. `asObject` would have thrown here, and
+ * `parseBooked` rethrows after booking spend — so a `tool_calls` field the engine emitted as a
+ * string, a number, or an array would have destroyed an otherwise complete review to protect a
+ * diagnostic count. That is the same trade `parseFindings` was rewritten to stop making
+ * (Keiko#3011, where one malformed finding discarded eighteen good ones), reintroduced one
+ * function over by the very parser written to diagnose it. Found by this reviewer reviewing
+ * itself, on the commit that added this function.
+ *
+ * Tool NAMES come from the engine's own fixed tool set, not from candidate content, but they are
+ * still filtered to a conservative identifier shape before being used as diagnostic keys — a key
+ * is a name in a log the whole organization reads.
+ */
+function parseToolCalls(value: unknown): ToolCallCounts {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { total: 0, byTool: {} };
+  }
+  const object = value as Record<string, unknown>;
+  const total =
+    typeof object.total === "number" && Number.isFinite(object.total)
+      ? Math.max(0, Math.trunc(object.total))
+      : 0;
+  return { total, byTool: parseByTool(object.by_tool) };
+}
+
+/** The per-tool half, split out to keep `parseToolCalls` under the complexity ceiling. Names come
+ *  from the engine's own fixed tool set, not from candidate content, but they are still filtered to
+ *  an identifier shape: a key lands in a log the consumer's whole organization reads. */
+function parseByTool(raw: unknown): Record<string, number> {
+  const byTool: Record<string, number> = {};
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return byTool;
+  for (const [name, count] of Object.entries(raw as Record<string, unknown>)) {
+    const usable = typeof count === "number" && Number.isFinite(count);
+    if (usable && TOOL_NAME.test(name)) byTool[name] = Math.max(0, Math.trunc(count));
+  }
+  return byTool;
+}
+
+const TOOL_NAME = /^[a-z][a-z0-9_]{0,63}$/i;
 
 function parseSummary(value: unknown): {
   totalTokens: number;
@@ -465,5 +565,6 @@ export function parseEngineResult(text: string): EngineResult {
     totalTokens: summary.totalTokens,
     budgetExceeded: summary.budgetExceeded,
     rejectedFindings: comments.rejected,
+    toolCalls: parseToolCalls(root.tool_calls),
   };
 }

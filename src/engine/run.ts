@@ -7,7 +7,7 @@ import { sha256, type Sha256 } from "../core/brands.js";
 import type { CompiledProfile } from "../config/profile.js";
 import type { GuidelineIndex } from "../config/guidelines.js";
 import { readModelToken, type RuntimeConfig } from "../config/runtime.js";
-import { startModelProxy, type ModelProxy } from "./model-proxy.js";
+import { renderChangeIntent, startModelProxy, type ModelProxy } from "./model-proxy.js";
 import type { Diagnostics } from "../diagnostics/sink.js";
 import { run, ExecFailure } from "../git/exec.js";
 import type { ReviewPair } from "../inventory/inventory.js";
@@ -47,8 +47,22 @@ export interface EngineRunOptions {
   readonly guidelines: GuidelineIndex;
   readonly env: NodeJS.ProcessEnv;
   readonly pathValue: string;
-  /** The pull request's stated purpose, forwarded to the proxy — see `ModelProxyOptions`. */
+  /**
+   * The pull request's stated purpose. Since v0.20.0 it travels on the engine's own
+   * `--background` flag (rendered through `renderChangeIntent`, so the data-not-instruction frame
+   * and the 1500-char bound are unchanged) instead of a proxy-spliced message. The native flag
+   * substitutes into `{{requirement_background}}` inside the first user message of every file's
+   * conversation — a position identical on every turn, where the old splice moved with the
+   * conversation's tail and broke the shared prefix at the splice point — and it also reaches the
+   * anthropic protocol path, which never had a proxy to splice for it.
+   */
   readonly changeIntent?: string;
+  /**
+   * Per-file deterministic context packs (`collectContextPacks`), keyed by reviewed path, handed
+   * to the proxy for injection — see `ModelProxyOptions.contextPacks` for the exact mechanics and
+   * `context-pack.ts` for why they exist. Absent and empty behave identically: no injection.
+   */
+  readonly contextPacks?: ReadonlyMap<string, string>;
   /**
    * The size-scaled per-run ceiling passed to the engine's own `--max-tokens-budget`.
    *
@@ -139,6 +153,37 @@ async function writeRuleFile(
   return { rulePath, ruleDigest: sha256(createHash("sha256").update(ruleBody).digest("hex")) };
 }
 
+/**
+ * Tool-call rounds the engine may spend on ONE file before it gives up on it.
+ *
+ * This is the root cause of the failure class every other fix this week has been catching
+ * downstream. Read from the pinned engine's own source (v1.8.4), the chain is exact:
+ * `Template.MaxToolRequestTimes` defaults to 30 in the embedded `task_template.json`;
+ * `llmloop.RunPerFile` counts down from it and, on exhaustion, prints "Max tool requests reached"
+ * and returns `false, nil`; `agent.executeSubtask` turns that into
+ * `errors.New("main_task did not complete before stopping")`; and the agent records it as a
+ * `subtask_error` warning naming the file. That warning is what `settle.ts` reads as a coverage
+ * gap, which is what settles the review incomplete. Thirty rounds is where reviews were dying.
+ *
+ * `--max-tools` only ever RAISES the template value (`loadCommonContext`: `if maxTools >
+ * tpl.MaxToolRequestTimes`), so this cannot accidentally lower the engine's own floor, and the
+ * engine clamps anything under 10 upward.
+ *
+ * Sixty rather than a larger number, and the reasoning is about cost asymmetry rather than
+ * ambition. A file that finishes in 25 rounds is completely unaffected — the ceiling is not a
+ * budget, only a stopping point. The extra spend falls exclusively on files that WOULD have died
+ * at 30, and those files already paid for their 30 rounds and returned nothing usable: raising the
+ * ceiling converts spend that bought a coverage gap into spend that may buy a verdict. Total cost
+ * stays bounded regardless, because `--max-tokens-budget` above is a separate, unchanged
+ * stop-loss on the whole run — this ceiling can extend one file's conversation, never the run's
+ * total spend.
+ *
+ * Doubling is deliberate over a bigger jump: a file that cannot finish in sixty rounds is very
+ * likely stuck rather than slow, and `engine.status.*`'s `warnings_subtask_error_tool_budget`
+ * count (see `result.ts`) is what will say whether that guess held.
+ */
+export const MAX_TOOL_ROUNDS_PER_FILE = 60;
+
 export function reviewArguments(options: EngineRunOptions, rulePath: string): string[] {
   return [
     "review",
@@ -148,6 +193,13 @@ export function reviewArguments(options: EngineRunOptions, rulePath: string): st
     options.pair.head,
     "--format",
     "json",
+    // The intent rides the engine's own background channel (v0.20.0) — see
+    // `EngineRunOptions.changeIntent`. Inline `--background` is passed through argv, which
+    // `git/exec.ts` hands to `execFile` with `shell: false`, so candidate-authored text is never
+    // shell-parsed; the engine substitutes it raw, so the rendered frame travels with it.
+    ...(options.changeIntent === undefined || options.changeIntent === ""
+      ? []
+      : ["--background", renderChangeIntent(options.changeIntent)]),
     // Explicit, so the engine never consults its discovery paths — including a `rule.json` inside
     // the repository being reviewed.
     "--rule",
@@ -159,6 +211,8 @@ export function reviewArguments(options: EngineRunOptions, rulePath: string): st
     // already selected has been paid for.
     "--max-tokens-budget",
     String(options.allottedBudget),
+    "--max-tools",
+    String(MAX_TOOL_ROUNDS_PER_FILE),
   ];
 }
 
@@ -211,10 +265,10 @@ async function startProxyIfNeeded(
     temperature: REVIEW_TEMPERATURE,
     seed: options.samplingSeed ?? REVIEW_SEED,
     promptCacheKey: promptCacheKeyForRule(ruleDigest),
-    // Conditional, not `changeIntent: options.changeIntent`: under `exactOptionalPropertyTypes` an
-    // optional field may be absent or a string, never an explicit `undefined`. Absent is also what
-    // keeps every body byte-identical for a caller that has no pull request to read an intent from.
-    ...(options.changeIntent === undefined ? {} : { changeIntent: options.changeIntent }),
+    // Conditional, not `contextPacks: options.contextPacks`: under `exactOptionalPropertyTypes` an
+    // optional field may be absent or a map, never an explicit `undefined`. Absent is also what
+    // keeps every body byte-identical for a caller that computed no packs.
+    ...(options.contextPacks === undefined ? {} : { contextPacks: options.contextPacks }),
   });
 }
 
@@ -238,6 +292,9 @@ function recordModelUsage(
       prompt: usage.prompt,
       completion: usage.completion,
       cached: usage.cached,
+      // Always present, like `cached`: when packs were computed, a zero here is the one signal
+      // that the injection stopped matching the engine's prompt shape (see `ModelUsage`).
+      context_pack_injected: usage.contextPackInjected,
       cache_key_rejected: usage.cacheKeyRejected,
       // Always present, even at 0: "no model call was refused" is a fact worth one word, and its
       // absence is what let Keiko#3002's persisted 400s masquerade as cache-key noise.

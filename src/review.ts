@@ -22,6 +22,7 @@ import { readModelToken, type RuntimeConfig } from "./config/runtime.js";
 import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
 import { acquireEngine } from "./engine/acquire.js";
+import { collectContextPacks } from "./engine/context-pack.js";
 import { currentPlatformDigest, ENGINE_PIN } from "./engine/pinned-release.js";
 import {
   auditClassification,
@@ -36,8 +37,10 @@ import {
   type RunStatus,
 } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
+import { runSingleShotEngine } from "./engine/single-shot.js";
 import {
   EngineRunError,
+  MAX_TOOL_ROUNDS_PER_FILE,
   runEngine,
   type EngineRunOptions,
   type EngineRunOutput,
@@ -428,6 +431,35 @@ interface LocalRun {
 const PER_FILE_TOKENS = 100_000;
 
 /**
+ * The tool-round ceiling this per-file price was calibrated under — the engine's own embedded
+ * default (`MAX_TOOL_REQUEST_TIMES: 30`, `task_template.json` at v1.8.4).
+ *
+ * Named here rather than left implicit because on 2026-08-06 the two drifted apart and the
+ * measurement caught it. Raising the ceiling to 60 (`MAX_TOOL_ROUNDS_PER_FILE`, engine/run.ts)
+ * without touching this price did not fix Keiko#3008 — it MOVED the failure: run 1 stopped
+ * settling `coverage_gap` and started settling `budget_exceeded` instead, spending 3.2M against
+ * an allotment of 1.59M that was still priced for half the conversation length it now permits.
+ *
+ * A per-file price and a per-file round ceiling are two statements about the same thing, so
+ * `allottedPerFile` below derives one from the other instead of letting a future change to either
+ * silently invalidate the calibration behind this constant.
+ */
+const CALIBRATED_TOOL_ROUNDS = 30;
+
+/**
+ * The per-file price at the round ceiling actually in force.
+ *
+ * Deliberately NOT a second hand-tuned constant: the 100k above was measured against 30 rounds,
+ * and the only honest way to keep it meaningful when the ceiling moves is to scale it by the same
+ * factor. This over-provisions slightly — a file rarely uses every round it is allowed — but the
+ * asymmetry `PER_FILE_TOKENS`'s own comment records still holds: headroom a run does not need
+ * costs nothing, and hitting the stop-loss costs the entire run.
+ */
+function allottedPerFile(): number {
+  return (PER_FILE_TOKENS * MAX_TOOL_ROUNDS_PER_FILE) / CALIBRATED_TOOL_ROUNDS;
+}
+
+/**
  * A weak secondary term, in tokens per changed line.
  *
  * Deliberately small relative to `PER_FILE_TOKENS`: line count is a poor predictor of spend next to
@@ -506,7 +538,7 @@ export function computeAllottedBudget(
 ): number {
   const sizeScaled =
     ALLOTMENT_MARGIN *
-    (reviewableFileCount * PER_FILE_TOKENS + reviewableChangedLines * PER_LINE_TOKENS);
+    (reviewableFileCount * allottedPerFile() + reviewableChangedLines * PER_LINE_TOKENS);
   const clamped = clamp(sizeScaled, ALLOTMENT_FLOOR, ALLOTMENT_CEILING);
   return Math.round(Math.min(tokenBudget, clamped));
 }
@@ -925,15 +957,17 @@ function bookPropagatedEngineFailure(error: unknown, ledger: SpendLedger): void 
   if (error instanceof EngineRunError) ledger.engine += error.wireTokens ?? 0;
 }
 
-/** The invocation options `executeEngine` hands `runEngineWithOneResume` — pure assembly, split
- *  out solely for that function's own line budget. */
-function engineInvocationOptions(
+/** The invocation options `executeEngine` hands `runEngineWithOneResume` — assembly plus the one
+ *  preparation step (`dispatchContextPacks`) that needs the same exclude union, split out for that
+ *  function's own line budget. */
+async function engineInvocationOptions(
   request: PipelineRequest,
   inventory: Inventory,
   binaryPath: string,
   allottedBudget: number,
   excluded: readonly string[],
-): EngineRunOptions {
+): Promise<EngineRunOptions> {
+  const contextPacks = await dispatchContextPacks(request, inventory, excluded);
   return {
     binaryPath,
     repositoryPath: request.repositoryPath,
@@ -944,9 +978,74 @@ function engineInvocationOptions(
     env: request.env,
     pathValue: request.pathValue,
     ...(request.changeIntent === undefined ? {} : { changeIntent: request.changeIntent }),
+    ...(contextPacks.size === 0 ? {} : { contextPacks }),
     allottedBudget,
     mechanicallyCleanPaths: excluded,
   };
+}
+
+/**
+ * The per-file context packs for exactly the paths this run will dispatch — reviewable minus the
+ * same exclude union the budget was computed from, so a cache hit or mechanically-clean path never
+ * pays for a lookup no engine conversation will read. Two git subprocesses regardless of file
+ * count, and `collectContextPacks` resolves every internal failure to "no pack", so this call can
+ * shrink the injection but never the review.
+ */
+async function dispatchContextPacks(
+  request: PipelineRequest,
+  inventory: Inventory,
+  excluded: readonly string[],
+): Promise<ReadonlyMap<string, string>> {
+  // Opt-in, defaulted OFF by a measurement, not a mood (2026-08-07, four paid runs on the
+  // Keiko#3011 merge — evidence: corpus/evidence/cost-ab-2026-08-07-context-packs.md). On the
+  // live endpoint, which the same day's probe showed caches nothing, no pack configuration beat
+  // the baseline's cost, and run-to-run variance under pinned sampling (1.80M / 1.84M / 2.58M
+  // tokens, 0 to 3 findings, one commit) is far too large for any single-run comparison to
+  // license a default. The mechanism itself is built, tested, and correct; it becomes economical
+  // the day the serving path discounts a stable prefix, and until then it costs every turn. Same
+  // escape-hatch pattern as `OCR_ALLOW_MODEL_DEVIATION` in `corpus/run.mjs`: deliberate
+  // experiments set KFQ_CONTEXT_PACKS=1; nothing else pays.
+  if (request.env.KFQ_CONTEXT_PACKS !== "1") return new Map();
+  const excludedSet = new Set(excluded);
+  const paths = [...inventory.reviewablePaths].filter((path) => !excludedSet.has(path));
+  return collectContextPacks({
+    repositoryPath: request.repositoryPath,
+    pair: inventory.pair,
+    paths,
+    pathValue: request.pathValue,
+  });
+}
+
+/**
+ * The one place both engine attempts (first dispatch and targeted resume) choose their runner.
+ *
+ * `KFQ_SINGLE_SHOT=1` selects the single-shot runner (`single-shot.ts`) — one model call per
+ * file, engine-compatible output, no tool loop — behind the same escape-hatch pattern as
+ * `KFQ_CONTEXT_PACKS`. Everything downstream (parse, settle, resume, publish, store) is runner-
+ * agnostic by construction: both produce the stdout shape `result.ts` parses. The targeted-gap
+ * resume therefore works unchanged in single-shot mode, retrying exactly the files whose calls
+ * failed.
+ */
+function invokeEngine(
+  options: EngineRunOptions,
+  diagnostics: Diagnostics,
+): Promise<EngineRunOutput> {
+  if (options.env.KFQ_SINGLE_SHOT === "1") return runSingleShotEngine(options, diagnostics);
+  return runEngine(options, diagnostics);
+}
+
+/** The budget booking plus the fully assembled invocation — the two preparations that share one
+ *  exclude union, folded together for `executeEngine`'s own line budget. */
+async function preparedInvocation(
+  request: PipelineRequest,
+  inventory: Inventory,
+  memo: MemoContext,
+  ledger: SpendLedger,
+  binaryPath: string,
+): Promise<EngineRunOptions> {
+  const { excluded, allottedBudget } = computeEngineBudget(request, inventory, memo);
+  ledger.allotted = allottedBudget;
+  return engineInvocationOptions(request, inventory, binaryPath, allottedBudget, excluded);
 }
 
 async function executeEngine(
@@ -960,14 +1059,12 @@ async function executeEngine(
   const workspace = await mkdtemp(join(tmpdir(), "kfq-engine-bin-"));
   try {
     const engine = await acquireEngine(workspace, diagnostics);
-    const { excluded, allottedBudget } = computeEngineBudget(request, inventory, memo);
-    ledger.allotted = allottedBudget;
     const {
       result: parsed,
       engineTokens,
       alreadyReviewedPaths,
     } = await runEngineWithOneResume(
-      engineInvocationOptions(request, inventory, engine.binaryPath, allottedBudget, excluded),
+      await preparedInvocation(request, inventory, memo, ledger, engine.binaryPath),
       diagnostics,
       ledger,
       inventory.reviewablePaths,
@@ -1588,9 +1685,27 @@ function recordEngineStatus(
     findings: result.findings.length,
     warnings: result.warnings.length,
   };
+  // Rounds are spent on tool calls, so this is the only line that can answer why a file exhausted
+  // its ceiling: not "it needed sixty rounds" but "it called this tool sixty times". Recorded only
+  // when the engine reported a tally, so a release that stops emitting one goes quiet rather than
+  // reporting a fabricated zero.
+  if (result.toolCalls.total > 0) {
+    counts.tool_calls = result.toolCalls.total;
+    for (const [name, calls] of Object.entries(result.toolCalls.byTool)) {
+      counts[`tool_${name}`] = calls;
+    }
+  }
   for (const warning of result.warnings) {
     const key = `warnings_${warning.type}`;
     counts[key] = (counts[key] ?? 0) + 1;
+    // The split that makes the round ceiling evaluable (2026-08-06): `subtask_error` covers both
+    // a file that exhausted its tool rounds and one whose model call simply failed, and only the
+    // first is answered by giving files more rounds. Without this second key, raising the ceiling
+    // would be a change nobody could measure. See `EngineWarning.cause`.
+    if (warning.cause !== undefined) {
+      const causeKey = `${key}_${warning.cause}`;
+      counts[causeKey] = (counts[causeKey] ?? 0) + 1;
+    }
   }
   diagnostics.record(ENGINE_STATUS_DIAGNOSTIC[result.status], { headSha, counts });
 }
@@ -1717,11 +1832,30 @@ function planGeneralResume(
  * `ALLOTMENT_MARGIN` the whole-review estimate uses — and bounded twice: never below the old floor
  * (a one-file round still gets real headroom), and never past what the consumer's own ceiling has
  * left unspent. The second bound is what keeps rounds from turning a stop-loss into a blank cheque.
+ *
+ * `undefined` — no round at all — when the ceiling has nothing left to give, and this return is
+ * load-bearing rather than tidy. `--max-tokens-budget 0` does not mean "spend nothing" to the
+ * engine; its own flag help reads `0 = unlimited`. So an exhausted headroom rendered as a number
+ * hands the very run that already overspent an UNBOUNDED dispatch — the exact inversion of the
+ * bound this function exists to apply. Measured on Keiko#3008 (2026-08-06): a run 8.79M into a
+ * 6M ceiling dispatched round 2 with `remaining: 0` and finished having spent 9.07M.
  */
-function targetedRoundBudget(gapSize: number, spent: number, options: EngineRunOptions): number {
-  const priced = Math.round(gapSize * PER_FILE_TOKENS * ALLOTMENT_MARGIN);
+function targetedRoundBudget(
+  gapSize: number,
+  spent: number,
+  options: EngineRunOptions,
+): number | undefined {
+  // `allottedPerFile()`, not the raw `PER_FILE_TOKENS`: a retried file runs under the SAME
+  // tool-round ceiling as every other, so pricing it at the pre-2026-08-06 calibration would
+  // reintroduce, one function over, exactly the drift that constant now exists to prevent.
+  const priced = Math.round(gapSize * allottedPerFile() * ALLOTMENT_MARGIN);
   const floor = Math.round(options.allottedBudget * RESUME_FLOOR_FRACTION);
   const headroom = Math.max(0, options.config.tokenBudget - spent);
+  // `ALLOTMENT_FLOOR` is this repository's own answer to "the least a review can be given and
+  // still be a review", so it is also the least a ROUND can be given. Below it the round would
+  // either be dispatched with a budget that cannot finish one file, or — at exactly zero — with
+  // no budget at all, which the engine reads as unlimited.
+  if (headroom < ALLOTMENT_FLOOR) return undefined;
   return clamp(Math.min(priced, headroom), Math.min(floor, headroom), options.config.tokenBudget);
 }
 
@@ -1769,6 +1903,31 @@ async function decideAfterFirstAttempt(
  * `memoizedForSettlement`, so `settle()` compares the second dispatch against the gap alone
  * rather than against the whole inventory. The decision itself lives in `targetedGapPaths`.
  */
+/**
+ * Whether another round is justified: the gap must have SHRUNK.
+ *
+ * A round that returns the same casualties — or more — is the deterministic per-file failure
+ * `resumeWorthwhile` already refuses to re-buy, recognised one round later. Paying for it twice
+ * more would reproduce the Keiko#3002 waste at a smaller scale, so the loop stops and says why.
+ * A gap of zero also stops it, and silently: nothing was left unreviewed, which is the outcome
+ * rounds exist to reach rather than a condition worth a diagnostic.
+ */
+function gapShrank(
+  before: number,
+  result: EngineResult,
+  reviewablePaths: ReadonlySet<string>,
+  diagnostics: Diagnostics,
+  round: number,
+): boolean {
+  const after = targetedGapPaths(result, reviewablePaths)?.size ?? 0;
+  if (after === 0) return false;
+  if (after >= before) {
+    diagnostics.record("engine.resume_gap_not_shrinking", { counts: { round, before, after } });
+    return false;
+  }
+  return true;
+}
+
 async function settleFinishedRun(
   parsed: EngineResult,
   context: FinishedRunContext,
@@ -1788,6 +1947,16 @@ async function settleFinishedRun(
     if (targeted === undefined) break;
     const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
     const remaining = targetedRoundBudget(targeted.size, spent, options);
+    // The consumer's ceiling has nothing left to fund a round with. Stopping here is the whole
+    // point: a run that already overspent must not be handed an unbounded dispatch (see
+    // `targetedRoundBudget`), and the gap it still reports is the next push's work, not this
+    // run's to buy at any price.
+    if (remaining === undefined) {
+      diagnostics.record("engine.resume_skipped_budget_exhausted", {
+        counts: { round, targeted: targeted.size, spent },
+      });
+      break;
+    }
     diagnostics.record("engine.resumed_gap_targeted", {
       counts: { round, targeted: targeted.size, covered: covered.length, remaining },
     });
@@ -1800,22 +1969,10 @@ async function settleFinishedRun(
       covered,
       ledger,
     );
-    // The gap must SHRINK to justify another round. A round that returns the same casualties (or
-    // more) is the deterministic per-file failure `resumeWorthwhile` already refuses to re-buy —
-    // paying for it twice more would reproduce the Keiko#3002 waste at a smaller scale.
-    const before = targeted.size;
-    const after = targetedGapPaths(attempt.result, reviewablePaths)?.size ?? 0;
     outcome = attempt;
     spent = attempt.engineTokens;
     standing = attempt.result;
-    if (after === 0 || after >= before) {
-      if (after > 0 && after >= before) {
-        diagnostics.record("engine.resume_gap_not_shrinking", {
-          counts: { round, before, after },
-        });
-      }
-      break;
-    }
+    if (!gapShrank(targeted.size, attempt.result, reviewablePaths, diagnostics, round)) break;
   }
 
   if (outcome === undefined) return finishedRunOutcome(diagnostics, parsed, options);
@@ -1857,7 +2014,7 @@ async function attemptResume(
     // the one bounded retry is what turns it into a second opinion. `mechanicallyCleanPaths` is
     // widened, never replaced: the resume must still skip everything the first dispatch already
     // excluded (renames, cache hits) on top of what the first ATTEMPT now proves was reviewed.
-    const second = await runEngine(
+    const second = await invokeEngine(
       {
         ...options,
         samplingSeed: RESUME_SEED,
@@ -1939,7 +2096,7 @@ async function runEngineWithOneResume(
   let firstResult: EngineResult | undefined;
   let alreadyReviewedPaths: readonly string[] = [];
   try {
-    const first = await runEngine(options, diagnostics);
+    const first = await invokeEngine(options, diagnostics);
     const parsed = parseBooked(first, ledger);
     recordEngineStatus(diagnostics, parsed, options.pair.head);
     if (parsed.status === "success") {

@@ -13,9 +13,10 @@
  * this repository deliberately does not patch it. The proxy stays entirely inside the product
  * boundary: it listens on 127.0.0.1 only, exists for the lifetime of one engine invocation, and
  * rewrites a small, fixed set of fields on a chat-completions body: sampling parameters always,
- * and — when configured — a cache-routing key. Credentials pass through untouched in headers and
- * are never read, logged, or stored; bodies are never logged (the same redaction posture as the
- * rest of this repository).
+ * and — when configured — a cache-routing key and a per-file context pack appended inside the
+ * first user message (see `ModelProxyOptions.contextPacks`). Credentials pass through untouched in
+ * headers and are never read, logged, or stored; bodies are never logged (the same redaction
+ * posture as the rest of this repository).
  *
  * Why it is import-free apart from node builtins: `corpus/run.mjs` loads this module directly
  * under Node's type stripping, so the corpus measures the identical pipeline the action ships —
@@ -60,6 +61,15 @@ export interface ModelUsage {
   readonly completion: number;
   /** Provider-reported `usage.prompt_tokens_details.cached_tokens`, summed. */
   readonly cached: number;
+  /**
+   * Chat-completions requests into which a per-file context pack was spliced (v0.20.0). Counted on
+   * the first attempt only, so the self-healing retries never double-book a request they repeat.
+   * Zero when no packs were configured — and, just as importantly, zero when packs WERE configured
+   * but no request ever matched one, which is the silent failure mode this counter exists to make
+   * visible: a path-extraction regex that stops matching the engine's prompt shape would otherwise
+   * read as "packs shipped" while every file reviewed bare.
+   */
+  readonly contextPackInjected: number;
   /**
    * Count of PROVEN cache-key rejections: a 400 to a request that carried the injected
    * `prompt_cache_key`, where the keyless retry then succeeded — the only observation that
@@ -131,27 +141,26 @@ export interface ModelProxyOptions {
    */
   readonly promptCacheKey?: string;
   /**
-   * What the change under review is FOR — the pull request's own title and description, as the
-   * author wrote them.
+   * Per-file context packs, keyed by the repository-relative path under review (v0.20.0).
    *
-   * The engine sends the diff and the rule and nothing else: the model is asked to judge a change
-   * without being told what it was meant to do. Hu et al. 2025 (arXiv:2511.07017) ablate exactly
-   * this and report quality-estimation F1 rising from ~27-30 to ~64-66 once issue and pull-request
-   * text are added — a larger effect than adding more surrounding CODE. Their defect-localization
-   * result is the reason this ships behind a measurement rather than as an obvious win: +14.99% for
-   * closed-source models, **-1.05% for open-weight ones**, and this product runs an open-weight
-   * model exclusively.
+   * Where the intent splice this option replaces used to sit at "before the engine's last
+   * message" — a position that MOVES as the conversation grows, so consecutive turns diverged at
+   * the splice point — a pack is appended INSIDE the first user message, immediately after its
+   * `</current_file_diff>` line. That position is the same in every turn of a file's
+   * conversation (the engine resends its own history verbatim and this proxy re-applies the same
+   * deterministic transformation to it), so the request prefix stays byte-stable across turns:
+   * inert on the current endpoint, which the 2026-08-07 probe showed caches nothing, and exactly
+   * right for any endpoint that ever starts to.
    *
-   * Inserted immediately BEFORE the engine's last message, never at the front. The engine resends
-   * the same 4.5-6.6k-token rule prefix on every turn of every file and providers discount an
-   * identical prefix; a per-pull-request preamble at position zero would make that prefix unique to
-   * one pull request and forfeit the discount on ~30 turns per file. Behind the shared prefix, the
-   * discount survives and only the tail differs.
+   * The file under review is read from the engine's own `<current_file_path>` tag in that same
+   * message — engine-authored structure, not candidate content. No tag, no matching pack, or a
+   * non-string content shape all degrade to "no injection": every failure here costs context,
+   * never the review. Pack text is repository-derived candidate-trust data; the pack's own frame
+   * states that boundary where the model reads it (see `context-pack.ts`).
    *
-   * Candidate-controlled text, so it is framed as data and bounded — see `renderChangeIntent`.
    * Omit to leave every body byte-identical to what this proxy sent before the option existed.
    */
-  readonly changeIntent?: string;
+  readonly contextPacks?: ReadonlyMap<string, string>;
   readonly fetchImpl?: typeof fetch;
 }
 
@@ -215,11 +224,13 @@ function withoutTrailingSlashes(value: string): string {
  * `pinSampling`'s result. `cacheKeyInjected` is distinct from "was injection requested": a
  * malformed or non-object body falls through untouched even when the caller asked for the key, and
  * the self-healing retry below must know which one actually happened — only a request that truly
- * carries the key can have been rejected for carrying it.
+ * carries the key can have been rejected for carrying it. `packInjected` follows the same
+ * distinction for the context pack, feeding the `contextPackInjected` counter.
  */
 interface PinnedBody {
   readonly body: Buffer;
   readonly cacheKeyInjected: boolean;
+  readonly packInjected: boolean;
 }
 
 /**
@@ -244,6 +255,15 @@ const MAX_INTENT_CHARS = 1500;
  * text already carries an `## Untrusted input` section for that reason; this repeats the boundary at
  * the point of injection rather than relying on the reviewer having remembered it, and the delimiter
  * is stated explicitly so a body that itself contains headings cannot appear to close the block.
+ *
+ * Since v0.20.0 the rendered text travels on the engine's own `--background` flag
+ * (`reviewArguments` in `run.ts`) rather than as a proxy-spliced message. The engine substitutes it
+ * into `{{requirement_background}}` inside the FIRST user message of every file's conversation — a
+ * position that is identical on every turn, where the old splice-before-last-message moved as the
+ * conversation grew and broke the shared prefix at exactly the splice point. The native flag also
+ * reaches the anthropic protocol path, which the proxy never touched. Exported from this module
+ * (unchanged, tests and all) because the framing contract is the same one `contextPacks` documents:
+ * candidate-trust text, bounded, framed as data at the point the model reads it.
  */
 export function renderChangeIntent(intent: string): string {
   const bounded = intent.slice(0, MAX_INTENT_CHARS);
@@ -258,40 +278,79 @@ export function renderChangeIntent(intent: string): string {
   ].join("\n");
 }
 
+/** The engine-authored tag naming the file a main- or plan-task prompt is about. */
+const CURRENT_FILE_PATH_TAG = /<current_file_path>([^<\n]*)<\/current_file_path>/;
+
+/** The line the pack is appended after — the end of the engine's own diff block. */
+const DIFF_CLOSE_MARKER = "</current_file_diff>";
+
 /**
- * Splices the intent in before the engine's final message, leaving the cacheable prefix intact.
+ * Appends the file's context pack inside the first user message that names a reviewed file,
+ * immediately after its `</current_file_diff>` line. Returns whether an injection happened.
  *
- * Returns the messages unchanged when there is nothing to insert, when the array is missing or
- * malformed, or when it is empty — every failure here costs context, never the review.
+ * First matching message only, first marker occurrence only. A hostile diff can itself contain
+ * the marker string, in which case the pack lands earlier in the message than the engine's own
+ * closing tag — accepted, not defended against, because position is not a trust boundary here: the
+ * pack is a self-framing data block wherever it sits, and a diff that wants to forge repository
+ * context can already write a fake block verbatim without this function's help. The rule text's
+ * `## Untrusted input` section is the defense for both shapes; picking a "safer" occurrence would
+ * only trade which candidate-authored text gets to choose the spot. Any shape surprise — no
+ * messages array, content not a string, tag or marker absent, no pack for the path — returns
+ * `false` and leaves the body untouched: context lost, review kept.
  */
-export function withChangeIntent(
+/** The message, as a user-role record with string content, or `undefined` for any other shape. */
+function asUserTextMessage(message: unknown): Record<string, unknown> | undefined {
+  if (typeof message !== "object" || message === null || Array.isArray(message)) return undefined;
+  const record = message as Record<string, unknown>;
+  if (record.role !== "user" || typeof record.content !== "string") return undefined;
+  return record;
+}
+
+/** `content` with the pack appended after its first diff-close marker, or `undefined` when the
+ *  path tag or the marker is missing, or no pack exists for the named path. */
+function contentWithPack(content: string, packs: ReadonlyMap<string, string>): string | undefined {
+  const tag = CURRENT_FILE_PATH_TAG.exec(content);
+  if (tag === null) return undefined;
+  const pack = packs.get(tag[1] ?? "");
+  if (pack === undefined) return undefined;
+  const markerIndex = content.indexOf(DIFF_CLOSE_MARKER);
+  if (markerIndex === -1) return undefined;
+  const insertAt = markerIndex + DIFF_CLOSE_MARKER.length;
+  return content.slice(0, insertAt) + "\n\n" + pack + content.slice(insertAt);
+}
+
+export function withContextPack(
   parsed: Record<string, unknown>,
-  intent: string,
-): unknown[] | undefined {
+  packs: ReadonlyMap<string, string>,
+): boolean {
   const raw: unknown = parsed.messages;
-  if (!Array.isArray(raw) || raw.length === 0) return undefined;
-  // Re-typed to `unknown[]` rather than carried as the `any[]` `Array.isArray` narrows to. Nothing
-  // here reads INTO a message — the splice only reorders opaque values around one this function
-  // built itself — so `unknown` is both honest about what came off the wire and sufficient.
+  if (!Array.isArray(raw)) return false;
   const messages: unknown[] = [...(raw as readonly unknown[])];
-  const insertAt = messages.length - 1;
-  return [
-    ...messages.slice(0, insertAt),
-    { role: "user", content: renderChangeIntent(intent) },
-    ...messages.slice(insertAt),
-  ];
+  for (let i = 0; i < messages.length; i += 1) {
+    const record = asUserTextMessage(messages[i]);
+    if (record === undefined) continue;
+    if (!CURRENT_FILE_PATH_TAG.test(record.content as string)) continue;
+    const content = contentWithPack(record.content as string, packs);
+    if (content === undefined) return false;
+    messages[i] = { ...record, content };
+    parsed.messages = messages;
+    return true;
+  }
+  return false;
 }
 
 /**
- * Splices the stated purpose into a body already narrowed to a record, in place.
+ * Applies the pack to a body already narrowed to a record, in place.
  *
  * Separate from `pinSampling` only so that function stays under the complexity bound — the two
- * guards here (configured at all, and a usable `messages` array) are one decision, not two.
+ * guards here (configured at all, and a usable message found) are one decision, not two.
  */
-function applyChangeIntent(rewritten: Record<string, unknown>, intent: string | undefined): void {
-  if (intent === undefined || intent === "") return;
-  const withIntent = withChangeIntent(rewritten, intent);
-  if (withIntent !== undefined) rewritten.messages = withIntent;
+function applyContextPack(
+  rewritten: Record<string, unknown>,
+  packs: ReadonlyMap<string, string> | undefined,
+): boolean {
+  if (packs === undefined || packs.size === 0) return false;
+  return withContextPack(rewritten, packs);
 }
 
 function pinSampling(
@@ -300,11 +359,11 @@ function pinSampling(
   options: ModelProxyOptions,
   includeCacheKey: boolean,
 ): PinnedBody {
-  if (!isChatCompletionsPath(path)) return { body, cacheKeyInjected: false };
+  if (!isChatCompletionsPath(path)) return { body, cacheKeyInjected: false, packInjected: false };
   try {
     const parsed: unknown = JSON.parse(body.toString("utf8"));
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return { body, cacheKeyInjected: false };
+      return { body, cacheKeyInjected: false, packInjected: false };
     }
     const rewritten: Record<string, unknown> = {
       ...parsed,
@@ -313,10 +372,10 @@ function pinSampling(
     };
     const cacheKeyInjected = includeCacheKey && options.promptCacheKey !== undefined;
     if (cacheKeyInjected) rewritten.prompt_cache_key = options.promptCacheKey;
-    applyChangeIntent(rewritten, options.changeIntent);
-    return { body: Buffer.from(JSON.stringify(rewritten), "utf8"), cacheKeyInjected };
+    const packInjected = applyContextPack(rewritten, options.contextPacks);
+    return { body: Buffer.from(JSON.stringify(rewritten), "utf8"), cacheKeyInjected, packInjected };
   } catch {
-    return { body, cacheKeyInjected: false };
+    return { body, cacheKeyInjected: false, packInjected: false };
   }
 }
 
@@ -326,6 +385,7 @@ interface MutableUsage {
   prompt: number;
   completion: number;
   cached: number;
+  contextPackInjected: number;
   cacheKeyRejected: number;
   rewriteRejected: number;
   badRequestPersisted: number;
@@ -383,6 +443,16 @@ interface CacheKeyLatch {
 
 function isJsonContentType(contentType: string | null): boolean {
   return contentType?.toLowerCase().includes("application/json") ?? false;
+}
+
+/**
+ * Books a pack injection on the FIRST attempt only — the self-healing retries re-pin the same
+ * request, and a request the engine made once must count once however many internal attempts it
+ * took. A helper rather than an inline conditional purely for `fetchWithCacheKeyFallback`'s
+ * complexity budget.
+ */
+function countPackInjection(usage: MutableUsage, pinned: PinnedBody | undefined): void {
+  if (pinned?.packInjected === true) usage.contextPackInjected += 1;
 }
 
 /**
@@ -477,6 +547,7 @@ async function fetchWithCacheKeyFallback(
   const pinned = request.withBody
     ? pinSampling(request.path, request.body, options, wantsCacheKey)
     : undefined;
+  countPackInjection(usage, pinned);
   const upstream = await doFetch(url, {
     method: request.method,
     headers: request.headers,
@@ -665,6 +736,7 @@ export function startModelProxy(options: ModelProxyOptions): Promise<ModelProxy>
     prompt: 0,
     completion: 0,
     cached: 0,
+    contextPackInjected: 0,
     cacheKeyRejected: 0,
     rewriteRejected: 0,
     badRequestPersisted: 0,
