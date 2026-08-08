@@ -90,11 +90,18 @@ const CLAIM_VERBS = new Set([
 ]);
 
 /**
- * The first word of the bold imperative title. A word list behind one small pattern rather than a
- * thirty-branch alternation: same language, linear scan, and a reader can see the two groups the
- * measurement above separates.
+ * The first word of the claim's imperative line, with or without bold markup.
+ *
+ * The optional `**` is load-bearing, and getting it wrong once nearly voided this whole pass.
+ * The rule text asks the model for a PLAIN imperative first line ("Validate the token in full,
+ * not by prefix."); the bold that appears in a published finding is added later, by
+ * `composeFindingBody`, long after this selector runs. A first draft required the markup and so
+ * would have matched almost nothing on real model output — and the measurement that "confirmed"
+ * it was run against published bodies, which carry the bold, so it validated the wrong string.
+ * Found by the Codex reviewer on Keiko-for-Quality#202. Both shapes match now: raw model content
+ * is what production passes, composed bodies are what a later caller or a fixture might.
  */
-const TITLE_VERB = /(?:^|\n)\s*\*\*\s*([A-Za-z]+)/u;
+const TITLE_VERB = /^\s*(?:\*\*\s*)?([A-Za-z]+)/u;
 
 /** Prose that states absence or wrongness outright, wherever it sits in the body. */
 const CLAIM_PHRASES = [
@@ -126,7 +133,11 @@ const CLAIM_PHRASES = [
 ];
 
 function opensWithClaimVerb(content: string): boolean {
-  const verb = TITLE_VERB.exec(content)?.[1];
+  // The claim's own imperative line — the first non-empty one — never a verb that happens to
+  // open a later prose sentence.
+  const firstLine = content.split("\n").find((line) => line.trim() !== "");
+  if (firstLine === undefined) return false;
+  const verb = TITLE_VERB.exec(firstLine)?.[1];
   return verb !== undefined && CLAIM_VERBS.has(verb.toLowerCase());
 }
 

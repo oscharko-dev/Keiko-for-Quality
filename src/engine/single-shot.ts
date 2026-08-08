@@ -707,7 +707,16 @@ async function verifyWholeFileClaims(
   comments: readonly EngineComment[],
 ): Promise<readonly EngineComment[]> {
   const needing = comments.filter((c) => needsWholeFileEvidence(c.content, dispatch.renderedDiff));
-  if (needing.length === 0 || state.spendStopped) return comments;
+  // The allotment is re-checked against CURRENT usage, not just the `spendStopped` flag: that flag
+  // is only raised when the NEXT file enters `budgetStopped`, so on the last file — or a one-file
+  // review — a stale flag would let this pass spend a whole-file request past the ceiling. The
+  // mode's central promise is that spend per file is bounded by construction, and a verification
+  // call is spend. Skipping it publishes the claims unverified, which is honest; it is not a
+  // coverage gap, so no warning is raised here.
+  const spent = state.usage.prompt + state.usage.completion;
+  if (needing.length === 0 || state.spendStopped || spent >= state.options.allottedBudget) {
+    return comments;
+  }
   const text = await headFileText(state.options, dispatch.path);
   if (text === undefined || text.length > MAX_VERIFY_FILE_CHARS) return comments;
 

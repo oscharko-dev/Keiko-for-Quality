@@ -16,6 +16,28 @@ import {
 describe("needsWholeFileEvidence", () => {
   const HUNK = ["12 +  const parsed = parseConfig(raw);", "13 +  return parsed.value;"].join("\n");
 
+  /**
+   * The shape production actually passes: the rule text asks for a PLAIN imperative first line,
+   * and the bold only appears after `composeFindingBody` runs — long after this selector. A draft
+   * that required the markup matched almost nothing on real model output, and the measurement
+   * that "confirmed" it had been run against published bodies. Codex reviewer, #202.
+   */
+  it("selects a raw model claim, which carries no bold markup", () => {
+    for (const raw of [
+      "Adjust the header-name expectation to match the parser's normalization.\n\nWhen a provider specifies a header, the form shows it verbatim.",
+      "Add handling for the new flag on the server side.\n\nWhen the dialog uploads a configuration, the server ignores it.",
+      "Validate the token in full, not by prefix.",
+    ]) {
+      expect(needsWholeFileEvidence(raw, HUNK)).toBe(true);
+    }
+  });
+
+  it("reads the claim's own first line, not a verb opening a later sentence", () => {
+    const grounded =
+      "Line 13 dereferences a value the added call may leave absent.\n\nMake sure to read it.";
+    expect(needsWholeFileEvidence(grounded, HUNK)).toBe(false);
+  });
+
   it("selects absence claims written as the rule text's imperative", () => {
     for (const title of [
       "**Add handling for the new `imageInputModelIdsConfigured` flag on the server side.**",
