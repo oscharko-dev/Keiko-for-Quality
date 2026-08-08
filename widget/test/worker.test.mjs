@@ -68,7 +68,7 @@ test("without a credential the card renders with em dashes and caches", async ()
 
 test("theme=light switches the palette", async () => {
   const svg = await (await get("/widget/oscharko-dev/Keiko.svg?theme=light")).text();
-  assert.match(svg, /#ffffff/);
+  assert.match(svg, /#FFFFFF/);
 });
 
 test("a configured PAT drives collection through the real pipeline", async () => {

@@ -81,12 +81,25 @@ function packageRoot(path: string, roots: readonly string[]): string {
 }
 
 /**
+ * A candidate's binding strength to the file being reviewed, most binding first: the package's own
+ * `package.json` (the file every version twin pairs with), then same-stem siblings (`foo.ts` ↔
+ * `foo.test.ts`), then `version` files (the audit's exact false-positive class), then
+ * nearest-by-directory alphabetical rest. Ties break on the path, so the order is total.
+ *
+ * The file's own stem and directory are parameters rather than a closure over the caller's loop
+ * (Sonar S7721): the rank of a candidate depends on nothing else, and a function re-created once
+ * per path said otherwise.
+ */
+function rank(candidate: string, ownStem: string, ownDir: string): number {
+  if (basename(candidate) === "package.json") return 0;
+  if (stem(candidate) === ownStem) return 1;
+  if (/(^|\/)version(s)?\./.test(candidate) || stem(candidate) === "version") return 2;
+  return dirname(candidate) === ownDir ? 3 : 4;
+}
+
+/**
  * The companion selection for every path at once — computed together so the grouping is one
  * consistent view of the change, not N independent guesses.
- *
- * Ranking inside a package, most binding first: the package's own `package.json` (the file every
- * version twin pairs with), then same-stem siblings (`foo.ts` ↔ `foo.test.ts`), then `version`
- * files (the audit's exact false-positive class), then nearest-by-directory alphabetical rest.
  */
 export function companionsByPath(paths: readonly string[]): ReadonlyMap<string, readonly string[]> {
   const roots = [
@@ -111,15 +124,10 @@ export function companionsByPath(paths: readonly string[]): ReadonlyMap<string, 
     );
     const ownStem = stem(path);
     const ownDir = dirname(path);
-    const ranked = [...group].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+    const ranked = [...group].sort(
+      (a, b) => rank(a, ownStem, ownDir) - rank(b, ownStem, ownDir) || a.localeCompare(b),
+    );
     result.set(path, ranked.slice(0, MAX_COMPANIONS));
-
-    function rank(candidate: string): number {
-      if (basename(candidate) === "package.json") return 0;
-      if (stem(candidate) === ownStem) return 1;
-      if (/(^|\/)version(s)?\./.test(candidate) || stem(candidate) === "version") return 2;
-      return dirname(candidate) === ownDir ? 3 : 4;
-    }
   }
   return result;
 }

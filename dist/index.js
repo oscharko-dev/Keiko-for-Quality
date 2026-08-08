@@ -1,4 +1,4 @@
-// Keiko for Quality 0.21.0 — generated bundle, do not edit.
+// Keiko for Quality 0.21.1 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/action/main.ts
@@ -1624,9 +1624,9 @@ function label(table, key, fallback) {
 }
 var FALLBACK_CATEGORY = "Review";
 var FALLBACK_SEVERITY = "Minor";
-var ASSET_BASE = "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/1869ec1ce1f4fa465d5a0d512f11f18b76ba9a9c/.github/assets/kq";
-function assetIcon(name, size) {
-  return `<img src="${ASSET_BASE}/${name}.svg" width="${String(size)}" height="${String(size)}" alt="">`;
+var ASSET_BASE = "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/6b59f533afef15820991b3a0470ddc22c6c6d436/.github/assets/kq";
+function assetChip(name, height, alt) {
+  return `<img src="${ASSET_BASE}/${name}.svg" height="${String(height)}" alt="${alt}">`;
 }
 var MAX_TITLE_CHARS = 120;
 function splitTitle(prose2) {
@@ -1662,7 +1662,7 @@ function composeFindingBody(sanitizedProse, marker, context) {
   const category = label(CATEGORIES, context.category, FALLBACK_CATEGORY);
   const severity = label(SEVERITIES, context.severity, FALLBACK_SEVERITY);
   const { title, body } = splitTitle(sanitizedProse);
-  const parts = [`**${category.toUpperCase()} \xB7 ${severity.toUpperCase()}**`, ""];
+  const parts = [`\`${category.toUpperCase()} \xB7 ${severity.toUpperCase()}\``, ""];
   if (title !== "") parts.push(`**${title}**`, "");
   parts.push(
     body,
@@ -1699,9 +1699,10 @@ function gapLine(counts) {
 }
 function composeIncompleteNotice(reasonCode, marker, counts) {
   return [
-    // "COVERAGE" is deliberately outside the CATEGORIES vocabulary above, so the two composers
-    // can never collide on their opening line — the invariant `isIncompleteNoticeBody` documents.
-    `${assetIcon("out-incomplete", 14)} **COVERAGE \xB7 MAJOR**`,
+    // Specimen ③'s chip pair. "COVERAGE" is deliberately outside the CATEGORIES vocabulary
+    // above, and no finding opens with an image, so the two composers can never collide on
+    // their opening line — the invariant `isIncompleteNoticeBody` documents.
+    `${assetChip("coverage", 22, "Coverage")} ${assetChip("sev-major", 22, "Major")}`,
     "",
     "**This change was not fully reviewed.**",
     "",
@@ -1743,11 +1744,11 @@ function reasonText(reason) {
 function outcomeText(report) {
   switch (report.outcome) {
     case "complete":
-      return `${assetIcon("out-complete", 12)} complete`;
+      return assetChip("out-complete", 20, "COMPLETE");
     case "abandoned":
-      return `${assetIcon("out-abandoned", 12)} abandoned`;
+      return assetChip("out-abandoned", 20, "ABANDONED");
     case "incomplete":
-      return `${assetIcon("out-incomplete", 12)} incomplete (\`${reasonText(report.reason)}\`)`;
+      return `${assetChip("out-incomplete", 20, "INCOMPLETE")} (\`${reasonText(report.reason)}\`)`;
   }
 }
 function countRows(counts) {
@@ -1797,7 +1798,9 @@ function composeSummaryBody(report, marker) {
   ].join(" \xB7 ");
   const tokensPerFinding = tokensPerFindingRow(report.budget, report.counts);
   const parts = [
-    `${assetIcon("reviewer", 18)} **Keiko for Quality \u2014 run summary**`,
+    // Specimen ② opens with the plain bold title — the reviewer's mark is the App avatar in
+    // GitHub's own comment chrome, not a second icon inside the body.
+    "**Keiko for Quality \u2014 run summary**",
     "",
     headline,
     "",
@@ -2487,7 +2490,7 @@ function parseGrepLine(line) {
   return { path, line: lineNumber, content };
 }
 function escapeRegExp(text3) {
-  return text3.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text3.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
 }
 function containsWord(content, identifier) {
   return new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(identifier)}(?![A-Za-z0-9_$])`).test(content);
@@ -2626,6 +2629,12 @@ function packageRoot(path, roots) {
   }
   return best;
 }
+function rank(candidate, ownStem, ownDir) {
+  if (basename(candidate) === "package.json") return 0;
+  if (stem(candidate) === ownStem) return 1;
+  if (/(^|\/)version(s)?\./.test(candidate) || stem(candidate) === "version") return 2;
+  return dirname2(candidate) === ownDir ? 3 : 4;
+}
 function companionsByPath(paths) {
   const roots = [
     ...new Set(paths.filter((p) => basename(p) === "package.json").map((p) => dirname2(p)))
@@ -2639,13 +2648,6 @@ function companionsByPath(paths) {
   }
   const result = /* @__PURE__ */ new Map();
   for (const path of paths) {
-    let rank2 = function(candidate) {
-      if (basename(candidate) === "package.json") return 0;
-      if (stem(candidate) === ownStem) return 1;
-      if (/(^|\/)version(s)?\./.test(candidate) || stem(candidate) === "version") return 2;
-      return dirname2(candidate) === ownDir ? 3 : 4;
-    };
-    var rank = rank2;
     if (isLockfilePath(path)) {
       result.set(path, []);
       continue;
@@ -2655,7 +2657,9 @@ function companionsByPath(paths) {
     );
     const ownStem = stem(path);
     const ownDir = dirname2(path);
-    const ranked = [...group].sort((a, b) => rank2(a) - rank2(b) || a.localeCompare(b));
+    const ranked = [...group].sort(
+      (a, b) => rank(a, ownStem, ownDir) - rank(b, ownStem, ownDir) || a.localeCompare(b)
+    );
     result.set(path, ranked.slice(0, MAX_COMPANIONS));
   }
   return result;
@@ -3761,12 +3765,8 @@ function renderNumberedHunks(fileDiff) {
   let oldBody = [];
   const flush = () => {
     if (newBody.length === 0 && oldBody.length === 0) return;
-    out.push("__new hunk__");
-    out.push(...newBody);
-    if (oldBody.length > 0) {
-      out.push("__old hunk__");
-      out.push(...oldBody);
-    }
+    out.push("__new hunk__", ...newBody);
+    if (oldBody.length > 0) out.push("__old hunk__", ...oldBody);
     newBody = [];
     oldBody = [];
   };
@@ -3878,9 +3878,19 @@ function parseFindingEntry(entry, path) {
     ...severity === void 0 ? {} : { severity }
   };
 }
+var FENCE = "```";
+var FENCE_LANGUAGE = "json";
+function unfenceJson(reply) {
+  const opened = reply.trimStart();
+  if (!opened.startsWith(FENCE)) return reply.trim();
+  const afterFence = opened.slice(FENCE.length);
+  const body = afterFence.startsWith(FENCE_LANGUAGE) ? afterFence.slice(FENCE_LANGUAGE.length) : afterFence;
+  const closed = body.trimEnd();
+  if (!closed.endsWith(FENCE)) return reply.trim();
+  return closed.slice(0, -FENCE.length).trim();
+}
 function parseFindingsReply(reply, path) {
-  const unfenced = /^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$/.exec(reply);
-  const text3 = (unfenced?.[1] ?? reply).trim();
+  const text3 = unfenceJson(reply);
   let parsed;
   try {
     parsed = JSON.parse(text3);
@@ -3948,9 +3958,11 @@ function parseModelResponse(text3) {
     transportFailure: false
   };
 }
+var ENDPOINT_TRAILING_SLASHES = /(?<!\/)\/+$/;
 async function callModel(endpoint, token, model, seed, system, user, fetchImpl) {
   try {
-    const response = await fetchImpl(`${endpoint.replace(/\/+$/, "")}/chat/completions`, {
+    const url = `${endpoint.replace(ENDPOINT_TRAILING_SLASHES, "")}/chat/completions`;
+    const response = await fetchImpl(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -4170,8 +4182,7 @@ async function repairRejectableBodies(state, comments) {
   if (reply.content === void 0) return comments;
   let repaired;
   try {
-    const unfenced = /^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$/.exec(reply.content);
-    repaired = JSON.parse((unfenced?.[1] ?? reply.content).trim());
+    repaired = JSON.parse(unfenceJson(reply.content));
   } catch {
     return comments;
   }
@@ -5896,7 +5907,7 @@ function tokenOverlap(a, b) {
   return { score: smaller === 0 ? 0 : shared / smaller, shared };
 }
 function stripComposedArtifacts(body) {
-  return clip2(body).replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "").replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<img[^>\n]*>/g, " ").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
+  return clip2(body).replace(/^`[A-Z]+ · [A-Z]+`[ \t]*\n?/, "").replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "").replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<img[^>\n]*>/g, " ").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
 }
 function similarByContent(a, b) {
   if (shareCodeBlock(a, b)) return true;
@@ -6331,7 +6342,11 @@ function resolveSubstantiationStrictness(env = process.env) {
   const raw = (env[STRICTNESS_ENV_VAR] ?? "").trim().toLowerCase();
   return isSubstantiationStrictness(raw) ? raw : DEFAULT_STRICTNESS;
 }
-var CIRCUMSTANCE = /(^|[.!?]\s|\*\*\s*)(When|If|Once|After|While|Whenever|Because)\s+[a-z`]|\b(on every (call|run|request|invocation)|for all inputs|on all paths|in every case)\b/imu;
+var ANCHORED_CONDITION = /(^|[.!?]\s|\*\*\s*)(When|If|Once|After|While|Whenever|Because)\s+[a-z`]/imu;
+var EVERY_PATH_CONDITION = /\b(on every (call|run|request|invocation)|for all inputs|on all paths|in every case)\b/imu;
+function statesCircumstance(text3) {
+  return ANCHORED_CONDITION.test(text3) || EVERY_PATH_CONDITION.test(text3);
+}
 var LOCATION = /`[A-Za-z_$][\w$.]*`|\b[\w./-]+\.[a-z]{2,4}\b|\bline \d+|:\d+\b/u;
 var DIFF_LINE = /^[+-]\s{2,}\S/u;
 function prose(body) {
@@ -6342,7 +6357,7 @@ function buildDossier(body) {
   const lines = body.split("\n").filter((line) => line.trim() !== "");
   return {
     namesLocation: LOCATION.test(text3),
-    namesCircumstance: CIRCUMSTANCE.test(text3),
+    namesCircumstance: statesCircumstance(text3),
     isDiffEcho: lines.length > 0 && lines.every((line) => DIFF_LINE.test(line))
   };
 }
@@ -6886,15 +6901,14 @@ async function compareMatchedPairs(blobCache, ctx, request, inventory, pairs, fi
       request.base,
       item.oldPath ?? item.path
     );
+    const side = { item, text: left, baseText: leftBase };
     for (const pair of matched) {
       compared += await compareAgainstCounterparts(
         blobCache,
         ctx,
         request.head,
-        item,
+        side,
         pair,
-        left,
-        leftBase,
         findings
       );
       if (findings.length >= MAX_GATE_FINDINGS) break;
@@ -6968,7 +6982,8 @@ function pushGateFindings(findings, path, items, describe) {
   }
   return false;
 }
-async function compareAgainstCounterparts(blobCache, ctx, head, item, pair, left, leftBase, findings) {
+async function compareAgainstCounterparts(blobCache, ctx, head, side, pair, findings) {
+  const { item, text: left, baseText: leftBase } = side;
   const path = item.path;
   let compared = 0;
   for (const counterpart of pair.counterparts) {

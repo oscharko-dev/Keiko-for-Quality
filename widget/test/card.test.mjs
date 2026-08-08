@@ -54,14 +54,14 @@ test("escapes markup in owner and repo names", () => {
 test("incomplete renders in the warn colour, not the accent", () => {
   const svg = renderCard({ owner: "o", repo: "r", outcome: "incomplete" });
   assert.match(svg, />INCOMPLETE</);
-  assert.match(svg, /#e8aa4e/);
+  assert.match(svg, /#D9A24F/);
 });
 
 test("themes use their own palettes", () => {
   const dark = renderCard(FULL, "dark");
   const light = renderCard(FULL, "light");
-  assert.match(dark, /#1d1f1d/);
-  assert.match(light, /#ffffff/);
+  assert.match(dark, /#171B18/);
+  assert.match(light, /#FFFFFF/);
   assert.notEqual(dark, light);
 });
 
