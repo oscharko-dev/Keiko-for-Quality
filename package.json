@@ -27,7 +27,7 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage && node --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/corpus-lcov.info --test corpus/*.test.mjs && cat coverage/corpus-lcov.info >> coverage/lcov.info",
+    "test:coverage": "vitest run --coverage && node --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/corpus-lcov.info --test corpus/*.test.mjs && cat coverage/corpus-lcov.info >> coverage/lcov.info && node --import ./widget/test/ts-hooks.mjs --experimental-test-coverage --test-reporter=lcov --test-reporter-destination=coverage/widget-lcov.info --test widget/test/*.test.mjs && cat coverage/widget-lcov.info >> coverage/lcov.info",
     "test:corpus": "node --test corpus/*.test.mjs",
     "build": "node scripts/build.mjs",
     "check:bundle": "node scripts/check-bundle.mjs",

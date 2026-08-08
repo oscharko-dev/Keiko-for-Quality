@@ -15,7 +15,7 @@ const encoder = new TextEncoder();
 function base64url(bytes: ArrayBuffer | Uint8Array): string {
   const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   let binary = "";
-  for (const b of view) binary += String.fromCharCode(b);
+  for (const b of view) binary += String.fromCodePoint(b);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 }
 
@@ -28,7 +28,7 @@ function pemToDer(pem: string): Uint8Array<ArrayBuffer> {
     .replace(/\s+/g, "");
   const binary = atob(body);
   const bytes = new Uint8Array(new ArrayBuffer(binary.length));
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.codePointAt(i) ?? 0;
   return bytes;
 }
 

@@ -71,6 +71,34 @@ test("theme=light switches the palette", async () => {
   assert.match(svg, /#ffffff/);
 });
 
+test("a configured PAT drives collection through the real pipeline", async () => {
+  const calls = [];
+  globalThis.fetch = async (url) => {
+    calls.push(String(url));
+    return new Response("no", { status: 500 });
+  };
+  cacheStore.clear();
+  const response = await get("/widget/oscharko-dev/Keiko.svg", { ...ENV, KQ_GITHUB_TOKEN: "tok" });
+  assert.equal(response.status, 200);
+  assert.ok(calls.length >= 2);
+  const svg = await response.text();
+  assert.ok((svg.match(/>—</g) ?? []).length === 3);
+});
+
+test("App credentials that cannot sign degrade to the em-dash card, not a 500", async () => {
+  globalThis.fetch = async () => {
+    throw new Error("unreachable");
+  };
+  cacheStore.clear();
+  const response = await get("/widget/oscharko-dev/Keiko.svg", {
+    ...ENV,
+    KQ_APP_ID: "1",
+    KQ_APP_PRIVATE_KEY: "not a key",
+  });
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), />—</);
+});
+
 test("a second identical request is served from the cache", async () => {
   cacheStore.clear();
   await get("/widget/oscharko-dev/Keiko.svg");
