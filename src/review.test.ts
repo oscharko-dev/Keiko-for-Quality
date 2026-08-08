@@ -3269,9 +3269,9 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(report.outcome).toBe("complete");
       expect(created).toHaveLength(1);
       // Published under the classification the engine reported ("bug"), never the "security" the
-      // (unreached) audit mock was configured to answer with — "Correctness" is "bug"'s rendered
-      // label in `composeFindingBody`'s CATEGORIES table (`publish/presentation.ts`).
-      expect(created[0]?.body).toContain("Correctness");
+      // (unreached) audit mock was configured to answer with — "CORRECTNESS" is "bug"'s rendered
+      // text-grammar label in `composeFindingBody`'s CATEGORIES table (`publish/presentation.ts`).
+      expect(created[0]?.body).toContain("CORRECTNESS");
       expect(callCount()).toBe(0);
 
       const skip = diagnostics.drain().find((r) => r.code === "classify.skipped_budget");
@@ -3309,11 +3309,11 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("complete");
       expect(created).toHaveLength(1);
-      // The audit RAN: the published body carries the audit's reclassification ("Security" is
-      // "security"'s rendered label in `composeFindingBody`'s CATEGORIES table), not the engine's
-      // original "bug".
+      // The audit RAN: the published body carries the audit's reclassification ("SECURITY" is
+      // "security"'s rendered text-grammar label in `composeFindingBody`'s CATEGORIES table), not
+      // the engine's original "bug".
       expect(callCount()).toBeGreaterThan(0);
-      expect(created[0]?.body).toContain("Security");
+      expect(created[0]?.body).toContain("SECURITY");
 
       const records = diagnostics.drain();
       expect(records.find((r) => r.code === "classify.skipped_budget")).toBeUndefined();
