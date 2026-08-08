@@ -22,6 +22,12 @@
 </p>
 
 <p align="center">
+  <a href="https://sonarcloud.io/project/overview?id=oscharko-dev_Keiko-for-Quality"><picture>
+    <img src="https://sonarcloud.io/images/project_badges/sonarcloud-highlight.svg" width="340" alt="Scanned on SonarQube Cloud badge">
+  </picture></a>
+</p>
+
+<p align="center">
   <!-- Card rendered by the quality-cards workflow (widget/scripts/render-card.mjs) from this
        host's own API data. When quality.keiko.dev is deployed, only the URLs below change to
        https://quality.keiko.dev/widget/oscharko-dev/Keiko-for-Quality.svg . -->
