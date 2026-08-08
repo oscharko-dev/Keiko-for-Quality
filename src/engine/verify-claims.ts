@@ -49,12 +49,91 @@ export interface VerifiableClaim {
  * direction, and an excerpt settles it no better: what the file actually does lives in the file.
  * With the change verbs in, the selector covers all 55.
  */
-const CLAIM_IMPERATIVE =
-  /(^|\n)\s*\*\*\s*(Add|Ensure|Guard|Reject|Validate|Clear|Handle|Initialize|Reset|Remove|Prevent|Avoid|Restrict|Require|Check|Adjust|Update|Replace|Restore|Reinstate|Delete|Move|Propagate|Load|Exclude|Cancel|Correct|Fix|Rename|Align|Switch|Use|Make|Treat|Accept)\b/iu;
+const CLAIM_VERBS = new Set([
+  // absence: the file does not do this
+  "add",
+  "ensure",
+  "guard",
+  "reject",
+  "validate",
+  "clear",
+  "handle",
+  "initialize",
+  "reset",
+  "remove",
+  "prevent",
+  "avoid",
+  "restrict",
+  "require",
+  "check",
+  // change: the file does this, and does it wrong
+  "adjust",
+  "update",
+  "replace",
+  "restore",
+  "reinstate",
+  "delete",
+  "move",
+  "propagate",
+  "load",
+  "exclude",
+  "cancel",
+  "correct",
+  "fix",
+  "rename",
+  "align",
+  "switch",
+  "use",
+  "make",
+  "treat",
+  "accept",
+]);
+
+/**
+ * The first word of the bold imperative title. A word list behind one small pattern rather than a
+ * thirty-branch alternation: same language, linear scan, and a reader can see the two groups the
+ * measurement above separates.
+ */
+const TITLE_VERB = /(?:^|\n)\s*\*\*\s*([A-Za-z]+)/u;
 
 /** Prose that states absence or wrongness outright, wherever it sits in the body. */
-const CLAIM_PROSE =
-  /\b(is missing|are missing|does not|doesn't|do not|don't|never (?:clears|checks|validates|resets|removes|handles|guards)|no (?:guard|handling|validation|check|cleanup)|without (?:guard|validation|checking)|fails to|omits|incorrectly|instead of)\b/iu;
+const CLAIM_PHRASES = [
+  "is missing",
+  "are missing",
+  "does not",
+  "doesn't",
+  "do not",
+  "don't",
+  "never clears",
+  "never checks",
+  "never validates",
+  "never resets",
+  "never removes",
+  "never handles",
+  "never guards",
+  "no guard",
+  "no handling",
+  "no validation",
+  "no check",
+  "no cleanup",
+  "without guard",
+  "without validation",
+  "without checking",
+  "fails to",
+  "omits",
+  "incorrectly",
+  "instead of",
+];
+
+function opensWithClaimVerb(content: string): boolean {
+  const verb = TITLE_VERB.exec(content)?.[1];
+  return verb !== undefined && CLAIM_VERBS.has(verb.toLowerCase());
+}
+
+function statesClaimInProse(content: string): boolean {
+  const text = content.toLowerCase();
+  return CLAIM_PHRASES.some((phrase) => text.includes(phrase));
+}
 
 /** A backticked identifier the prose leans on as evidence. */
 const BACKTICKED = /`([A-Za-z_$][\w$]*)`/gu;
@@ -77,7 +156,7 @@ const BACKTICKED = /`([A-Za-z_$][\w$]*)`/gu;
  * single qualifying claim costs.
  */
 export function needsWholeFileEvidence(content: string, renderedDiff: string): boolean {
-  if (CLAIM_IMPERATIVE.test(content) || CLAIM_PROSE.test(content)) return true;
+  if (opensWithClaimVerb(content) || statesClaimInProse(content)) return true;
   const symbols = [...content.matchAll(BACKTICKED)].map((m) => m[1]);
   return symbols.some((symbol) => symbol !== undefined && !shownWholeWord(symbol, renderedDiff));
 }
