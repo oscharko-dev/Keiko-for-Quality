@@ -1964,4 +1964,43 @@ describe("redactModelId on empty input", () => {
       },
     ],
   },
+  // ---------------------------------------------------------------------------------------------
+  {
+    id: "clean-version-bump-twin",
+    defect: null,
+    // The dominant false-positive class of the first live day on the consumer (2026-08-08,
+    // Keiko#3019): a release diff moved `package.json` and the package's version constant TO THE
+    // SAME VALUE in the same change, and the per-file reviewer — seeing one side at a time —
+    // alleged fourteen times that "the other file" was left behind, escalating some of them to
+    // Major. Both sides of the twin are in this diff, both land on 0.3.0, and the companion
+    // mechanism (`companions.ts`) puts each file's twin hunks in its prompt. Any finding here is
+    // the one-sided-pair failure; silence is the only correct review.
+    // The manifest deliberately sits where the corpus profile can NEVER dispatch it (no ts/js
+    // extension) — exactly the live shape: the model reviews the CODE side only, and the manifest
+    // reaches it solely as a companion hunk. tokens > 0 on this case is part of what it pins: a
+    // run that dispatches neither file measures nothing (the first draft did exactly that).
+    about: "a version bump whose manifest and constant moved together to the same value",
+    files: [
+      {
+        path: "src/examplepkg/package.json",
+        base: `{
+  "name": "example-pkg",
+  "version": "0.2.15"
+}
+`,
+        head: `{
+  "name": "example-pkg",
+  "version": "0.3.0"
+}
+`,
+      },
+      {
+        path: "src/examplepkg/version.ts",
+        base: `export const EXAMPLE_PKG_VERSION = "0.2.15" as const;
+`,
+        head: `export const EXAMPLE_PKG_VERSION = "0.3.0" as const;
+`,
+      },
+    ],
+  },
 ];

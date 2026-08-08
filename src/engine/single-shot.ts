@@ -78,6 +78,25 @@ const RETRIES_PER_FILE = 1;
 const COMPANION_HUNK_CHARS = 1200;
 const COMPANION_BLOCK_CHARS = 4000;
 
+/**
+ * Files at or above this many changed lines get a SECOND, focused pass (different seed, a lens
+ * fixed on boundaries, error paths, resource lifetimes, and new security surface) whose findings
+ * are unioned with the first pass's after de-duplication.
+ *
+ * Measured motivation (2026-08-08 live audit, Keiko#3020): a ~700-line new security module got
+ * the same single call as a two-line dep bump; four author-confirmed logic defects in it were
+ * found by a competitor and two more by nobody, while this reviewer's findings on that PR were
+ * mostly test housekeeping — and a re-review failed to re-find its own argv critical, which only
+ * the store rescued. One extra bounded call on the heavy tail is the cheapest depth that exists:
+ * on the audited window it would have added 6 calls across 23 runs.
+ */
+const SECOND_PASS_MIN_CHANGED_LINES = 150;
+
+/** Seed offset for the second pass: pinned like everything else, deliberately different from the
+ *  first pass so the model walks a different path — the same one-bit-of-entropy reasoning as the
+ *  resume seed in `run.ts`. */
+const SECOND_PASS_SEED_OFFSET = 1000;
+
 /** Character budget for one file's rendered diff inside the prompt. Far above any reviewable
  *  hunk set, far below a generated-bundle flood; a diff past this bound is truncated with an
  *  explicit marker so the model knows it is not seeing the whole change. */
@@ -94,6 +113,8 @@ const SEVERITIES = "critical, high, medium, low";
 interface FileDispatch {
   readonly path: string;
   readonly renderedDiff: string;
+  /** Changed-line count of the raw fragment — the second-pass gate reads it. */
+  readonly changedLines: number;
   /** The `<companion_changes>` block for this file, when it has companions — see `companions.ts`. */
   readonly companionBlock?: string;
 }
@@ -506,9 +527,13 @@ async function prepareDispatches(options: EngineRunOptions): Promise<FileDispatc
         ? `${rendered.slice(0, MAX_DIFF_CHARS)}\n(truncated: diff exceeds the prompt budget)`
         : rendered;
     const companionBlock = companionBlockFor(companions.get(path) ?? [], fragments);
+    const changedLines = (fragments.get(path) ?? "")
+      .split("\n")
+      .filter((line) => /^[+-][^+-]/.test(line) || line === "+" || line === "-").length;
     return {
       path,
       renderedDiff: bounded,
+      changedLines,
       ...(companionBlock === undefined ? {} : { companionBlock }),
     };
   });
@@ -575,7 +600,68 @@ async function reviewOneFile(state: RunState, dispatch: FileDispatch): Promise<v
     });
     return;
   }
-  state.comments.push(...(await repairRejectableBodies(state, parsed)));
+  let combined: readonly EngineComment[] = parsed;
+  if (dispatch.changedLines >= SECOND_PASS_MIN_CHANGED_LINES) {
+    combined = unionComments(parsed, await secondFocusedPass(state, dispatch, user));
+  }
+  state.comments.push(...(await repairRejectableBodies(state, combined)));
+}
+
+/**
+ * The heavy-file second pass: same prompt plus a hard lens, different pinned seed. A transport
+ * failure here costs only the extra depth, never the file — the first pass's findings stand, so
+ * no warning is raised and the file stays covered.
+ */
+async function secondFocusedPass(
+  state: RunState,
+  dispatch: FileDispatch,
+  firstPassUser: string,
+): Promise<readonly EngineComment[]> {
+  const user = [
+    firstPassUser,
+    "",
+    "--- second focused pass ---",
+    "This file is large enough to deserve a second, independent read. Focus EXCLUSIVELY on:",
+    "boundary conditions and off-by-one edges, error and early-return paths, resource lifetimes",
+    "(open/close, spawn/kill, timeout bounds), and the security of newly reachable code paths.",
+    "Do not repeat style, naming, version-consistency, or test-housekeeping observations.",
+    "Reply with the same JSON array format.",
+  ].join("\n");
+  const reply = await callModel(
+    state.options.config.endpoint,
+    state.token,
+    state.options.config.model,
+    state.seed + SECOND_PASS_SEED_OFFSET,
+    state.system,
+    user,
+    state.fetchImpl,
+  );
+  state.usage.requests += 1;
+  state.usage.prompt += reply.promptTokens;
+  state.usage.completion += reply.completionTokens;
+  if (reply.content === undefined) return [];
+  return parseFindingsReply(reply.content, dispatch.path) ?? [];
+}
+
+/** First-pass findings win; a second-pass finding joins only when no first-pass finding already
+ *  sits on the same lines saying effectively the same thing. */
+function unionComments(
+  first: readonly EngineComment[],
+  second: readonly EngineComment[],
+): readonly EngineComment[] {
+  const normalize = (text: string): string =>
+    text.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 80);
+  const seen = new Set(
+    first.map((c) => `${String(c.start_line)}:${String(c.end_line)}:${normalize(c.content)}`),
+  );
+  const merged = [...first];
+  for (const comment of second) {
+    const key = `${String(comment.start_line)}:${String(comment.end_line)}:${normalize(comment.content)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(comment);
+  }
+  return merged;
 }
 
 /** The publisher's verdict on a body, reduced to what the repair loop needs. */

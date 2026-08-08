@@ -3742,6 +3742,8 @@ var MAX_COMPLETION_TOKENS = 3e3;
 var RETRIES_PER_FILE = 1;
 var COMPANION_HUNK_CHARS = 1200;
 var COMPANION_BLOCK_CHARS = 4e3;
+var SECOND_PASS_MIN_CHANGED_LINES = 150;
+var SECOND_PASS_SEED_OFFSET = 1e3;
 var MAX_DIFF_CHARS = 6e4;
 var CATEGORIES2 = "bug, security, performance, maintainability, test, documentation, other";
 var SEVERITIES2 = "critical, high, medium, low";
@@ -4025,9 +4027,11 @@ async function prepareDispatches(options2) {
     const bounded = rendered.length > MAX_DIFF_CHARS ? `${rendered.slice(0, MAX_DIFF_CHARS)}
 (truncated: diff exceeds the prompt budget)` : rendered;
     const companionBlock = companionBlockFor(companions.get(path) ?? [], fragments);
+    const changedLines = (fragments.get(path) ?? "").split("\n").filter((line) => /^[+-][^+-]/.test(line) || line === "+" || line === "-").length;
     return {
       path,
       renderedDiff: bounded,
+      changedLines,
       ...companionBlock === void 0 ? {} : { companionBlock }
     };
   });
@@ -4082,7 +4086,51 @@ async function reviewOneFile(state, dispatch) {
     });
     return;
   }
-  state.comments.push(...await repairRejectableBodies(state, parsed));
+  let combined = parsed;
+  if (dispatch.changedLines >= SECOND_PASS_MIN_CHANGED_LINES) {
+    combined = unionComments(parsed, await secondFocusedPass(state, dispatch, user));
+  }
+  state.comments.push(...await repairRejectableBodies(state, combined));
+}
+async function secondFocusedPass(state, dispatch, firstPassUser) {
+  const user = [
+    firstPassUser,
+    "",
+    "--- second focused pass ---",
+    "This file is large enough to deserve a second, independent read. Focus EXCLUSIVELY on:",
+    "boundary conditions and off-by-one edges, error and early-return paths, resource lifetimes",
+    "(open/close, spawn/kill, timeout bounds), and the security of newly reachable code paths.",
+    "Do not repeat style, naming, version-consistency, or test-housekeeping observations.",
+    "Reply with the same JSON array format."
+  ].join("\n");
+  const reply = await callModel(
+    state.options.config.endpoint,
+    state.token,
+    state.options.config.model,
+    state.seed + SECOND_PASS_SEED_OFFSET,
+    state.system,
+    user,
+    state.fetchImpl
+  );
+  state.usage.requests += 1;
+  state.usage.prompt += reply.promptTokens;
+  state.usage.completion += reply.completionTokens;
+  if (reply.content === void 0) return [];
+  return parseFindingsReply(reply.content, dispatch.path) ?? [];
+}
+function unionComments(first, second) {
+  const normalize2 = (text3) => text3.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 80);
+  const seen = new Set(
+    first.map((c) => `${String(c.start_line)}:${String(c.end_line)}:${normalize2(c.content)}`)
+  );
+  const merged = [...first];
+  for (const comment of second) {
+    const key = `${String(comment.start_line)}:${String(comment.end_line)}:${normalize2(comment.content)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(comment);
+  }
+  return merged;
 }
 function bodyRejected(content) {
   return !sanitizeFindingBody(content).ok;
