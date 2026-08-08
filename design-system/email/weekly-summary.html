@@ -1,0 +1,53 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<!-- Keiko for Quality email template — design-system/index.html section 06 ("Light body, ink
+     header"). MSO-safe tables, 600px single column, system font stack, sentence-case factual
+     subjects. Glyphs ship as PNG at 2x when a sender pipeline exists; until then the text
+     grammar (SECURITY · CRITICAL) is the canonical form. Placeholders use {{double_braces}}. -->
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Weekly summary — Keiko for Quality</title>
+</head>
+<body style="margin:0;padding:0;background:#F3F4F2;">
+<div style="display:none;max-height:0;overflow:hidden;">{{runs}} runs, {{findings}} findings, {{acted_on_pct}}% acted on</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#F3F4F2;">
+<tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;">
+  <!-- ink header with lockup -->
+  <tr><td style="background:#1B211E;border-radius:12px 12px 0 0;padding:20px 28px;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+      <td style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;color:#F3F6F4;">
+        <span style="color:#4EBA87;">&#9679;</span>&nbsp; Keiko for Quality
+      </td>
+      <td align="right" style="font-family:SFMono-Regular,Consolas,Menlo,monospace;font-size:11px;letter-spacing:0.12em;color:#8B9791;text-transform:uppercase;">{{repo}}</td>
+    </tr></table>
+  </td></tr>
+  <!-- body card -->
+  <tr><td style="background:#FFFFFF;border:1px solid #E1E4E0;border-top:0;border-radius:0 0 12px 12px;padding:28px;">
+    <h1 style="margin:0 0 6px;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:18px;font-weight:650;color:#26302B;">Your week with Keiko for Quality</h1>
+    <p style="margin:0 0 18px;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:13px;line-height:1.6;color:#5A6660;">{{week_range}} on <span style="font-family:SFMono-Regular,Consolas,Menlo,monospace;">{{repo}}</span></p>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+      <tr>
+        <td width="33%" style="padding:14px;border:1px solid #E1E4E0;border-radius:10px;"><div style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:22px;font-weight:650;color:#26302B;">{{runs}}</div><div style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:12px;color:#5A6660;">runs</div></td>
+        <td width="8">&nbsp;</td>
+        <td width="33%" style="padding:14px;border:1px solid #E1E4E0;border-radius:10px;"><div style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:22px;font-weight:650;color:#26302B;">{{findings}}</div><div style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:12px;color:#5A6660;">findings</div></td>
+        <td width="8">&nbsp;</td>
+        <td style="padding:14px;border:1px solid #E1E4E0;border-radius:10px;"><div style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:22px;font-weight:650;color:#4EBA87;">{{acted_on_pct}}%</div><div style="font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:12px;color:#5A6660;">acted on</div></td>
+      </tr>
+    </table>
+    <p style="margin:18px 0 0;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:13px;line-height:1.7;color:#26302B;">Completion rate {{completion_pct}}%. Most-acted-on category: {{top_category}}. {{top_finding_note}}</p>
+    <!-- governed footer: why you receive this, and where to change that -->
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin-top:28px;border-top:1px solid #E1E4E0;">
+      <tr><td style="padding-top:16px;font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;font-size:12px;line-height:1.6;color:#5A6660;">
+        You receive this because Keiko for Quality reviews pull requests on
+        <span style="font-family:SFMono-Regular,Consolas,Menlo,monospace;">{{repo}}</span> and you subscribed to
+        {{subscription_reason}}. Change or stop these mails: {{preferences_url}}.
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>
