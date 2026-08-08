@@ -106,7 +106,7 @@ same run are suppressed — the accounting for every suppression is in the run s
              PR: ${{ github.event.pull_request.number }}
            run: git fetch --no-tags origin "pull/${PR}/head"
 
-         - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.20.1
+         - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.21.0
            env:
              # The credential is passed by variable NAME, never as an input.
              KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
