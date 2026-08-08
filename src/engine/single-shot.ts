@@ -43,6 +43,8 @@ import type { Diagnostics } from "../diagnostics/sink.js";
 import { run } from "../git/exec.js";
 import { readModelToken } from "../config/runtime.js";
 import { buildRuleFile, serializeRuleFile } from "./rule-file.js";
+import { companionsByPath } from "./companions.js";
+import { sanitizeFindingBody } from "../publish/sanitize.js";
 import { EngineRunError, type EngineRunOptions, type EngineRunOutput } from "./run.js";
 
 /** Sampling pins, identical in value and rationale to `run.ts` — one reviewer, one temperature. */
@@ -53,9 +55,47 @@ const DEFAULT_SEED = 42;
  *  not a findings array. */
 const MAX_COMPLETION_TOKENS = 3000;
 
+/**
+ * One bounded repair call per file whose parsed findings carry publisher-rejectable bodies.
+ *
+ * Motivated by the first live day: two runs settled `publication_degraded` because exactly one
+ * body each died at the sanitizer (class `html` — a bare angle-bracket token), meaning a correct
+ * finding was found, paid for, and never reached a reader. The repair asks the model to fix the
+ * FORMATTING of the flagged bodies only. A body that still fails after repair is passed through
+ * UNCHANGED — the publisher rejects it and the settlement reports the degradation honestly.
+ * Silently dropping it here would be the same reader-visible loss with the honesty removed.
+ * Exactly one repair round per file, by construction of `repairRejectableBodies`.
+ */
+
 /** One bounded retry per file on transport-shaped failures (429/5xx/network). A 4xx is the
  *  request's own fault and retrying it verbatim buys nothing — the file becomes a warning. */
 const RETRIES_PER_FILE = 1;
+
+/** Per-companion and whole-block character budgets for the `<companion_changes>` section. The
+ *  block exists to kill the one-sided-pair false-positive class (37 of 52 findings on the first
+ *  live release PR), and three bounded hunks do that; a whole package's diffs would just re-crowd
+ *  the prompt the single-shot mode exists to keep small. */
+const COMPANION_HUNK_CHARS = 1200;
+const COMPANION_BLOCK_CHARS = 4000;
+
+/**
+ * Files at or above this many changed lines get a SECOND, focused pass (different seed, a lens
+ * fixed on boundaries, error paths, resource lifetimes, and new security surface) whose findings
+ * are unioned with the first pass's after de-duplication.
+ *
+ * Measured motivation (2026-08-08 live audit, Keiko#3020): a ~700-line new security module got
+ * the same single call as a two-line dep bump; four author-confirmed logic defects in it were
+ * found by a competitor and two more by nobody, while this reviewer's findings on that PR were
+ * mostly test housekeeping — and a re-review failed to re-find its own argv critical, which only
+ * the store rescued. One extra bounded call on the heavy tail is the cheapest depth that exists:
+ * on the audited window it would have added 6 calls across 23 runs.
+ */
+const SECOND_PASS_MIN_CHANGED_LINES = 150;
+
+/** Seed offset for the second pass: pinned like everything else, deliberately different from the
+ *  first pass so the model walks a different path — the same one-bit-of-entropy reasoning as the
+ *  resume seed in `run.ts`. */
+const SECOND_PASS_SEED_OFFSET = 1000;
 
 /** Character budget for one file's rendered diff inside the prompt. Far above any reviewable
  *  hunk set, far below a generated-bundle flood; a diff past this bound is truncated with an
@@ -73,6 +113,10 @@ const SEVERITIES = "critical, high, medium, low";
 interface FileDispatch {
   readonly path: string;
   readonly renderedDiff: string;
+  /** Changed-line count of the raw fragment — the second-pass gate reads it. */
+  readonly changedLines: number;
+  /** The `<companion_changes>` block for this file, when it has companions — see `companions.ts`. */
+  readonly companionBlock?: string;
 }
 
 interface EngineComment {
@@ -177,6 +221,14 @@ function systemPrompt(rule: string): string {
     "marked `+`; `__old hunk__` shows removed lines. Cite `start_line`/`end_line` from the",
     "numbered lines only.",
     "",
+    "A `<companion_changes>` block may follow the diff: the hunks of RELATED files changed in the",
+    "SAME pull request (its package manifest, same-stem siblings, version files). Cross-file",
+    "consistency claims — versions matching, exports existing, counterparts updated — are",
+    "permitted ONLY when a companion hunk shown here proves them. When a counterpart file is part",
+    "of this change but its hunk is not shown, DO NOT allege any mismatch with it: the pair may",
+    "have moved together, and a claim about an unseen file is a guess wearing a finding's clothes.",
+    "Files listed as changed but not shown are not yours to reason about at all.",
+    "",
     "Reply with ONLY a JSON array, no prose around it. Each element:",
     `{"start_line": N, "end_line": N, "category": one of ${CATEGORIES},`,
     ` "severity": one of ${SEVERITIES}, "content": "the finding body"}.`,
@@ -188,17 +240,20 @@ function systemPrompt(rule: string): string {
   ].join("\n");
 }
 
-function userPrompt(dispatch: FileDispatch, pack: string | undefined, others: string): string {
+function userPrompt(
+  dispatch: FileDispatch,
+  pack: string | undefined,
+  totalChangedFiles: number,
+): string {
   return [
-    "<other_changed_files>",
-    others,
-    "</other_changed_files>",
+    `This file is part of a change touching ${String(totalChangedFiles)} file(s) in total.`,
     "",
     `<current_file_path>${dispatch.path}</current_file_path>`,
     "",
     "<current_file_diff>",
     dispatch.renderedDiff,
     "</current_file_diff>",
+    ...(dispatch.companionBlock === undefined ? [] : ["", dispatch.companionBlock]),
     ...(pack === undefined ? [] : ["", pack]),
     "",
     "Review the change in <current_file_diff> now and reply with the JSON array.",
@@ -417,6 +472,46 @@ interface RunState {
   readonly comments: EngineComment[];
   readonly warnings: EngineWarningShape[];
   spendStopped: boolean;
+  /** Bodies the repair call actually saved — surfaced in `model.usage` so a silent repair
+   *  pipeline failure reads as the regression it is, mirroring `context_pack_injected`. */
+  repairedBodies: number;
+}
+
+/**
+ * The `<companion_changes>` block for one file: its companions' numbered hunks, each and the whole
+ * block bounded. Companions come from the FULL changed-path set (not just the rule-selected one) —
+ * a version twin is a twin whether or not the profile reviews it — but only fragments the diff
+ * actually carries can render.
+ */
+function companionBlockFor(
+  companions: readonly string[],
+  fragments: ReadonlyMap<string, string>,
+): string | undefined {
+  const sections: string[] = [];
+  let used = 0;
+  for (const companion of companions) {
+    const fragment = fragments.get(companion);
+    if (fragment === undefined) continue;
+    const rendered = renderNumberedHunks(fragment);
+    if (rendered === "") continue;
+    const bounded =
+      rendered.length > COMPANION_HUNK_CHARS
+        ? `${rendered.slice(0, COMPANION_HUNK_CHARS)}\n(truncated)`
+        : rendered;
+    const section = `## ${companion}\n${bounded}`;
+    if (used + section.length > COMPANION_BLOCK_CHARS) break;
+    used += section.length;
+    sections.push(section);
+  }
+  if (sections.length === 0) return undefined;
+  return [
+    "<companion_changes>",
+    "Changes to related files from the SAME pull request, same numbered-hunk format. Consistency",
+    "claims about these files are permitted exactly as far as these hunks show.",
+    "",
+    sections.join("\n\n"),
+    "</companion_changes>",
+  ].join("\n");
 }
 
 /** The dispatch list: the rule-selected changed files, each with its bounded rendered diff. */
@@ -424,13 +519,23 @@ async function prepareDispatches(options: EngineRunOptions): Promise<FileDispatc
   const diffText = await gitDiff(options);
   if (diffText === undefined) throw new EngineRunError("engine.run.spawn_failed");
   const fragments = splitFileDiffs(diffText);
+  const companions = companionsByPath([...fragments.keys()]);
   return dispatchPaths(options, [...fragments.keys()]).map((path) => {
     const rendered = renderNumberedHunks(fragments.get(path) ?? "");
     const bounded =
       rendered.length > MAX_DIFF_CHARS
         ? `${rendered.slice(0, MAX_DIFF_CHARS)}\n(truncated: diff exceeds the prompt budget)`
         : rendered;
-    return { path, renderedDiff: bounded };
+    const companionBlock = companionBlockFor(companions.get(path) ?? [], fragments);
+    const changedLines = (fragments.get(path) ?? "")
+      .split("\n")
+      .filter((line) => /^[+-][^+-]/.test(line) || line === "+" || line === "-").length;
+    return {
+      path,
+      renderedDiff: bounded,
+      changedLines,
+      ...(companionBlock === undefined ? {} : { companionBlock }),
+    };
   });
 }
 
@@ -459,9 +564,8 @@ function budgetStopped(state: RunState, dispatch: FileDispatch): boolean {
  *  failure shape lands as an honest `subtask_error` — settlement's coverage gap, never silence. */
 async function reviewOneFile(state: RunState, dispatch: FileDispatch): Promise<void> {
   if (budgetStopped(state, dispatch)) return;
-  const others = state.paths.filter((path) => path !== dispatch.path).join("\n");
   const pack = state.options.contextPacks?.get(dispatch.path);
-  const user = userPrompt(dispatch, pack, others);
+  const user = userPrompt(dispatch, pack, state.paths.length);
   let reply: ModelReply | undefined;
   for (let attempt = 0; attempt <= RETRIES_PER_FILE; attempt += 1) {
     reply = await callModel(
@@ -496,7 +600,134 @@ async function reviewOneFile(state: RunState, dispatch: FileDispatch): Promise<v
     });
     return;
   }
-  state.comments.push(...parsed);
+  let combined: readonly EngineComment[] = parsed;
+  if (dispatch.changedLines >= SECOND_PASS_MIN_CHANGED_LINES) {
+    combined = unionComments(parsed, await secondFocusedPass(state, dispatch, user));
+  }
+  state.comments.push(...(await repairRejectableBodies(state, combined)));
+}
+
+/**
+ * The heavy-file second pass: same prompt plus a hard lens, different pinned seed. A transport
+ * failure here costs only the extra depth, never the file — the first pass's findings stand, so
+ * no warning is raised and the file stays covered.
+ */
+async function secondFocusedPass(
+  state: RunState,
+  dispatch: FileDispatch,
+  firstPassUser: string,
+): Promise<readonly EngineComment[]> {
+  const user = [
+    firstPassUser,
+    "",
+    "--- second focused pass ---",
+    "This file is large enough to deserve a second, independent read. Focus EXCLUSIVELY on:",
+    "boundary conditions and off-by-one edges, error and early-return paths, resource lifetimes",
+    "(open/close, spawn/kill, timeout bounds), and the security of newly reachable code paths.",
+    "Do not repeat style, naming, version-consistency, or test-housekeeping observations.",
+    "Reply with the same JSON array format.",
+  ].join("\n");
+  const reply = await callModel(
+    state.options.config.endpoint,
+    state.token,
+    state.options.config.model,
+    state.seed + SECOND_PASS_SEED_OFFSET,
+    state.system,
+    user,
+    state.fetchImpl,
+  );
+  state.usage.requests += 1;
+  state.usage.prompt += reply.promptTokens;
+  state.usage.completion += reply.completionTokens;
+  if (reply.content === undefined) return [];
+  return parseFindingsReply(reply.content, dispatch.path) ?? [];
+}
+
+/** First-pass findings win; a second-pass finding joins only when no first-pass finding already
+ *  sits on the same lines saying effectively the same thing. */
+function unionComments(
+  first: readonly EngineComment[],
+  second: readonly EngineComment[],
+): readonly EngineComment[] {
+  const normalize = (text: string): string =>
+    text.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 80);
+  const seen = new Set(
+    first.map((c) => `${String(c.start_line)}:${String(c.end_line)}:${normalize(c.content)}`),
+  );
+  const merged = [...first];
+  for (const comment of second) {
+    const key = `${String(comment.start_line)}:${String(comment.end_line)}:${normalize(comment.content)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(comment);
+  }
+  return merged;
+}
+
+/** The publisher's verdict on a body, reduced to what the repair loop needs. */
+function bodyRejected(content: string): boolean {
+  return !sanitizeFindingBody(content).ok;
+}
+
+/**
+ * Sends the flagged bodies back to the model once, formatting-repair only, and keeps a repaired
+ * body only when the REAL sanitizer now accepts it and the model returned the same count. Any
+ * other shape — call failed, wrong count, still rejected — keeps the original: the loss then
+ * surfaces downstream as the honest `publication_degraded` it is. See `REPAIR_CALLS_PER_FILE`.
+ */
+async function repairRejectableBodies(
+  state: RunState,
+  comments: readonly EngineComment[],
+): Promise<readonly EngineComment[]> {
+  const flagged = comments
+    .map((comment, index) => ({ comment, index }))
+    .filter(({ comment }) => bodyRejected(comment.content));
+  if (flagged.length === 0) return comments;
+
+  const system = [
+    "You repair the FORMATTING of code-review finding bodies so a strict publisher accepts them.",
+    "Never change meaning, evidence, or tone. Rules the publisher enforces: no HTML — wrap any",
+    "angle-bracket token in backticks (`LIKE_THIS`); no links, images, or URLs — describe them in",
+    "plain words; no @mentions; no `suggestion` fences (plain `diff` fences are fine); the body",
+    "ends after its last sentence, its closing fence, or a `Source:` line.",
+    "",
+    "Reply with ONLY a JSON array of strings: the repaired bodies, in the exact order given, same",
+    "count as given.",
+  ].join("\n");
+  const user = JSON.stringify(flagged.map(({ comment }) => comment.content));
+
+  const reply = await callModel(
+    state.options.config.endpoint,
+    state.token,
+    state.options.config.model,
+    state.seed,
+    system,
+    user,
+    state.fetchImpl,
+  );
+  state.usage.requests += 1;
+  state.usage.prompt += reply.promptTokens;
+  state.usage.completion += reply.completionTokens;
+  if (reply.content === undefined) return comments;
+
+  let repaired: unknown;
+  try {
+    const unfenced = /^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$/.exec(reply.content);
+    repaired = JSON.parse((unfenced?.[1] ?? reply.content).trim());
+  } catch {
+    return comments;
+  }
+  if (!Array.isArray(repaired) || repaired.length !== flagged.length) return comments;
+  const repairedList: readonly unknown[] = repaired as readonly unknown[];
+
+  const result = [...comments];
+  flagged.forEach(({ comment, index }, i) => {
+    const candidate = repairedList[i];
+    if (typeof candidate !== "string" || candidate === "" || bodyRejected(candidate)) return;
+    result[index] = { ...comment, content: candidate };
+    state.repairedBodies += 1;
+  });
+  return result;
 }
 
 /** The engine-shaped stdout — byte-compatible with what `result.ts` parses from the binary. */
@@ -517,6 +748,29 @@ function assembleStdout(state: RunState, dispatched: number, startedMs: number):
     warnings: state.warnings,
     session_id: randomUUID(),
   });
+}
+
+/** The shared per-invocation state, assembled once — split from the runner for its line budget. */
+function initialRunState(
+  options: EngineRunOptions,
+  rule: string,
+  dispatches: readonly FileDispatch[],
+  fetchImpl: typeof fetch,
+  token: string,
+): RunState {
+  return {
+    options,
+    token,
+    system: systemPrompt(rule),
+    paths: dispatches.map((dispatch) => dispatch.path),
+    seed: options.samplingSeed ?? DEFAULT_SEED,
+    fetchImpl,
+    usage: { prompt: 0, completion: 0, requests: 0 },
+    comments: [],
+    warnings: [],
+    spendStopped: false,
+    repairedBodies: 0,
+  };
 }
 
 /**
@@ -540,18 +794,7 @@ export async function runSingleShotEngine(
   if (rule === undefined) throw new EngineRunError("engine.run.spawn_failed");
 
   const dispatches = await prepareDispatches(options);
-  const state: RunState = {
-    options,
-    token,
-    system: systemPrompt(rule),
-    paths: dispatches.map((dispatch) => dispatch.path),
-    seed: options.samplingSeed ?? DEFAULT_SEED,
-    fetchImpl,
-    usage: { prompt: 0, completion: 0, requests: 0 },
-    comments: [],
-    warnings: [],
-    spendStopped: false,
-  };
+  const state = initialRunState(options, rule, dispatches, fetchImpl, token);
   await inPool(dispatches, options.config.concurrency, (dispatch) =>
     reviewOneFile(state, dispatch),
   );
@@ -571,6 +814,7 @@ export async function runSingleShotEngine(
       completion: state.usage.completion,
       cached: 0,
       context_pack_injected: options.contextPacks === undefined ? 0 : dispatches.length,
+      bodies_repaired: state.repairedBodies,
       cache_key_rejected: 0,
       bad_request_persisted: 0,
     },

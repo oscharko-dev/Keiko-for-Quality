@@ -116,9 +116,12 @@ describe("findsSimilarOpenConversation", () => {
     expect(found).toBe(true);
   });
 
-  it("does not suppress once the drift exceeds the line tolerance", () => {
+  // Re-pinned 2026-08-08: three lines of drift with an identical body is now the wide band's
+  // legitimate suppression (a critical was republished as a duplicate after a 79→91 force-push
+  // shift on the first live day), so the boundary this test holds moved to the wide band's edge.
+  it("does not suppress once the drift exceeds even the wide drift band", () => {
     const found = findsSimilarOpenConversation(
-      candidate({ startLine: 239, endLine: 239 }),
+      candidate({ startLine: 300, endLine: 300 }),
       [thread({ startLine: 236, endLine: 236 })],
       IDENTITY,
     );
@@ -401,9 +404,11 @@ describe("findsDispositionedConversation", () => {
     expect(found).toBe(false);
   });
 
-  it("does not suppress once the drift exceeds the line tolerance, even at a dispositioned location", () => {
+  // Re-pinned 2026-08-08 alongside the open-conversation twin above: the boundary moved to the
+  // wide drift band's edge.
+  it("does not suppress once the drift exceeds even the wide band, at a dispositioned location", () => {
     const found = findsDispositionedConversation(
-      candidate({ startLine: 239, endLine: 239 }),
+      candidate({ startLine: 300, endLine: 300 }),
       [thread({ resolved: true, dispositioned: true, startLine: 236, endLine: 236 })],
       IDENTITY,
     );
@@ -845,5 +850,60 @@ describe("findsOutdatedRecurrence", () => {
       );
       expect(found).toBe(false);
     });
+  });
+});
+
+describe("wide-drift suppression (2026-08-08 live audit)", () => {
+  const CANDIDATE = {
+    path: "packages/keiko-server/src/coding-runtime/packagedSecureWorkspaceTextRead.ts",
+    startLine: 91,
+    endLine: 91,
+    body: "Enforce signature verification independently of platformAssurance.\n\nWhen the lane value comes from the activation file, verification can be disabled.",
+  };
+  const thread = (
+    overrides: Partial<{ startLine: number; endLine: number; body: string }>,
+  ): ExistingConversation => ({
+    authorLogin: "keiko-for-quality[bot]",
+    path: CANDIDATE.path,
+    startLine: 79,
+    endLine: 79,
+    resolved: false,
+    dispositioned: false,
+    body: CANDIDATE.body,
+    ...overrides,
+  });
+
+  it("suppresses the same text republished after a twelve-line anchor drift", () => {
+    expect(findsSimilarOpenConversation(CANDIDATE, [thread({})], "keiko-for-quality[bot]")).toBe(
+      true,
+    );
+  });
+
+  it("does not let the wide band suppress a merely similar body", () => {
+    expect(
+      findsSimilarOpenConversation(
+        CANDIDATE,
+        [
+          thread({
+            body: "Enforce signature verification independently of platformAssurance.\n\nA related but different observation about the update path.",
+          }),
+        ],
+        "keiko-for-quality[bot]",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps the near band's similarity semantics unchanged", () => {
+    expect(
+      findsSimilarOpenConversation(
+        { ...CANDIDATE, startLine: 80, endLine: 80 },
+        [
+          thread({
+            body: "Enforce signature verification independently of platformAssurance.\n\nWhen the lane value comes from the activation file, verification can be disabled entirely.",
+          }),
+        ],
+        "keiko-for-quality[bot]",
+      ),
+    ).toBe(true);
   });
 });

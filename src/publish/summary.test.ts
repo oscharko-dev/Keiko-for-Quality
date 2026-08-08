@@ -132,14 +132,40 @@ describe("maintainRunSummary: upsert rules", () => {
     expect(api.existing).toHaveLength(1);
   });
 
-  it("replaces the head SHA in the updated comment rather than appending it", async () => {
+  // Re-pinned 2026-08-08: the first live day overwrote thirteen runs' record with the
+  // fourteenth's, so the update now carries a bounded Recent-runs trail. The old head may appear
+  // there — and ONLY there; the headline still speaks solely about the newest run.
+  it("replaces the head SHA in the headline and keeps the old run as one history row", async () => {
     await maintainRunSummary(context, runInput(), createSilentDiagnostics());
     const newHead = commitSha("c".repeat(40));
     await maintainRunSummary(context, runInput({ headSha: newHead }), createSilentDiagnostics());
 
     const body = api.existing[0]?.body ?? "";
     expect(body).toContain(newHead.slice(0, 7));
-    expect(body).not.toContain(HEAD.slice(0, 7));
+    const historyAt = body.indexOf("**Recent runs**");
+    expect(historyAt).toBeGreaterThan(-1);
+    // The old head survives only inside the trail.
+    expect(body.slice(0, historyAt)).not.toContain(HEAD.slice(0, 7));
+    expect(body.slice(historyAt)).toContain(HEAD.slice(0, 7));
+    // Newest first, both runs listed.
+    const rows = body
+      .slice(historyAt)
+      .split("\n")
+      .filter((line) => line.startsWith("- `"));
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain(newHead.slice(0, 7));
+  });
+
+  it("caps the history trail at five rows, newest first", async () => {
+    for (let i = 0; i < 7; i += 1) {
+      const head = commitSha(String(i).repeat(40));
+      await maintainRunSummary(context, runInput({ headSha: head }), createSilentDiagnostics());
+    }
+    const body = api.existing[0]?.body ?? "";
+    const rows = body.split("\n").filter((line) => line.startsWith("- `"));
+    expect(rows).toHaveLength(5);
+    expect(rows[0]).toContain("6666666");
+    expect(rows[4]).toContain("2222222");
   });
 
   it("ignores a foreign-authored comment carrying the marker and creates a fresh one", async () => {
