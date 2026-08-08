@@ -4932,6 +4932,7 @@ function isSubstantiveDisposition(lastReply, identity) {
 
 // src/publish/similarity.ts
 var LINE_TOLERANCE = 2;
+var LINE_DRIFT_TOLERANCE = 40;
 var SIMILARITY_THRESHOLD = 0.5;
 var MIN_SHARED_TOKENS = 4;
 var RECURRENCE_THRESHOLD = 0.7;
@@ -5017,13 +5018,24 @@ function hasNoAnchor(startLine, endLine) {
   return startLine <= 0 || endLine <= 0;
 }
 function linesOverlap(candidate, existing) {
+  return linesOverlapWithin(candidate, existing, LINE_TOLERANCE);
+}
+function linesOverlapWithin(candidate, existing, tolerance) {
   if (existing.startLine === void 0 || existing.endLine === void 0) return false;
   if (hasNoAnchor(candidate.startLine, candidate.endLine)) return false;
   if (hasNoAnchor(existing.startLine, existing.endLine)) return false;
-  return candidate.startLine <= existing.endLine + LINE_TOLERANCE && existing.startLine <= candidate.endLine + LINE_TOLERANCE;
+  return candidate.startLine <= existing.endLine + tolerance && existing.startLine <= candidate.endLine + tolerance;
+}
+function bodiesEffectivelyIdentical(candidateBody, existingBody) {
+  const normalize2 = (text) => text.replace(/\s+/g, " ").trim();
+  return normalize2(candidateBody) === normalize2(stripComposedArtifacts(existingBody));
 }
 function isSameFindingAtSameLocation(candidate, thread, identity) {
-  return thread.authorLogin === identity && thread.path === candidate.path && linesOverlap(candidate, thread) && bodiesAreSimilar(candidate.body, thread.body);
+  if (thread.authorLogin !== identity || thread.path !== candidate.path) return false;
+  if (linesOverlap(candidate, thread) && bodiesAreSimilar(candidate.body, thread.body)) {
+    return true;
+  }
+  return linesOverlapWithin(candidate, thread, LINE_DRIFT_TOLERANCE) && bodiesEffectivelyIdentical(candidate.body, thread.body);
 }
 function carriesNoAnchor(thread) {
   return thread.startLine === void 0 && thread.endLine === void 0;

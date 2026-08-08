@@ -1878,6 +1878,31 @@ function buildSummaryReport(input, diagnostics) {
     durationMs: input.durationMs
   };
 }
+var HISTORY_HEADER = "**Recent runs**";
+var MAX_HISTORY_ROWS = 5;
+function historyRow(input) {
+  const r = input.report;
+  const reason = r.reason === void 0 ? "" : ` (\`${r.reason}\`)`;
+  return `- \`${input.headSha.slice(0, 7)}\` \xB7 ${r.outcome}${reason} \xB7 fresh ${String(r.reviewablePaths - r.cacheHits)} \xB7 replayed ${String(r.cacheHits)} \xB7 ${String(Math.round(input.durationMs / 1e3))}s`;
+}
+function renderRunHistory(currentRow, previousBody) {
+  const carried = [];
+  if (previousBody !== void 0) {
+    const at = previousBody.indexOf(HISTORY_HEADER);
+    if (at !== -1) {
+      for (const line of previousBody.slice(at).split("\n").slice(1)) {
+        if (!line.startsWith("- `")) break;
+        carried.push(line);
+      }
+    }
+  }
+  const rows = [currentRow, ...carried].slice(0, MAX_HISTORY_ROWS);
+  return `
+
+${HISTORY_HEADER}
+${rows.join("\n")}
+`;
+}
 function newestOwnSummary(comments) {
   return comments.reduce(
     (newest, comment) => newest === void 0 || comment.id > newest.id ? comment : newest,
@@ -1893,9 +1918,9 @@ async function maintainRunSummary(context, input, diagnostics) {
   try {
     const summary = buildSummaryReport(input, diagnostics.drain());
     const marker = summaryMarker(`${context.ref.owner}/${context.ref.repo}`, context.pullNumber);
-    const body = composeSummaryBody(summary, markerComment(marker));
     const existing = await context.client.listIssueComments(context.ref, context.pullNumber);
     const target = newestOwnSummary(ownSummaryComments(existing, context.identity, marker));
+    const body = composeSummaryBody(summary, markerComment(marker)) + renderRunHistory(historyRow(input), target?.body);
     if (target === void 0) {
       const created = await context.client.createIssueComment(
         context.ref,
@@ -5745,6 +5770,7 @@ function tallyPlacementAttempts(ladder) {
 
 // src/publish/similarity.ts
 var LINE_TOLERANCE = 2;
+var LINE_DRIFT_TOLERANCE = 40;
 var SIMILARITY_THRESHOLD = 0.5;
 var MIN_SHARED_TOKENS = 4;
 var RECURRENCE_THRESHOLD = 0.7;
@@ -5830,13 +5856,24 @@ function hasNoAnchor(startLine, endLine) {
   return startLine <= 0 || endLine <= 0;
 }
 function linesOverlap(candidate, existing) {
+  return linesOverlapWithin(candidate, existing, LINE_TOLERANCE);
+}
+function linesOverlapWithin(candidate, existing, tolerance) {
   if (existing.startLine === void 0 || existing.endLine === void 0) return false;
   if (hasNoAnchor(candidate.startLine, candidate.endLine)) return false;
   if (hasNoAnchor(existing.startLine, existing.endLine)) return false;
-  return candidate.startLine <= existing.endLine + LINE_TOLERANCE && existing.startLine <= candidate.endLine + LINE_TOLERANCE;
+  return candidate.startLine <= existing.endLine + tolerance && existing.startLine <= candidate.endLine + tolerance;
+}
+function bodiesEffectivelyIdentical(candidateBody, existingBody) {
+  const normalize2 = (text3) => text3.replace(/\s+/g, " ").trim();
+  return normalize2(candidateBody) === normalize2(stripComposedArtifacts(existingBody));
 }
 function isSameFindingAtSameLocation(candidate, thread, identity) {
-  return thread.authorLogin === identity && thread.path === candidate.path && linesOverlap(candidate, thread) && bodiesAreSimilar(candidate.body, thread.body);
+  if (thread.authorLogin !== identity || thread.path !== candidate.path) return false;
+  if (linesOverlap(candidate, thread) && bodiesAreSimilar(candidate.body, thread.body)) {
+    return true;
+  }
+  return linesOverlapWithin(candidate, thread, LINE_DRIFT_TOLERANCE) && bodiesEffectivelyIdentical(candidate.body, thread.body);
 }
 function carriesNoAnchor(thread) {
   return thread.startLine === void 0 && thread.endLine === void 0;
