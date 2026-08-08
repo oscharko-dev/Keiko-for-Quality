@@ -2571,7 +2571,7 @@ async function collectContextPacks(request) {
 import { createHash as createHash4 } from "node:crypto";
 var MAX_COMPANIONS = 3;
 var LOCKFILE = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|[^/]+\.lock)$/;
-function isLockfile(path) {
+function isLockfilePath(path) {
   return LOCKFILE.test(path);
 }
 function dirname2(path) {
@@ -2615,12 +2615,12 @@ function companionsByPath(paths) {
       return dirname2(candidate) === ownDir ? 3 : 4;
     };
     var rank = rank2;
-    if (isLockfile(path)) {
+    if (isLockfilePath(path)) {
       result.set(path, []);
       continue;
     }
     const group = (byRoot.get(packageRoot(path, roots)) ?? []).filter(
-      (candidate) => candidate !== path && !isLockfile(candidate)
+      (candidate) => candidate !== path && !isLockfilePath(candidate)
     );
     const ownStem = stem(path);
     const ownDir = dirname2(path);
@@ -4057,7 +4057,55 @@ async function reviewOneFile(state, dispatch) {
     });
     return;
   }
-  state.comments.push(...parsed);
+  state.comments.push(...await repairRejectableBodies(state, parsed));
+}
+function bodyRejected(content) {
+  return !sanitizeFindingBody(content).ok;
+}
+async function repairRejectableBodies(state, comments) {
+  const flagged = comments.map((comment, index) => ({ comment, index })).filter(({ comment }) => bodyRejected(comment.content));
+  if (flagged.length === 0) return comments;
+  const system = [
+    "You repair the FORMATTING of code-review finding bodies so a strict publisher accepts them.",
+    "Never change meaning, evidence, or tone. Rules the publisher enforces: no HTML \u2014 wrap any",
+    "angle-bracket token in backticks (`LIKE_THIS`); no links, images, or URLs \u2014 describe them in",
+    "plain words; no @mentions; no `suggestion` fences (plain `diff` fences are fine); the body",
+    "ends after its last sentence, its closing fence, or a `Source:` line.",
+    "",
+    "Reply with ONLY a JSON array of strings: the repaired bodies, in the exact order given, same",
+    "count as given."
+  ].join("\n");
+  const user = JSON.stringify(flagged.map(({ comment }) => comment.content));
+  const reply = await callModel(
+    state.options.config.endpoint,
+    state.token,
+    state.options.config.model,
+    state.seed,
+    system,
+    user,
+    state.fetchImpl
+  );
+  state.usage.requests += 1;
+  state.usage.prompt += reply.promptTokens;
+  state.usage.completion += reply.completionTokens;
+  if (reply.content === void 0) return comments;
+  let repaired;
+  try {
+    const unfenced = /^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$/.exec(reply.content);
+    repaired = JSON.parse((unfenced?.[1] ?? reply.content).trim());
+  } catch {
+    return comments;
+  }
+  if (!Array.isArray(repaired) || repaired.length !== flagged.length) return comments;
+  const repairedList = repaired;
+  const result = [...comments];
+  flagged.forEach(({ comment, index }, i) => {
+    const candidate = repairedList[i];
+    if (typeof candidate !== "string" || candidate === "" || bodyRejected(candidate)) return;
+    result[index] = { ...comment, content: candidate };
+    state.repairedBodies += 1;
+  });
+  return result;
 }
 function assembleStdout(state, dispatched, startedMs) {
   const totalTokens = state.usage.prompt + state.usage.completion;
@@ -4077,15 +4125,8 @@ function assembleStdout(state, dispatched, startedMs) {
     session_id: randomUUID()
   });
 }
-async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
-  const token = readModelToken(options2.config, options2.env);
-  if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
-  const started = Date.now();
-  const ruleDigest = ruleDigestFor(options2);
-  const rule = buildRuleFile(options2.profile, options2.guidelines, options2.mechanicallyCleanPaths).rules[0]?.rule;
-  if (rule === void 0) throw new EngineRunError("engine.run.spawn_failed");
-  const dispatches = await prepareDispatches(options2);
-  const state = {
+function initialRunState(options2, rule, dispatches, fetchImpl, token) {
+  return {
     options: options2,
     token,
     system: systemPrompt(rule),
@@ -4095,8 +4136,19 @@ async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
     usage: { prompt: 0, completion: 0, requests: 0 },
     comments: [],
     warnings: [],
-    spendStopped: false
+    spendStopped: false,
+    repairedBodies: 0
   };
+}
+async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
+  const token = readModelToken(options2.config, options2.env);
+  if (token === void 0) throw new EngineRunError("engine.run.spawn_failed");
+  const started = Date.now();
+  const ruleDigest = ruleDigestFor(options2);
+  const rule = buildRuleFile(options2.profile, options2.guidelines, options2.mechanicallyCleanPaths).rules[0]?.rule;
+  if (rule === void 0) throw new EngineRunError("engine.run.spawn_failed");
+  const dispatches = await prepareDispatches(options2);
+  const state = initialRunState(options2, rule, dispatches, fetchImpl, token);
   await inPool(
     dispatches,
     options2.config.concurrency,
@@ -4117,6 +4169,7 @@ async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
       completion: state.usage.completion,
       cached: 0,
       context_pack_injected: options2.contextPacks === void 0 ? 0 : dispatches.length,
+      bodies_repaired: state.repairedBodies,
       cache_key_rejected: 0,
       bad_request_persisted: 0
     }
@@ -6473,8 +6526,9 @@ function gitContext(request) {
   };
 }
 function noticeAnchor(inventory) {
-  const reviewable = inventory.items.find((item) => item.reviewable);
-  return (reviewable ?? inventory.items[0])?.path;
+  const reviewable = inventory.items.filter((item) => item.reviewable);
+  const readable = reviewable.find((item) => !isLockfilePath(item.path));
+  return (readable ?? reviewable[0] ?? inventory.items[0])?.path;
 }
 async function headIsCurrent(request) {
   const state = await request.client.getPullRequest(request.ref, request.pullNumber);

@@ -23,7 +23,7 @@ import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
 import { acquireEngine } from "./engine/acquire.js";
 import { collectContextPacks } from "./engine/context-pack.js";
-import { companionsByPath, companionContextDigest } from "./engine/companions.js";
+import { companionsByPath, companionContextDigest, isLockfilePath } from "./engine/companions.js";
 import { currentPlatformDigest, ENGINE_PIN } from "./engine/pinned-release.js";
 import {
   auditClassification,
@@ -582,10 +582,18 @@ function gitContext(request: PipelineRequest): GitContext {
   };
 }
 
-/** Something to anchor a file-level notice to. A notice with no anchor cannot be published. */
+/**
+ * Something to anchor a file-level notice to. A notice with no anchor cannot be published.
+ *
+ * Prefers the first reviewable item that is not a lockfile: the first live day anchored two
+ * coverage notices to `package-lock.json:1` — the least readable spot on the whole pull request —
+ * purely because the lockfile sorted first among reviewable items. A lockfile can still anchor as
+ * the last resort; a notice nobody can place is worse than one oddly placed.
+ */
 function noticeAnchor(inventory: Inventory): string | undefined {
-  const reviewable = inventory.items.find((item) => item.reviewable);
-  return (reviewable ?? inventory.items[0])?.path;
+  const reviewable = inventory.items.filter((item) => item.reviewable);
+  const readable = reviewable.find((item) => !isLockfilePath(item.path as string));
+  return (readable ?? reviewable[0] ?? inventory.items[0])?.path;
 }
 
 /**

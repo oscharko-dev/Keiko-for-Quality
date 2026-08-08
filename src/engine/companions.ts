@@ -43,7 +43,7 @@ export const MAX_COMPANIONS = 3;
 const LOCKFILE =
   /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|[^/]+\.lock)$/;
 
-function isLockfile(path: string): boolean {
+export function isLockfilePath(path: string): boolean {
   return LOCKFILE.test(path);
 }
 
@@ -102,12 +102,12 @@ export function companionsByPath(paths: readonly string[]): ReadonlyMap<string, 
 
   const result = new Map<string, readonly string[]>();
   for (const path of paths) {
-    if (isLockfile(path)) {
+    if (isLockfilePath(path)) {
       result.set(path, []);
       continue;
     }
     const group = (byRoot.get(packageRoot(path, roots)) ?? []).filter(
-      (candidate) => candidate !== path && !isLockfile(candidate),
+      (candidate) => candidate !== path && !isLockfilePath(candidate),
     );
     const ownStem = stem(path);
     const ownDir = dirname(path);

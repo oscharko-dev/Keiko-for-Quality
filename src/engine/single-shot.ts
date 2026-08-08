@@ -44,6 +44,7 @@ import { run } from "../git/exec.js";
 import { readModelToken } from "../config/runtime.js";
 import { buildRuleFile, serializeRuleFile } from "./rule-file.js";
 import { companionsByPath } from "./companions.js";
+import { sanitizeFindingBody } from "../publish/sanitize.js";
 import { EngineRunError, type EngineRunOptions, type EngineRunOutput } from "./run.js";
 
 /** Sampling pins, identical in value and rationale to `run.ts` — one reviewer, one temperature. */
@@ -53,6 +54,18 @@ const DEFAULT_SEED = 42;
 /** Completion budget per reply: a findings array is small; a reply that needs more than this is
  *  not a findings array. */
 const MAX_COMPLETION_TOKENS = 3000;
+
+/**
+ * One bounded repair call per file whose parsed findings carry publisher-rejectable bodies.
+ *
+ * Motivated by the first live day: two runs settled `publication_degraded` because exactly one
+ * body each died at the sanitizer (class `html` — a bare angle-bracket token), meaning a correct
+ * finding was found, paid for, and never reached a reader. The repair asks the model to fix the
+ * FORMATTING of the flagged bodies only. A body that still fails after repair is passed through
+ * UNCHANGED — the publisher rejects it and the settlement reports the degradation honestly.
+ * Silently dropping it here would be the same reader-visible loss with the honesty removed.
+ * Exactly one repair round per file, by construction of `repairRejectableBodies`.
+ */
 
 /** One bounded retry per file on transport-shaped failures (429/5xx/network). A 4xx is the
  *  request's own fault and retrying it verbatim buys nothing — the file becomes a warning. */
@@ -438,6 +451,9 @@ interface RunState {
   readonly comments: EngineComment[];
   readonly warnings: EngineWarningShape[];
   spendStopped: boolean;
+  /** Bodies the repair call actually saved — surfaced in `model.usage` so a silent repair
+   *  pipeline failure reads as the regression it is, mirroring `context_pack_injected`. */
+  repairedBodies: number;
 }
 
 /**
@@ -559,7 +575,73 @@ async function reviewOneFile(state: RunState, dispatch: FileDispatch): Promise<v
     });
     return;
   }
-  state.comments.push(...parsed);
+  state.comments.push(...(await repairRejectableBodies(state, parsed)));
+}
+
+/** The publisher's verdict on a body, reduced to what the repair loop needs. */
+function bodyRejected(content: string): boolean {
+  return !sanitizeFindingBody(content).ok;
+}
+
+/**
+ * Sends the flagged bodies back to the model once, formatting-repair only, and keeps a repaired
+ * body only when the REAL sanitizer now accepts it and the model returned the same count. Any
+ * other shape — call failed, wrong count, still rejected — keeps the original: the loss then
+ * surfaces downstream as the honest `publication_degraded` it is. See `REPAIR_CALLS_PER_FILE`.
+ */
+async function repairRejectableBodies(
+  state: RunState,
+  comments: readonly EngineComment[],
+): Promise<readonly EngineComment[]> {
+  const flagged = comments
+    .map((comment, index) => ({ comment, index }))
+    .filter(({ comment }) => bodyRejected(comment.content));
+  if (flagged.length === 0) return comments;
+
+  const system = [
+    "You repair the FORMATTING of code-review finding bodies so a strict publisher accepts them.",
+    "Never change meaning, evidence, or tone. Rules the publisher enforces: no HTML — wrap any",
+    "angle-bracket token in backticks (`LIKE_THIS`); no links, images, or URLs — describe them in",
+    "plain words; no @mentions; no `suggestion` fences (plain `diff` fences are fine); the body",
+    "ends after its last sentence, its closing fence, or a `Source:` line.",
+    "",
+    "Reply with ONLY a JSON array of strings: the repaired bodies, in the exact order given, same",
+    "count as given.",
+  ].join("\n");
+  const user = JSON.stringify(flagged.map(({ comment }) => comment.content));
+
+  const reply = await callModel(
+    state.options.config.endpoint,
+    state.token,
+    state.options.config.model,
+    state.seed,
+    system,
+    user,
+    state.fetchImpl,
+  );
+  state.usage.requests += 1;
+  state.usage.prompt += reply.promptTokens;
+  state.usage.completion += reply.completionTokens;
+  if (reply.content === undefined) return comments;
+
+  let repaired: unknown;
+  try {
+    const unfenced = /^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$/.exec(reply.content);
+    repaired = JSON.parse((unfenced?.[1] ?? reply.content).trim());
+  } catch {
+    return comments;
+  }
+  if (!Array.isArray(repaired) || repaired.length !== flagged.length) return comments;
+  const repairedList: readonly unknown[] = repaired as readonly unknown[];
+
+  const result = [...comments];
+  flagged.forEach(({ comment, index }, i) => {
+    const candidate = repairedList[i];
+    if (typeof candidate !== "string" || candidate === "" || bodyRejected(candidate)) return;
+    result[index] = { ...comment, content: candidate };
+    state.repairedBodies += 1;
+  });
+  return result;
 }
 
 /** The engine-shaped stdout — byte-compatible with what `result.ts` parses from the binary. */
@@ -580,6 +662,29 @@ function assembleStdout(state: RunState, dispatched: number, startedMs: number):
     warnings: state.warnings,
     session_id: randomUUID(),
   });
+}
+
+/** The shared per-invocation state, assembled once — split from the runner for its line budget. */
+function initialRunState(
+  options: EngineRunOptions,
+  rule: string,
+  dispatches: readonly FileDispatch[],
+  fetchImpl: typeof fetch,
+  token: string,
+): RunState {
+  return {
+    options,
+    token,
+    system: systemPrompt(rule),
+    paths: dispatches.map((dispatch) => dispatch.path),
+    seed: options.samplingSeed ?? DEFAULT_SEED,
+    fetchImpl,
+    usage: { prompt: 0, completion: 0, requests: 0 },
+    comments: [],
+    warnings: [],
+    spendStopped: false,
+    repairedBodies: 0,
+  };
 }
 
 /**
@@ -603,18 +708,7 @@ export async function runSingleShotEngine(
   if (rule === undefined) throw new EngineRunError("engine.run.spawn_failed");
 
   const dispatches = await prepareDispatches(options);
-  const state: RunState = {
-    options,
-    token,
-    system: systemPrompt(rule),
-    paths: dispatches.map((dispatch) => dispatch.path),
-    seed: options.samplingSeed ?? DEFAULT_SEED,
-    fetchImpl,
-    usage: { prompt: 0, completion: 0, requests: 0 },
-    comments: [],
-    warnings: [],
-    spendStopped: false,
-  };
+  const state = initialRunState(options, rule, dispatches, fetchImpl, token);
   await inPool(dispatches, options.config.concurrency, (dispatch) =>
     reviewOneFile(state, dispatch),
   );
@@ -634,6 +728,7 @@ export async function runSingleShotEngine(
       completion: state.usage.completion,
       cached: 0,
       context_pack_injected: options.contextPacks === undefined ? 0 : dispatches.length,
+      bodies_repaired: state.repairedBodies,
       cache_key_rejected: 0,
       bad_request_persisted: 0,
     },
