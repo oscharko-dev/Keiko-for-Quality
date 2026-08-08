@@ -94,6 +94,17 @@ export interface CandidateForDedup {
 const LINE_TOLERANCE = 2;
 
 /**
+ * The wide band for force-push line drift (2026-08-08 live audit): a critical finding republished
+ * as a duplicate after its anchor moved 79→91 — twelve lines, far outside the near band — because
+ * intervening hunks shifted the file. Within this wider band a match additionally requires the
+ * bodies to be EFFECTIVELY IDENTICAL (whitespace-normalized equality), not merely similar: the
+ * near band's similarity threshold at forty lines of drift would start collapsing genuinely
+ * distinct findings that quote the same idiom twice in one file. Drift-with-identical-text is
+ * exactly the replayed-finding shape; drift-with-similar-text is not safe to suppress.
+ */
+const LINE_DRIFT_TOLERANCE = 40;
+
+/**
  * Overlap-coefficient threshold for the two bodies' content-word sets: shared words divided by the
  * smaller body's own word count.
  *
@@ -359,13 +370,28 @@ interface LineAnchored {
  * as anything, existing or candidate.
  */
 function linesOverlap(candidate: SimilarityCandidate, existing: LineAnchored): boolean {
+  return linesOverlapWithin(candidate, existing, LINE_TOLERANCE);
+}
+
+/** `linesOverlap` generalized over its tolerance — the wide-drift caller shares every guard. */
+function linesOverlapWithin(
+  candidate: SimilarityCandidate,
+  existing: LineAnchored,
+  tolerance: number,
+): boolean {
   if (existing.startLine === undefined || existing.endLine === undefined) return false;
   if (hasNoAnchor(candidate.startLine, candidate.endLine)) return false;
   if (hasNoAnchor(existing.startLine, existing.endLine)) return false;
   return (
-    candidate.startLine <= existing.endLine + LINE_TOLERANCE &&
-    existing.startLine <= candidate.endLine + LINE_TOLERANCE
+    candidate.startLine <= existing.endLine + tolerance &&
+    existing.startLine <= candidate.endLine + tolerance
   );
+}
+
+/** Whitespace-normalized equality — the strictest useful body match, reserved for wide drift. */
+function bodiesEffectivelyIdentical(candidateBody: string, existingBody: string): boolean {
+  const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
+  return normalize(candidateBody) === normalize(stripComposedArtifacts(existingBody));
 }
 
 /**
@@ -380,11 +406,15 @@ function isSameFindingAtSameLocation(
   thread: ExistingConversation,
   identity: string,
 ): boolean {
+  if (thread.authorLogin !== identity || thread.path !== candidate.path) return false;
+  if (linesOverlap(candidate, thread) && bodiesAreSimilar(candidate.body, thread.body)) {
+    return true;
+  }
+  // Force-push drift: same text, moved anchor — see LINE_DRIFT_TOLERANCE for why the wide band
+  // demands identity rather than similarity.
   return (
-    thread.authorLogin === identity &&
-    thread.path === candidate.path &&
-    linesOverlap(candidate, thread) &&
-    bodiesAreSimilar(candidate.body, thread.body)
+    linesOverlapWithin(candidate, thread, LINE_DRIFT_TOLERANCE) &&
+    bodiesEffectivelyIdentical(candidate.body, thread.body)
   );
 }
 
