@@ -320,9 +320,13 @@ export function parseGrepLine(line: string): GrepMatch | undefined {
  * Escapes an identifier for use inside a RegExp. Identifiers here are `[A-Za-z0-9_$]+` by
  * construction, so `$` is the only metacharacter that can occur — escaped anyway via the general
  * form, because the input shape is an argument, not something this function should have to trust.
+ *
+ * The replacement is a raw string (Sonar S7780) because it carries exactly one backslash, and a
+ * `"\\$&"` written with two invites the reader to count them: `$&` re-emits the matched
+ * metacharacter, and the single backslash in front of it is the escape.
  */
 function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
 }
 
 /** True when `content` contains `identifier` as a whole word — the render-side twin of the

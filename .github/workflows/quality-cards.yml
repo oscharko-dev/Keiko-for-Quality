@@ -1,0 +1,61 @@
+# Renders the review-record cards the READMEs embed and commits them to the `quality-cards`
+# data branch. GitHub-only delivery for the card widget: same renderer and collector as the
+# quality.keiko.dev service (widget/), numbers read from this host's own API with the workflow
+# token — no external infrastructure, no secrets. When quality.keiko.dev is deployed, the README
+# URLs swap to the live endpoint and this workflow retires with the branch.
+name: quality-cards
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: quality-cards
+  cancel-in-progress: false
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The renderer's source, read-only.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # The data branch, with credentials retained: this checkout is what the job pushes to,
+      # scoped by the workflow's own contents: write and the unprotected quality-cards branch.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: quality-cards
+          path: cards-branch
+          persist-credentials: true
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+
+      # No npm install: renderer and collector are dependency-free by design (widget/README.md).
+      - name: Render cards
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node widget/scripts/render-card.mjs oscharko-dev Keiko-for-Quality cards-branch/cards
+          node widget/scripts/render-card.mjs oscharko-dev Keiko cards-branch/cards
+
+      - name: Commit when changed
+        working-directory: cards-branch
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "cards unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "quality-cards: scheduled render"
+          git push origin HEAD:quality-cards

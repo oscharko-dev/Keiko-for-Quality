@@ -107,18 +107,38 @@ describe("parseFindingsReply", () => {
     expect(parseFindingsReply("[]", "src/a.ts")).toEqual([]);
   });
 
+  /**
+   * The edge the linear unfencing turns on: a fence run INSIDE the reply is content, because the
+   * only admissible closing run is one with nothing but whitespace after it to the end of the
+   * reply. A rewrite that stopped at the first run it saw would cut the array in half and parse
+   * nothing, and one that demanded the `json` tag or a fence flush against the end would reject
+   * replies this mode has always accepted.
+   */
+  it("closes on the run nothing but whitespace follows, not on the first one seen", () => {
+    const entry = '{"start_line": 1, "end_line": 1, "content": "cite ```diff``` blocks"}';
+    expect(parseFindingsReply(`\`\`\`json\n[${entry}]\n\`\`\`\n`, "a")).toHaveLength(1);
+    expect(parseFindingsReply(`\`\`\`\n[${entry}]\n\`\`\`  \n`, "a")).toHaveLength(1);
+    expect(parseFindingsReply(`  [${entry}]  `, "a")).toHaveLength(1);
+  });
+
+  /** An opener with no closer is not a fence, so the raw reply is what gets parsed — and a reply
+   *  that is a fence opener plus an array is not JSON. */
+  it("leaves an unclosed fence in place rather than guessing where it ended", () => {
+    expect(parseFindingsReply("```json\n[]", "a")).toBeUndefined();
+  });
+
   it("rejects rather than repairs anything off-shape", () => {
     expect(parseFindingsReply("not json", "a")).toBeUndefined();
     expect(parseFindingsReply('{"findings": []}', "a")).toBeUndefined();
-    expect(parseFindingsReply('[{"start_line": 0, "end_line": 1, "content": "x"}]', "a")).toBe(
-      undefined,
-    );
-    expect(parseFindingsReply('[{"start_line": 2, "end_line": 1, "content": "x"}]', "a")).toBe(
-      undefined,
-    );
-    expect(parseFindingsReply('[{"start_line": 1, "end_line": 1, "content": ""}]', "a")).toBe(
-      undefined,
-    );
+    expect(
+      parseFindingsReply('[{"start_line": 0, "end_line": 1, "content": "x"}]', "a"),
+    ).toBeUndefined();
+    expect(
+      parseFindingsReply('[{"start_line": 2, "end_line": 1, "content": "x"}]', "a"),
+    ).toBeUndefined();
+    expect(
+      parseFindingsReply('[{"start_line": 1, "end_line": 1, "content": ""}]', "a"),
+    ).toBeUndefined();
   });
 });
 

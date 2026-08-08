@@ -1,19 +1,23 @@
 /**
  * The quality.keiko.dev widget card: one repository's review record, rendered as a
- * self-contained SVG in the Keiko for Quality design language.
+ * self-contained SVG — a faithful transcription of the card widget in section 07 of
+ * `design-system/index.html`. Every dimension, colour and spacing below is copied from that
+ * markup, not invented here: 340px card, #171B18 on a 24px dot grid, the 42px orca tile with
+ * its green glow, mono 21px metrics with 10px labels, the outcome chip right-aligned ON the
+ * metrics row, and the EX EXPERIENTIA DISCO / quality.keiko.dev footer above a hairline.
+ * When the design page changes, this module follows it — never the other way around.
  *
  * Pure function of its inputs — no fetch, no clock, no environment — so the whole visual
- * contract is unit-testable byte-for-byte and the deployment adapter (`worker.ts`) stays a thin
- * shell around data collection and caching. Colors are the design-system tokens
- * (`design-system/index.html`), oklch-converted to hex at build-authoring time, dark and light
- * theme both; the layout mirrors the card widget in section 07 of the system page and the
- * README mock this whole service exists to make true: runs over thirty days, findings, the
- * acted-on share, and the latest outcome as a chip.
+ * contract is unit-testable byte-for-byte. The dark theme is the canonical card (the design
+ * page's own README example pins `theme=dark`); the light palette is a derived variant for
+ * the worker's `?theme=light`, kept coherent with the design system's light tokens.
  *
  * Numbers are the caller's problem on purpose. This module renders what it is handed and
  * nothing else — absent values render as an em dash, never as a fabricated zero, the same
  * honesty rule the run summary follows.
  */
+
+import { orcaMark } from "./logo.js";
 
 export interface CardData {
   readonly owner: string;
@@ -33,41 +37,70 @@ export interface CardData {
 export type CardTheme = "dark" | "light";
 
 interface Palette {
-  readonly bg: string;
   readonly card: string;
   readonly line: string;
+  readonly hairline: string;
+  readonly dot: string;
   readonly fg: string;
   readonly muted: string;
   readonly accent: string;
-  readonly warn: string;
+  readonly chipOk: string;
+  readonly chipOkBg: string;
+  readonly chipOkLine: string;
+  readonly chipWarn: string;
+  readonly chipWarnBg: string;
+  readonly chipWarnLine: string;
+  readonly tile: string;
+  readonly tileGlow: string;
+  readonly tileInk: string;
 }
 
-/** Token values from design-system/index.html, oklch→srgb converted exactly. */
+/** Dark values verbatim from the design page's card markup; light derived from its tokens. */
 const PALETTES: Record<CardTheme, Palette> = {
   dark: {
-    bg: "#141614",
-    card: "#1d1f1d",
-    line: "#2c2e2d",
-    fg: "#f3f6f4",
-    muted: "#a9abaa",
+    card: "#171B18",
+    line: "rgba(255,255,255,0.12)",
+    hairline: "rgba(255,255,255,0.1)",
+    dot: "rgba(233,237,235,0.07)",
+    fg: "#F2F5F3",
+    muted: "#98A29C",
     accent: "#4EBA87",
-    warn: "#e8aa4e",
+    chipOk: "#5FB585",
+    chipOkBg: "rgba(78,186,135,0.14)",
+    chipOkLine: "rgba(78,186,135,0.4)",
+    chipWarn: "#D9A24F",
+    chipWarnBg: "rgba(217,162,79,0.14)",
+    chipWarnLine: "rgba(217,162,79,0.4)",
+    tile: "#4EBA87",
+    tileGlow: "rgba(78,186,135,0.45)",
+    tileInk: "#1B211E",
   },
   light: {
-    bg: "#f3f4f2",
-    card: "#ffffff",
-    line: "#e1e4e0",
-    fg: "#26302b",
-    muted: "#5a6660",
-    accent: "#2e8f63",
-    warn: "#8a6410",
+    card: "#FFFFFF",
+    line: "#D5DBD6",
+    hairline: "#E3E8E4",
+    dot: "rgba(27,33,30,0.06)",
+    fg: "#1B211E",
+    muted: "#6A746E",
+    accent: "#2E8F63",
+    chipOk: "#2E8F63",
+    chipOkBg: "rgba(46,143,99,0.10)",
+    chipOkLine: "rgba(46,143,99,0.35)",
+    chipWarn: "#8A6410",
+    chipWarnBg: "rgba(138,100,16,0.10)",
+    chipWarnLine: "rgba(138,100,16,0.35)",
+    tile: "#4EBA87",
+    tileGlow: "rgba(78,186,135,0.35)",
+    tileInk: "#1B211E",
   },
 };
 
 const WIDTH = 340;
-const HEIGHT = 170;
-const FONT = "-apple-system,'Segoe UI',Helvetica,Arial,sans-serif";
-const MONO = "SFMono-Regular,Consolas,Menlo,monospace";
+const HEIGHT = 240;
+const PAD_X = 20;
+const PAD_Y = 18;
+const SANS = "-apple-system,'Segoe UI',Helvetica,Arial,sans-serif";
+const MONO = "'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace";
 
 /** SVG text content must never carry markup from repo names — escape the five. */
 function esc(text: string): string {
@@ -90,54 +123,103 @@ function lastRunLabel(hours: number | undefined): string {
   return `last run ${String(Math.round(hours / 24))} d ago`;
 }
 
-function outcomeChip(outcome: CardData["outcome"], p: Palette): string {
-  if (outcome === undefined) return "";
-  const complete = outcome === "complete";
-  const color = complete ? p.accent : p.warn;
-  const label = outcome.toUpperCase();
-  const w = 24 + label.length * 7.6;
-  const x = WIDTH - 20 - w;
-  const check = complete
-    ? `<path d="M${String(x + 11)} 41 l3 3 l5.6 -5.6" fill="none" stroke="${color}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`
-    : `<circle cx="${String(x + 13)}" cy="40" r="4" fill="none" stroke="${color}" stroke-width="1.6"/>`;
+/** The 42px brand tile with its glow, and the orca ink mark inset by the design's 4px. */
+function tileBlock(p: Palette): string {
+  const inset = 34 / 1024;
   return (
-    `<rect x="${String(x)}" y="30" width="${String(w)}" height="20" rx="10" fill="none" stroke="${color}" opacity="0.85"/>` +
-    check +
-    `<text x="${String(x + 22)}" y="44" font-family="${MONO}" font-size="10" letter-spacing="1" fill="${color}">${label}</text>`
+    `<rect x="${String(PAD_X - 6)}" y="${String(PAD_Y - 6)}" width="54" height="54" rx="16" fill="${p.tileGlow}" filter="url(#glow)"/>` +
+    `<rect x="${String(PAD_X)}" y="${String(PAD_Y)}" width="42" height="42" rx="11" fill="${p.tile}"/>` +
+    `<g transform="translate(${String(PAD_X + 4)},${String(PAD_Y + 4)}) scale(${String(inset)})">${orcaMark(p.tileInk)}</g>`
   );
 }
 
-/** The orca dot: brand circle with the ink swoosh, small enough to read at 40px. */
-function orcaMark(p: Palette): string {
+interface MetricColumn {
+  readonly value: string;
+  readonly label: string;
+  readonly accent: boolean;
+}
+
+/** Column advance mirrors the flex row: max(value, label) width plus the design's 22px gap. */
+function metricsBlock(columns: readonly MetricColumn[], p: Palette): string {
+  const valueY = 95;
+  const labelY = 109;
+  let x = PAD_X;
+  const parts: string[] = [];
+  for (const col of columns) {
+    parts.push(
+      `<text x="${String(x)}" y="${String(valueY)}" font-family="${MONO}" font-size="21" fill="${col.accent ? p.accent : p.fg}">${esc(col.value)}</text>`,
+      `<text x="${String(x)}" y="${String(labelY)}" font-family="${SANS}" font-size="10" fill="${p.muted}">${esc(col.label)}</text>`,
+    );
+    const width = Math.max(col.value.length * 12.7, col.label.length * 4.9);
+    x += width + 22;
+  }
+  return parts.join("\n  ");
+}
+
+function chipBlock(outcome: CardData["outcome"], p: Palette): string {
+  if (outcome === undefined) return "";
+  const ok = outcome === "complete";
+  const color = ok ? p.chipOk : p.chipWarn;
+  const bg = ok ? p.chipOkBg : p.chipWarnBg;
+  const line = ok ? p.chipOkLine : p.chipWarnLine;
+  const label = outcome.toUpperCase();
+  const textW = label.length * 6.4;
+  const w = 9 + 11 + 5 + textW + 9;
+  const x = WIDTH - PAD_X - w;
+  const cy = 88;
+  const icon = ok
+    ? `<path d="M${String(x + 11)} ${String(cy)} l2.8 2.8 l5.4 -5.6" fill="none" stroke="${color}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`
+    : `<circle cx="${String(x + 14.5)}" cy="${String(cy)}" r="4.4" fill="none" stroke="${color}" stroke-width="1.6"/>`;
   return (
-    `<rect x="20" y="24" width="40" height="40" rx="11" fill="${p.accent}" opacity="0.16"/>` +
-    `<circle cx="40" cy="44" r="12" fill="${p.accent}"/>` +
-    `<path d="M33.5 42.5 c2.6 -4 7.6 -4.7 11 -2 c-1.2 4.7 -5.7 7.4 -11 6.4 Z" fill="${p.card}"/>`
+    `<rect x="${String(x)}" y="${String(cy - 10.5)}" width="${String(w)}" height="21" rx="10.5" fill="${bg}" stroke="${line}"/>` +
+    icon +
+    `<text x="${String(x + 25)}" y="${String(cy + 3.5)}" font-family="${MONO}" font-size="9.5" letter-spacing="0.7" fill="${color}">${label}</text>`
+  );
+}
+
+function footerBlock(p: Palette): string {
+  const lineY = HEIGHT - 37;
+  const baseY = HEIGHT - PAD_Y - 4;
+  return (
+    `<line x1="${String(PAD_X)}" y1="${String(lineY)}" x2="${String(WIDTH - PAD_X)}" y2="${String(lineY)}" stroke="${p.hairline}"/>` +
+    `<text x="${String(PAD_X)}" y="${String(baseY)}" font-family="${MONO}" font-size="9.5" letter-spacing="0.7" fill="${p.muted}">EX EXPERIENTIA DISCO</text>` +
+    `<text x="${String(WIDTH - PAD_X)}" y="${String(baseY)}" text-anchor="end" font-family="${MONO}" font-size="9.5" fill="${p.accent}">quality.keiko.dev →</text>`
   );
 }
 
 export function renderCard(data: CardData, theme: CardTheme = "dark"): string {
   const p = PALETTES[theme];
   const title = "Reviewed by Keiko for Quality";
-  const repoLine = esc(`${data.owner}/${data.repo}`);
-  // The under-an-hour label carries a literal "<" — escape it like any other text content.
   const last = esc(lastRunLabel(data.lastRunHours));
+  const slug = esc(`${data.owner}/${data.repo}`);
+  const lastRun = last === "" ? "" : ` · ${last}`;
+  const sub = `${slug}${lastRun}`;
   const acted = data.actedOnPct === undefined ? "—" : `${String(Math.round(data.actedOnPct))}%`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${String(WIDTH)}" height="${String(HEIGHT)}" viewBox="0 0 ${String(WIDTH)} ${String(HEIGHT)}" role="img" aria-label="${esc(title)} — ${repoLine}">
-  <rect x="0.5" y="0.5" width="${String(WIDTH - 1)}" height="${String(HEIGHT - 1)}" rx="12.5" fill="${p.card}" stroke="${p.line}"/>
-  ${orcaMark(p)}
-  <text x="72" y="42" font-family="${FONT}" font-size="14.5" font-weight="650" fill="${p.fg}">${esc(title)}</text>
-  <text x="72" y="60" font-family="${MONO}" font-size="11" fill="${p.muted}">${repoLine}${last === "" ? "" : ` · ${last}`}</text>
-  ${outcomeChip(data.outcome, p)}
-  <text x="24" y="118" font-family="${FONT}" font-size="30" font-weight="650" fill="${p.fg}">${metric(data.runs30d)}</text>
-  <text x="24" y="138" font-family="${FONT}" font-size="11.5" fill="${p.muted}">runs · 30 d</text>
-  <text x="128" y="118" font-family="${FONT}" font-size="30" font-weight="650" fill="${p.fg}">${metric(data.findings)}</text>
-  <text x="128" y="138" font-family="${FONT}" font-size="11.5" fill="${p.muted}">findings</text>
-  <text x="228" y="118" font-family="${FONT}" font-size="30" font-weight="650" fill="${p.accent}">${acted}</text>
-  <text x="228" y="138" font-family="${FONT}" font-size="11.5" fill="${p.muted}">acted on</text>
-  <line x1="20" y1="152" x2="${String(WIDTH - 20)}" y2="152" stroke="${p.line}"/>
-  <text x="24" y="164" font-family="${MONO}" font-size="8.5" letter-spacing="1.6" fill="${p.muted}">EX EXPERIENTIA DISCO</text>
-  <text x="${String(WIDTH - 24)}" y="164" text-anchor="end" font-family="${MONO}" font-size="9" fill="${p.accent}">quality.keiko.dev</text>
+  const columns: readonly MetricColumn[] = [
+    { value: metric(data.runs30d), label: "runs · 30 d", accent: false },
+    { value: metric(data.findings), label: "findings", accent: false },
+    { value: acted, label: "acted on", accent: true },
+  ];
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${String(WIDTH)}" height="${String(HEIGHT)}" viewBox="0 0 ${String(WIDTH)} ${String(HEIGHT)}" role="img" aria-label="${esc(title)} — ${slug}">
+  <defs>
+    <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse" x="12" y="10">
+      <circle cx="1" cy="1" r="1.2" fill="${p.dot}"/>
+    </pattern>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+    <clipPath id="card"><rect x="0.5" y="0.5" width="${String(WIDTH - 1)}" height="${String(HEIGHT - 1)}" rx="12"/></clipPath>
+  </defs>
+  <rect x="0.5" y="0.5" width="${String(WIDTH - 1)}" height="${String(HEIGHT - 1)}" rx="12" fill="${p.card}" stroke="${p.line}"/>
+  <rect x="0.5" y="0.5" width="${String(WIDTH - 1)}" height="${String(HEIGHT - 1)}" rx="12" fill="url(#dots)"/>
+  <g clip-path="url(#card)">
+  ${tileBlock(p)}
+  <text x="75" y="36" font-family="${SANS}" font-size="13.5" font-weight="650" letter-spacing="-0.14" fill="${p.fg}">${esc(title)}</text>
+  <text x="75" y="51" font-family="${MONO}" font-size="10" fill="${p.muted}">${sub}</text>
+  ${metricsBlock(columns, p)}
+  ${chipBlock(data.outcome, p)}
+  ${footerBlock(p)}
+  </g>
 </svg>
 `;
 }

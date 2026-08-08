@@ -10,10 +10,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/oscharko-dev/Keiko-for-Quality/pulls?q=is%3Apr"><img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/1869ec1ce1f4fa465d5a0d512f11f18b76ba9a9c/.github/assets/kq/badge-reviewed.svg" height="28" alt="Reviewed by Keiko for Quality"></a>
-  <!-- Live widget, enabled once quality.keiko.dev is deployed (design-system/index.html, section 07):
-  <a href="https://github.com/oscharko-dev/Keiko-for-Quality/pulls?q=is%3Apr"><img src="https://quality.keiko.dev/widget/oscharko-dev/Keiko-for-Quality.svg?v=card&theme=dark" width="340" alt="Reviewed by Keiko for Quality — live run, finding and acted-on numbers for this repository"></a>
-  -->
+  <!-- Card rendered by the quality-cards workflow (widget/scripts/render-card.mjs) from this
+       host's own API data. When quality.keiko.dev is deployed, only the URLs below change to
+       https://quality.keiko.dev/widget/oscharko-dev/Keiko-for-Quality.svg . -->
+  <a href="https://github.com/oscharko-dev/Keiko-for-Quality/pulls?q=is%3Apr"><picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/quality-cards/cards/oscharko-dev/Keiko-for-Quality-light.svg">
+    <img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/quality-cards/cards/oscharko-dev/Keiko-for-Quality.svg" width="340" alt="Reviewed by Keiko for Quality — run, finding and acted-on numbers for this repository">
+  </picture></a>
 </p>
 
 <p align="center">
@@ -48,7 +51,7 @@ not a promise — see [SECURITY.md](SECURITY.md).
 Each finding opens with its classification, makes one imperative claim, and argues it in two
 sentences a reader can check against the code:
 
-> **TESTS · MAJOR**
+> `TESTS · MAJOR`
 >
 > **Add the required `verifyImmutableOwnership` option to the activation call.**
 >
@@ -106,7 +109,7 @@ same run are suppressed — the accounting for every suppression is in the run s
              PR: ${{ github.event.pull_request.number }}
            run: git fetch --no-tags origin "pull/${PR}/head"
 
-         - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.21.0
+         - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.21.1
            env:
              # The credential is passed by variable NAME, never as an input.
              KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
@@ -147,10 +150,11 @@ is in [docs/operations.md](docs/operations.md); release discipline is in
 
 The complete design language for every surface — GitHub comments, email, CLI, checks and README
 widgets — lives in [`design-system/`](design-system/): one self-contained page
-(`index.html`), the Lift-grammar quality glyphs, and the orca marks. Comment assets are pinned
-to the full commit SHA that the [`kq-assets-v1`](.github/assets/kq/) tag names — the SHA, not
-the tag, for the same reason consumers pin this action by SHA — so published comments can never
-change appearance retroactively.
+(`index.html`), the Lift-grammar quality glyphs, and the orca marks. Comment assets are the
+design page's chip pills, pinned to the full commit SHA that the
+[`kq-assets-v2`](.github/assets/kq/) tag names — the SHA, not the tag, for the same reason
+consumers pin this action by SHA — so published comments can never change appearance
+retroactively.
 
 ## Governance
 

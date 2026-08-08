@@ -602,8 +602,8 @@ describe("entriesUnderCurrentSemantics", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error("unreachable");
-    expect(result.store.entries.length).toBe(2);
-    expect(entriesUnderCurrentSemantics(result.store).entries.length).toBe(1);
+    expect(result.store.entries).toHaveLength(2);
+    expect(entriesUnderCurrentSemantics(result.store).entries).toHaveLength(1);
   });
 
   /** An entry with no `semantics` at all is a v2 store's shape, and v2 is not read at all. */

@@ -204,8 +204,25 @@ export interface Dossier {
   readonly isDiffEcho: boolean;
 }
 
-const CIRCUMSTANCE =
-  /(^|[.!?]\s|\*\*\s*)(When|If|Once|After|While|Whenever|Because)\s+[a-z`]|\b(on every (call|run|request|invocation)|for all inputs|on all paths|in every case)\b/imu;
+/**
+ * The circumstance predicate `corpus/evidence-shape.mjs` measured — that module's doc comment is
+ * where the numbers and the reasons for each half live, and these two literals must keep matching
+ * its two, character for character, or the two stop grading the same property.
+ *
+ * Two literals rather than the one alternation that produced those numbers, because that expression
+ * scored 27 against Sonar's regex-complexity ceiling of 20 (S5843). Nothing about what is graded
+ * changes: a top-level `|` is the union of its two sides, and a union matches exactly when one of
+ * its sides does. Both halves keep the same flags — `m` above all, which is what makes `^` mean "a
+ * line start" rather than "the body's first character".
+ */
+const ANCHORED_CONDITION =
+  /(^|[.!?]\s|\*\*\s*)(When|If|Once|After|While|Whenever|Because)\s+[a-z`]/imu;
+const EVERY_PATH_CONDITION =
+  /\b(on every (call|run|request|invocation)|for all inputs|on all paths|in every case)\b/imu;
+
+function statesCircumstance(text: string): boolean {
+  return ANCHORED_CONDITION.test(text) || EVERY_PATH_CONDITION.test(text);
+}
 
 /**
  * A path-like token (`src/a.ts`), a line reference (`line 42`, `:163`), or a backticked symbol.
@@ -230,7 +247,7 @@ export function buildDossier(body: string): Dossier {
   const lines = body.split("\n").filter((line) => line.trim() !== "");
   return {
     namesLocation: LOCATION.test(text),
-    namesCircumstance: CIRCUMSTANCE.test(text),
+    namesCircumstance: statesCircumstance(text),
     isDiffEcho: lines.length > 0 && lines.every((line) => DIFF_LINE.test(line)),
   };
 }
