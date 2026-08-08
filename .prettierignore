@@ -4,3 +4,8 @@ coverage/
 node_modules/
 LICENSE
 package-lock.json
+
+# Design artifacts: the bundler-exported system page, generated glyph assets, and MSO-safe
+# email tables — reformatting would break MSO table layout and pointlessly churn a 900 KB export.
+design-system/
+.github/assets/kq/
