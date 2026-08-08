@@ -67,6 +67,11 @@ describe("composeFindingBody", () => {
     const header = document.indexOf("`SECURITY · CRITICAL`");
     const title = document.indexOf("**Validate");
     const prose = document.indexOf("This comparison");
+    // An absent needle indexes as -1 and would satisfy any "before" comparison — the reviewer's
+    // own finding on #194. Presence first, order second.
+    expect(header).toBeGreaterThanOrEqual(0);
+    expect(title).toBeGreaterThanOrEqual(0);
+    expect(prose).toBeGreaterThanOrEqual(0);
     expect(header).toBeLessThan(title);
     expect(title).toBeLessThan(prose);
   });
