@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="248" height="28" viewBox="0 0 248 28" role="img" aria-label="Reviewed by Keiko for Quality">
+  <rect x="0.5" y="0.5" width="247" height="27" rx="6.5" fill="#1d1f1d" stroke="#2c2e2d"/>
+  <circle cx="15" cy="14" r="5" fill="#4EBA87"/>
+  <path d="M12.6 13.2 c1 -1.6 3 -1.9 4.4 -0.8 c-0.5 1.9 -2.3 3 -4.4 2.6 Z" fill="#1d1f1d"/>
+  <text x="28" y="18" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="600" fill="#f3f6f4">Reviewed by</text>
+  <text x="103" y="18" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="12" font-weight="650" fill="#4EBA87">Keiko for Quality</text>
+  <path d="M216 14 l4 4 l8 -8" fill="none" stroke="#4EBA87" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
