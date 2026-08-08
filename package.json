@@ -32,7 +32,7 @@
     "build": "node scripts/build.mjs",
     "check:bundle": "node scripts/check-bundle.mjs",
     "review": "node --import ./scripts/register-ts-hooks.mjs --experimental-strip-types src/cli.ts",
-    "verify": "npm run typecheck && npm run lint && npm run format:check && npm test && npm run test:corpus && npm run build && npm run check:bundle",
+    "verify": "npm run typecheck && npm run typecheck:widget && npm run lint && npm run format:check && npm test && npm run test:corpus && npm run test:widget && npm run build && npm run check:bundle",
     "check:engine-pin": "node scripts/check-engine-pin.mjs",
     "corpus": "node corpus/run.mjs",
     "fetch:engine": "node scripts/fetch-engine.mjs",
@@ -42,7 +42,9 @@
     "corpus:completion": "node corpus/completion-gate.mjs",
     "arena": "node corpus/arena.mjs",
     "arena:trend": "node corpus/arena-trend.mjs",
-    "live:telemetry": "node corpus/live-telemetry.mjs"
+    "live:telemetry": "node corpus/live-telemetry.mjs",
+    "typecheck:widget": "tsc -p widget/tsconfig.json",
+    "test:widget": "node --import ./widget/test/ts-hooks.mjs --test widget/test/*.test.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",
