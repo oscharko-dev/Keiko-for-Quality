@@ -219,6 +219,48 @@ export function buildSummaryReport(
  * This function never deletes or edits a comment it does not choose as the target: archiving or
  * removing an older stray is explicitly out of scope for Keiko-for-Quality#31.
  */
+/** The upsert keeps only the newest run's table; these two keep the older runs' one-line trail.
+ *
+ * Motivated by the first live day (2026-08-08): a fourteen-run pull request ended with ONE
+ * summary comment whose thirteen predecessors were recoverable only through the comment's GitHub
+ * edit history — the reviewer's own record of what it did, overwritten by the record of what it
+ * did last. Five rows is trail enough to see a pattern (repeated invalidations, a flapping
+ * outcome) without the comment growing without bound. */
+const HISTORY_HEADER = "**Recent runs**";
+const MAX_HISTORY_ROWS = 5;
+
+/** One run as one compact line: head, outcome (+reason), fresh/replayed split, duration. */
+function historyRow(input: SummaryRunInput): string {
+  const r = input.report;
+  const reason = r.reason === undefined ? "" : ` (\`${r.reason}\`)`;
+  return (
+    `- \`${(input.headSha as string).slice(0, 7)}\` · ${r.outcome}${reason} · ` +
+    `fresh ${String(r.reviewablePaths - r.cacheHits)} · replayed ${String(r.cacheHits)} · ` +
+    `${String(Math.round(input.durationMs / 1000))}s`
+  );
+}
+
+/**
+ * The `Recent runs` block for this update: the current row first, then the rows carried over from
+ * the previous body, capped. Parsing the block back out of markdown this module itself wrote is
+ * deliberate: the comment IS the persistence — there is no store to consult, and any line that
+ * fails the strict row shape is simply dropped rather than trusted.
+ */
+export function renderRunHistory(currentRow: string, previousBody: string | undefined): string {
+  const carried: string[] = [];
+  if (previousBody !== undefined) {
+    const at = previousBody.indexOf(HISTORY_HEADER);
+    if (at !== -1) {
+      for (const line of previousBody.slice(at).split("\n").slice(1)) {
+        if (!line.startsWith("- `")) break;
+        carried.push(line);
+      }
+    }
+  }
+  const rows = [currentRow, ...carried].slice(0, MAX_HISTORY_ROWS);
+  return `\n\n${HISTORY_HEADER}\n${rows.join("\n")}\n`;
+}
+
 function newestOwnSummary(comments: readonly IssueComment[]): IssueComment | undefined {
   return comments.reduce<IssueComment | undefined>(
     (newest, comment) => (newest === undefined || comment.id > newest.id ? comment : newest),
@@ -260,10 +302,12 @@ export async function maintainRunSummary(
   try {
     const summary = buildSummaryReport(input, diagnostics.drain());
     const marker = summaryMarker(`${context.ref.owner}/${context.ref.repo}`, context.pullNumber);
-    const body = composeSummaryBody(summary, markerComment(marker));
 
     const existing = await context.client.listIssueComments(context.ref, context.pullNumber);
     const target = newestOwnSummary(ownSummaryComments(existing, context.identity, marker));
+    const body =
+      composeSummaryBody(summary, markerComment(marker)) +
+      renderRunHistory(historyRow(input), target?.body);
 
     if (target === undefined) {
       const created = await context.client.createIssueComment(

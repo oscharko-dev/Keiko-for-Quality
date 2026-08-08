@@ -87,7 +87,7 @@ jobs:
       # The pinned release — see this file's header for why this is not `uses: ./`. Advance it in
       # the same change that tags a release, exactly as the consumer's pin is advanced.
       - name: Review
-        uses: oscharko-dev/Keiko-for-Quality@b398ea7b9db8d6b16d5922b38ea3d8e47bd20563 # v0.19.2
+        uses: oscharko-dev/Keiko-for-Quality@f09528308a7ffdf6ca60840e253a8fc085e9c9a3 # v0.20.0
         with:
           profile: .github/keiko-for-quality.json
           model_endpoint: ${{ secrets.KFQ_MODEL_ENDPOINT }}
@@ -104,3 +104,7 @@ jobs:
           token_budget: 3000000
         env:
           KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
+          # The single-shot mode this release qualified (corpus waves 28/29 and 27/29, completion
+          # gate 100%, seed gate GREEN — corpus/evidence/qualification-2026-08-07-single-shot.md):
+          # one model call per file, an arithmetic cost bound, and no tool loop to die mid-file.
+          KFQ_SINGLE_SHOT: "1"

@@ -277,9 +277,14 @@ describe("runSingleShotEngine", () => {
     }
     const aBody = seen
       .map((body) => body.messages?.[1]?.content ?? "")
-      .find((content) => content.includes("src/a.ts"));
+      .find((content) => content.includes("<current_file_path>src/a.ts</current_file_path>"));
     expect(aBody).toContain("__new hunk__");
     expect(aBody).toContain("<repository_context>");
+    // The companion block carries the OTHER changed file's hunks — the one-sided-pair
+    // false-positive class from the live audit dies exactly here.
+    expect(aBody).toContain("<companion_changes>");
+    expect(aBody).toContain("## src/b.ts");
+    expect(aBody).not.toContain("<other_changed_files>");
 
     // The stdout is REAL engine shape: prove it by round-tripping the shipped parser.
     const parsed = parseEngineResult(output.stdout);
@@ -308,5 +313,229 @@ describe("runSingleShotEngine", () => {
     expect(parsed.warnings[0]?.file).toBe("src/a.ts");
     // One bounded retry per transport failure: two wire calls for the one file, then honesty.
     expect(seen).toHaveLength(2);
+  });
+});
+
+describe("repair of publisher-rejectable bodies", () => {
+  interface CapturedBody {
+    readonly messages?: { role: string; content: string }[];
+  }
+  const REPAIR_CONFIG: RuntimeConfig = {
+    protocol: "openai",
+    endpoint: "https://model.example.test/v1",
+    model: "gpt-oss-120b",
+    tokenEnvName: "MODEL_TOKEN",
+    language: "English",
+    concurrency: 2,
+    fileTimeoutSeconds: 300,
+    reviewTimeoutSeconds: 1800,
+    tokenBudget: 2_000_000,
+    maxFindings: 50,
+    renameDetectionPercent: 50,
+  };
+  const PROFILE = compileProfile({
+    version: 1,
+    reviewRelevant: ["src/**"],
+    deletionCritical: [],
+    generated: [],
+    excluded: [],
+    benignWarnings: [],
+    pathInstructions: [],
+  } satisfies ReviewProfile);
+  function options(pair: ReviewPair, overrides: Partial<EngineRunOptions>): EngineRunOptions {
+    return {
+      binaryPath: "/unused-in-single-shot",
+      repositoryPath: "/unused-repo",
+      pair,
+      config: REPAIR_CONFIG,
+      profile: PROFILE,
+      guidelines: { paths: [] },
+      env: { MODEL_TOKEN: "secret-token" },
+      pathValue: "/usr/bin:/bin",
+      allottedBudget: 500_000,
+      mechanicallyCleanPaths: [],
+      ...overrides,
+    };
+  }
+
+  it("repairs a body the sanitizer rejects and keeps the original when repair fails", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "kfq-ss3-"));
+    const git = (args: readonly string[]): string =>
+      execFileSync("git", [...args], {
+        cwd: repo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.test",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.test",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+        },
+      });
+    git(["init", "-q", "-b", "main"]);
+    await mkdir(join(repo, "src"), { recursive: true });
+    await writeFile(join(repo, "src/a.ts"), "old\n");
+    git(["add", "."]);
+    git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+    const base = git(["rev-parse", "HEAD"]).trim();
+    await writeFile(join(repo, "src/a.ts"), "new line\n");
+    git(["add", "."]);
+    git(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+    const head = git(["rev-parse", "HEAD"]).trim();
+    const pair: ReviewPair = {
+      base: commitSha(base),
+      head: commitSha(head),
+      mergeBase: commitSha(base),
+    };
+
+    // First call: a review whose body carries a bare <path> token (sanitizer class html).
+    // Second call: the repair — returns one backticked body. Third scenario file below covers
+    // the repair failing.
+    let call = 0;
+    const seen: CapturedBody[] = [];
+    const fetchImpl = ((_url: string | URL, init?: RequestInit): Promise<Response> => {
+      const body = JSON.parse((init?.body as string | undefined) ?? "{}") as CapturedBody;
+      seen.push(body);
+      call += 1;
+      const reply =
+        call === 1
+          ? '[{"start_line": 1, "end_line": 1, "category": "bug", "severity": "high", "content": "Use a null device.\\n\\nIt runs diff -- /dev/null <path> today."}]'
+          : '["Use a null device.\\n\\nIt runs `diff -- /dev/null <path>` today."]';
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: reply } }],
+            usage: { prompt_tokens: 50, completion_tokens: 10 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    }) as typeof fetch;
+
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+    // Two wire calls: the review and the one repair.
+    expect(seen).toHaveLength(2);
+    const parsed = parseEngineResult(output.stdout);
+    expect(parsed.findings).toHaveLength(1);
+    // The published body is the repaired, backticked form the real sanitizer accepts.
+    expect(parsed.findings[0]?.content).toContain("`diff -- /dev/null <path>`");
+  });
+});
+
+describe("second focused pass for heavy files", () => {
+  const HEAVY_CONFIG: RuntimeConfig = {
+    protocol: "openai",
+    endpoint: "https://model.example.test/v1",
+    model: "gpt-oss-120b",
+    tokenEnvName: "MODEL_TOKEN",
+    language: "English",
+    concurrency: 2,
+    fileTimeoutSeconds: 300,
+    reviewTimeoutSeconds: 1800,
+    tokenBudget: 2_000_000,
+    maxFindings: 50,
+    renameDetectionPercent: 50,
+  };
+  const HEAVY_PROFILE = compileProfile({
+    version: 1,
+    reviewRelevant: ["src/**"],
+    deletionCritical: [],
+    generated: [],
+    excluded: [],
+    benignWarnings: [],
+    pathInstructions: [],
+  } satisfies ReviewProfile);
+  function repairOptions(pair: ReviewPair, overrides: Partial<EngineRunOptions>): EngineRunOptions {
+    return {
+      binaryPath: "/unused-in-single-shot",
+      repositoryPath: "/unused-repo",
+      pair,
+      config: HEAVY_CONFIG,
+      profile: HEAVY_PROFILE,
+      guidelines: { paths: [] },
+      env: { MODEL_TOKEN: "secret-token" },
+      pathValue: "/usr/bin:/bin",
+      allottedBudget: 500_000,
+      mechanicallyCleanPaths: [],
+      ...overrides,
+    };
+  }
+
+  it("runs exactly one extra call for a 150+ line change and unions without duplicating", async () => {
+    const repo = await mkdtemp(join(tmpdir(), "kfq-ss4-"));
+    const git = (args: readonly string[]): string =>
+      execFileSync("git", [...args], {
+        cwd: repo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.test",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.test",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+        },
+      });
+    git(["init", "-q", "-b", "main"]);
+    await mkdir(join(repo, "src"), { recursive: true });
+    await writeFile(join(repo, "src/big.ts"), "// base\n");
+    git(["add", "."]);
+    git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+    const base = git(["rev-parse", "HEAD"]).trim();
+    const bigBody = Array.from(
+      { length: 160 },
+      (_, i) => `export const line${String(i)} = ${String(i)};`,
+    ).join("\n");
+    await writeFile(join(repo, "src/big.ts"), `${bigBody}\n`);
+    git(["add", "."]);
+    git(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+    const head = git(["rev-parse", "HEAD"]).trim();
+    const pair: ReviewPair = {
+      base: commitSha(base),
+      head: commitSha(head),
+      mergeBase: commitSha(base),
+    };
+
+    const seenSeeds: number[] = [];
+    const fetchImpl = ((_url: string | URL, init?: RequestInit): Promise<Response> => {
+      const body = JSON.parse((init?.body as string | undefined) ?? "{}") as {
+        seed?: number;
+        messages?: { role: string; content: string }[];
+      };
+      seenSeeds.push(body.seed ?? -1);
+      const isSecondPass = (body.messages?.[1]?.content ?? "").includes("second focused pass");
+      const reply = isSecondPass
+        ? // One duplicate of the first pass's finding (same lines, same text) and one genuinely new.
+          '[{"start_line": 3, "end_line": 3, "category": "bug", "severity": "high", "content": "Boundary reads one element past the end."},{"start_line": 9, "end_line": 9, "category": "bug", "severity": "medium", "content": "Error path returns success shape."}]'
+        : '[{"start_line": 3, "end_line": 3, "category": "bug", "severity": "high", "content": "Boundary reads one element past the end."}]';
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: reply } }],
+            usage: { prompt_tokens: 80, completion_tokens: 20 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    }) as typeof fetch;
+
+    const output = await runSingleShotEngine(
+      repairOptions(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+    // Two calls: first pass seed 42, second pass seed 1042.
+    expect(seenSeeds).toEqual([42, 1042]);
+    const parsed = parseEngineResult(output.stdout);
+    // Union kept the duplicate once and the genuinely new finding.
+    expect(parsed.findings).toHaveLength(2);
+    expect(parsed.status).toBe("success");
   });
 });

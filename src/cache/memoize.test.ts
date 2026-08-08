@@ -674,3 +674,64 @@ describe("buildNewEntries", () => {
     expect(entries).toEqual([]);
   });
 });
+
+describe("per-path context digests (single-shot, v0.20.1)", () => {
+  it("replays on a matching per-path digest where the whole-set scalar moved, and refuses a moved group", () => {
+    const changeA = rawChange({ path: "src/a.ts" });
+    const changeB = rawChange({
+      path: "src/b.ts",
+      oldBlob: blobId("3".repeat(40)),
+      newBlob: blobId("4".repeat(40)),
+    });
+    const inventory = inventoryOf([changeA, changeB]);
+    const digests = new Map<string, Sha256>([
+      ["src/a.ts", sha256("c".repeat(64))],
+      ["src/b.ts", sha256("d".repeat(64))],
+    ]);
+    const written = buildNewEntries({
+      inventory,
+      eligiblePaths: new Set(["src/a.ts", "src/b.ts"]),
+      hitPaths: new Set(),
+      findings: [],
+      ruleDigest: RULE_DIGEST,
+      engineDigest: ENGINE_DIGEST,
+      pathSetDigest: PATH_SET_DIGEST,
+      contextDigests: digests,
+      config: CONFIG,
+    });
+    // Each entry is stamped with its OWN group digest, not the whole-set scalar.
+    expect(written.map((entry) => entry.prPathSetDigest).sort()).toEqual(
+      [...digests.values()].sort(),
+    );
+    const store: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: written };
+
+    // A later run whose whole-set scalar moved (an unrelated file joined the PR) still replays
+    // every file whose OWN companion group is unchanged...
+    const unchanged = lookupMemoized(
+      store,
+      inventory,
+      RULE_DIGEST,
+      ENGINE_DIGEST,
+      CONFIG,
+      sha256("8".repeat(64)),
+      digests,
+    );
+    expect(unchanged.hits.size).toBe(2);
+    expect(unchanged.contextInvalidated).toBe(0);
+
+    // ...and refuses exactly the file whose companion group moved.
+    const moved = new Map(digests);
+    moved.set("src/b.ts", sha256("e".repeat(64)));
+    const partial = lookupMemoized(
+      store,
+      inventory,
+      RULE_DIGEST,
+      ENGINE_DIGEST,
+      CONFIG,
+      sha256("8".repeat(64)),
+      moved,
+    );
+    expect([...partial.hits.keys()]).toEqual(["src/a.ts"]);
+    expect(partial.contextInvalidated).toBe(1);
+  });
+});
