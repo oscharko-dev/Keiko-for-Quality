@@ -1624,7 +1624,7 @@ function label(table, key, fallback) {
 }
 var FALLBACK_CATEGORY = "Review";
 var FALLBACK_SEVERITY = "Minor";
-var ASSET_BASE = "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/kq-assets-v1/.github/assets/kq";
+var ASSET_BASE = "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/1869ec1ce1f4fa465d5a0d512f11f18b76ba9a9c/.github/assets/kq";
 function assetIcon(name, size) {
   return `<img src="${ASSET_BASE}/${name}.svg" width="${String(size)}" height="${String(size)}" alt="">`;
 }

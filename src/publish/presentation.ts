@@ -65,16 +65,20 @@ const FALLBACK_CATEGORY = "Review";
 const FALLBACK_SEVERITY = "Minor";
 
 /**
- * Comment assets are served from the immutable `kq-assets-v1` tag — a tag this repository
- * creates once and never moves, so a published comment can never change appearance
- * retroactively. Findings deliberately do NOT use these: a finding is an argument, and it
- * renders as text everywhere, including in clients that strip or block images. Icons appear
- * only on the two product-voice surfaces — the run summary and the coverage notice — where the
- * word the icon decorates is always right next to it, which is also why every `alt` is empty:
- * with images blocked the surfaces degrade to exactly the text they carried before icons.
+ * Comment assets are pinned to the full commit SHA the `kq-assets-v1` tag names — the SHA, not
+ * the tag, for the same reason consumers pin this action by SHA: a tag is mutable, and a
+ * published comment must never change appearance retroactively, nor be redirectable to content
+ * this repository did not review. (This reviewer found that distinction itself, reviewing the
+ * change that introduced the tag reference — Keiko-for-Quality#184.) The tag remains the
+ * human-readable alias for the same commit. Findings deliberately do NOT use these assets: a
+ * finding is an argument, and it renders as text everywhere, including in clients that strip
+ * or block images. Icons appear only on the two product-voice surfaces — the run summary and
+ * the coverage notice — where the word the icon decorates is always right next to it, which is
+ * also why every `alt` is empty: with images blocked the surfaces degrade to exactly the text
+ * they carried before icons.
  */
 const ASSET_BASE =
-  "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/kq-assets-v1/.github/assets/kq";
+  "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/1869ec1ce1f4fa465d5a0d512f11f18b76ba9a9c/.github/assets/kq";
 
 function assetIcon(name: string, size: number): string {
   return `<img src="${ASSET_BASE}/${name}.svg" width="${String(size)}" height="${String(size)}" alt="">`;

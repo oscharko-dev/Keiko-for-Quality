@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/oscharko-dev/Keiko-for-Quality/pulls?q=is%3Apr"><img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/kq-assets-v1/.github/assets/kq/badge-reviewed.svg" height="28" alt="Reviewed by Keiko for Quality"></a>
+  <a href="https://github.com/oscharko-dev/Keiko-for-Quality/pulls?q=is%3Apr"><img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/1869ec1ce1f4fa465d5a0d512f11f18b76ba9a9c/.github/assets/kq/badge-reviewed.svg" height="28" alt="Reviewed by Keiko for Quality"></a>
   <!-- Live widget, enabled once quality.keiko.dev is deployed (design-system/index.html, section 07):
   <a href="https://github.com/oscharko-dev/Keiko-for-Quality/pulls?q=is%3Apr"><img src="https://quality.keiko.dev/widget/oscharko-dev/Keiko-for-Quality.svg?v=card&theme=dark" width="340" alt="Reviewed by Keiko for Quality — live run, finding and acted-on numbers for this repository"></a>
   -->
@@ -147,8 +147,9 @@ is in [docs/operations.md](docs/operations.md); release discipline is in
 
 The complete design language for every surface — GitHub comments, email, CLI, checks and README
 widgets — lives in [`design-system/`](design-system/): one self-contained page
-(`index.html`), the Lift-grammar quality glyphs, and the orca marks. Comment assets are served
-from the immutable [`kq-assets-v1`](.github/assets/kq/) tag, so published comments can never
+(`index.html`), the Lift-grammar quality glyphs, and the orca marks. Comment assets are pinned
+to the full commit SHA that the [`kq-assets-v1`](.github/assets/kq/) tag names — the SHA, not
+the tag, for the same reason consumers pin this action by SHA — so published comments can never
 change appearance retroactively.
 
 ## Governance
