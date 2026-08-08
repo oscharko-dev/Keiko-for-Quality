@@ -129,10 +129,10 @@ describe("composeIncompleteNotice", () => {
   const notice = composeIncompleteNotice("settlement.incomplete.coverage_gap", MARKER);
 
   it("is visually distinct from a defect finding", () => {
-    // "COVERAGE" is outside composeFindingBody's category vocabulary, and the icon (pinned
-    // kq-assets-v1 tag, empty alt) appears on no finding — both keep the opening lines disjoint.
+    // "COVERAGE" is outside composeFindingBody's category vocabulary, and the icon (pinned to a
+    // full commit SHA, empty alt) appears on no finding — both keep the opening lines disjoint.
     expect(notice.split("\n")[0]).toMatch(
-      /^<img src="https:\/\/raw\.githubusercontent\.com\/oscharko-dev\/Keiko-for-Quality\/kq-assets-v1\/[^"]+\/out-incomplete\.svg" width="14" height="14" alt=""> \*\*COVERAGE · MAJOR\*\*$/,
+      /^<img src="https:\/\/raw\.githubusercontent\.com\/oscharko-dev\/Keiko-for-Quality\/[0-9a-f]{40}\/[^"]+\/out-incomplete\.svg" width="14" height="14" alt=""> \*\*COVERAGE · MAJOR\*\*$/,
     );
     expect(notice).toContain("**This change was not fully reviewed.**");
   });
