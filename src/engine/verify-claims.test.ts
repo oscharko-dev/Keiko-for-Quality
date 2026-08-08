@@ -16,6 +16,28 @@ import {
 describe("needsWholeFileEvidence", () => {
   const HUNK = ["12 +  const parsed = parseConfig(raw);", "13 +  return parsed.value;"].join("\n");
 
+  /**
+   * The shape production actually passes: the rule text asks for a PLAIN imperative first line,
+   * and the bold only appears after `composeFindingBody` runs — long after this selector. A draft
+   * that required the markup matched almost nothing on real model output, and the measurement
+   * that "confirmed" it had been run against published bodies. Codex reviewer, #202.
+   */
+  it("selects a raw model claim, which carries no bold markup", () => {
+    for (const raw of [
+      "Adjust the header-name expectation to match the parser's normalization.\n\nWhen a provider specifies a header, the form shows it verbatim.",
+      "Add handling for the new flag on the server side.\n\nWhen the dialog uploads a configuration, the server ignores it.",
+      "Validate the token in full, not by prefix.",
+    ]) {
+      expect(needsWholeFileEvidence(raw, HUNK)).toBe(true);
+    }
+  });
+
+  it("reads the claim's own first line, not a verb opening a later sentence", () => {
+    const grounded =
+      "Line 13 dereferences a value the added call may leave absent.\n\nMake sure to read it.";
+    expect(needsWholeFileEvidence(grounded, HUNK)).toBe(false);
+  });
+
   it("selects absence claims written as the rule text's imperative", () => {
     for (const title of [
       "**Add handling for the new `imageInputModelIdsConfigured` flag on the server side.**",
@@ -29,6 +51,21 @@ describe("needsWholeFileEvidence", () => {
     }
   });
 
+  // Widened against measurement: the first draft carried only the absence verbs and selected 36
+  // of the window's 55 refutations. The missing 19 were all change imperatives.
+  it("selects the change imperatives the first draft missed", () => {
+    for (const title of [
+      "**Adjust the header-name expectation to match the parser's normalization.**",
+      "**Replace the use of `importMeta` with a proper directory resolution.**",
+      "**Restore the original top-level coverage fields.**",
+      "**Update consumers to read coverage metrics from the nested object.**",
+      "**Move the definition before its first use.**",
+      "**Cancel pending reads when the component unmounts.**",
+    ]) {
+      expect(needsWholeFileEvidence(title, HUNK)).toBe(true);
+    }
+  });
+
   it("selects prose that asserts absence outright", () => {
     expect(needsWholeFileEvidence("The parser does not reject duplicates.", HUNK)).toBe(true);
     expect(needsWholeFileEvidence("This path fails to clean up the directory.", HUNK)).toBe(true);
@@ -37,6 +74,14 @@ describe("needsWholeFileEvidence", () => {
 
   it("selects a claim leaning on a symbol the model was never shown", () => {
     expect(needsWholeFileEvidence("`orphanedProfiles` is computed too late.", HUNK)).toBe(true);
+  });
+
+  // This reviewer's own finding on the change that introduced this function (#201): a substring
+  // test reads `cat` as shown by `concatenate`, marking an unseen symbol as grounded.
+  it("counts a symbol as shown only when the diff shows the whole identifier", () => {
+    const diff = "12 +  const total = concatenate(parts);";
+    expect(needsWholeFileEvidence("`cat` is never bounded.", diff)).toBe(true);
+    expect(needsWholeFileEvidence("`concatenate` is never bounded.", diff)).toBe(false);
   });
 
   it("leaves a claim grounded in the shown hunk alone", () => {

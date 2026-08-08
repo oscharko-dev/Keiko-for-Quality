@@ -3271,13 +3271,92 @@ function promptIdentityDigest(profile, guidelines) {
 import { createHash as createHash7, randomUUID } from "node:crypto";
 
 // src/engine/verify-claims.ts
-var ABSENCE_IMPERATIVE = /(^|\n)\s*\*\*\s*(Add|Ensure|Guard|Reject|Validate|Clear|Handle|Initialize|Reset|Remove|Prevent|Avoid|Restrict|Require|Check)\b/iu;
-var ABSENCE_PROSE = /\b(is missing|are missing|does not|doesn't|do not|don't|never (?:clears|checks|validates|resets|removes|handles|guards)|no (?:guard|handling|validation|check|cleanup)|without (?:guard|validation|checking)|fails to|omits)\b/iu;
+var CLAIM_VERBS = /* @__PURE__ */ new Set([
+  // absence: the file does not do this
+  "add",
+  "ensure",
+  "guard",
+  "reject",
+  "validate",
+  "clear",
+  "handle",
+  "initialize",
+  "reset",
+  "remove",
+  "prevent",
+  "avoid",
+  "restrict",
+  "require",
+  "check",
+  // change: the file does this, and does it wrong
+  "adjust",
+  "update",
+  "replace",
+  "restore",
+  "reinstate",
+  "delete",
+  "move",
+  "propagate",
+  "load",
+  "exclude",
+  "cancel",
+  "correct",
+  "fix",
+  "rename",
+  "align",
+  "switch",
+  "use",
+  "make",
+  "treat",
+  "accept"
+]);
+var TITLE_VERB = /^\s*(?:\*\*\s*)?([A-Za-z]+)/u;
+var CLAIM_PHRASES = [
+  "is missing",
+  "are missing",
+  "does not",
+  "doesn't",
+  "do not",
+  "don't",
+  "never clears",
+  "never checks",
+  "never validates",
+  "never resets",
+  "never removes",
+  "never handles",
+  "never guards",
+  "no guard",
+  "no handling",
+  "no validation",
+  "no check",
+  "no cleanup",
+  "without guard",
+  "without validation",
+  "without checking",
+  "fails to",
+  "omits",
+  "incorrectly",
+  "instead of"
+];
+function opensWithClaimVerb(content) {
+  const firstLine = content.split("\n").find((line) => line.trim() !== "");
+  if (firstLine === void 0) return false;
+  const verb = TITLE_VERB.exec(firstLine)?.[1];
+  return verb !== void 0 && CLAIM_VERBS.has(verb.toLowerCase());
+}
+function statesClaimInProse(content) {
+  const text3 = content.toLowerCase();
+  return CLAIM_PHRASES.some((phrase) => text3.includes(phrase));
+}
 var BACKTICKED = /`([A-Za-z_$][\w$]*)`/gu;
 function needsWholeFileEvidence(content, renderedDiff) {
-  if (ABSENCE_IMPERATIVE.test(content) || ABSENCE_PROSE.test(content)) return true;
+  if (opensWithClaimVerb(content) || statesClaimInProse(content)) return true;
   const symbols = [...content.matchAll(BACKTICKED)].map((m) => m[1]);
-  return symbols.some((symbol) => symbol !== void 0 && !renderedDiff.includes(symbol));
+  return symbols.some((symbol) => symbol !== void 0 && !shownWholeWord(symbol, renderedDiff));
+}
+function shownWholeWord(symbol, renderedDiff) {
+  const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
+  return new RegExp(String.raw`(?<![\w$])${escaped}(?![\w$])`, "u").test(renderedDiff);
 }
 function numberFileLines(text3) {
   return text3.split("\n").map((line, index) => `${String(index + 1)} ${line}`).join("\n");
@@ -4203,7 +4282,10 @@ async function headFileText(options2, path) {
 }
 async function verifyWholeFileClaims(state, dispatch, comments) {
   const needing = comments.filter((c) => needsWholeFileEvidence(c.content, dispatch.renderedDiff));
-  if (needing.length === 0 || state.spendStopped) return comments;
+  const spent = state.usage.prompt + state.usage.completion;
+  if (needing.length === 0 || state.spendStopped || spent >= state.options.allottedBudget) {
+    return comments;
+  }
   const text3 = await headFileText(state.options, dispatch.path);
   if (text3 === void 0 || text3.length > MAX_VERIFY_FILE_CHARS) return comments;
   const reply = await callModel(
