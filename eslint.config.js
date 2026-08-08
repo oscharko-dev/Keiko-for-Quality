@@ -7,6 +7,8 @@ const NODE_SCRIPT_GLOBALS = {
   process: "readonly",
   Buffer: "readonly",
   fetch: "readonly",
+  Request: "readonly",
+  Response: "readonly",
   URL: "readonly",
 };
 
@@ -74,9 +76,35 @@ export default defineConfig(
     },
   },
 
+  // The widget service is a second, self-contained TypeScript program (widget/tsconfig.json,
+  // WebWorker lib) held to the same discipline as src/ — minus the console rule, which guards
+  // the product's diagnostics sink, a contract the worker does not participate in.
+  {
+    files: ["widget/src/**/*.ts"],
+    extends: [
+      js.configs.recommended,
+      ...tseslint.configs.strictTypeChecked,
+      ...tseslint.configs.stylisticTypeChecked,
+    ],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      "@typescript-eslint/explicit-function-return-type": "error",
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/consistent-type-imports": "error",
+      complexity: ["error", 10],
+      "max-lines-per-function": ["error", { max: 50, skipBlankLines: true, skipComments: true }],
+      eqeqeq: ["error", "always"],
+    },
+  },
+
   // Build and gate scripts are plain Node ESM, outside the TypeScript program.
   {
-    files: ["scripts/**/*.mjs", "corpus/**/*.mjs", "*.js"],
+    files: ["scripts/**/*.mjs", "corpus/**/*.mjs", "widget/test/**/*.mjs", "*.js"],
     extends: [js.configs.recommended],
     languageOptions: {
       ecmaVersion: 2024,
