@@ -60,18 +60,33 @@ function prose(body) {
 }
 
 /**
+ * A condition word opening a sentence, or ending a bold title.
+ *
+ * The anchor is load-bearing: dropping it takes ours from 21.7% to 66.1%, because our findings do
+ * mention circumstances — inside the fix they propose, not as the condition under which the code is
+ * wrong. Those are different claims and only one is checkable.
+ */
+const ANCHORED_CONDITION =
+  /(^|[.!?]\s|\*\*\s*)(When|If|Once|After|While|Whenever|Because)\s+[a-z`]/imu;
+
+/** The every-path forms: a defect wrong on all paths has no circumstance to name, and the rule text
+ *  asks for that to be SAID rather than left silent. */
+const EVERY_PATH_CONDITION =
+  /\b(on every (call|run|request|invocation)|for all inputs|on all paths|in every case)\b/imu;
+
+/**
  * The circumstance under which the defect occurs, stated as a circumstance: "When the loopback peer
  * omits Content-Length…", "If the BFF stalls before returning headers…".
  *
- * Anchored to a sentence start, or to the end of a bold title, so that a subordinate "… if present"
- * inside a remedy does not count. That anchor is load-bearing: dropping it takes ours from 21.7% to
- * 66.1%, because our findings do mention circumstances — inside the fix they propose, not as the
- * condition under which the code is wrong. Those are different claims and only one is checkable.
+ * Two literals rather than the one alternation that produced the numbers above, because that
+ * expression scored 27 against Sonar's regex-complexity ceiling of 20 (S5843). The accepted set is
+ * unchanged and the figures are not re-based: a top-level `|` is the union of its two sides, and a
+ * union matches exactly when one of its sides does. Both halves must keep the same flags, `m` above
+ * all — it is what makes `^` mean "a line start" rather than "the body's first character".
  */
 export function statesTriggeringCondition(body) {
-  return /(^|[.!?]\s|\*\*\s*)(When|If|Once|After|While|Whenever|Because)\s+[a-z`]|\b(on every (call|run|request|invocation)|for all inputs|on all paths|in every case)\b/imu.test(
-    prose(body),
-  );
+  const text = prose(body);
+  return ANCHORED_CONDITION.test(text) || EVERY_PATH_CONDITION.test(text);
 }
 
 /** Counts over a set of bodies, for a run report or an offline sweep over real production output. */

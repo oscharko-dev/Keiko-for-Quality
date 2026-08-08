@@ -1267,15 +1267,14 @@ async function compareMatchedPairs(
       request.base,
       (item.oldPath ?? item.path) as string,
     );
+    const side: ChangedSide = { item, text: left, baseText: leftBase };
     for (const pair of matched) {
       compared += await compareAgainstCounterparts(
         blobCache,
         ctx,
         request.head,
-        item,
+        side,
         pair,
-        left,
-        leftBase,
         findings,
       );
       if (findings.length >= MAX_GATE_FINDINGS) break;
@@ -1429,24 +1428,38 @@ function pushGateFindings<T>(
 }
 
 /**
+ * The changed file's own side of a comparison: the item, and its head and base text.
+ *
+ * One value rather than three adjacent parameters because the three are only ever true together —
+ * `text` and `baseText` are THIS item's content at head and base, and a caller that paired one
+ * item with another's text would produce a finding about a file that never said it. Grouping them
+ * is also what keeps the comparison inside this project's parameter budget (Sonar S107).
+ */
+interface ChangedSide {
+  readonly item: InventoryItem;
+  readonly text: string;
+  /** Absent for an added file, which correctly leaves the union check with nothing to compare. */
+  readonly baseText: string | undefined;
+}
+
+/**
  * One changed file against one pair's counterparts; returns how many comparisons actually ran.
  *
- * `left`/`leftBase` are read once by the caller (`collectGateFindings`) and passed in rather than
- * re-read here — an item matching more than one declared pair used to pay for its own head/base
- * content once per matching pair, all identical reads. `right` (a counterpart, not this item) is
- * still read here, through the shared cache, since which counterparts get read depends on which
- * pair is being compared right now.
+ * `side` is read once by the caller (`collectGateFindings`) and passed in rather than re-read here
+ * — an item matching more than one declared pair used to pay for its own head/base content once
+ * per matching pair, all identical reads. `right` (a counterpart, not this item) is still read
+ * here, through the shared cache, since which counterparts get read depends on which pair is being
+ * compared right now.
  */
 async function compareAgainstCounterparts(
   blobCache: BlobTextCache,
   ctx: GitContext,
   head: CommitSha,
-  item: InventoryItem,
+  side: ChangedSide,
   pair: { readonly counterparts: readonly string[] },
-  left: string,
-  leftBase: string | undefined,
   findings: EngineFinding[],
 ): Promise<number> {
+  const { item, text: left, baseText: leftBase } = side;
   const path = item.path as string;
   let compared = 0;
   for (const counterpart of pair.counterparts) {

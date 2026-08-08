@@ -155,12 +155,8 @@ export function renderNumberedHunks(fileDiff: string): string {
   let oldBody: string[] = [];
   const flush = (): void => {
     if (newBody.length === 0 && oldBody.length === 0) return;
-    out.push("__new hunk__");
-    out.push(...newBody);
-    if (oldBody.length > 0) {
-      out.push("__old hunk__");
-      out.push(...oldBody);
-    }
+    out.push("__new hunk__", ...newBody);
+    if (oldBody.length > 0) out.push("__old hunk__", ...oldBody);
     newBody = [];
     oldBody = [];
   };
@@ -295,13 +291,44 @@ function parseFindingEntry(entry: unknown, path: string): EngineComment | undefi
   };
 }
 
+/** The fence a model wraps its JSON in when it cannot resist Markdown, and the language tag it
+ *  most often puts on the opener. */
+const FENCE = "```";
+const FENCE_LANGUAGE = "json";
+
+/**
+ * The text inside a fence that wraps the WHOLE reply, or the trimmed reply when there is none —
+ * the one tolerance this mode grants such a reply, shared by the findings parser and the
+ * body-repair pass so the two can never disagree about what a fenced reply is.
+ *
+ * A walk rather than the `^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$` it replaces, which Sonar reports
+ * as super-linear (S8786): three whitespace-capable quantifiers in a row let one run of whitespace
+ * decompose many ways, and the lazy middle re-scanned to the end of the reply once per candidate
+ * closing run. Neither the accepted language nor the returned text changes, for two reasons worth
+ * writing down. A closing run is admissible only when nothing but whitespace follows it to the end
+ * of the reply, and at most one position in a string can satisfy that — a second would have to put
+ * a backtick inside the first one's trailing whitespace — so the lazy scan's FIRST admissible run
+ * and this trim-from-the-end's LAST one are the same run. And both callers trimmed the capture,
+ * which is what makes the two `\s*` around it nothing this has to reproduce.
+ */
+function unfenceJson(reply: string): string {
+  const opened = reply.trimStart();
+  if (!opened.startsWith(FENCE)) return reply.trim();
+  const afterFence = opened.slice(FENCE.length);
+  const body = afterFence.startsWith(FENCE_LANGUAGE)
+    ? afterFence.slice(FENCE_LANGUAGE.length)
+    : afterFence;
+  const closed = body.trimEnd();
+  if (!closed.endsWith(FENCE)) return reply.trim();
+  return closed.slice(0, -FENCE.length).trim();
+}
+
 /** Strict reply parsing: fences tolerated, everything else reject-rather-than-repair. */
 export function parseFindingsReply(
   reply: string,
   path: string,
 ): readonly EngineComment[] | undefined {
-  const unfenced = /^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$/.exec(reply);
-  const text = (unfenced?.[1] ?? reply).trim();
+  const text = unfenceJson(reply);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -393,6 +420,18 @@ function parseModelResponse(text: string): ModelReply {
   };
 }
 
+/**
+ * The trailing slashes of a configured endpoint, so the request path is appended exactly once.
+ *
+ * The lookbehind pins the match to the START of that run — which is where a non-global `replace`
+ * finds it anyway, since the leftmost match of `\/+$` is by definition the earliest position from
+ * which every remaining character is a slash, and such a position is never itself preceded by one.
+ * Saying so out loud is what keeps the scan linear (Sonar S8786): without it, every position inside
+ * a long run is retried as its own start. Same shape, same fix, and same argument as
+ * `URL_TRAILING_PUNCTUATION` in `publish/sanitize.ts`.
+ */
+const ENDPOINT_TRAILING_SLASHES = /(?<!\/)\/+$/;
+
 async function callModel(
   endpoint: string,
   token: string,
@@ -403,7 +442,8 @@ async function callModel(
   fetchImpl: typeof fetch,
 ): Promise<ModelReply> {
   try {
-    const response = await fetchImpl(`${endpoint.replace(/\/+$/, "")}/chat/completions`, {
+    const url = `${endpoint.replace(ENDPOINT_TRAILING_SLASHES, "")}/chat/completions`;
+    const response = await fetchImpl(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -712,8 +752,7 @@ async function repairRejectableBodies(
 
   let repaired: unknown;
   try {
-    const unfenced = /^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$/.exec(reply.content);
-    repaired = JSON.parse((unfenced?.[1] ?? reply.content).trim());
+    repaired = JSON.parse(unfenceJson(reply.content));
   } catch {
     return comments;
   }
