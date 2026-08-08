@@ -10,6 +10,18 @@
 </p>
 
 <p align="center">
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=alert_status"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=duplicated_lines_density"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=coverage"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=duplicated_lines_density"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=reliability_rating"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=security_rating"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=sqale_rating"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=sqale_index"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=vulnerabilities"></a>
+</p>
+
+<p align="center">
   <!-- Card rendered by the quality-cards workflow (widget/scripts/render-card.mjs) from this
        host's own API data. When quality.keiko.dev is deployed, only the URLs below change to
        https://quality.keiko.dev/widget/oscharko-dev/Keiko-for-Quality.svg . -->
