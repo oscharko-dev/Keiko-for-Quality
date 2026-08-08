@@ -191,14 +191,16 @@ export function renderCard(data: CardData, theme: CardTheme = "dark"): string {
   const p = PALETTES[theme];
   const title = "Reviewed by Keiko for Quality";
   const last = esc(lastRunLabel(data.lastRunHours));
-  const sub = `${esc(`${data.owner}/${data.repo}`)}${last === "" ? "" : ` · ${last}`}`;
+  const slug = esc(`${data.owner}/${data.repo}`);
+  const lastRun = last === "" ? "" : ` · ${last}`;
+  const sub = `${slug}${lastRun}`;
   const acted = data.actedOnPct === undefined ? "—" : `${String(Math.round(data.actedOnPct))}%`;
   const columns: readonly MetricColumn[] = [
     { value: metric(data.runs30d), label: "runs · 30 d", accent: false },
     { value: metric(data.findings), label: "findings", accent: false },
     { value: acted, label: "acted on", accent: true },
   ];
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${String(WIDTH)}" height="${String(HEIGHT)}" viewBox="0 0 ${String(WIDTH)} ${String(HEIGHT)}" role="img" aria-label="${esc(title)} — ${esc(`${data.owner}/${data.repo}`)}">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${String(WIDTH)}" height="${String(HEIGHT)}" viewBox="0 0 ${String(WIDTH)} ${String(HEIGHT)}" role="img" aria-label="${esc(title)} — ${slug}">
   <defs>
     <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse" x="12" y="10">
       <circle cx="1" cy="1" r="1.2" fill="${p.dot}"/>

@@ -29,8 +29,8 @@ await writeFile(join(outDir, owner, `${repo}.svg`), renderCard(data, "dark"));
 await writeFile(join(outDir, owner, `${repo}-light.svg`), renderCard(data, "light"));
 
 const shown = (v) => (v === undefined ? "—" : String(v));
+const actedOn = data.actedOnPct === undefined ? "—" : `${Math.round(data.actedOnPct)}%`;
 console.log(
   `${owner}/${repo}: runs30d=${shown(data.runs30d)} findings=${shown(data.findings)} ` +
-    `actedOn=${data.actedOnPct === undefined ? "—" : `${Math.round(data.actedOnPct)}%`} ` +
-    `outcome=${shown(data.outcome)}`,
+    `actedOn=${actedOn} outcome=${shown(data.outcome)}`,
 );
