@@ -10,10 +10,13 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/oscharko-dev/Keiko-for-Quality/pulls?q=is%3Apr"><img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/1869ec1ce1f4fa465d5a0d512f11f18b76ba9a9c/.github/assets/kq/badge-reviewed.svg" height="28" alt="Reviewed by Keiko for Quality"></a>
-  <!-- Live widget, enabled once quality.keiko.dev is deployed (design-system/index.html, section 07):
-  <a href="https://github.com/oscharko-dev/Keiko-for-Quality/pulls?q=is%3Apr"><img src="https://quality.keiko.dev/widget/oscharko-dev/Keiko-for-Quality.svg?v=card&theme=dark" width="340" alt="Reviewed by Keiko for Quality — live run, finding and acted-on numbers for this repository"></a>
-  -->
+  <!-- Card rendered by the quality-cards workflow (widget/scripts/render-card.mjs) from this
+       host's own API data. When quality.keiko.dev is deployed, only the URLs below change to
+       https://quality.keiko.dev/widget/oscharko-dev/Keiko-for-Quality.svg . -->
+  <a href="https://github.com/oscharko-dev/Keiko-for-Quality/pulls?q=is%3Apr"><picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/quality-cards/cards/oscharko-dev/Keiko-for-Quality-light.svg">
+    <img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/quality-cards/cards/oscharko-dev/Keiko-for-Quality.svg" width="340" alt="Reviewed by Keiko for Quality — run, finding and acted-on numbers for this repository">
+  </picture></a>
 </p>
 
 <p align="center">

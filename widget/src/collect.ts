@@ -22,8 +22,13 @@ import type { CardData } from "./card.js";
 
 const MAX_PRS = 30;
 const BOT_LOGIN = "keiko-for-quality[bot]";
+/** GraphQL reports a GitHub App's author login WITHOUT the "[bot]" suffix REST uses — measured
+ *  live against oscharko-dev/Keiko, where the suffixed comparison counted zero threads. */
+const BOT_LOGIN_GRAPHQL = "keiko-for-quality";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const HOUR_MS = 60 * 60 * 1000;
+/** Runs pages fetched per review workflow (100 runs each) — a bound, not a guess at infinity. */
+const MAX_RUN_PAGES = 3;
 
 async function json<T>(
   fetchImpl: typeof fetch,
@@ -101,6 +106,67 @@ interface RunStats {
   readonly lastRunHours?: number;
 }
 
+/**
+ * The review workflows' numeric ids. Scoped-by-workflow run queries are what make the count
+ * honest on a busy repository: the flat `/actions/runs` listing returns the newest 100 runs of
+ * EVERY workflow, and a dense CI pushes month-old review runs straight out of that window —
+ * measured live on oscharko-dev/Keiko, where the flat query undercounted 42 review runs as 10.
+ */
+async function reviewWorkflowIds(
+  base: string,
+  token: string,
+  fetchImpl: typeof fetch,
+): Promise<readonly number[] | undefined> {
+  const reply = await json<{
+    workflows?: readonly { readonly id?: number; readonly path?: string }[];
+  }>(fetchImpl, `${base}/actions/workflows?per_page=100`, token);
+  if (reply?.workflows === undefined) return undefined;
+  return reply.workflows
+    .filter((wf) => isReviewWorkflow(wf.path))
+    .map((wf) => wf.id)
+    .filter((id): id is number => id !== undefined);
+}
+
+interface WorkflowTally {
+  readonly count: number;
+  readonly newest: WorkflowRun | undefined;
+}
+
+async function tallyWorkflowRuns(
+  base: string,
+  workflowId: number,
+  day: string,
+  token: string,
+  fetchImpl: typeof fetch,
+): Promise<WorkflowTally> {
+  let count = 0;
+  let newest: WorkflowRun | undefined;
+  for (let page = 1; page <= MAX_RUN_PAGES; page += 1) {
+    const reply = await json<{ workflow_runs?: readonly WorkflowRun[] }>(
+      fetchImpl,
+      `${base}/actions/workflows/${String(workflowId)}/runs?per_page=100&page=${String(page)}&created=%3E${day}`,
+      token,
+    );
+    const runs = reply?.workflow_runs ?? [];
+    for (const run of runs) {
+      // A skipped or cancelled run is not a review — superseded pushes cancel their runs under
+      // the consumer's concurrency group, and counting those would inflate the card.
+      if (run.status !== "completed") continue;
+      if (run.conclusion === "skipped" || run.conclusion === "cancelled") continue;
+      count += 1;
+      newest ??= run;
+    }
+    if (runs.length < 100) break;
+  }
+  return { count, newest };
+}
+
+function newerRun(a: WorkflowRun | undefined, b: WorkflowRun | undefined): WorkflowRun | undefined {
+  if (a?.created_at === undefined) return b;
+  if (b?.created_at === undefined) return a;
+  return Date.parse(a.created_at) >= Date.parse(b.created_at) ? a : b;
+}
+
 async function collectRunStats(
   base: string,
   token: string,
@@ -109,20 +175,18 @@ async function collectRunStats(
   since: number,
 ): Promise<RunStats> {
   const day = new Date(since).toISOString().slice(0, 10);
-  const reply = await json<{ workflow_runs?: readonly WorkflowRun[] }>(
-    fetchImpl,
-    `${base}/actions/runs?per_page=100&created=%3E${day}`,
-    token,
-  );
-  if (reply?.workflow_runs === undefined) return {};
-  const review = reply.workflow_runs.filter(
-    (run) =>
-      isReviewWorkflow(run.path) && run.status === "completed" && run.conclusion !== "skipped",
-  );
-  const newest = review[0];
-  if (newest?.created_at === undefined) return { runs30d: review.length };
+  const ids = await reviewWorkflowIds(base, token, fetchImpl);
+  if (ids === undefined) return {};
+  let runs30d = 0;
+  let newest: WorkflowRun | undefined;
+  for (const id of ids) {
+    const tally = await tallyWorkflowRuns(base, id, day, token, fetchImpl);
+    runs30d += tally.count;
+    newest = newerRun(newest, tally.newest);
+  }
+  if (newest?.created_at === undefined) return { runs30d };
   return {
-    runs30d: review.length,
+    runs30d,
     lastRunHours: Math.max(0, (nowMs - Date.parse(newest.created_at)) / HOUR_MS),
     outcome: newest.conclusion === "success" ? "complete" : "incomplete",
   };
@@ -140,7 +204,7 @@ interface ThreadTally {
 /** A thread counts when the reviewer opened it and it is a finding, not a coverage stub. */
 function isBotFindingThread(node: ThreadNode): boolean {
   const first = node.comments?.nodes?.[0];
-  return first?.author?.login === BOT_LOGIN && !isCoverageStub(first.body);
+  return first?.author?.login === BOT_LOGIN_GRAPHQL && !isCoverageStub(first.body);
 }
 
 async function tallyThreads(
