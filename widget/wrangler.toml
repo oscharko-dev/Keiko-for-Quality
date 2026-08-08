@@ -1,0 +1,20 @@
+# Cloudflare Worker configuration for the quality.keiko.dev widget service.
+# Deploy from this directory: `npx wrangler deploy` (see README.md for the full runbook).
+
+name = "keiko-quality-widget"
+main = "src/worker.ts"
+compatibility_date = "2026-08-01"
+
+# The custom domain. Wrangler creates the DNS record and certificate when the keiko.dev zone
+# lives in the same Cloudflare account; otherwise attach the domain in the dashboard first.
+routes = [{ pattern = "quality.keiko.dev", custom_domain = true }]
+
+[vars]
+# The owners this service will spend its GitHub credential on. Comma-separated, exact match.
+KQ_ALLOWED_OWNERS = "oscharko-dev"
+
+# Secrets are set out-of-band, never in this file:
+#   npx wrangler secret put KQ_GITHUB_TOKEN        # simplest: fine-grained read-only PAT
+# or the GitHub App pair (preferred for rate limits and revocability):
+#   npx wrangler secret put KQ_APP_ID
+#   npx wrangler secret put KQ_APP_PRIVATE_KEY     # PKCS#8 PEM, the full file content
