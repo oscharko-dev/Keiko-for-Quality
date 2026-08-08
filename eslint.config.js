@@ -104,7 +104,13 @@ export default defineConfig(
 
   // Build and gate scripts are plain Node ESM, outside the TypeScript program.
   {
-    files: ["scripts/**/*.mjs", "corpus/**/*.mjs", "widget/test/**/*.mjs", "*.js"],
+    files: [
+      "scripts/**/*.mjs",
+      "corpus/**/*.mjs",
+      "widget/test/**/*.mjs",
+      "widget/scripts/**/*.mjs",
+      "*.js",
+    ],
     extends: [js.configs.recommended],
     languageOptions: {
       ecmaVersion: 2024,
