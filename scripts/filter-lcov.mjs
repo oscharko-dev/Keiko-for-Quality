@@ -20,10 +20,13 @@ if (!prefix) {
   process.exit(2);
 }
 
+// Whole path components only — the reviewer's own finding on #194: a bare "src" prefix would
+// also keep "src2/", smuggling unrelated coverage into the filtered report.
+const dirPrefix = prefix.endsWith("/") ? prefix : `${prefix}/`;
 const blocks = readFileSync(file, "utf8").split("end_of_record\n");
 const kept = blocks.filter((block) => {
   const sf = /^SF:(.*)$/m.exec(block);
-  return sf?.[1].startsWith(prefix) === true;
+  return sf?.[1].startsWith(dirPrefix) === true;
 });
 writeFileSync(file, kept.map((b) => `${b}end_of_record\n`).join(""));
 console.log(`filter-lcov: kept ${kept.length} of ${blocks.length - 1} SF blocks under ${prefix}`);
