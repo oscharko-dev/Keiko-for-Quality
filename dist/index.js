@@ -1,4 +1,4 @@
-// Keiko for Quality 0.20.1 — generated bundle, do not edit.
+// Keiko for Quality 0.21.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/action/main.ts
@@ -1604,26 +1604,30 @@ function escapeInline(text3) {
 
 // src/publish/presentation.ts
 var CATEGORIES = {
-  security: { icon: "\u{1F512}", text: "Security" },
-  bug: { icon: "\u{1F41B}", text: "Correctness" },
-  performance: { icon: "\u26A1", text: "Performance" },
-  maintainability: { icon: "\u{1F9F9}", text: "Maintainability" },
-  test: { icon: "\u{1F9EA}", text: "Tests" },
-  documentation: { icon: "\u{1F4DA}", text: "Documentation" },
-  other: { icon: "\u{1F50E}", text: "Review" }
+  security: "Security",
+  bug: "Correctness",
+  performance: "Performance",
+  maintainability: "Maintainability",
+  test: "Tests",
+  documentation: "Documentation",
+  other: "Review"
 };
 var SEVERITIES = {
-  critical: { icon: "\u{1F534}", text: "Critical" },
-  high: { icon: "\u{1F7E0}", text: "Major" },
-  medium: { icon: "\u{1F7E1}", text: "Minor" },
-  low: { icon: "\u{1F535}", text: "Nit" }
+  critical: "Critical",
+  high: "Major",
+  medium: "Minor",
+  low: "Nit"
 };
 function label(table, key, fallback) {
   if (key === void 0) return fallback;
   return table[key.toLowerCase()] ?? fallback;
 }
-var FALLBACK_CATEGORY = { icon: "\u{1F50E}", text: "Review" };
-var FALLBACK_SEVERITY = { icon: "\u{1F7E1}", text: "Minor" };
+var FALLBACK_CATEGORY = "Review";
+var FALLBACK_SEVERITY = "Minor";
+var ASSET_BASE = "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/1869ec1ce1f4fa465d5a0d512f11f18b76ba9a9c/.github/assets/kq";
+function assetIcon(name, size) {
+  return `<img src="${ASSET_BASE}/${name}.svg" width="${String(size)}" height="${String(size)}" alt="">`;
+}
 var MAX_TITLE_CHARS = 120;
 function splitTitle(prose2) {
   const trimmed = prose2.trim();
@@ -1658,7 +1662,7 @@ function composeFindingBody(sanitizedProse, marker, context) {
   const category = label(CATEGORIES, context.category, FALLBACK_CATEGORY);
   const severity = label(SEVERITIES, context.severity, FALLBACK_SEVERITY);
   const { title, body } = splitTitle(sanitizedProse);
-  const parts = [`_${category.icon} ${category.text}_ | _${severity.icon} ${severity.text}_`, ""];
+  const parts = [`**${category.toUpperCase()} \xB7 ${severity.toUpperCase()}**`, ""];
   if (title !== "") parts.push(`**${title}**`, "");
   parts.push(
     body,
@@ -1695,7 +1699,9 @@ function gapLine(counts) {
 }
 function composeIncompleteNotice(reasonCode, marker, counts) {
   return [
-    "_\u26A0\uFE0F Coverage_ | _\u{1F7E0} Major_",
+    // "COVERAGE" is deliberately outside the CATEGORIES vocabulary above, so the two composers
+    // can never collide on their opening line — the invariant `isIncompleteNoticeBody` documents.
+    `${assetIcon("out-incomplete", 14)} **COVERAGE \xB7 MAJOR**`,
     "",
     "**This change was not fully reviewed.**",
     "",
@@ -1737,11 +1743,11 @@ function reasonText(reason) {
 function outcomeText(report) {
   switch (report.outcome) {
     case "complete":
-      return "\u2705 complete";
+      return `${assetIcon("out-complete", 12)} complete`;
     case "abandoned":
-      return "\u23F3 abandoned";
+      return `${assetIcon("out-abandoned", 12)} abandoned`;
     case "incomplete":
-      return `\u26A0\uFE0F incomplete (\`${reasonText(report.reason)}\`)`;
+      return `${assetIcon("out-incomplete", 12)} incomplete (\`${reasonText(report.reason)}\`)`;
   }
 }
 function countRows(counts) {
@@ -1791,7 +1797,7 @@ function composeSummaryBody(report, marker) {
   ].join(" \xB7 ");
   const tokensPerFinding = tokensPerFindingRow(report.budget, report.counts);
   const parts = [
-    "**Keiko for Quality \u2014 run summary**",
+    `${assetIcon("reviewer", 18)} **Keiko for Quality \u2014 run summary**`,
     "",
     headline,
     "",
@@ -5890,7 +5896,7 @@ function tokenOverlap(a, b) {
   return { score: smaller === 0 ? 0 : shared / smaller, shared };
 }
 function stripComposedArtifacts(body) {
-  return clip2(body).replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
+  return clip2(body).replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "").replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<img[^>\n]*>/g, " ").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
 }
 function similarByContent(a, b) {
   if (shareCodeBlock(a, b)) return true;

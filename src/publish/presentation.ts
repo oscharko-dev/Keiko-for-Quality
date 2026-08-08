@@ -26,47 +26,63 @@ export interface FindingContext {
   readonly category: string | undefined;
 }
 
-interface Label {
-  readonly icon: string;
-  readonly text: string;
-}
-
 /**
  * Category labels.
  *
  * Deliberately coarse. A reader triaging a page of findings needs to know whether this is about
  * correctness or about tidiness; finer taxonomy buys nothing at a glance.
  */
-const CATEGORIES: Readonly<Record<string, Label>> = {
-  security: { icon: "🔒", text: "Security" },
-  bug: { icon: "🐛", text: "Correctness" },
-  performance: { icon: "⚡", text: "Performance" },
-  maintainability: { icon: "🧹", text: "Maintainability" },
-  test: { icon: "🧪", text: "Tests" },
-  documentation: { icon: "📚", text: "Documentation" },
-  other: { icon: "🔎", text: "Review" },
+const CATEGORIES: Readonly<Record<string, string>> = {
+  security: "Security",
+  bug: "Correctness",
+  performance: "Performance",
+  maintainability: "Maintainability",
+  test: "Tests",
+  documentation: "Documentation",
+  other: "Review",
 };
 
-/** Severity labels. The colour carries the urgency; the word carries the meaning. */
-const SEVERITIES: Readonly<Record<string, Label>> = {
-  critical: { icon: "🔴", text: "Critical" },
-  high: { icon: "🟠", text: "Major" },
-  medium: { icon: "🟡", text: "Minor" },
-  low: { icon: "🔵", text: "Nit" },
+/** Severity labels. The word carries the meaning; the design system's text grammar carries it
+ *  without colour on purpose — findings stay fully textual (design-system/, section 04). */
+const SEVERITIES: Readonly<Record<string, string>> = {
+  critical: "Critical",
+  high: "Major",
+  medium: "Minor",
+  low: "Nit",
 };
 
 function label(
-  table: Readonly<Record<string, Label>>,
+  table: Readonly<Record<string, string>>,
   key: string | undefined,
-  fallback: Label,
-): Label {
+  fallback: string,
+): string {
   if (key === undefined) return fallback;
   return table[key.toLowerCase()] ?? fallback;
 }
 
 /** Used when the model omits a classification or invents one outside the vocabulary. */
-const FALLBACK_CATEGORY: Label = { icon: "🔎", text: "Review" };
-const FALLBACK_SEVERITY: Label = { icon: "🟡", text: "Minor" };
+const FALLBACK_CATEGORY = "Review";
+const FALLBACK_SEVERITY = "Minor";
+
+/**
+ * Comment assets are pinned to the full commit SHA the `kq-assets-v1` tag names — the SHA, not
+ * the tag, for the same reason consumers pin this action by SHA: a tag is mutable, and a
+ * published comment must never change appearance retroactively, nor be redirectable to content
+ * this repository did not review. (This reviewer found that distinction itself, reviewing the
+ * change that introduced the tag reference — Keiko-for-Quality#184.) The tag remains the
+ * human-readable alias for the same commit. Findings deliberately do NOT use these assets: a
+ * finding is an argument, and it renders as text everywhere, including in clients that strip
+ * or block images. Icons appear only on the two product-voice surfaces — the run summary and
+ * the coverage notice — where the word the icon decorates is always right next to it, which is
+ * also why every `alt` is empty: with images blocked the surfaces degrade to exactly the text
+ * they carried before icons.
+ */
+const ASSET_BASE =
+  "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/1869ec1ce1f4fa465d5a0d512f11f18b76ba9a9c/.github/assets/kq";
+
+function assetIcon(name: string, size: number): string {
+  return `<img src="${ASSET_BASE}/${name}.svg" width="${String(size)}" height="${String(size)}" alt="">`;
+}
 
 const MAX_TITLE_CHARS = 120;
 
@@ -135,7 +151,9 @@ export function composeFindingBody(
   const severity = label(SEVERITIES, context.severity, FALLBACK_SEVERITY);
   const { title, body } = splitTitle(sanitizedProse);
 
-  const parts = [`_${category.icon} ${category.text}_ | _${severity.icon} ${severity.text}_`, ""];
+  // The design system's text grammar: `SECURITY · CRITICAL`. Chosen over icons for findings on
+  // purpose — see `ASSET_BASE`'s doc comment.
+  const parts = [`**${category.toUpperCase()} · ${severity.toUpperCase()}**`, ""];
   if (title !== "") parts.push(`**${title}**`, "");
   parts.push(
     body,
@@ -191,7 +209,9 @@ export function composeIncompleteNotice(
   counts?: Readonly<Record<string, number>>,
 ): string {
   return [
-    "_⚠️ Coverage_ | _🟠 Major_",
+    // "COVERAGE" is deliberately outside the CATEGORIES vocabulary above, so the two composers
+    // can never collide on their opening line — the invariant `isIncompleteNoticeBody` documents.
+    `${assetIcon("out-incomplete", 14)} **COVERAGE · MAJOR**`,
     "",
     "**This change was not fully reviewed.**",
     "",
@@ -224,8 +244,9 @@ export function composeIncompleteNotice(
 /**
  * True for a comment body this exact function produced — a fixed, product-controlled sentence,
  * never model content, and never reachable from `composeFindingBody`: no entry in `CATEGORIES`
- * above maps to "Coverage", the label line every incomplete notice starts with, so the two composers
- * can never collide on their opening line, and the sentence checked here is stricter still.
+ * above maps to "Coverage", the header word every incomplete notice opens with, so the two
+ * composers can never collide on their opening line, and the sentence checked here is stricter
+ * still.
  *
  * Exists so a later run can recognise its OWN past incomplete notices well enough to resolve the
  * ones a subsequent push has superseded (`github/client.ts`'s `resolveSupersededOwnNotices`),
@@ -362,11 +383,11 @@ function reasonText(reason: ReasonCode | undefined): string {
 function outcomeText(report: SummaryReport): string {
   switch (report.outcome) {
     case "complete":
-      return "✅ complete";
+      return `${assetIcon("out-complete", 12)} complete`;
     case "abandoned":
-      return "⏳ abandoned";
+      return `${assetIcon("out-abandoned", 12)} abandoned`;
     case "incomplete":
-      return `⚠️ incomplete (\`${reasonText(report.reason)}\`)`;
+      return `${assetIcon("out-incomplete", 12)} incomplete (\`${reasonText(report.reason)}\`)`;
   }
 }
 
@@ -459,7 +480,7 @@ export function composeSummaryBody(report: SummaryReport, marker: string): strin
 
   const tokensPerFinding = tokensPerFindingRow(report.budget, report.counts);
   const parts = [
-    "**Keiko for Quality — run summary**",
+    `${assetIcon("reviewer", 18)} **Keiko for Quality — run summary**`,
     "",
     headline,
     "",
