@@ -508,19 +508,28 @@ describe("repair of publisher-rejectable bodies", () => {
       mergeBase: commitSha(base),
     };
 
-    // First call: a review whose body carries a bare <path> token (sanitizer class html).
-    // Second call: the repair — returns one backticked body. Third scenario file below covers
-    // the repair failing.
-    let call = 0;
+    // Three calls, scripted by what each prompt asks for rather than by a counter: the review,
+    // then whole-file verification (the claim opens with a claim verb, so it qualifies), then
+    // the repair. The order is the point — a body about to be dropped must never cost a repair
+    // call, so verification runs first.
     const seen: CapturedBody[] = [];
+    const kinds: string[] = [];
     const fetchImpl = ((_url: string | URL, init?: RequestInit): Promise<Response> => {
       const body = JSON.parse((init?.body as string | undefined) ?? "{}") as CapturedBody;
       seen.push(body);
-      call += 1;
+      const user = body.messages?.[1]?.content ?? "";
+      const kind = user.includes("<claims>")
+        ? "verify"
+        : user.includes("<current_file_diff>")
+          ? "review"
+          : "repair";
+      kinds.push(kind);
       const reply =
-        call === 1
+        kind === "review"
           ? '[{"start_line": 1, "end_line": 1, "category": "bug", "severity": "high", "content": "Use a null device.\\n\\nIt runs diff -- /dev/null <path> today."}]'
-          : '["Use a null device.\\n\\nIt runs `diff -- /dev/null <path>` today."]';
+          : kind === "verify"
+            ? '[{"claim": 1, "verdict": "supported"}]'
+            : '["Use a null device.\\n\\nIt runs `diff -- /dev/null <path>` today."]';
       return Promise.resolve(
         new Response(
           JSON.stringify({
@@ -537,8 +546,9 @@ describe("repair of publisher-rejectable bodies", () => {
       createSilentDiagnostics(),
       fetchImpl,
     );
-    // Two wire calls: the review and the one repair.
-    expect(seen).toHaveLength(2);
+    // Three wire calls, in this order: the review, the verification that keeps the claim, and
+    // the one repair that rescues its body.
+    expect(kinds).toEqual(["review", "verify", "repair"]);
     const parsed = parseEngineResult(output.stdout);
     expect(parsed.findings).toHaveLength(1);
     // The published body is the repaired, backticked form the real sanitizer accepts.

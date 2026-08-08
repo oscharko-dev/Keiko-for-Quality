@@ -3310,7 +3310,7 @@ var CLAIM_VERBS = /* @__PURE__ */ new Set([
   "treat",
   "accept"
 ]);
-var TITLE_VERB = /(?:^|\n)\s*\*\*\s*([A-Za-z]+)/u;
+var TITLE_VERB = /^\s*(?:\*\*\s*)?([A-Za-z]+)/u;
 var CLAIM_PHRASES = [
   "is missing",
   "are missing",
@@ -3339,7 +3339,9 @@ var CLAIM_PHRASES = [
   "instead of"
 ];
 function opensWithClaimVerb(content) {
-  const verb = TITLE_VERB.exec(content)?.[1];
+  const firstLine = content.split("\n").find((line) => line.trim() !== "");
+  if (firstLine === void 0) return false;
+  const verb = TITLE_VERB.exec(firstLine)?.[1];
   return verb !== void 0 && CLAIM_VERBS.has(verb.toLowerCase());
 }
 function statesClaimInProse(content) {
@@ -4280,7 +4282,10 @@ async function headFileText(options2, path) {
 }
 async function verifyWholeFileClaims(state, dispatch, comments) {
   const needing = comments.filter((c) => needsWholeFileEvidence(c.content, dispatch.renderedDiff));
-  if (needing.length === 0 || state.spendStopped) return comments;
+  const spent = state.usage.prompt + state.usage.completion;
+  if (needing.length === 0 || state.spendStopped || spent >= state.options.allottedBudget) {
+    return comments;
+  }
   const text3 = await headFileText(state.options, dispatch.path);
   if (text3 === void 0 || text3.length > MAX_VERIFY_FILE_CHARS) return comments;
   const reply = await callModel(
