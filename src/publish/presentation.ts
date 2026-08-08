@@ -65,23 +65,25 @@ const FALLBACK_CATEGORY = "Review";
 const FALLBACK_SEVERITY = "Minor";
 
 /**
- * Comment assets are pinned to the full commit SHA the `kq-assets-v1` tag names — the SHA, not
+ * Comment assets are pinned to the full commit SHA the `kq-assets-v2` tag names — the SHA, not
  * the tag, for the same reason consumers pin this action by SHA: a tag is mutable, and a
  * published comment must never change appearance retroactively, nor be redirectable to content
  * this repository did not review. (This reviewer found that distinction itself, reviewing the
  * change that introduced the tag reference — Keiko-for-Quality#184.) The tag remains the
- * human-readable alias for the same commit. Findings deliberately do NOT use these assets: a
- * finding is an argument, and it renders as text everywhere, including in clients that strip
- * or block images. Icons appear only on the two product-voice surfaces — the run summary and
- * the coverage notice — where the word the icon decorates is always right next to it, which is
- * also why every `alt` is empty: with images blocked the surfaces degrade to exactly the text
- * they carried before icons.
+ * human-readable alias for the same commit.
+ *
+ * The assets are the design page's chip pills (asset rules, section 05): self-contained 22px
+ * pills — 20px for outcome chips — on the ink tile, readable on any background, with the words
+ * inside the image. `alt` carries the same words, so screen readers and image-off clients read
+ * "Coverage, Major" either way; that is the design's own fallback contract. Findings
+ * deliberately do NOT use these assets: a finding is an argument, and it renders as text
+ * everywhere — its classification line is the design's one-token text grammar.
  */
 const ASSET_BASE =
-  "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/1869ec1ce1f4fa465d5a0d512f11f18b76ba9a9c/.github/assets/kq";
+  "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/6b59f533afef15820991b3a0470ddc22c6c6d436/.github/assets/kq";
 
-function assetIcon(name: string, size: number): string {
-  return `<img src="${ASSET_BASE}/${name}.svg" width="${String(size)}" height="${String(size)}" alt="">`;
+function assetChip(name: string, height: number, alt: string): string {
+  return `<img src="${ASSET_BASE}/${name}.svg" height="${String(height)}" alt="${alt}">`;
 }
 
 const MAX_TITLE_CHARS = 120;
@@ -151,9 +153,9 @@ export function composeFindingBody(
   const severity = label(SEVERITIES, context.severity, FALLBACK_SEVERITY);
   const { title, body } = splitTitle(sanitizedProse);
 
-  // The design system's text grammar: `SECURITY · CRITICAL`. Chosen over icons for findings on
-  // purpose — see `ASSET_BASE`'s doc comment.
-  const parts = [`**${category.toUpperCase()} · ${severity.toUpperCase()}**`, ""];
+  // The design system's text grammar, exactly as specimen ① writes its fallback: one inline-code
+  // token. Chosen over chips for findings on purpose — see `ASSET_BASE`'s doc comment.
+  const parts = [`\`${category.toUpperCase()} · ${severity.toUpperCase()}\``, ""];
   if (title !== "") parts.push(`**${title}**`, "");
   parts.push(
     body,
@@ -209,9 +211,10 @@ export function composeIncompleteNotice(
   counts?: Readonly<Record<string, number>>,
 ): string {
   return [
-    // "COVERAGE" is deliberately outside the CATEGORIES vocabulary above, so the two composers
-    // can never collide on their opening line — the invariant `isIncompleteNoticeBody` documents.
-    `${assetIcon("out-incomplete", 14)} **COVERAGE · MAJOR**`,
+    // Specimen ③'s chip pair. "COVERAGE" is deliberately outside the CATEGORIES vocabulary
+    // above, and no finding opens with an image, so the two composers can never collide on
+    // their opening line — the invariant `isIncompleteNoticeBody` documents.
+    `${assetChip("coverage", 22, "Coverage")} ${assetChip("sev-major", 22, "Major")}`,
     "",
     "**This change was not fully reviewed.**",
     "",
@@ -380,14 +383,16 @@ function reasonText(reason: ReasonCode | undefined): string {
   return isReasonCode(reason) ? reason : "unknown";
 }
 
+/** Specimen ②'s outcome chip: the word lives inside the pill image, `alt` carries it for
+ *  image-off clients, and only the incomplete case appends its reason code. */
 function outcomeText(report: SummaryReport): string {
   switch (report.outcome) {
     case "complete":
-      return `${assetIcon("out-complete", 12)} complete`;
+      return assetChip("out-complete", 20, "COMPLETE");
     case "abandoned":
-      return `${assetIcon("out-abandoned", 12)} abandoned`;
+      return assetChip("out-abandoned", 20, "ABANDONED");
     case "incomplete":
-      return `${assetIcon("out-incomplete", 12)} incomplete (\`${reasonText(report.reason)}\`)`;
+      return `${assetChip("out-incomplete", 20, "INCOMPLETE")} (\`${reasonText(report.reason)}\`)`;
   }
 }
 
@@ -480,7 +485,9 @@ export function composeSummaryBody(report: SummaryReport, marker: string): strin
 
   const tokensPerFinding = tokensPerFindingRow(report.budget, report.counts);
   const parts = [
-    `${assetIcon("reviewer", 18)} **Keiko for Quality — run summary**`,
+    // Specimen ② opens with the plain bold title — the reviewer's mark is the App avatar in
+    // GitHub's own comment chrome, not a second icon inside the body.
+    "**Keiko for Quality — run summary**",
     "",
     headline,
     "",

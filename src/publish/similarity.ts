@@ -305,9 +305,10 @@ function tokenOverlap(
  */
 function stripComposedArtifacts(body: string): string {
   return clip(body)
-    .replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "") // the CATEGORY · SEVERITY header line
+    .replace(/^`[A-Z]+ · [A-Z]+`[ \t]*\n?/, "") // the code-span header line (the current grammar)
+    .replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "") // the bold header line (v0.21.0 comments)
     .replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "") // the pre-design-system label line
-    .replace(/<img[^>\n]*>/g, " ") // product-composed asset icons (summary/notice surfaces)
+    .replace(/<img[^>\n]*>/g, " ") // product-composed asset chips (summary/notice surfaces)
     .replace(/<details>[\s\S]*?<\/details>/g, " ") // the collapsed repair-prompt block
     .replace(/<!--[\s\S]*?-->/g, " "); // the hidden marker comment
 }

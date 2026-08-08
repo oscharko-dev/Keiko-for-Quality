@@ -51,7 +51,7 @@ not a promise — see [SECURITY.md](SECURITY.md).
 Each finding opens with its classification, makes one imperative claim, and argues it in two
 sentences a reader can check against the code:
 
-> **TESTS · MAJOR**
+> `TESTS · MAJOR`
 >
 > **Add the required `verifyImmutableOwnership` option to the activation call.**
 >
@@ -150,10 +150,11 @@ is in [docs/operations.md](docs/operations.md); release discipline is in
 
 The complete design language for every surface — GitHub comments, email, CLI, checks and README
 widgets — lives in [`design-system/`](design-system/): one self-contained page
-(`index.html`), the Lift-grammar quality glyphs, and the orca marks. Comment assets are pinned
-to the full commit SHA that the [`kq-assets-v1`](.github/assets/kq/) tag names — the SHA, not
-the tag, for the same reason consumers pin this action by SHA — so published comments can never
-change appearance retroactively.
+(`index.html`), the Lift-grammar quality glyphs, and the orca marks. Comment assets are the
+design page's chip pills, pinned to the full commit SHA that the
+[`kq-assets-v2`](.github/assets/kq/) tag names — the SHA, not the tag, for the same reason
+consumers pin this action by SHA — so published comments can never change appearance
+retroactively.
 
 ## Governance
 
