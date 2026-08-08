@@ -334,6 +334,104 @@ describe("runSingleShotEngine", () => {
     // One bounded retry per transport failure: two wire calls for the one file, then honesty.
     expect(seen).toHaveLength(2);
   });
+
+  /**
+   * The false-positive class the verification pass exists for, reproduced from the audited
+   * window: the model claims a guard is missing, and the guard sits in the same file outside the
+   * hunk it was shown. The verifier is given the whole file and contradicts the claim.
+   */
+  it("drops a claim the whole file contradicts and keeps everything else", async () => {
+    const guarded = [
+      "export function parse(raw: string): string | undefined {",
+      "  const value = raw.trim();",
+      "  if (value === '') return undefined;",
+      "  return value;",
+      "}",
+      "export const added = parse('x');",
+    ].join("\n");
+    const { repo, pair } = await makeRepo("kfq-ss-verify-", { "src/a.ts": `${guarded}\n` });
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub((user) => {
+      if (user.includes("<claims>")) {
+        // The verifier sees the empty-string guard and refuses the absence claim; the second
+        // claim is grounded in the hunk and was never sent, so it cannot be dropped here.
+        return { status: 200, reply: '[{"claim":1,"verdict":"contradicted","line":3}]' };
+      }
+      if (user.includes("<current_file_path>src/a.ts</current_file_path>")) {
+        return {
+          status: 200,
+          reply: JSON.stringify([
+            {
+              start_line: 6,
+              end_line: 6,
+              category: "bug",
+              severity: "high",
+              content: "**Guard against an empty raw value before parsing.**",
+            },
+            {
+              start_line: 6,
+              end_line: 6,
+              category: "bug",
+              severity: "low",
+              content: "The added line calls parse with a literal, which the hunk shows.",
+            },
+          ]),
+        };
+      }
+      return { status: 200, reply: "[]" };
+    }, seen);
+
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+
+    const verifyCall = seen.find((body) =>
+      (body.messages?.[1]?.content ?? "").includes("<claims>"),
+    );
+    expect(verifyCall).toBeDefined();
+    // Pinned like every other call, and deliberately its own seed.
+    expect(verifyCall?.seed).toBe(2042);
+    // The whole file rode along, guard line included.
+    expect(verifyCall?.messages?.[1]?.content).toContain("3   if (value === '') return undefined;");
+    const parsed = parseEngineResult(output.stdout);
+    expect(parsed.findings).toHaveLength(1);
+    expect(parsed.findings[0]?.content).toContain("calls parse with a literal");
+  });
+
+  it("keeps every claim when the verifier cannot answer", async () => {
+    const { repo, pair } = await makeRepo("kfq-ss-verify-fail-", {
+      "src/a.ts": "keep\nexport const added = 1;\n",
+    });
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub((user) => {
+      if (user.includes("<claims>")) return { status: 200, reply: "sorry, no JSON here" };
+      if (user.includes("<current_file_path>src/a.ts</current_file_path>")) {
+        return {
+          status: 200,
+          reply: JSON.stringify([
+            {
+              start_line: 2,
+              end_line: 2,
+              category: "bug",
+              severity: "high",
+              content: "**Add a bounds check for the added constant.**",
+            },
+          ]),
+        };
+      }
+      return { status: 200, reply: "[]" };
+    }, seen);
+
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+    // An unparseable verdict is not a verdict: the finding reaches the reader unchanged.
+    expect(parseEngineResult(output.stdout).findings).toHaveLength(1);
+  });
 });
 
 describe("repair of publisher-rejectable bodies", () => {

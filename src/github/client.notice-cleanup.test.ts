@@ -105,11 +105,117 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
       IDENTITY,
       isNoticeBody,
       CURRENT_HEAD,
+      false,
     );
 
     expect(outcome).toStrictEqual({ attempted: 1, resolved: 1 });
     expect(calls[1]?.query).toContain("resolveReviewThread");
     expect(calls[1]?.variables).toStrictEqual({ threadId: "PRRT_1" });
+  });
+
+  /**
+   * Keiko#3003, measured: an `engine_error` notice stayed open while a LATER run reviewed the very
+   * same head to completion. The head never moved, so neither `isOutdated` nor the older-head test
+   * could see the notice had been answered — only the outcome of the run doing the cleanup can.
+   */
+  it("resolves a same-head notice once a run completes, which the head tests cannot see", async () => {
+    const { fetch, calls } = scriptedGraphql([
+      threadsPage([
+        {
+          id: "PRRT_SAME",
+          isResolved: false,
+          isOutdated: false,
+          comments: {
+            nodes: [
+              {
+                databaseId: 9,
+                author: { login: IDENTITY },
+                body: NOTICE_BODY,
+                originalCommit: { oid: CURRENT_HEAD },
+              },
+            ],
+          },
+        },
+      ]),
+      jsonResponse({
+        data: { resolveReviewThread: { thread: { id: "PRRT_SAME", isResolved: true } } },
+      }),
+    ]);
+    globalThis.fetch = fetch;
+    const client = new GitHubClient("https://api.example.test", "token");
+
+    const outcome = await client.resolveSupersededOwnNotices(
+      REF,
+      1,
+      IDENTITY,
+      isNoticeBody,
+      CURRENT_HEAD,
+      true,
+    );
+
+    expect(outcome).toStrictEqual({ attempted: 1, resolved: 1 });
+    expect(calls[1]?.variables).toStrictEqual({ threadId: "PRRT_SAME" });
+  });
+
+  // The same thread under an INCOMPLETE run stays open: a run that could not review the head has
+  // not answered the notice about that head, and saying otherwise is exactly the "incomplete reads
+  // as clean" failure this product exists to prevent.
+  it("leaves a same-head notice open when the run did not complete", async () => {
+    const { fetch } = scriptedGraphql([
+      threadsPage([
+        {
+          id: "PRRT_SAME",
+          isResolved: false,
+          isOutdated: false,
+          comments: {
+            nodes: [
+              {
+                databaseId: 9,
+                author: { login: IDENTITY },
+                body: NOTICE_BODY,
+                originalCommit: { oid: CURRENT_HEAD },
+              },
+            ],
+          },
+        },
+      ]),
+    ]);
+    globalThis.fetch = fetch;
+    const client = new GitHubClient("https://api.example.test", "token");
+
+    expect(
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD, false),
+    ).toStrictEqual({ attempted: 0, resolved: 0 });
+  });
+
+  // A completed run resolves NOTICES, never findings: a finding is an open question for a human,
+  // and the collector's own author/body test is what keeps that line — asserted here because the
+  // completed-run branch is the widest one in that predicate.
+  it("never resolves a finding thread, even on a completed run", async () => {
+    const { fetch } = scriptedGraphql([
+      threadsPage([
+        {
+          id: "PRRT_FIND",
+          isResolved: false,
+          isOutdated: true,
+          comments: {
+            nodes: [
+              {
+                databaseId: 3,
+                author: { login: IDENTITY },
+                body: "`TESTS · MAJOR`\n\n**A finding.**",
+              },
+            ],
+          },
+        },
+      ]),
+    ]);
+    globalThis.fetch = fetch;
+    const client = new GitHubClient("https://api.example.test", "token");
+
+    expect(
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD, true),
+    ).toStrictEqual({ attempted: 0, resolved: 0 });
   });
 
   it("does not resolve a thread that is outdated but already genuinely resolved", async () => {
@@ -132,6 +238,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
       IDENTITY,
       isNoticeBody,
       CURRENT_HEAD,
+      false,
     );
 
     expect(outcome).toStrictEqual({ attempted: 0, resolved: 0 });
@@ -153,7 +260,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     const client = new GitHubClient("https://api.example.test", "token");
 
     expect(
-      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD, false),
     ).toStrictEqual({
       attempted: 0,
       resolved: 0,
@@ -198,6 +305,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
       IDENTITY,
       isNoticeBody,
       CURRENT_HEAD,
+      false,
     );
 
     expect(outcome).toStrictEqual({ attempted: 1, resolved: 1 });
@@ -233,6 +341,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
       IDENTITY,
       isNoticeBody,
       CURRENT_HEAD,
+      false,
     );
 
     expect(outcome).toStrictEqual({ attempted: 0, resolved: 0 });
@@ -264,7 +373,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     const client = new GitHubClient("https://api.example.test", "token");
 
     expect(
-      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD, false),
     ).toStrictEqual({
       attempted: 0,
       resolved: 0,
@@ -288,7 +397,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     const client = new GitHubClient("https://api.example.test", "token");
 
     expect(
-      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD, false),
     ).toStrictEqual({
       attempted: 0,
       resolved: 0,
@@ -318,7 +427,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     const client = new GitHubClient("https://api.example.test", "token");
 
     expect(
-      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD, false),
     ).toStrictEqual({
       attempted: 1,
       resolved: 1,
@@ -360,7 +469,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     const client = new GitHubClient("https://api.example.test", "token");
 
     expect(
-      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD, false),
     ).toStrictEqual({
       attempted: 2,
       resolved: 2,
@@ -395,7 +504,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     // a per-thread failure must not abandon the rest of the batch, the same containment posture
     // `publisher.ts`'s `executeOne` uses.
     expect(
-      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD, false),
     ).toStrictEqual({
       attempted: 2,
       resolved: 1,
@@ -407,7 +516,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     const client = new GitHubClient("https://api.example.test", "token");
 
     await expect(
-      client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+      client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD, false),
     ).resolves.toStrictEqual({ attempted: 0, resolved: 0 });
   });
 
@@ -426,7 +535,7 @@ describe("GitHubClient.resolveSupersededOwnNotices", () => {
     const client = new GitHubClient("https://api.example.test", "token");
 
     expect(
-      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD),
+      await client.resolveSupersededOwnNotices(REF, 1, IDENTITY, isNoticeBody, CURRENT_HEAD, false),
     ).toStrictEqual({
       attempted: 0,
       resolved: 0,

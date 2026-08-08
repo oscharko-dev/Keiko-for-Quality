@@ -44,7 +44,8 @@
     "arena:trend": "node corpus/arena-trend.mjs",
     "live:telemetry": "node corpus/live-telemetry.mjs",
     "typecheck:widget": "tsc -p widget/tsconfig.json",
-    "test:widget": "node --import ./widget/test/ts-hooks.mjs --test widget/test/*.test.mjs"
+    "test:widget": "node --import ./widget/test/ts-hooks.mjs --test widget/test/*.test.mjs",
+    "corpus:precision": "node corpus/precision-gate.mjs"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",
