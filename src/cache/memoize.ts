@@ -135,6 +135,18 @@ const EMPTY_LOOKUP: MemoLookupResult = {
  * equals this one; otherwise it is a content match this run refuses to replay, counted in
  * `contextInvalidated` rather than `hits`.
  */
+/** Whether a stored entry's context stamp matches this run's expectation for `path` — the
+ *  per-path override when one exists, the whole-set scalar otherwise. Split from `lookupMemoized`
+ *  purely for its complexity budget. */
+function contextMatches(
+  entry: CacheEntry,
+  path: string,
+  pathSetDigest: Sha256,
+  contextDigests: ReadonlyMap<string, Sha256> | undefined,
+): boolean {
+  return entry.prPathSetDigest === (contextDigests?.get(path) ?? pathSetDigest);
+}
+
 export function lookupMemoized(
   store: CacheStore | undefined,
   inventory: Inventory,
@@ -142,6 +154,12 @@ export function lookupMemoized(
   engineDigest: Sha256 | undefined,
   config: RuntimeConfig,
   pathSetDigest: Sha256,
+  // Per-path context expectation (v0.20.1): in single-shot mode a file's verdict depends on its
+  // companion group's diff identity, not on the whole pull request's path-set shape — see
+  // `companions.ts` for the measurement (89% of a live window's spend went into whole-set
+  // invalidations) and for why the agentic path keeps the conservative scalar. Absent path → the
+  // scalar `pathSetDigest` applies, so the agentic path is byte-identical to before.
+  contextDigests?: ReadonlyMap<string, Sha256>,
 ): MemoLookupResult {
   if (store === undefined || engineDigest === undefined) return EMPTY_LOOKUP;
 
@@ -171,7 +189,7 @@ export function lookupMemoized(
     );
     const entry = lookup(store, key);
     if (entry === undefined) continue;
-    if (entry.prPathSetDigest === pathSetDigest) hits.set(path, entry);
+    if (contextMatches(entry, path, pathSetDigest, contextDigests)) hits.set(path, entry);
     else contextInvalidated += 1;
   }
   return { hits, eligiblePaths, contextInvalidated };
@@ -232,6 +250,10 @@ export interface NewEntryInputs {
    * writes is stamped with exactly the digest a later run with an unchanged path set will match.
    */
   readonly pathSetDigest: Sha256;
+  /** Same per-path override as `lookupMemoized`'s parameter of this name, and it must be the SAME
+   *  map the lookup used: an entry written under one context definition and read under another
+   *  would never match itself. */
+  readonly contextDigests?: ReadonlyMap<string, Sha256>;
   readonly config: RuntimeConfig;
 }
 
@@ -284,7 +306,7 @@ export function buildNewEntries(inputs: NewEntryInputs): CacheEntry[] {
       headBlob: item.headBlob,
       ruleDigest: inputs.ruleDigest,
       engineDigest: inputs.engineDigest,
-      prPathSetDigest: inputs.pathSetDigest,
+      prPathSetDigest: inputs.contextDigests?.get(path) ?? inputs.pathSetDigest,
       // Stamped from the constant rather than passed in: only this build knows which publication
       // contract produced these findings, and an entry that lied about it would be replayed by a
       // build whose sanitizer disagrees with the body it stored.

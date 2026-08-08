@@ -23,6 +23,7 @@ import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
 import { acquireEngine } from "./engine/acquire.js";
 import { collectContextPacks } from "./engine/context-pack.js";
+import { companionsByPath, companionContextDigest } from "./engine/companions.js";
 import { currentPlatformDigest, ENGINE_PIN } from "./engine/pinned-release.js";
 import {
   auditClassification,
@@ -648,6 +649,9 @@ interface MemoContext {
   readonly engineDigest: Sha256 | undefined;
   /** This run's changed-path-set digest (v0.10.0, issue #50) — see `computePrPathSetDigest`. */
   readonly pathSetDigest: Sha256 | undefined;
+  /** Per-path companion-context digests (single-shot mode, v0.20.1) — the SAME map lookup and
+   *  entry-building must share; see `singleShotContextDigests` and `companions.ts`. */
+  readonly contextDigests?: ReadonlyMap<string, Sha256>;
   /** Eligible paths a stored entry answered on content alone, but whose path-set context had moved. */
   readonly contextInvalidated: number;
 }
@@ -731,10 +735,53 @@ function prepareMemoization(
   diagnostics: Diagnostics,
 ): MemoContext {
   if (request.cacheStore === undefined) return INERT_MEMO;
+  return memoWithLookup(request, inventory, diagnostics);
+}
 
+/**
+ * The per-path cache-context expectation for single-shot runs, or `undefined` on the agentic path.
+ *
+ * In single-shot mode a file's verdict depends on exactly what its one prompt contained: its own
+ * diff (the six-field key), the rule, and its companions' hunks — so the replay-context stamp is
+ * the companion group's base→head identity (`companions.ts`), not the whole pull request's
+ * path-set shape. Measured motivation (2026-08-08 live audit): whole-set invalidation re-reviewed
+ * 113–116 files three times in twenty-five minutes and accounted for 89% of the window's spend,
+ * while one added test file re-reviewed eleven. The agentic path returns `undefined` and keeps
+ * the conservative scalar digest: it can search the repository, so its verdicts legitimately
+ * depend on more than any fixed neighbour set.
+ */
+function singleShotContextDigests(
+  request: PipelineRequest,
+  inventory: Inventory,
+): ReadonlyMap<string, Sha256> | undefined {
+  if (request.env.KFQ_SINGLE_SHOT !== "1") return undefined;
+  const identity = new Map<string, string>();
+  for (const item of inventory.items) {
+    identity.set(
+      item.path as string,
+      `${(item.baseBlob as string | undefined) ?? "-"}>${(item.headBlob as string | undefined) ?? "-"}`,
+    );
+  }
+  const companions = companionsByPath([...identity.keys()]);
+  const digests = new Map<string, Sha256>();
+  for (const [path, group] of companions) {
+    digests.set(
+      path,
+      companionContextDigest(group, (companion) => identity.get(companion)),
+    );
+  }
+  return digests;
+}
+
+function memoWithLookup(
+  request: PipelineRequest,
+  inventory: Inventory,
+  diagnostics: Diagnostics,
+): MemoContext {
   const ruleDigest = promptIdentityDigest(request.profile, request.guidelines);
   const engineDigest = currentPlatformDigest();
   const pathSetDigest = computePrPathSetDigest(inventory);
+  const contextDigests = singleShotContextDigests(request, inventory);
   const { hits, eligiblePaths, contextInvalidated } = lookupMemoized(
     request.cacheStore,
     inventory,
@@ -742,6 +789,7 @@ function prepareMemoization(
     engineDigest,
     request.config,
     pathSetDigest,
+    contextDigests,
   );
   const memo: MemoContext = {
     hits,
@@ -750,6 +798,7 @@ function prepareMemoization(
     ruleDigest,
     engineDigest,
     pathSetDigest,
+    ...(contextDigests === undefined ? {} : { contextDigests }),
     contextInvalidated,
   };
   diagnostics.record("cache.hits", {
@@ -2582,6 +2631,9 @@ function finalizeCacheStore(
     ruleDigest: memo.ruleDigest,
     engineDigest: memo.engineDigest,
     pathSetDigest: memo.pathSetDigest,
+    // The SAME map the lookup used (see `NewEntryInputs.contextDigests`): an entry stamped under
+    // one context definition and read under another would never match itself.
+    ...(memo.contextDigests === undefined ? {} : { contextDigests: memo.contextDigests }),
     config: request.config,
   });
   // This run's own hits, carried alongside the freshly-built entries so `appendEntries`' existing

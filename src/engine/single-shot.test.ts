@@ -277,9 +277,14 @@ describe("runSingleShotEngine", () => {
     }
     const aBody = seen
       .map((body) => body.messages?.[1]?.content ?? "")
-      .find((content) => content.includes("src/a.ts"));
+      .find((content) => content.includes("<current_file_path>src/a.ts</current_file_path>"));
     expect(aBody).toContain("__new hunk__");
     expect(aBody).toContain("<repository_context>");
+    // The companion block carries the OTHER changed file's hunks — the one-sided-pair
+    // false-positive class from the live audit dies exactly here.
+    expect(aBody).toContain("<companion_changes>");
+    expect(aBody).toContain("## src/b.ts");
+    expect(aBody).not.toContain("<other_changed_files>");
 
     // The stdout is REAL engine shape: prove it by round-tripping the shipped parser.
     const parsed = parseEngineResult(output.stdout);

@@ -43,6 +43,7 @@ import type { Diagnostics } from "../diagnostics/sink.js";
 import { run } from "../git/exec.js";
 import { readModelToken } from "../config/runtime.js";
 import { buildRuleFile, serializeRuleFile } from "./rule-file.js";
+import { companionsByPath } from "./companions.js";
 import { EngineRunError, type EngineRunOptions, type EngineRunOutput } from "./run.js";
 
 /** Sampling pins, identical in value and rationale to `run.ts` — one reviewer, one temperature. */
@@ -56,6 +57,13 @@ const MAX_COMPLETION_TOKENS = 3000;
 /** One bounded retry per file on transport-shaped failures (429/5xx/network). A 4xx is the
  *  request's own fault and retrying it verbatim buys nothing — the file becomes a warning. */
 const RETRIES_PER_FILE = 1;
+
+/** Per-companion and whole-block character budgets for the `<companion_changes>` section. The
+ *  block exists to kill the one-sided-pair false-positive class (37 of 52 findings on the first
+ *  live release PR), and three bounded hunks do that; a whole package's diffs would just re-crowd
+ *  the prompt the single-shot mode exists to keep small. */
+const COMPANION_HUNK_CHARS = 1200;
+const COMPANION_BLOCK_CHARS = 4000;
 
 /** Character budget for one file's rendered diff inside the prompt. Far above any reviewable
  *  hunk set, far below a generated-bundle flood; a diff past this bound is truncated with an
@@ -73,6 +81,8 @@ const SEVERITIES = "critical, high, medium, low";
 interface FileDispatch {
   readonly path: string;
   readonly renderedDiff: string;
+  /** The `<companion_changes>` block for this file, when it has companions — see `companions.ts`. */
+  readonly companionBlock?: string;
 }
 
 interface EngineComment {
@@ -177,6 +187,14 @@ function systemPrompt(rule: string): string {
     "marked `+`; `__old hunk__` shows removed lines. Cite `start_line`/`end_line` from the",
     "numbered lines only.",
     "",
+    "A `<companion_changes>` block may follow the diff: the hunks of RELATED files changed in the",
+    "SAME pull request (its package manifest, same-stem siblings, version files). Cross-file",
+    "consistency claims — versions matching, exports existing, counterparts updated — are",
+    "permitted ONLY when a companion hunk shown here proves them. When a counterpart file is part",
+    "of this change but its hunk is not shown, DO NOT allege any mismatch with it: the pair may",
+    "have moved together, and a claim about an unseen file is a guess wearing a finding's clothes.",
+    "Files listed as changed but not shown are not yours to reason about at all.",
+    "",
     "Reply with ONLY a JSON array, no prose around it. Each element:",
     `{"start_line": N, "end_line": N, "category": one of ${CATEGORIES},`,
     ` "severity": one of ${SEVERITIES}, "content": "the finding body"}.`,
@@ -188,17 +206,20 @@ function systemPrompt(rule: string): string {
   ].join("\n");
 }
 
-function userPrompt(dispatch: FileDispatch, pack: string | undefined, others: string): string {
+function userPrompt(
+  dispatch: FileDispatch,
+  pack: string | undefined,
+  totalChangedFiles: number,
+): string {
   return [
-    "<other_changed_files>",
-    others,
-    "</other_changed_files>",
+    `This file is part of a change touching ${String(totalChangedFiles)} file(s) in total.`,
     "",
     `<current_file_path>${dispatch.path}</current_file_path>`,
     "",
     "<current_file_diff>",
     dispatch.renderedDiff,
     "</current_file_diff>",
+    ...(dispatch.companionBlock === undefined ? [] : ["", dispatch.companionBlock]),
     ...(pack === undefined ? [] : ["", pack]),
     "",
     "Review the change in <current_file_diff> now and reply with the JSON array.",
@@ -419,18 +440,61 @@ interface RunState {
   spendStopped: boolean;
 }
 
+/**
+ * The `<companion_changes>` block for one file: its companions' numbered hunks, each and the whole
+ * block bounded. Companions come from the FULL changed-path set (not just the rule-selected one) —
+ * a version twin is a twin whether or not the profile reviews it — but only fragments the diff
+ * actually carries can render.
+ */
+function companionBlockFor(
+  companions: readonly string[],
+  fragments: ReadonlyMap<string, string>,
+): string | undefined {
+  const sections: string[] = [];
+  let used = 0;
+  for (const companion of companions) {
+    const fragment = fragments.get(companion);
+    if (fragment === undefined) continue;
+    const rendered = renderNumberedHunks(fragment);
+    if (rendered === "") continue;
+    const bounded =
+      rendered.length > COMPANION_HUNK_CHARS
+        ? `${rendered.slice(0, COMPANION_HUNK_CHARS)}\n(truncated)`
+        : rendered;
+    const section = `## ${companion}\n${bounded}`;
+    if (used + section.length > COMPANION_BLOCK_CHARS) break;
+    used += section.length;
+    sections.push(section);
+  }
+  if (sections.length === 0) return undefined;
+  return [
+    "<companion_changes>",
+    "Changes to related files from the SAME pull request, same numbered-hunk format. Consistency",
+    "claims about these files are permitted exactly as far as these hunks show.",
+    "",
+    sections.join("\n\n"),
+    "</companion_changes>",
+  ].join("\n");
+}
+
 /** The dispatch list: the rule-selected changed files, each with its bounded rendered diff. */
 async function prepareDispatches(options: EngineRunOptions): Promise<FileDispatch[]> {
   const diffText = await gitDiff(options);
   if (diffText === undefined) throw new EngineRunError("engine.run.spawn_failed");
   const fragments = splitFileDiffs(diffText);
+  const companions = companionsByPath([...fragments.keys()]);
   return dispatchPaths(options, [...fragments.keys()]).map((path) => {
     const rendered = renderNumberedHunks(fragments.get(path) ?? "");
     const bounded =
       rendered.length > MAX_DIFF_CHARS
         ? `${rendered.slice(0, MAX_DIFF_CHARS)}\n(truncated: diff exceeds the prompt budget)`
         : rendered;
-    return { path, renderedDiff: bounded };
+    const companionBlock = companionBlockFor(companions.get(path) ?? [], fragments);
+    return {
+      path,
+      renderedDiff: bounded,
+      ...(companionBlock === undefined ? {} : { companionBlock }),
+    };
   });
 }
 
@@ -459,9 +523,8 @@ function budgetStopped(state: RunState, dispatch: FileDispatch): boolean {
  *  failure shape lands as an honest `subtask_error` — settlement's coverage gap, never silence. */
 async function reviewOneFile(state: RunState, dispatch: FileDispatch): Promise<void> {
   if (budgetStopped(state, dispatch)) return;
-  const others = state.paths.filter((path) => path !== dispatch.path).join("\n");
   const pack = state.options.contextPacks?.get(dispatch.path);
-  const user = userPrompt(dispatch, pack, others);
+  const user = userPrompt(dispatch, pack, state.paths.length);
   let reply: ModelReply | undefined;
   for (let attempt = 0; attempt <= RETRIES_PER_FILE; attempt += 1) {
     reply = await callModel(

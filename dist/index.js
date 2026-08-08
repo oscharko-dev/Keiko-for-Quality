@@ -1936,7 +1936,10 @@ var EMPTY_LOOKUP = {
   eligiblePaths: /* @__PURE__ */ new Set(),
   contextInvalidated: 0
 };
-function lookupMemoized(store, inventory, ruleDigest, engineDigest, config, pathSetDigest) {
+function contextMatches(entry, path, pathSetDigest, contextDigests) {
+  return entry.prPathSetDigest === (contextDigests?.get(path) ?? pathSetDigest);
+}
+function lookupMemoized(store, inventory, ruleDigest, engineDigest, config, pathSetDigest, contextDigests) {
   if (store === void 0 || engineDigest === void 0) return EMPTY_LOOKUP;
   let model;
   try {
@@ -1963,7 +1966,7 @@ function lookupMemoized(store, inventory, ruleDigest, engineDigest, config, path
     );
     const entry = lookup(store, key);
     if (entry === void 0) continue;
-    if (entry.prPathSetDigest === pathSetDigest) hits.set(path, entry);
+    if (contextMatches(entry, path, pathSetDigest, contextDigests)) hits.set(path, entry);
     else contextInvalidated += 1;
   }
   return { hits, eligiblePaths, contextInvalidated };
@@ -2016,7 +2019,7 @@ function buildNewEntries(inputs) {
       headBlob: item.headBlob,
       ruleDigest: inputs.ruleDigest,
       engineDigest: inputs.engineDigest,
-      prPathSetDigest: inputs.pathSetDigest,
+      prPathSetDigest: inputs.contextDigests?.get(path) ?? inputs.pathSetDigest,
       // Stamped from the constant rather than passed in: only this build knows which publication
       // contract produced these findings, and an entry that lied about it would be replayed by a
       // build whose sanitizer disagrees with the body it stored.
@@ -2564,6 +2567,73 @@ async function collectContextPacks(request) {
   return packs;
 }
 
+// src/engine/companions.ts
+import { createHash as createHash4 } from "node:crypto";
+var MAX_COMPANIONS = 3;
+var LOCKFILE = /(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|[^/]+\.lock)$/;
+function isLockfile(path) {
+  return LOCKFILE.test(path);
+}
+function dirname2(path) {
+  const slash = path.lastIndexOf("/");
+  return slash === -1 ? "" : path.slice(0, slash);
+}
+function basename(path) {
+  const slash = path.lastIndexOf("/");
+  return slash === -1 ? path : path.slice(slash + 1);
+}
+function stem(path) {
+  return basename(path).replace(/\.(test|spec)(?=\.)/, "").replace(/\.[^.]+$/, "");
+}
+function packageRoot(path, roots) {
+  let best = "";
+  for (const root of roots) {
+    if (root === "") continue;
+    if ((path.startsWith(`${root}/`) || dirname2(path) === root) && root.length > best.length) {
+      best = root;
+    }
+  }
+  return best;
+}
+function companionsByPath(paths) {
+  const roots = [
+    ...new Set(paths.filter((p) => basename(p) === "package.json").map((p) => dirname2(p)))
+  ];
+  const byRoot = /* @__PURE__ */ new Map();
+  for (const path of paths) {
+    const root = packageRoot(path, roots);
+    const group = byRoot.get(root) ?? [];
+    group.push(path);
+    byRoot.set(root, group);
+  }
+  const result = /* @__PURE__ */ new Map();
+  for (const path of paths) {
+    let rank2 = function(candidate) {
+      if (basename(candidate) === "package.json") return 0;
+      if (stem(candidate) === ownStem) return 1;
+      if (/(^|\/)version(s)?\./.test(candidate) || stem(candidate) === "version") return 2;
+      return dirname2(candidate) === ownDir ? 3 : 4;
+    };
+    var rank = rank2;
+    if (isLockfile(path)) {
+      result.set(path, []);
+      continue;
+    }
+    const group = (byRoot.get(packageRoot(path, roots)) ?? []).filter(
+      (candidate) => candidate !== path && !isLockfile(candidate)
+    );
+    const ownStem = stem(path);
+    const ownDir = dirname2(path);
+    const ranked = [...group].sort((a, b) => rank2(a) - rank2(b) || a.localeCompare(b));
+    result.set(path, ranked.slice(0, MAX_COMPANIONS));
+  }
+  return result;
+}
+function companionContextDigest(companions, blobOf) {
+  const lines = companions.map((path) => `${path}\0${blobOf(path) ?? ""}`).sort((a, b) => a.localeCompare(b));
+  return sha256(createHash4("sha256").update(lines.join("\n")).digest("hex"));
+}
+
 // src/engine/classify.ts
 var FINDING_CATEGORIES = [
   "bug",
@@ -2812,7 +2882,7 @@ async function auditClassification(findings, deps) {
 }
 
 // src/engine/rule-identity.ts
-import { createHash as createHash4 } from "node:crypto";
+import { createHash as createHash5 } from "node:crypto";
 
 // src/engine/rule-file.ts
 var CATCH_ALL_RULE = [
@@ -3159,14 +3229,14 @@ function serializeRuleFile(file) {
 // src/engine/rule-identity.ts
 function promptIdentityDigest(profile, guidelines) {
   const body = serializeRuleFile(buildRuleFile(profile, guidelines));
-  return sha256(createHash4("sha256").update(body).digest("hex"));
+  return sha256(createHash5("sha256").update(body).digest("hex"));
 }
 
 // src/engine/single-shot.ts
-import { createHash as createHash6, randomUUID } from "node:crypto";
+import { createHash as createHash7, randomUUID } from "node:crypto";
 
 // src/engine/run.ts
-import { createHash as createHash5 } from "node:crypto";
+import { createHash as createHash6 } from "node:crypto";
 import { mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join as join2 } from "node:path";
@@ -3507,7 +3577,7 @@ async function writeRuleFile(options2, home) {
   const ruleBody = serializeRuleFile(rule);
   const rulePath = join2(home, "keiko-rules.json");
   await writeFile2(rulePath, ruleBody, { mode: 384 });
-  return { rulePath, ruleDigest: sha256(createHash5("sha256").update(ruleBody).digest("hex")) };
+  return { rulePath, ruleDigest: sha256(createHash6("sha256").update(ruleBody).digest("hex")) };
 }
 var MAX_TOOL_ROUNDS_PER_FILE = 60;
 function reviewArguments(options2, rulePath) {
@@ -3645,6 +3715,8 @@ var TEMPERATURE = 0;
 var DEFAULT_SEED = 42;
 var MAX_COMPLETION_TOKENS = 3e3;
 var RETRIES_PER_FILE = 1;
+var COMPANION_HUNK_CHARS = 1200;
+var COMPANION_BLOCK_CHARS = 4e3;
 var MAX_DIFF_CHARS = 6e4;
 var CATEGORIES2 = "bug, security, performance, maintainability, test, documentation, other";
 var SEVERITIES2 = "critical, high, medium, low";
@@ -3712,6 +3784,14 @@ function systemPrompt(rule) {
     "marked `+`; `__old hunk__` shows removed lines. Cite `start_line`/`end_line` from the",
     "numbered lines only.",
     "",
+    "A `<companion_changes>` block may follow the diff: the hunks of RELATED files changed in the",
+    "SAME pull request (its package manifest, same-stem siblings, version files). Cross-file",
+    "consistency claims \u2014 versions matching, exports existing, counterparts updated \u2014 are",
+    "permitted ONLY when a companion hunk shown here proves them. When a counterpart file is part",
+    "of this change but its hunk is not shown, DO NOT allege any mismatch with it: the pair may",
+    "have moved together, and a claim about an unseen file is a guess wearing a finding's clothes.",
+    "Files listed as changed but not shown are not yours to reason about at all.",
+    "",
     "Reply with ONLY a JSON array, no prose around it. Each element:",
     `{"start_line": N, "end_line": N, "category": one of ${CATEGORIES2},`,
     ` "severity": one of ${SEVERITIES2}, "content": "the finding body"}.`,
@@ -3722,17 +3802,16 @@ function systemPrompt(rule) {
     "--- review guidance ends ---"
   ].join("\n");
 }
-function userPrompt(dispatch, pack, others) {
+function userPrompt(dispatch, pack, totalChangedFiles) {
   return [
-    "<other_changed_files>",
-    others,
-    "</other_changed_files>",
+    `This file is part of a change touching ${String(totalChangedFiles)} file(s) in total.`,
     "",
     `<current_file_path>${dispatch.path}</current_file_path>`,
     "",
     "<current_file_diff>",
     dispatch.renderedDiff,
     "</current_file_diff>",
+    ...dispatch.companionBlock === void 0 ? [] : ["", dispatch.companionBlock],
     ...pack === void 0 ? [] : ["", pack],
     "",
     "Review the change in <current_file_diff> now and reply with the JSON array."
@@ -3883,17 +3962,49 @@ async function inPool(items, width, work) {
 }
 function ruleDigestFor(options2) {
   const rule = buildRuleFile(options2.profile, options2.guidelines, options2.mechanicallyCleanPaths);
-  return sha256(createHash6("sha256").update(serializeRuleFile(rule)).digest("hex"));
+  return sha256(createHash7("sha256").update(serializeRuleFile(rule)).digest("hex"));
+}
+function companionBlockFor(companions, fragments) {
+  const sections = [];
+  let used = 0;
+  for (const companion of companions) {
+    const fragment = fragments.get(companion);
+    if (fragment === void 0) continue;
+    const rendered = renderNumberedHunks(fragment);
+    if (rendered === "") continue;
+    const bounded = rendered.length > COMPANION_HUNK_CHARS ? `${rendered.slice(0, COMPANION_HUNK_CHARS)}
+(truncated)` : rendered;
+    const section = `## ${companion}
+${bounded}`;
+    if (used + section.length > COMPANION_BLOCK_CHARS) break;
+    used += section.length;
+    sections.push(section);
+  }
+  if (sections.length === 0) return void 0;
+  return [
+    "<companion_changes>",
+    "Changes to related files from the SAME pull request, same numbered-hunk format. Consistency",
+    "claims about these files are permitted exactly as far as these hunks show.",
+    "",
+    sections.join("\n\n"),
+    "</companion_changes>"
+  ].join("\n");
 }
 async function prepareDispatches(options2) {
   const diffText = await gitDiff(options2);
   if (diffText === void 0) throw new EngineRunError("engine.run.spawn_failed");
   const fragments = splitFileDiffs(diffText);
+  const companions = companionsByPath([...fragments.keys()]);
   return dispatchPaths(options2, [...fragments.keys()]).map((path) => {
     const rendered = renderNumberedHunks(fragments.get(path) ?? "");
     const bounded = rendered.length > MAX_DIFF_CHARS ? `${rendered.slice(0, MAX_DIFF_CHARS)}
 (truncated: diff exceeds the prompt budget)` : rendered;
-    return { path, renderedDiff: bounded };
+    const companionBlock = companionBlockFor(companions.get(path) ?? [], fragments);
+    return {
+      path,
+      renderedDiff: bounded,
+      ...companionBlock === void 0 ? {} : { companionBlock }
+    };
   });
 }
 function budgetStopped(state, dispatch) {
@@ -3910,9 +4021,8 @@ function budgetStopped(state, dispatch) {
 }
 async function reviewOneFile(state, dispatch) {
   if (budgetStopped(state, dispatch)) return;
-  const others = state.paths.filter((path) => path !== dispatch.path).join("\n");
   const pack = state.options.contextPacks?.get(dispatch.path);
-  const user = userPrompt(dispatch, pack, others);
+  const user = userPrompt(dispatch, pack, state.paths.length);
   let reply;
   for (let attempt = 0; attempt <= RETRIES_PER_FILE; attempt += 1) {
     reply = await callModel(
@@ -6411,16 +6521,40 @@ function cacheCounts(memo) {
 }
 function prepareMemoization(request, inventory, diagnostics) {
   if (request.cacheStore === void 0) return INERT_MEMO;
+  return memoWithLookup(request, inventory, diagnostics);
+}
+function singleShotContextDigests(request, inventory) {
+  if (request.env.KFQ_SINGLE_SHOT !== "1") return void 0;
+  const identity = /* @__PURE__ */ new Map();
+  for (const item of inventory.items) {
+    identity.set(
+      item.path,
+      `${item.baseBlob ?? "-"}>${item.headBlob ?? "-"}`
+    );
+  }
+  const companions = companionsByPath([...identity.keys()]);
+  const digests = /* @__PURE__ */ new Map();
+  for (const [path, group] of companions) {
+    digests.set(
+      path,
+      companionContextDigest(group, (companion) => identity.get(companion))
+    );
+  }
+  return digests;
+}
+function memoWithLookup(request, inventory, diagnostics) {
   const ruleDigest = promptIdentityDigest(request.profile, request.guidelines);
   const engineDigest = currentPlatformDigest();
   const pathSetDigest = computePrPathSetDigest(inventory);
+  const contextDigests = singleShotContextDigests(request, inventory);
   const { hits, eligiblePaths, contextInvalidated } = lookupMemoized(
     request.cacheStore,
     inventory,
     ruleDigest,
     engineDigest,
     request.config,
-    pathSetDigest
+    pathSetDigest,
+    contextDigests
   );
   const memo = {
     hits,
@@ -6429,6 +6563,7 @@ function prepareMemoization(request, inventory, diagnostics) {
     ruleDigest,
     engineDigest,
     pathSetDigest,
+    ...contextDigests === void 0 ? {} : { contextDigests },
     contextInvalidated
   };
   diagnostics.record("cache.hits", {
@@ -7146,6 +7281,9 @@ function finalizeCacheStore(request, inventory, memo, engineFindings, restrictTo
     ruleDigest: memo.ruleDigest,
     engineDigest: memo.engineDigest,
     pathSetDigest: memo.pathSetDigest,
+    // The SAME map the lookup used (see `NewEntryInputs.contextDigests`): an entry stamped under
+    // one context definition and read under another would never match itself.
+    ...memo.contextDigests === void 0 ? {} : { contextDigests: memo.contextDigests },
     config: request.config
   });
   const touched = [...memo.hits.values()];
