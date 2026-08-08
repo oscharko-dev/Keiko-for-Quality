@@ -5,22 +5,21 @@ import { collectCardData } from "../src/collect.ts";
 
 /**
  * The collector's contract is "render what you know": every assertion here is either a counting
- * rule (which runs, comments and threads belong to the reviewer) or a degradation rule (a failed
- * endpoint leaves its metric undefined instead of inventing a zero). The fake fetch maps URL
- * substrings to canned bodies; anything unmatched is a 500, which doubles as the failure fixture.
+ * rule (which runs and threads belong to the reviewer) or a degradation rule (a failed endpoint —
+ * or a window that outruns a safety ceiling — leaves its metric undefined instead of inventing a
+ * number). The fake fetch maps URL substrings to canned bodies; anything unmatched is a 500,
+ * which doubles as the failure fixture.
  *
- * Two fixture shapes are load-bearing, both measured live against oscharko-dev/Keiko:
- * runs are served per-workflow (`/actions/workflows/<id>/runs`), because the flat runs listing
- * undercounts on a busy repository; and GraphQL thread authors carry NO "[bot]" suffix, while
- * REST review-comment users DO.
+ * Fixture shapes that are load-bearing, all measured live against oscharko-dev/Keiko: runs are
+ * served per-workflow (the flat listing undercounts on a busy repository), GraphQL thread
+ * authors carry NO "[bot]" suffix, and findings/acted-on pages through GraphQL search over the
+ * whole window rather than sampling recent pull requests.
  */
 
 const NOW = Date.parse("2026-08-08T12:00:00Z");
 const RECENT = "2026-08-07T12:00:00Z";
 const OLDER = "2026-08-01T00:00:00Z";
-const STALE = "2026-05-01T00:00:00Z";
-const BOT_REST = "keiko-for-quality[bot]";
-const BOT_GRAPHQL = "keiko-for-quality";
+const BOT = "keiko-for-quality";
 
 function fakeFetch(routes) {
   return async (url, init) => {
@@ -43,8 +42,19 @@ const REVIEW_WORKFLOWS = {
   ],
 };
 
-function threadsReply(nodes) {
-  return { data: { repository: { pullRequest: { reviewThreads: { nodes } } } } };
+function thread(author, resolved, body = "finding") {
+  return { isResolved: resolved, comments: { nodes: [{ author: { login: author }, body }] } };
+}
+
+function searchPage(threadLists, hasNext = false, cursor = null) {
+  return {
+    data: {
+      search: {
+        pageInfo: { hasNextPage: hasNext, endCursor: cursor },
+        nodes: threadLists.map((nodes) => ({ reviewThreads: { nodes } })),
+      },
+    },
+  };
 }
 
 test("counts runs per review workflow and reads outcome from the newest", async () => {
@@ -65,7 +75,7 @@ test("counts runs per review workflow and reads outcome from the newest", async 
       "/actions/workflows/12/runs": {
         workflow_runs: [{ status: "completed", conclusion: "failure", created_at: OLDER }],
       },
-      "/pulls?": [],
+      graphql: searchPage([]),
     }),
     NOW,
   );
@@ -88,52 +98,60 @@ test("the newest run decides the outcome across workflows", async () => {
       "/actions/workflows/12/runs": {
         workflow_runs: [{ status: "completed", conclusion: "failure", created_at: RECENT }],
       },
-      "/pulls?": [],
+      graphql: searchPage([]),
     }),
     NOW,
   );
   assert.equal(data.outcome, "incomplete");
 });
 
-test("findings count the bot's REST comments without coverage stubs; actedOn uses GraphQL logins", async () => {
+test("findings count the bot's threads without coverage stubs; actedOn is their resolved share", async () => {
   const data = await collectCardData(
     "o",
     "r",
     "tok",
     fakeFetch({
       "/actions/workflows?": { workflows: [] },
-      "/pulls?": [
-        { number: 7, updated_at: RECENT },
-        { number: 6, updated_at: STALE },
-      ],
-      "/pulls/7/comments": [
-        { user: { login: BOT_REST }, body: "**TESTS · MAJOR** finding" },
-        { user: { login: BOT_REST }, body: "this file was not fully reviewed" },
-        { user: { login: "human" }, body: "reply" },
-      ],
-      graphql: threadsReply([
-        {
-          isResolved: true,
-          comments: { nodes: [{ author: { login: BOT_GRAPHQL }, body: "finding" }] },
-        },
-        {
-          isResolved: false,
-          comments: { nodes: [{ author: { login: BOT_GRAPHQL }, body: "finding" }] },
-        },
-        { isResolved: true, comments: { nodes: [{ author: { login: "human" }, body: "chat" }] } },
-        {
-          isResolved: true,
-          comments: { nodes: [{ author: { login: BOT_GRAPHQL }, body: "was not fully reviewed" }] },
-        },
+      graphql: searchPage([
+        [
+          thread(BOT, true),
+          thread(BOT, false),
+          thread("human", true),
+          thread(BOT, true, "this file was not fully reviewed"),
+        ],
+        [thread(BOT, false), thread(BOT, false)],
       ]),
     }),
     NOW,
   );
-  assert.equal(data.findings, 1);
+  assert.equal(data.findings, 4);
+  assert.equal(data.actedOnPct, 25);
+});
+
+test("search pagination follows the cursor across the whole window", async () => {
+  const cursors = [];
+  const data = await collectCardData(
+    "o",
+    "r",
+    "tok",
+    fakeFetch({
+      "/actions/workflows?": { workflows: [] },
+      graphql: (url, init) => {
+        const vars = JSON.parse(init.body).variables;
+        cursors.push(vars.after);
+        return vars.after === null
+          ? searchPage([[thread(BOT, true)]], true, "C1")
+          : searchPage([[thread(BOT, false)]]);
+      },
+    }),
+    NOW,
+  );
+  assert.deepEqual(cursors, [null, "C1"]);
+  assert.equal(data.findings, 2);
   assert.equal(data.actedOnPct, 50);
 });
 
-test("stale pull requests are outside the window entirely", async () => {
+test("a thread-heavy pull request's overflow pages are followed to the end", async () => {
   const calls = [];
   const data = await collectCardData(
     "o",
@@ -141,17 +159,100 @@ test("stale pull requests are outside the window entirely", async () => {
     "tok",
     fakeFetch({
       "/actions/workflows?": { workflows: [] },
-      "/pulls?": [{ number: 6, updated_at: STALE }],
-      "/pulls/6/comments": (url) => {
-        calls.push(url);
-        return [];
+      graphql: (url, init) => {
+        const { query, variables } = JSON.parse(init.body);
+        if (query.includes("pullRequest(number")) {
+          calls.push([variables.n, variables.after]);
+          return {
+            data: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [thread(BOT, false)],
+                  },
+                },
+              },
+            },
+          };
+        }
+        const page = searchPage([[thread(BOT, true)]]);
+        const pr = page.data.search.nodes[0];
+        pr.number = 7;
+        pr.reviewThreads.pageInfo = { hasNextPage: true, endCursor: "T1" };
+        return page;
       },
     }),
     NOW,
   );
-  assert.equal(calls.length, 0);
-  assert.equal(data.findings, 0);
+  assert.deepEqual(calls, [[7, "T1"]]);
+  assert.equal(data.findings, 2);
+  assert.equal(data.actedOnPct, 50);
+});
+
+test("a window that outruns the search safety ceiling drops the metric, never a floor", async () => {
+  const data = await collectCardData(
+    "o",
+    "r",
+    "tok",
+    fakeFetch({
+      "/actions/workflows?": { workflows: [] },
+      graphql: () => searchPage([[thread(BOT, true)]], true, "MORE"),
+    }),
+    NOW,
+  );
+  assert.equal(data.findings, undefined);
   assert.equal(data.actedOnPct, undefined);
+});
+
+test("a run window that outruns the pagination ceiling drops the run metrics too", async () => {
+  const fullPage = {
+    workflow_runs: Array.from({ length: 100 }, () => ({
+      status: "completed",
+      conclusion: "success",
+      created_at: RECENT,
+    })),
+  };
+  const data = await collectCardData(
+    "o",
+    "r",
+    "tok",
+    fakeFetch({
+      "/actions/workflows?": { workflows: [{ id: 11, path: "keiko-for-quality.yml" }] },
+      "/actions/workflows/11/runs": fullPage,
+      graphql: searchPage([]),
+    }),
+    NOW,
+  );
+  assert.equal(data.runs30d, undefined);
+  assert.equal(data.outcome, undefined);
+});
+
+test("a full page requests the next one, a short page stops", async () => {
+  const pages = [];
+  const fullPage = {
+    workflow_runs: Array.from({ length: 100 }, () => ({
+      status: "completed",
+      conclusion: "success",
+      created_at: RECENT,
+    })),
+  };
+  const data = await collectCardData(
+    "o",
+    "r",
+    "tok",
+    fakeFetch({
+      "/actions/workflows?": { workflows: [{ id: 11, path: "keiko-for-quality.yml" }] },
+      "/actions/workflows/11/runs": (url) => {
+        pages.push(new URL(url).searchParams.get("page"));
+        return pages.length < 2 ? fullPage : { workflow_runs: [] };
+      },
+      graphql: searchPage([]),
+    }),
+    NOW,
+  );
+  assert.deepEqual(pages, ["1", "2"]);
+  assert.equal(data.runs30d, 100);
 });
 
 test("every endpoint failing leaves every metric undefined", async () => {
@@ -176,47 +277,4 @@ test("a throwing fetch degrades the same way", async () => {
     NOW,
   );
   assert.deepEqual(data, { owner: "o", repo: "r" });
-});
-
-test("graphql failure keeps findings but drops actedOn", async () => {
-  const data = await collectCardData(
-    "o",
-    "r",
-    "tok",
-    fakeFetch({
-      "/actions/workflows?": { workflows: [] },
-      "/pulls?": [{ number: 7, updated_at: RECENT }],
-      "/pulls/7/comments": [{ user: { login: BOT_REST }, body: "finding" }],
-    }),
-    NOW,
-  );
-  assert.equal(data.findings, 1);
-  assert.equal(data.actedOnPct, undefined);
-});
-
-test("a full page requests the next one, a short page stops", async () => {
-  const pages = [];
-  const fullPage = {
-    workflow_runs: Array.from({ length: 100 }, () => ({
-      status: "completed",
-      conclusion: "success",
-      created_at: RECENT,
-    })),
-  };
-  const data = await collectCardData(
-    "o",
-    "r",
-    "tok",
-    fakeFetch({
-      "/actions/workflows?": { workflows: [{ id: 11, path: "keiko-for-quality.yml" }] },
-      "/actions/workflows/11/runs": (url) => {
-        pages.push(new URL(url).searchParams.get("page"));
-        return pages.length < 2 ? fullPage : { workflow_runs: [] };
-      },
-      "/pulls?": [],
-    }),
-    NOW,
-  );
-  assert.deepEqual(pages, ["1", "2"]);
-  assert.equal(data.runs30d, 100);
 });
