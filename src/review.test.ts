@@ -1118,6 +1118,9 @@ describe("performReview: review-cache memoization end to end", () => {
         // The reviewed head (2026-08-06): the supersession clause that resolves file-level
         // notices compares each notice's originalCommit against exactly this value.
         request.head,
+        // This run completed, so its own past notices on the SAME head are superseded too — the
+        // gap Keiko#3003 exposed, where a head that never moved left an answered notice open.
+        true,
       );
       // The predicate handed across is the real detector, not a stand-in — a notice's own fixed
       // template, carrying a well-formed marker (#42 requires both), must be recognised, and
@@ -1170,6 +1173,9 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("abandoned");
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      // An abandoned run answered nothing, so same-head notices stay open — the flag is what
+      // keeps "incomplete never reads as clean" true for the cleanup path too.
+      expect(cleanupSpy.mock.calls[0]?.[5]).toBe(false);
     });
 
     it("records a diagnostic with both counts when notices were resolved", async () => {

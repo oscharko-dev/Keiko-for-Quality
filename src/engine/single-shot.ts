@@ -44,6 +44,14 @@ import { run } from "../git/exec.js";
 import { readModelToken } from "../config/runtime.js";
 import { buildRuleFile, serializeRuleFile } from "./rule-file.js";
 import { companionsByPath } from "./companions.js";
+import {
+  buildVerifyPrompt,
+  needsWholeFileEvidence,
+  numberFileLines,
+  parseVerdicts,
+  tallyOf,
+  VERIFY_SYSTEM_PROMPT,
+} from "./verify-claims.js";
 import { sanitizeFindingBody } from "../publish/sanitize.js";
 import { EngineRunError, type EngineRunOptions, type EngineRunOutput } from "./run.js";
 
@@ -101,6 +109,21 @@ const SECOND_PASS_SEED_OFFSET = 1000;
  *  hunk set, far below a generated-bundle flood; a diff past this bound is truncated with an
  *  explicit marker so the model knows it is not seeing the whole change. */
 const MAX_DIFF_CHARS = 60_000;
+
+/**
+ * Character ceiling on a file sent to whole-file claim verification (`verify-claims.ts`).
+ *
+ * 160k characters covers every source file in the audited consumer — the largest carrier of
+ * refuted claims was 4,422 lines (~150k) — while keeping one verification call inside the same
+ * order of magnitude as the review call it protects. A file past the ceiling publishes its claims
+ * unverified rather than truncated: a verifier answering from half a file would produce exactly
+ * the confident absence claim this pass exists to remove.
+ */
+const MAX_VERIFY_FILE_CHARS = 160_000;
+
+/** Seed offset for the verification call — pinned and distinct, the same one-bit-of-entropy
+ *  reasoning as the second pass. */
+const VERIFY_SEED_OFFSET = 2000;
 
 /**
  * The categories and severities the rule text prescribes. The model is told these exact tokens;
@@ -515,6 +538,11 @@ interface RunState {
   /** Bodies the repair call actually saved — surfaced in `model.usage` so a silent repair
    *  pipeline failure reads as the regression it is, mirroring `context_pack_injected`. */
   repairedBodies: number;
+  /** Claims sent to whole-file verification, and the ones the file itself contradicted. Both
+   *  reach `model.usage`: a verification pass that silently stops asking, or starts dropping
+   *  everything, is a regression only counting makes visible. */
+  claimsVerified: number;
+  claimsDropped: number;
 }
 
 /**
@@ -644,7 +672,68 @@ async function reviewOneFile(state: RunState, dispatch: FileDispatch): Promise<v
   if (dispatch.changedLines >= SECOND_PASS_MIN_CHANGED_LINES) {
     combined = unionComments(parsed, await secondFocusedPass(state, dispatch, user));
   }
-  state.comments.push(...(await repairRejectableBodies(state, combined)));
+  const verified = await verifyWholeFileClaims(state, dispatch, combined);
+  state.comments.push(...(await repairRejectableBodies(state, verified)));
+}
+
+/** The file at the reviewed head, read as a Git object — never from a checkout, the same trust
+ *  posture the diff itself is read under. Absent (deleted file, unreadable object) means the
+ *  verification simply does not run. */
+async function headFileText(options: EngineRunOptions, path: string): Promise<string | undefined> {
+  try {
+    const result = await run("git", ["--no-pager", "show", `${options.pair.head}:${path}`], {
+      cwd: options.repositoryPath,
+      timeoutMs: 30_000,
+      maxBuffer: 64 * 1024 * 1024,
+      env: { PATH: options.pathValue, LC_ALL: "C" },
+    });
+    return result.stdout.toString("utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Drops the claims the file itself contradicts — see `verify-claims.ts` for the measurement that
+ * motivates this pass and the honesty rules it keeps.
+ *
+ * Every early return publishes the claims unchanged: nothing to verify, a file that cannot be
+ * read, a file past the size ceiling, a budget already stopped, a failed call, an unparseable
+ * reply. A verifier that cannot answer must never become a silent filter.
+ */
+async function verifyWholeFileClaims(
+  state: RunState,
+  dispatch: FileDispatch,
+  comments: readonly EngineComment[],
+): Promise<readonly EngineComment[]> {
+  const needing = comments.filter((c) => needsWholeFileEvidence(c.content, dispatch.renderedDiff));
+  if (needing.length === 0 || state.spendStopped) return comments;
+  const text = await headFileText(state.options, dispatch.path);
+  if (text === undefined || text.length > MAX_VERIFY_FILE_CHARS) return comments;
+
+  const reply = await callModel(
+    state.options.config.endpoint,
+    state.token,
+    state.options.config.model,
+    state.seed + VERIFY_SEED_OFFSET,
+    VERIFY_SYSTEM_PROMPT,
+    buildVerifyPrompt(dispatch.path, numberFileLines(text), needing),
+    state.fetchImpl,
+  );
+  state.usage.requests += 1;
+  state.usage.prompt += reply.promptTokens;
+  state.usage.completion += reply.completionTokens;
+  if (reply.content === undefined) return comments;
+
+  const verdicts = parseVerdicts(unfenceJson(reply.content), needing.length);
+  if (verdicts === undefined) return comments;
+  const tally = tallyOf(verdicts, needing.length);
+  state.claimsVerified += tally.asked;
+  state.claimsDropped += tally.dropped;
+  const contradicted = new Set(
+    verdicts.filter((v) => v.contradicted).map((v) => needing[v.claim - 1]),
+  );
+  return comments.filter((c) => !contradicted.has(c));
 }
 
 /**
@@ -809,6 +898,8 @@ function initialRunState(
     warnings: [],
     spendStopped: false,
     repairedBodies: 0,
+    claimsVerified: 0,
+    claimsDropped: 0,
   };
 }
 
@@ -854,6 +945,8 @@ export async function runSingleShotEngine(
       cached: 0,
       context_pack_injected: options.contextPacks === undefined ? 0 : dispatches.length,
       bodies_repaired: state.repairedBodies,
+      claims_verified: state.claimsVerified,
+      claims_dropped: state.claimsDropped,
       cache_key_rejected: 0,
       bad_request_persisted: 0,
     },

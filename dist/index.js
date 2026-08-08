@@ -3270,6 +3270,81 @@ function promptIdentityDigest(profile, guidelines) {
 // src/engine/single-shot.ts
 import { createHash as createHash7, randomUUID } from "node:crypto";
 
+// src/engine/verify-claims.ts
+var ABSENCE_IMPERATIVE = /(^|\n)\s*\*\*\s*(Add|Ensure|Guard|Reject|Validate|Clear|Handle|Initialize|Reset|Remove|Prevent|Avoid|Restrict|Require|Check)\b/iu;
+var ABSENCE_PROSE = /\b(is missing|are missing|does not|doesn't|do not|don't|never (?:clears|checks|validates|resets|removes|handles|guards)|no (?:guard|handling|validation|check|cleanup)|without (?:guard|validation|checking)|fails to|omits)\b/iu;
+var BACKTICKED = /`([A-Za-z_$][\w$]*)`/gu;
+function needsWholeFileEvidence(content, renderedDiff) {
+  if (ABSENCE_IMPERATIVE.test(content) || ABSENCE_PROSE.test(content)) return true;
+  const symbols = [...content.matchAll(BACKTICKED)].map((m) => m[1]);
+  return symbols.some((symbol) => symbol !== void 0 && !renderedDiff.includes(symbol));
+}
+function numberFileLines(text3) {
+  return text3.split("\n").map((line, index) => `${String(index + 1)} ${line}`).join("\n");
+}
+var VERIFY_SYSTEM_PROMPT = [
+  "You verify review claims against the complete file they were written about.",
+  "",
+  "For each numbered claim decide exactly one verdict:",
+  '- "supported": the file does NOT already handle what the claim says is missing or wrong, so the claim stands.',
+  '- "contradicted": the file already does the thing the claim asks for, or the claim rests on a false premise about the code or the language. Cite the line number that shows it.',
+  "",
+  "Judge only what the file shows. A claim you cannot settle from the file is `supported` \u2014",
+  "you are removing claims the file itself refutes, not claims you find unconvincing.",
+  "",
+  'Answer with a JSON array and nothing else: [{"claim": 1, "verdict": "contradicted", "line": 655}]',
+  "Every claim must appear exactly once. `line` is required for `contradicted`, omitted otherwise."
+].join("\n");
+function buildVerifyPrompt(path, numberedFile, claims) {
+  const listed = claims.map((claim, index) => {
+    const where = claim.start_line > 0 ? ` (anchored at line ${String(claim.start_line)})` : " (file level)";
+    return `claim ${String(index + 1)}${where}:
+${claim.content}`;
+  });
+  return [
+    `<file path="${path}">`,
+    numberedFile,
+    "</file>",
+    "",
+    "<claims>",
+    listed.join("\n\n"),
+    "</claims>"
+  ].join("\n");
+}
+function parseVerdicts(reply, claimCount) {
+  let parsed;
+  try {
+    parsed = JSON.parse(reply);
+  } catch {
+    return void 0;
+  }
+  if (!Array.isArray(parsed)) return void 0;
+  return parsed.map((entry) => oneVerdict(entry, claimCount)).filter((verdict) => verdict !== void 0);
+}
+function claimIndex(value, claimCount) {
+  if (typeof value !== "number" || !Number.isInteger(value)) return void 0;
+  return value >= 1 && value <= claimCount ? value : void 0;
+}
+function evidenceLine(value) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) return void 0;
+  return value;
+}
+function oneVerdict(entry, claimCount) {
+  if (typeof entry !== "object" || entry === null) return void 0;
+  const { claim, verdict, line } = entry;
+  const index = claimIndex(claim, claimCount);
+  if (index === void 0 || typeof verdict !== "string") return void 0;
+  return {
+    claim: index,
+    contradicted: verdict.toLowerCase() === "contradicted",
+    line: evidenceLine(line)
+  };
+}
+function tallyOf(verdicts, asked) {
+  if (verdicts === void 0) return { asked, dropped: 0 };
+  return { asked, dropped: verdicts.filter((v) => v.contradicted).length };
+}
+
 // src/engine/run.ts
 import { createHash as createHash6 } from "node:crypto";
 import { mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
@@ -3755,6 +3830,8 @@ var COMPANION_BLOCK_CHARS = 4e3;
 var SECOND_PASS_MIN_CHANGED_LINES = 150;
 var SECOND_PASS_SEED_OFFSET = 1e3;
 var MAX_DIFF_CHARS = 6e4;
+var MAX_VERIFY_FILE_CHARS = 16e4;
+var VERIFY_SEED_OFFSET = 2e3;
 var CATEGORIES2 = "bug, security, performance, maintainability, test, documentation, other";
 var SEVERITIES2 = "critical, high, medium, low";
 function renderNumberedHunks(fileDiff) {
@@ -4108,7 +4185,49 @@ async function reviewOneFile(state, dispatch) {
   if (dispatch.changedLines >= SECOND_PASS_MIN_CHANGED_LINES) {
     combined = unionComments(parsed, await secondFocusedPass(state, dispatch, user));
   }
-  state.comments.push(...await repairRejectableBodies(state, combined));
+  const verified = await verifyWholeFileClaims(state, dispatch, combined);
+  state.comments.push(...await repairRejectableBodies(state, verified));
+}
+async function headFileText(options2, path) {
+  try {
+    const result = await run("git", ["--no-pager", "show", `${options2.pair.head}:${path}`], {
+      cwd: options2.repositoryPath,
+      timeoutMs: 3e4,
+      maxBuffer: 64 * 1024 * 1024,
+      env: { PATH: options2.pathValue, LC_ALL: "C" }
+    });
+    return result.stdout.toString("utf8");
+  } catch {
+    return void 0;
+  }
+}
+async function verifyWholeFileClaims(state, dispatch, comments) {
+  const needing = comments.filter((c) => needsWholeFileEvidence(c.content, dispatch.renderedDiff));
+  if (needing.length === 0 || state.spendStopped) return comments;
+  const text3 = await headFileText(state.options, dispatch.path);
+  if (text3 === void 0 || text3.length > MAX_VERIFY_FILE_CHARS) return comments;
+  const reply = await callModel(
+    state.options.config.endpoint,
+    state.token,
+    state.options.config.model,
+    state.seed + VERIFY_SEED_OFFSET,
+    VERIFY_SYSTEM_PROMPT,
+    buildVerifyPrompt(dispatch.path, numberFileLines(text3), needing),
+    state.fetchImpl
+  );
+  state.usage.requests += 1;
+  state.usage.prompt += reply.promptTokens;
+  state.usage.completion += reply.completionTokens;
+  if (reply.content === void 0) return comments;
+  const verdicts = parseVerdicts(unfenceJson(reply.content), needing.length);
+  if (verdicts === void 0) return comments;
+  const tally = tallyOf(verdicts, needing.length);
+  state.claimsVerified += tally.asked;
+  state.claimsDropped += tally.dropped;
+  const contradicted = new Set(
+    verdicts.filter((v) => v.contradicted).map((v) => needing[v.claim - 1])
+  );
+  return comments.filter((c) => !contradicted.has(c));
 }
 async function secondFocusedPass(state, dispatch, firstPassUser) {
   const user = [
@@ -4227,7 +4346,9 @@ function initialRunState(options2, rule, dispatches, fetchImpl, token) {
     comments: [],
     warnings: [],
     spendStopped: false,
-    repairedBodies: 0
+    repairedBodies: 0,
+    claimsVerified: 0,
+    claimsDropped: 0
   };
 }
 async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
@@ -4260,6 +4381,8 @@ async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
       cached: 0,
       context_pack_injected: options2.contextPacks === void 0 ? 0 : dispatches.length,
       bodies_repaired: state.repairedBodies,
+      claims_verified: state.claimsVerified,
+      claims_dropped: state.claimsDropped,
       cache_key_rejected: 0,
       bad_request_persisted: 0
     }
@@ -5416,7 +5539,7 @@ function collectThreadOverlays(nodes, into) {
     }
   }
 }
-function collectResolvableNoticeThreadIds(nodes, identity, isNoticeBody, currentHead, into) {
+function collectResolvableNoticeThreadIds(nodes, identity, isNoticeBody, currentHead, completedThisRun, into) {
   for (const node of nodes) {
     if (node.isResolved === true) continue;
     if (typeof node.id !== "string") continue;
@@ -5428,7 +5551,7 @@ function collectResolvableNoticeThreadIds(nodes, identity, isNoticeBody, current
       const oid = comment.originalCommit?.oid;
       return typeof oid === "string" && oid !== "" && oid !== currentHead;
     });
-    if (node.isOutdated === true || supersededByHead) into.push(node.id);
+    if (node.isOutdated === true || supersededByHead || completedThisRun) into.push(node.id);
   }
 }
 var RESOLVE_REVIEW_THREAD_MUTATION = `mutation($threadId: ID!) {
@@ -5602,7 +5725,7 @@ var GitHubClient = class {
    * path this method must never affect the shape or cost of. The duplicated pagination shell is a
    * dozen identical lines, not a design this file has any other copy of to drift from.
    */
-  async fetchResolvableNoticeThreadIds(ref, number, identity, isNoticeBody, currentHead) {
+  async fetchResolvableNoticeThreadIds(ref, number, identity, isNoticeBody, currentHead, completedThisRun) {
     const ids = [];
     try {
       let cursor = null;
@@ -5620,6 +5743,7 @@ var GitHubClient = class {
           identity,
           isNoticeBody,
           currentHead,
+          completedThisRun,
           ids
         );
         const next = nextThreadsCursor(threads);
@@ -5665,13 +5789,14 @@ var GitHubClient = class {
    * failed mutation to the same `false` a thread that just wasn't resolved would produce: `attempted`
    * is the only way a caller can tell "nothing needed resolving" apart from "every attempt failed."
    */
-  async resolveSupersededOwnNotices(ref, number, identity, isNoticeBody, currentHead) {
+  async resolveSupersededOwnNotices(ref, number, identity, isNoticeBody, currentHead, completedThisRun) {
     const ids = await this.fetchResolvableNoticeThreadIds(
       ref,
       number,
       identity,
       isNoticeBody,
-      currentHead
+      currentHead,
+      completedThisRun
     );
     let resolved = 0;
     for (const threadId of ids) {
@@ -7584,8 +7709,10 @@ async function settleOrReport(run2, inventory, memo) {
 }
 async function performReview(request, diagnostics) {
   const ledger = { allotted: 0, engine: 0, classify: 0 };
+  let report;
   try {
-    return await performReviewInner(request, diagnostics, ledger);
+    report = await performReviewInner(request, diagnostics, ledger);
+    return report;
   } finally {
     if (ledger.engine > 0 || ledger.classify > 0) {
       diagnostics.record("run.spend", {
@@ -7604,7 +7731,8 @@ async function performReview(request, diagnostics) {
           request.pullNumber,
           request.identity,
           isIncompleteNoticeBody,
-          request.head
+          request.head,
+          report?.outcome === "complete"
         );
         if (attempted > 0) {
           diagnostics.record("cleanup.superseded_notices_resolved", {

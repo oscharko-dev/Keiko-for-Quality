@@ -116,6 +116,15 @@ export interface ReviewCommentApi {
     identity: string,
     isNoticeBody: (body: string) => boolean,
     currentHead: string,
+    /**
+     * Whether THIS run completed. A completed run supersedes its own past notices on the current
+     * head too — measured on Keiko#3003, where an `engine_error` notice stayed open under a later
+     * run that reviewed the SAME head successfully: the head never moved, so the outdated/older-head
+     * test could not see the notice was answered. Safe by construction rather than by care: a
+     * completed run never publishes a notice (incomplete-never-clean is the only path that does),
+     * so there is no notice of its own for this to erase.
+     */
+    completedThisRun: boolean,
   ): Promise<{ readonly attempted: number; readonly resolved: number }>;
 }
 
@@ -368,6 +377,7 @@ function collectResolvableNoticeThreadIds(
   identity: string,
   isNoticeBody: (body: string) => boolean,
   currentHead: string,
+  completedThisRun: boolean,
   into: string[],
 ): void {
   for (const node of nodes) {
@@ -384,7 +394,7 @@ function collectResolvableNoticeThreadIds(
       const oid = comment.originalCommit?.oid;
       return typeof oid === "string" && oid !== "" && oid !== currentHead;
     });
-    if (node.isOutdated === true || supersededByHead) into.push(node.id);
+    if (node.isOutdated === true || supersededByHead || completedThisRun) into.push(node.id);
   }
 }
 
@@ -637,6 +647,7 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     identity: string,
     isNoticeBody: (body: string) => boolean,
     currentHead: string,
+    completedThisRun: boolean,
   ): Promise<readonly string[]> {
     const ids: string[] = [];
     try {
@@ -655,6 +666,7 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
           identity,
           isNoticeBody,
           currentHead,
+          completedThisRun,
           ids,
         );
         const next = nextThreadsCursor(threads);
@@ -710,6 +722,7 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
     identity: string,
     isNoticeBody: (body: string) => boolean,
     currentHead: string,
+    completedThisRun: boolean,
   ): Promise<{ readonly attempted: number; readonly resolved: number }> {
     const ids = await this.fetchResolvableNoticeThreadIds(
       ref,
@@ -717,6 +730,7 @@ export class GitHubClient implements ReviewCommentApi, IssueCommentApi {
       identity,
       isNoticeBody,
       currentHead,
+      completedThisRun,
     );
     let resolved = 0;
     for (const threadId of ids) {
