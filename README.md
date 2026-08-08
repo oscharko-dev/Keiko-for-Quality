@@ -17,15 +17,16 @@
 </p>
 
 <p align="center">
-  <sub>This repository reviews itself: every pull request here is reviewed by Keiko for Quality
-  before it merges.</sub>
+  <sub>This repository reviews itself: every non-draft, same-repository pull request here is
+  reviewed by Keiko for Quality before it merges.</sub>
 </p>
 
 ---
 
 ## What it does
 
-Keiko for Quality reviews every non-draft pull request against its base branch and publishes
+Keiko for Quality reviews every non-draft pull request from the same repository (fork-originated
+heads are deliberately skipped — see the trust posture) against its base branch and publishes
 what it finds as ordinary review conversations — anchored to the file and line, bound to the
 exact commit it reviewed. You reply, resolve or refute them the way you would with any reviewer.
 
@@ -129,8 +130,9 @@ same run are suppressed — the accounting for every suppression is in the run s
 4. Open a pull request. The first run reviews it, publishes its findings, and leaves the run
    summary.
 
-The full operating reference — every input, local runs, report schemas, the release discipline —
-is in [docs/operations.md](docs/operations.md).
+The full operating reference — every input, local runs, report schemas, the qualification gates —
+is in [docs/operations.md](docs/operations.md); release discipline is in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Where findings reach you
 

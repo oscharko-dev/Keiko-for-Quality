@@ -1,8 +1,9 @@
 # Keiko for Quality — operations reference
 
-The complete operating documentation: trust posture, inputs, local runs, report schemas,
-release discipline. The product front page lives in the repository [README](../README.md);
-everything it links to in depth is here, unchanged.
+The complete operating documentation: trust posture, inputs, local runs, report schemas, and
+the qualification gates. Release discipline — the green bar, the pin rules — lives in
+[CONTRIBUTING.md](../CONTRIBUTING.md). The product front page lives in the repository
+[README](../README.md); everything it links to in depth is here, unchanged.
 
 ---
 
@@ -195,7 +196,7 @@ own.
 
 A finding is suppressed against an existing conversation only when it is the same finding this
 reviewer already published, or the same finding at a location someone already gave a considered
-answer to, checked in three stages:
+answer to, checked in four stages:
 
 1. **Exact marker.** Every published conversation carries a hidden fingerprint of its content. A
    later run recomputes the same fingerprint for the same defect and suppresses the repost.

@@ -283,9 +283,11 @@ function tokenOverlap(
  * `classifySuppression` builds `SimilarityCandidate.body` straight from `sanitized.body` — the
  * model's raw sanitized prose for the finding under consideration right now, never composed — while
  * `toExistingConversation` reads `comment.body` straight off a comment that `publishComposedFinding`
- * (`publisher.ts`) already posted through `composeFindingBody`: a `_<category>_ | _<severity>_`
- * label line, the finding's own prose, a collapsed `<details>` repair-prompt block, and a hidden
- * marker comment (see `presentation.ts`). Three of those four parts are fixed product vocabulary
+ * (`publisher.ts`) already posted through `composeFindingBody`: a `**CATEGORY · SEVERITY**` header
+ * line (comments published before the design-system grammar carry the older
+ * `_<category>_ | _<severity>_` shape, and both are stripped — an existing conversation outlives
+ * the release that composed it), the finding's own prose, a collapsed `<details>` repair-prompt
+ * block, and a hidden marker comment (see `presentation.ts`). Three of those four parts are fixed product vocabulary
  * stamped on every single finding this reviewer ever publishes, never model content — the label
  * words, "details"/"summary"/"prompt"/"agents", the entire fixed repair-prompt template ("verify",
  * "finding", "code", "fix", "cause", "resolve", "repository", "verification", ...), and the marker's
@@ -303,7 +305,9 @@ function tokenOverlap(
  */
 function stripComposedArtifacts(body: string): string {
   return clip(body)
-    .replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "") // the leading category/severity label line
+    .replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "") // the CATEGORY · SEVERITY header line
+    .replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "") // the pre-design-system label line
+    .replace(/<img[^>\n]*>/g, " ") // product-composed asset icons (summary/notice surfaces)
     .replace(/<details>[\s\S]*?<\/details>/g, " ") // the collapsed repair-prompt block
     .replace(/<!--[\s\S]*?-->/g, " "); // the hidden marker comment
 }

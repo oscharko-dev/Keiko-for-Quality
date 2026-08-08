@@ -58,13 +58,13 @@ describe("splitTitle", () => {
 describe("composeFindingBody", () => {
   const document = composeFindingBody(REAL_PROSE, MARKER, CONTEXT);
 
-  it("leads with a scannable classification line", () => {
-    expect(document.split("\n")[0]).toBe("_🔒 Security_ | _🔴 Critical_");
+  it("leads with the design system's text-grammar classification line", () => {
+    expect(document.split("\n")[0]).toBe("**SECURITY · CRITICAL**");
   });
 
   it("states the action as a bold imperative before the argument", () => {
     expect(document).toContain("**Validate the token in full, not by prefix.**");
-    const header = document.indexOf("_🔒 Security_");
+    const header = document.indexOf("**SECURITY · CRITICAL**");
     const title = document.indexOf("**Validate");
     const prose = document.indexOf("This comparison");
     expect(header).toBeLessThan(title);
@@ -92,7 +92,7 @@ describe("composeFindingBody", () => {
       severity: "catastrophic",
       category: "vibes",
     });
-    expect(unknown.split("\n")[0]).toBe("_🔎 Review_ | _🟡 Minor_");
+    expect(unknown.split("\n")[0]).toBe("**REVIEW · MINOR**");
   });
 
   it("omits the location clause when no line is known", () => {
@@ -129,7 +129,11 @@ describe("composeIncompleteNotice", () => {
   const notice = composeIncompleteNotice("settlement.incomplete.coverage_gap", MARKER);
 
   it("is visually distinct from a defect finding", () => {
-    expect(notice.split("\n")[0]).toBe("_⚠️ Coverage_ | _🟠 Major_");
+    // "COVERAGE" is outside composeFindingBody's category vocabulary, and the icon (pinned
+    // kq-assets-v1 tag, empty alt) appears on no finding — both keep the opening lines disjoint.
+    expect(notice.split("\n")[0]).toMatch(
+      /^<img src="https:\/\/raw\.githubusercontent\.com\/oscharko-dev\/Keiko-for-Quality\/kq-assets-v1\/[^"]+\/out-incomplete\.svg" width="14" height="14" alt=""> \*\*COVERAGE · MAJOR\*\*$/,
+    );
     expect(notice).toContain("**This change was not fully reviewed.**");
   });
 
