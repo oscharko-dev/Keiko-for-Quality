@@ -36,19 +36,25 @@ export interface VerifiableClaim {
 }
 
 /**
- * The imperative openings and prose forms that assert something is NOT there.
+ * The imperative openings a finding's claim is written with.
  *
- * Taken from the refuted corpus rather than invented: every phrase below opened at least one
- * finding the reader then refuted by pointing at code the model had not been shown. "Add",
- * "Ensure", "Guard", "Reject", "Validate", "Clear", "Handle", "Remove" are the rule text's own
- * imperative style, so the match is on the CLAIM shape, not on wording the model chose freely.
+ * Every verb below opened at least one finding in the audited window that the reader then
+ * refuted, and the list was widened once, against measurement rather than intuition. The first
+ * draft carried only the ABSENCE verbs (Add, Ensure, Guard, Reject, Validate, Clear, Handle,
+ * Remove …) on the argument that an excerpt can show presence but never absence. Re-grading the
+ * window's 55 refutations against that draft showed it selecting 36: the missing 19 were all
+ * CHANGE imperatives — "Adjust the header-name expectation to match the parser's normalization",
+ * "Replace the use of `import.meta.dirname`", "Restore the original top-level coverage fields" —
+ * claims that the code does something it does not do. That is the same question in the other
+ * direction, and an excerpt settles it no better: what the file actually does lives in the file.
+ * With the change verbs in, the selector covers all 55.
  */
-const ABSENCE_IMPERATIVE =
-  /(^|\n)\s*\*\*\s*(Add|Ensure|Guard|Reject|Validate|Clear|Handle|Initialize|Reset|Remove|Prevent|Avoid|Restrict|Require|Check)\b/iu;
+const CLAIM_IMPERATIVE =
+  /(^|\n)\s*\*\*\s*(Add|Ensure|Guard|Reject|Validate|Clear|Handle|Initialize|Reset|Remove|Prevent|Avoid|Restrict|Require|Check|Adjust|Update|Replace|Restore|Reinstate|Delete|Move|Propagate|Load|Exclude|Cancel|Correct|Fix|Rename|Align|Switch|Use|Make|Treat|Accept)\b/iu;
 
-/** Prose that states absence outright, wherever it sits in the body. */
-const ABSENCE_PROSE =
-  /\b(is missing|are missing|does not|doesn't|do not|don't|never (?:clears|checks|validates|resets|removes|handles|guards)|no (?:guard|handling|validation|check|cleanup)|without (?:guard|validation|checking)|fails to|omits)\b/iu;
+/** Prose that states absence or wrongness outright, wherever it sits in the body. */
+const CLAIM_PROSE =
+  /\b(is missing|are missing|does not|doesn't|do not|don't|never (?:clears|checks|validates|resets|removes|handles|guards)|no (?:guard|handling|validation|check|cleanup)|without (?:guard|validation|checking)|fails to|omits|incorrectly|instead of)\b/iu;
 
 /** A backticked identifier the prose leans on as evidence. */
 const BACKTICKED = /`([A-Za-z_$][\w$]*)`/gu;
@@ -58,16 +64,20 @@ const BACKTICKED = /`([A-Za-z_$][\w$]*)`/gu;
  *
  * Two independent triggers, either of which means the hunk cannot settle the question:
  *
- * 1. **It asserts absence.** "Add X", "Ensure Y is cleared", "no validation for Z" — an excerpt
- *    can show that something is present, never that it is absent from the file.
+ * 1. **It claims the file does, or fails to do, something.** "Add X", "no validation for Z",
+ *    "Adjust Y to match the parser's normalization" — every one of those is a statement about the
+ *    file, and an excerpt is not a file.
  * 2. **It leans on a symbol the model was not shown.** When the prose cites `someHelper` and
  *    `someHelper` appears nowhere in the rendered diff, the model is reasoning about code outside
  *    its context — the exact posture that produced the semantics-level refutations.
  *
- * A claim that trips neither is grounded in what the model actually read, and is not sent.
+ * A claim that trips neither is grounded in what the model actually read, and is not sent. The
+ * cost of the wider net is bounded by construction: verification is ONE call per file, batched
+ * over that file's claims, so a file whose findings all qualify costs exactly what a file with a
+ * single qualifying claim costs.
  */
 export function needsWholeFileEvidence(content: string, renderedDiff: string): boolean {
-  if (ABSENCE_IMPERATIVE.test(content) || ABSENCE_PROSE.test(content)) return true;
+  if (CLAIM_IMPERATIVE.test(content) || CLAIM_PROSE.test(content)) return true;
   const symbols = [...content.matchAll(BACKTICKED)].map((m) => m[1]);
   return symbols.some((symbol) => symbol !== undefined && !renderedDiff.includes(symbol));
 }

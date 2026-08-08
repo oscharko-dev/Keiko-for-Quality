@@ -3271,11 +3271,11 @@ function promptIdentityDigest(profile, guidelines) {
 import { createHash as createHash7, randomUUID } from "node:crypto";
 
 // src/engine/verify-claims.ts
-var ABSENCE_IMPERATIVE = /(^|\n)\s*\*\*\s*(Add|Ensure|Guard|Reject|Validate|Clear|Handle|Initialize|Reset|Remove|Prevent|Avoid|Restrict|Require|Check)\b/iu;
-var ABSENCE_PROSE = /\b(is missing|are missing|does not|doesn't|do not|don't|never (?:clears|checks|validates|resets|removes|handles|guards)|no (?:guard|handling|validation|check|cleanup)|without (?:guard|validation|checking)|fails to|omits)\b/iu;
+var CLAIM_IMPERATIVE = /(^|\n)\s*\*\*\s*(Add|Ensure|Guard|Reject|Validate|Clear|Handle|Initialize|Reset|Remove|Prevent|Avoid|Restrict|Require|Check|Adjust|Update|Replace|Restore|Reinstate|Delete|Move|Propagate|Load|Exclude|Cancel|Correct|Fix|Rename|Align|Switch|Use|Make|Treat|Accept)\b/iu;
+var CLAIM_PROSE = /\b(is missing|are missing|does not|doesn't|do not|don't|never (?:clears|checks|validates|resets|removes|handles|guards)|no (?:guard|handling|validation|check|cleanup)|without (?:guard|validation|checking)|fails to|omits|incorrectly|instead of)\b/iu;
 var BACKTICKED = /`([A-Za-z_$][\w$]*)`/gu;
 function needsWholeFileEvidence(content, renderedDiff) {
-  if (ABSENCE_IMPERATIVE.test(content) || ABSENCE_PROSE.test(content)) return true;
+  if (CLAIM_IMPERATIVE.test(content) || CLAIM_PROSE.test(content)) return true;
   const symbols = [...content.matchAll(BACKTICKED)].map((m) => m[1]);
   return symbols.some((symbol) => symbol !== void 0 && !renderedDiff.includes(symbol));
 }

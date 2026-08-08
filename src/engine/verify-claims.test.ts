@@ -29,6 +29,21 @@ describe("needsWholeFileEvidence", () => {
     }
   });
 
+  // Widened against measurement: the first draft carried only the absence verbs and selected 36
+  // of the window's 55 refutations. The missing 19 were all change imperatives.
+  it("selects the change imperatives the first draft missed", () => {
+    for (const title of [
+      "**Adjust the header-name expectation to match the parser's normalization.**",
+      "**Replace the use of `importMeta` with a proper directory resolution.**",
+      "**Restore the original top-level coverage fields.**",
+      "**Update consumers to read coverage metrics from the nested object.**",
+      "**Move the definition before its first use.**",
+      "**Cancel pending reads when the component unmounts.**",
+    ]) {
+      expect(needsWholeFileEvidence(title, HUNK)).toBe(true);
+    }
+  });
+
   it("selects prose that asserts absence outright", () => {
     expect(needsWholeFileEvidence("The parser does not reject duplicates.", HUNK)).toBe(true);
     expect(needsWholeFileEvidence("This path fails to clean up the directory.", HUNK)).toBe(true);
