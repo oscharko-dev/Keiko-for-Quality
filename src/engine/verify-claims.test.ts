@@ -54,6 +54,14 @@ describe("needsWholeFileEvidence", () => {
     expect(needsWholeFileEvidence("`orphanedProfiles` is computed too late.", HUNK)).toBe(true);
   });
 
+  // This reviewer's own finding on the change that introduced this function (#201): a substring
+  // test reads `cat` as shown by `concatenate`, marking an unseen symbol as grounded.
+  it("counts a symbol as shown only when the diff shows the whole identifier", () => {
+    const diff = "12 +  const total = concatenate(parts);";
+    expect(needsWholeFileEvidence("`cat` is never bounded.", diff)).toBe(true);
+    expect(needsWholeFileEvidence("`concatenate` is never bounded.", diff)).toBe(false);
+  });
+
   it("leaves a claim grounded in the shown hunk alone", () => {
     expect(
       needsWholeFileEvidence("`parseConfig` returns undefined here, so line 13 throws.", HUNK),

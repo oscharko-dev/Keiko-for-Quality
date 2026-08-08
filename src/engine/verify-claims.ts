@@ -79,7 +79,19 @@ const BACKTICKED = /`([A-Za-z_$][\w$]*)`/gu;
 export function needsWholeFileEvidence(content: string, renderedDiff: string): boolean {
   if (CLAIM_IMPERATIVE.test(content) || CLAIM_PROSE.test(content)) return true;
   const symbols = [...content.matchAll(BACKTICKED)].map((m) => m[1]);
-  return symbols.some((symbol) => symbol !== undefined && !renderedDiff.includes(symbol));
+  return symbols.some((symbol) => symbol !== undefined && !shownWholeWord(symbol, renderedDiff));
+}
+
+/**
+ * Whether the diff actually shows this identifier, rather than merely containing its letters.
+ *
+ * A substring test reads `cat` as shown by `concatenate`, which is the wrong direction to be
+ * wrong in: it would mark a claim as grounded when the model never saw the symbol, and the claim
+ * would skip verification. Found by this reviewer, reviewing this very change (#201).
+ */
+function shownWholeWord(symbol: string, renderedDiff: string): boolean {
+  const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
+  return new RegExp(String.raw`(?<![\w$])${escaped}(?![\w$])`, "u").test(renderedDiff);
 }
 
 /** The file, numbered the same way the hunks are, so an evidence line means the same thing in

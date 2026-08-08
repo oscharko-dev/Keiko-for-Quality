@@ -3277,7 +3277,11 @@ var BACKTICKED = /`([A-Za-z_$][\w$]*)`/gu;
 function needsWholeFileEvidence(content, renderedDiff) {
   if (CLAIM_IMPERATIVE.test(content) || CLAIM_PROSE.test(content)) return true;
   const symbols = [...content.matchAll(BACKTICKED)].map((m) => m[1]);
-  return symbols.some((symbol) => symbol !== void 0 && !renderedDiff.includes(symbol));
+  return symbols.some((symbol) => symbol !== void 0 && !shownWholeWord(symbol, renderedDiff));
+}
+function shownWholeWord(symbol, renderedDiff) {
+  const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
+  return new RegExp(String.raw`(?<![\w$])${escaped}(?![\w$])`, "u").test(renderedDiff);
 }
 function numberFileLines(text3) {
   return text3.split("\n").map((line, index) => `${String(index + 1)} ${line}`).join("\n");
