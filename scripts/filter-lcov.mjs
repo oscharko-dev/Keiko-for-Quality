@@ -22,8 +22,8 @@ if (!prefix) {
 
 const blocks = readFileSync(file, "utf8").split("end_of_record\n");
 const kept = blocks.filter((block) => {
-  const sf = block.match(/^SF:(.*)$/m);
-  return sf !== null && sf[1].startsWith(prefix);
+  const sf = /^SF:(.*)$/m.exec(block);
+  return sf?.[1].startsWith(prefix) === true;
 });
 writeFileSync(file, kept.map((b) => `${b}end_of_record\n`).join(""));
 console.log(`filter-lcov: kept ${kept.length} of ${blocks.length - 1} SF blocks under ${prefix}`);
