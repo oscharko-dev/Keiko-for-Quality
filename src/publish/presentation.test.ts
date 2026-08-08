@@ -59,12 +59,12 @@ describe("composeFindingBody", () => {
   const document = composeFindingBody(REAL_PROSE, MARKER, CONTEXT);
 
   it("leads with the design system's text-grammar classification line", () => {
-    expect(document.split("\n")[0]).toBe("**SECURITY · CRITICAL**");
+    expect(document.split("\n")[0]).toBe("`SECURITY · CRITICAL`");
   });
 
   it("states the action as a bold imperative before the argument", () => {
     expect(document).toContain("**Validate the token in full, not by prefix.**");
-    const header = document.indexOf("**SECURITY · CRITICAL**");
+    const header = document.indexOf("`SECURITY · CRITICAL`");
     const title = document.indexOf("**Validate");
     const prose = document.indexOf("This comparison");
     expect(header).toBeLessThan(title);
@@ -92,7 +92,7 @@ describe("composeFindingBody", () => {
       severity: "catastrophic",
       category: "vibes",
     });
-    expect(unknown.split("\n")[0]).toBe("**REVIEW · MINOR**");
+    expect(unknown.split("\n")[0]).toBe("`REVIEW · MINOR`");
   });
 
   it("omits the location clause when no line is known", () => {
@@ -129,10 +129,10 @@ describe("composeIncompleteNotice", () => {
   const notice = composeIncompleteNotice("settlement.incomplete.coverage_gap", MARKER);
 
   it("is visually distinct from a defect finding", () => {
-    // "COVERAGE" is outside composeFindingBody's category vocabulary, and the icon (pinned to a
-    // full commit SHA, empty alt) appears on no finding — both keep the opening lines disjoint.
+    // Specimen ③'s chip pair, SHA-pinned, with the words in the alt text — and no finding ever
+    // opens with an image, which keeps the two composers' opening lines disjoint.
     expect(notice.split("\n")[0]).toMatch(
-      /^<img src="https:\/\/raw\.githubusercontent\.com\/oscharko-dev\/Keiko-for-Quality\/[0-9a-f]{40}\/[^"]+\/out-incomplete\.svg" width="14" height="14" alt=""> \*\*COVERAGE · MAJOR\*\*$/,
+      /^<img src="https:\/\/raw\.githubusercontent\.com\/oscharko-dev\/Keiko-for-Quality\/[0-9a-f]{40}\/[^"]+\/coverage\.svg" height="22" alt="Coverage"> <img src="[^"]+\/sev-major\.svg" height="22" alt="Major">$/,
     );
     expect(notice).toContain("**This change was not fully reviewed.**");
   });
@@ -348,7 +348,7 @@ describe("composeSummaryBody", () => {
         summaryReport({ outcome: "incomplete", reason: "settlement.incomplete.coverage_gap" }),
         MARKER,
       );
-      expect(body).toContain("incomplete (`settlement.incomplete.coverage_gap`)");
+      expect(body).toContain('alt="INCOMPLETE"> (`settlement.incomplete.coverage_gap`)');
     });
 
     it("renders a bare 'abandoned' with no reason code, matching the outcome-line contract", () => {
@@ -509,7 +509,7 @@ describe("composeSummaryBody", () => {
       );
       expect(body).not.toContain("hostile");
       expect(body).not.toContain("<script>");
-      expect(body).toContain("incomplete (`unknown`)");
+      expect(body).toContain("(`unknown`)");
     });
   });
 });

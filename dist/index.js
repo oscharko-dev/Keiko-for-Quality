@@ -1624,9 +1624,9 @@ function label(table, key, fallback) {
 }
 var FALLBACK_CATEGORY = "Review";
 var FALLBACK_SEVERITY = "Minor";
-var ASSET_BASE = "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/1869ec1ce1f4fa465d5a0d512f11f18b76ba9a9c/.github/assets/kq";
-function assetIcon(name, size) {
-  return `<img src="${ASSET_BASE}/${name}.svg" width="${String(size)}" height="${String(size)}" alt="">`;
+var ASSET_BASE = "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/6b59f533afef15820991b3a0470ddc22c6c6d436/.github/assets/kq";
+function assetChip(name, height, alt) {
+  return `<img src="${ASSET_BASE}/${name}.svg" height="${String(height)}" alt="${alt}">`;
 }
 var MAX_TITLE_CHARS = 120;
 function splitTitle(prose2) {
@@ -1662,7 +1662,7 @@ function composeFindingBody(sanitizedProse, marker, context) {
   const category = label(CATEGORIES, context.category, FALLBACK_CATEGORY);
   const severity = label(SEVERITIES, context.severity, FALLBACK_SEVERITY);
   const { title, body } = splitTitle(sanitizedProse);
-  const parts = [`**${category.toUpperCase()} \xB7 ${severity.toUpperCase()}**`, ""];
+  const parts = [`\`${category.toUpperCase()} \xB7 ${severity.toUpperCase()}\``, ""];
   if (title !== "") parts.push(`**${title}**`, "");
   parts.push(
     body,
@@ -1699,9 +1699,10 @@ function gapLine(counts) {
 }
 function composeIncompleteNotice(reasonCode, marker, counts) {
   return [
-    // "COVERAGE" is deliberately outside the CATEGORIES vocabulary above, so the two composers
-    // can never collide on their opening line — the invariant `isIncompleteNoticeBody` documents.
-    `${assetIcon("out-incomplete", 14)} **COVERAGE \xB7 MAJOR**`,
+    // Specimen ③'s chip pair. "COVERAGE" is deliberately outside the CATEGORIES vocabulary
+    // above, and no finding opens with an image, so the two composers can never collide on
+    // their opening line — the invariant `isIncompleteNoticeBody` documents.
+    `${assetChip("coverage", 22, "Coverage")} ${assetChip("sev-major", 22, "Major")}`,
     "",
     "**This change was not fully reviewed.**",
     "",
@@ -1743,11 +1744,11 @@ function reasonText(reason) {
 function outcomeText(report) {
   switch (report.outcome) {
     case "complete":
-      return `${assetIcon("out-complete", 12)} complete`;
+      return assetChip("out-complete", 20, "COMPLETE");
     case "abandoned":
-      return `${assetIcon("out-abandoned", 12)} abandoned`;
+      return assetChip("out-abandoned", 20, "ABANDONED");
     case "incomplete":
-      return `${assetIcon("out-incomplete", 12)} incomplete (\`${reasonText(report.reason)}\`)`;
+      return `${assetChip("out-incomplete", 20, "INCOMPLETE")} (\`${reasonText(report.reason)}\`)`;
   }
 }
 function countRows(counts) {
@@ -1797,7 +1798,9 @@ function composeSummaryBody(report, marker) {
   ].join(" \xB7 ");
   const tokensPerFinding = tokensPerFindingRow(report.budget, report.counts);
   const parts = [
-    `${assetIcon("reviewer", 18)} **Keiko for Quality \u2014 run summary**`,
+    // Specimen ② opens with the plain bold title — the reviewer's mark is the App avatar in
+    // GitHub's own comment chrome, not a second icon inside the body.
+    "**Keiko for Quality \u2014 run summary**",
     "",
     headline,
     "",
@@ -5904,7 +5907,7 @@ function tokenOverlap(a, b) {
   return { score: smaller === 0 ? 0 : shared / smaller, shared };
 }
 function stripComposedArtifacts(body) {
-  return clip2(body).replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "").replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<img[^>\n]*>/g, " ").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
+  return clip2(body).replace(/^`[A-Z]+ · [A-Z]+`[ \t]*\n?/, "").replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "").replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<img[^>\n]*>/g, " ").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
 }
 function similarByContent(a, b) {
   if (shareCodeBlock(a, b)) return true;
