@@ -3,7 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { ExecFailure, gitEnvironment, run, type ExecOptions } from "./exec.js";
+import {
+  ExecFailure,
+  gitEnvironment,
+  run,
+  runBoundedLineRecords,
+  type ExecOptions,
+} from "./exec.js";
 
 /**
  * The product starts exactly one kind of subprocess, and it starts it here.
@@ -184,6 +190,79 @@ describe("run — failure classification", () => {
     );
     expect(failure.message).toBe(`${NODE} exited with 2`);
     expect(failure.message).not.toContain("secret-path");
+  });
+});
+
+describe("runBoundedLineRecords", () => {
+  it("retains only complete bounded records and marks later stdout truncated", async () => {
+    const result = await runBoundedLineRecords(
+      NODE,
+      ["-e", "for (let i = 0; i < 100; i += 1) process.stdout.write(`row${i}\\n`);"],
+      { cwd: tmpdir(), timeoutMs: 10_000, maximumBytes: 1024, maximumRecords: 2 },
+    );
+
+    expect(result.status).toBe("stdout_truncated");
+    expect(result.records.map((record) => record.toString("utf8"))).toEqual(["row0\n", "row1\n"]);
+  });
+
+  it("applies the byte ceiling without retaining a partial record", async () => {
+    const result = await runBoundedLineRecords(
+      NODE,
+      ["-e", "process.stdout.write('one\\ntoolong\\n')"],
+      { cwd: tmpdir(), timeoutMs: 10_000, maximumBytes: 5, maximumRecords: 10 },
+    );
+
+    expect(result.status).toBe("stdout_truncated");
+    expect(result.records.map((record) => record.toString("utf8"))).toEqual(["one\n"]);
+  });
+
+  it("preserves shell-free argument boundaries", async () => {
+    const hostile = "$(touch should-not-run)";
+    const result = await runBoundedLineRecords(
+      NODE,
+      ["-e", "process.stdout.write(`${process.argv[1]}\\n`)", hostile],
+      { cwd: tmpdir(), timeoutMs: 10_000, maximumBytes: 1024, maximumRecords: 2 },
+    );
+
+    expect(result.records[0]?.toString("utf8")).toBe(`${hostile}\n`);
+  });
+
+  it("rejects a real non-zero exit even after stdout crossed the cap", async () => {
+    const failure = await rejection(
+      runBoundedLineRecords(
+        NODE,
+        [
+          "-e",
+          "for (let i = 0; i < 20; i += 1) process.stdout.write(`secret${i}\\n`); process.exit(2);",
+        ],
+        { cwd: tmpdir(), timeoutMs: 10_000, maximumBytes: 1024, maximumRecords: 2 },
+      ),
+    );
+
+    expect(failure.code).toBe(2);
+    expect(failure.message).not.toContain("secret");
+  });
+
+  it("rejects timeout and unterminated output without exposing content", async () => {
+    const timeout = await rejection(
+      runBoundedLineRecords(NODE, ["-e", "setTimeout(() => {}, 10_000)"], {
+        cwd: tmpdir(),
+        timeoutMs: 250,
+        maximumBytes: 1024,
+        maximumRecords: 2,
+      }),
+    );
+    expect(timeout.timedOut).toBe(true);
+
+    const malformed = await rejection(
+      runBoundedLineRecords(NODE, ["-e", "process.stdout.write('candidate-secret')"], {
+        cwd: tmpdir(),
+        timeoutMs: 10_000,
+        maximumBytes: 1024,
+        maximumRecords: 2,
+      }),
+    );
+    expect(malformed.message).not.toContain("candidate-secret");
   });
 });
 

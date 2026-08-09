@@ -8,7 +8,7 @@
  */
 
 import type { CommitSha } from "../core/brands.js";
-import { ExecFailure, gitEnvironment, run } from "../git/exec.js";
+import { ExecFailure, gitEnvironment, run, runBoundedLineRecords } from "../git/exec.js";
 import { readTextAtCommit, verifyCommit, type GitContext } from "../git/plumbing.js";
 import {
   extractEvidenceIdentifiers,
@@ -23,6 +23,7 @@ export const MAX_REPOSITORY_FOLLOW_UP_TERMS = 3;
 
 const MAX_GREP_TERMS = 8;
 const MAX_RAW_MATCHES = 96;
+const MAX_STRUCTURAL_CANDIDATE_PATHS_PER_TERM = 4;
 const MAX_CODE_ENTRIES = 12;
 const MAX_CODE_PATHS = 5;
 const MAX_MANIFEST_FILES = 3;
@@ -43,6 +44,7 @@ const TERM_STOP_WORDS: ReadonlySet<string> = new Set([
   "config",
   "data",
   "error",
+  "length",
   "input",
   "item",
   "path",
@@ -50,6 +52,7 @@ const TERM_STOP_WORDS: ReadonlySet<string> = new Set([
   "state",
   "test",
   "text",
+  "the",
   "value",
 ]);
 
@@ -101,14 +104,35 @@ interface GrepMatch {
   readonly content: string;
 }
 
+interface RankedGrepMatch extends GrepMatch {
+  readonly termRank: number;
+}
+
+interface RankedEvidenceEntry extends RepositoryEvidenceEntry {
+  readonly termRank: number;
+}
+
+interface GrepTermResult {
+  readonly sightings: readonly GrepMatch[];
+  readonly truncated: boolean;
+}
+
+interface GrepSearchResult {
+  readonly matches: readonly RankedGrepMatch[];
+  readonly candidatePaths: readonly string[];
+  readonly truncated: boolean;
+}
+
 function validTerm(term: string): boolean {
   const tail = term.split(".").at(-1)?.toLowerCase() ?? "";
+  const qualified = term.includes(".");
+  // `length` alone is too broad, while `String.length` is an exact and bounded Git literal.
   return (
     term.length >= 3 &&
     term.length <= 80 &&
     RETRIEVAL_TERM.test(term) &&
     !TERM_STOP_WORDS.has(term.toLowerCase()) &&
-    !TERM_STOP_WORDS.has(tail)
+    (qualified || !TERM_STOP_WORDS.has(tail))
   );
 }
 
@@ -136,8 +160,10 @@ function expandedSearchTerms(terms: readonly string[]): readonly string[] {
   const seen = new Set<string>();
   for (const term of terms) {
     const tail = term.split(".").at(-1) ?? term;
-    for (const candidate of [tail, term]) {
-      if (seen.has(candidate)) continue;
+    // Prefer the exact qualified name. A broad tail such as `length` must never run before the
+    // bounded `String.length` query and flood the complete repository.
+    for (const candidate of [term, tail]) {
+      if (!validTerm(candidate) || seen.has(candidate)) continue;
       seen.add(candidate);
       expanded.push(candidate);
       if (expanded.length === MAX_GREP_TERMS) return expanded;
@@ -278,28 +304,165 @@ function parseGrepOutput(output: string, head: CommitSha): readonly GrepMatch[] 
   return matches;
 }
 
-async function grepAtHead(
+function parseCompleteGrepRecords(
+  records: readonly Buffer[],
+  head: CommitSha,
+): readonly GrepMatch[] {
+  const matches: GrepMatch[] = [];
+  for (const record of records) {
+    const output = record.toString("utf8");
+    const delimiters = grepDelimiters(output, 0);
+    if (delimiters?.contentEnd !== output.length - 1) {
+      throw new RepositoryContextRetrievalError();
+    }
+    const match = grepMatchAt(output, 0, delimiters, head);
+    if (match === undefined) throw new RepositoryContextRetrievalError();
+    matches.push(match);
+  }
+  return matches;
+}
+
+async function grepTermAtHead(
   context: GitContext,
   head: CommitSha,
-  terms: readonly string[],
+  term: string,
   strict = false,
   deadlineMs?: number,
-): Promise<readonly GrepMatch[]> {
-  if (terms.length === 0) return [];
-  if (strict && !(await strictGrepHasMatch(context, head, terms, deadlineMs))) return [];
+): Promise<GrepTermResult> {
+  if (strict && !(await strictGrepHasMatch(context, head, [term], deadlineMs))) {
+    return { sightings: [], truncated: false };
+  }
   try {
     const timeoutMs = boundedRepositoryTimeout(deadlineMs, context.timeoutMs);
-    const result = await run("git", grepArguments(head, terms), {
+    if (strict) {
+      const streamed = await runBoundedLineRecords("git", grepArguments(head, [term]), {
+        cwd: context.cwd,
+        timeoutMs,
+        maximumBytes: GIT_MAX_BUFFER,
+        maximumRecords: MAX_RAW_MATCHES,
+        env: { ...gitEnvironment(context.pathValue), GIT_LITERAL_PATHSPECS: "1" },
+      });
+      return {
+        sightings: parseCompleteGrepRecords(streamed.records, head),
+        truncated: streamed.status === "stdout_truncated",
+      };
+    }
+    // Initial retrieval remains best-effort and buffered: an overflowing/noisy automatic term is
+    // isolated and skipped. Only the judge-requested follow-up needs to distinguish saturation so
+    // it can fail closed through structural retrieval instead of accepting a lexical prefix.
+    const result = await run("git", grepArguments(head, [term]), {
       cwd: context.cwd,
       timeoutMs,
       maxBuffer: GIT_MAX_BUFFER,
       env: { ...gitEnvironment(context.pathValue), GIT_LITERAL_PATHSPECS: "1" },
     });
-    return parseGrepOutput(result.stdout.toString("utf8"), head);
+    return {
+      sightings: parseGrepOutput(result.stdout.toString("utf8"), head),
+      truncated: false,
+    };
   } catch (error) {
     if (strict) throw new RepositoryContextRetrievalError(error);
-    return [];
+    return { sightings: [], truncated: false };
   }
+}
+
+function takeUniqueMatches(
+  seen: Set<string>,
+  candidates: readonly RankedGrepMatch[],
+  maximum: number,
+): readonly RankedGrepMatch[] {
+  const selected: RankedGrepMatch[] = [];
+  for (const match of candidates) {
+    const key = `${match.path}\u0000${String(match.line)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    selected.push(match);
+    if (selected.length === maximum) return selected;
+  }
+  return selected;
+}
+
+function matchQuota(termIndex: number, termCount: number): number {
+  const base = Math.floor(MAX_RAW_MATCHES / termCount);
+  const remainder = MAX_RAW_MATCHES % termCount;
+  return base + (termIndex < remainder ? 1 : 0);
+}
+
+function interleaveMatches(
+  groups: readonly (readonly RankedGrepMatch[])[],
+): readonly RankedGrepMatch[] {
+  const selected: RankedGrepMatch[] = [];
+  const maximumGroupLength = Math.max(0, ...groups.map((group) => group.length));
+  // One result from every term per round makes the fixed reservations reach the final evidence
+  // selector. Earlier (higher-relevance) terms still win every round and own duplicate sightings.
+  for (let offset = 0; offset < maximumGroupLength; offset += 1) {
+    for (const group of groups) {
+      const match = group[offset];
+      if (match !== undefined) selected.push(match);
+    }
+  }
+  return selected;
+}
+
+function takeCandidatePaths(
+  seen: Set<string>,
+  sightings: readonly GrepMatch[],
+  reviewPath: string,
+): readonly string[] {
+  const selected: string[] = [];
+  for (const sighting of sightings) {
+    if (sighting.path === reviewPath || seen.has(sighting.path)) continue;
+    seen.add(sighting.path);
+    selected.push(sighting.path);
+    if (selected.length === MAX_STRUCTURAL_CANDIDATE_PATHS_PER_TERM) return selected;
+  }
+  return selected;
+}
+
+function interleavePaths(groups: readonly (readonly string[])[]): readonly string[] {
+  const selected: string[] = [];
+  const maximumGroupLength = Math.max(0, ...groups.map((group) => group.length));
+  for (let offset = 0; offset < maximumGroupLength; offset += 1) {
+    for (const group of groups) {
+      const path = group[offset];
+      if (path !== undefined) selected.push(path);
+    }
+  }
+  return selected;
+}
+
+async function grepAtHead(
+  context: GitContext,
+  head: CommitSha,
+  terms: readonly string[],
+  reviewPath: string,
+  strict = false,
+  deadlineMs?: number,
+): Promise<GrepSearchResult> {
+  if (terms.length === 0) return { matches: [], candidatePaths: [], truncated: false };
+  const seenMatches = new Set<string>();
+  const seenPaths = new Set<string>();
+  const groups: (readonly RankedGrepMatch[])[] = [];
+  const pathGroups: (readonly string[])[] = [];
+  let truncated = false;
+  for (const [termIndex, term] of terms.entries()) {
+    const result = await grepTermAtHead(context, head, term, strict, deadlineMs);
+    truncated ||= result.truncated;
+    pathGroups.push(takeCandidatePaths(seenPaths, result.sightings, reviewPath));
+    const ranked = result.sightings
+      .filter((match) => match.path !== reviewPath)
+      .map((match) => ({ ...match, termRank: termIndex }));
+    groups.push(
+      result.truncated
+        ? []
+        : takeUniqueMatches(seenMatches, ranked, matchQuota(termIndex, terms.length)),
+    );
+  }
+  return {
+    matches: interleaveMatches(groups),
+    candidatePaths: interleavePaths(pathGroups),
+    truncated,
+  };
 }
 
 async function strictGrepHasMatch(
@@ -328,36 +491,62 @@ function matchKind(match: GrepMatch): RepositoryEvidenceKind {
   return DECLARATION_HINT.test(match.content) ? "definition" : "callsite";
 }
 
-function asCodeEntry(match: GrepMatch): RepositoryEvidenceEntry {
+function asCodeEntry(match: RankedGrepMatch): RankedEvidenceEntry {
   return { ...match, kind: matchKind(match) };
 }
 
-function addCodeEntry(
-  selected: RepositoryEvidenceEntry[],
+function addCodeEntry<Entry extends RepositoryEvidenceEntry>(
+  selected: Entry[],
   paths: Set<string>,
-  entry: RepositoryEvidenceEntry | undefined,
-): void {
+  entry: Entry | undefined,
+): boolean {
   if (
     entry === undefined ||
+    selected.length === MAX_CODE_ENTRIES ||
     selected.some((item) => item.path === entry.path && item.line === entry.line)
   ) {
-    return;
+    return false;
   }
-  if (!paths.has(entry.path) && paths.size === MAX_CODE_PATHS) return;
+  if (!paths.has(entry.path) && paths.size === MAX_CODE_PATHS) return false;
   paths.add(entry.path);
   selected.push(entry);
+  return true;
+}
+
+function reserveRankedEntries(
+  candidates: readonly RankedEvidenceEntry[],
+  selected: RankedEvidenceEntry[],
+  paths: Set<string>,
+): void {
+  const reservedRanks = new Set<number>();
+  for (const candidate of candidates) {
+    if (reservedRanks.has(candidate.termRank)) continue;
+    if (addCodeEntry(selected, paths, candidate)) reservedRanks.add(candidate.termRank);
+    if (selected.length === MAX_CODE_ENTRIES) return;
+  }
+}
+
+function withoutTermRank(entry: RankedEvidenceEntry): RepositoryEvidenceEntry {
+  return {
+    path: entry.path,
+    line: entry.line,
+    content: entry.content,
+    kind: entry.kind,
+  };
 }
 
 function boundedCodeEntries(
-  matches: readonly GrepMatch[],
+  matches: readonly RankedGrepMatch[],
   reviewPath: string,
 ): readonly RepositoryEvidenceEntry[] {
+  // `grepAtHead` already orders matches by term relevance and fixed fair reservations. Sorting by
+  // path here would silently replace that semantic order with repository naming.
   const candidates = matches
     .filter((match) => match.path !== reviewPath && match.content.length <= MAX_MATCH_LINE_CHARS)
-    .map(asCodeEntry)
-    .sort((left, right) => left.path.localeCompare(right.path) || left.line - right.line);
-  const selected: RepositoryEvidenceEntry[] = [];
+    .map(asCodeEntry);
+  const selected: RankedEvidenceEntry[] = [];
   const paths = new Set<string>();
+  reserveRankedEntries(candidates, selected, paths);
   for (const kind of ["definition", "test", "callsite"] as const) {
     addCodeEntry(
       selected,
@@ -369,26 +558,45 @@ function boundedCodeEntries(
     addCodeEntry(selected, paths, candidate);
     if (selected.length === MAX_CODE_ENTRIES) break;
   }
-  return selected;
+  return selected.map(withoutTermRank);
 }
 
 function boundedEvidenceEntries(
-  entries: readonly RepositoryEvidenceEntry[],
+  structural: readonly RepositoryEvidenceEntry[],
+  lexical: readonly RepositoryEvidenceEntry[],
   reviewPath: string,
 ): readonly RepositoryEvidenceEntry[] {
-  const candidates = entries
-    .filter((entry) => entry.path !== reviewPath && entry.content.length <= MAX_MATCH_LINE_CHARS)
-    .sort((left, right) => left.path.localeCompare(right.path) || left.line - right.line);
+  const eligible = (
+    entries: readonly RepositoryEvidenceEntry[],
+  ): readonly RepositoryEvidenceEntry[] =>
+    entries.filter(
+      (entry) => entry.path !== reviewPath && entry.content.length <= MAX_MATCH_LINE_CHARS,
+    );
+  const structuralCandidates = eligible(structural);
+  const lexicalCandidates = eligible(lexical);
   const selected: RepositoryEvidenceEntry[] = [];
   const paths = new Set<string>();
   for (const kind of ["definition", "test", "callsite"] as const) {
     addCodeEntry(
       selected,
       paths,
-      candidates.find((entry) => entry.kind === kind),
+      structuralCandidates.find((entry) => entry.kind === kind),
     );
   }
-  for (const candidate of candidates) {
+  const reservedStructuralPaths = new Set(selected.map((entry) => entry.path));
+  for (const entry of structuralCandidates) {
+    if (reservedStructuralPaths.has(entry.path)) continue;
+    if (addCodeEntry(selected, paths, entry)) reservedStructuralPaths.add(entry.path);
+  }
+  for (const entry of structuralCandidates) addCodeEntry(selected, paths, entry);
+  for (const kind of ["definition", "test", "callsite"] as const) {
+    addCodeEntry(
+      selected,
+      paths,
+      lexicalCandidates.find((entry) => entry.kind === kind),
+    );
+  }
+  for (const candidate of lexicalCandidates) {
     addCodeEntry(selected, paths, candidate);
     if (selected.length === MAX_CODE_ENTRIES) break;
   }
@@ -525,14 +733,15 @@ async function collectCodeEntries(
   terms: readonly string[],
   strict = false,
 ): Promise<readonly RepositoryEvidenceEntry[]> {
-  const matches = await grepAtHead(
+  const result = await grepAtHead(
     context,
     request.head,
     expandedSearchTerms(terms),
+    request.reviewPath,
     strict,
     request.deadlineMs,
   );
-  return boundedCodeEntries(matches, request.reviewPath);
+  return boundedCodeEntries(result.matches, request.reviewPath);
 }
 
 /** Initial deterministic stage: finding/anchor/diff identifiers plus relevant manifests. */
@@ -568,16 +777,17 @@ export async function collectRepositoryContextFollowUp(
   remainingRepositoryMs(request);
   const context = await strictlyVerifiedContext(request);
   const terms = validatedRetrieveTerms(retrieveTerms);
-  const matches = await grepAtHead(
+  const result = await grepAtHead(
     context,
     request.head,
     expandedSearchTerms(terms),
+    request.reviewPath,
     true,
     request.deadlineMs,
   );
   remainingRepositoryMs(request);
-  const lexical = boundedCodeEntries(matches, request.reviewPath);
-  if (!lexicalNeedsStructuralFallback(matches, lexical, terms)) {
+  const lexical = boundedCodeEntries(result.matches, request.reviewPath);
+  if (!result.truncated && !lexicalNeedsStructuralFallback(result.matches, lexical, terms)) {
     return { headCommit: request.head, entries: lexical };
   }
   try {
@@ -585,13 +795,13 @@ export async function collectRepositoryContextFollowUp(
       context,
       head: request.head,
       reviewPath: request.reviewPath,
-      candidatePaths: matches.map((match) => match.path),
+      candidatePaths: result.candidatePaths,
       terms,
       ...(request.deadlineMs === undefined ? {} : { deadlineMs: request.deadlineMs }),
     });
     return {
       headCommit: request.head,
-      entries: boundedEvidenceEntries([...structural, ...lexical], request.reviewPath),
+      entries: boundedEvidenceEntries(structural, lexical, request.reviewPath),
     };
   } catch (error) {
     // The judge requested this fallback because lexical evidence was ambiguous. Returning those

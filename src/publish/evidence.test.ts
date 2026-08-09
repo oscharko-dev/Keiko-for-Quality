@@ -48,6 +48,39 @@ describe("citedIdentifiers", () => {
       }),
     ).toEqual([]);
   });
+
+  it("does not let prose from a whole-file diff become repository search terms", () => {
+    expect(
+      extractEvidenceIdentifiers({
+        findingContent: "The `the` wording is not a repository symbol.",
+        anchorText: "const result = parseGatewayConfig(rawInput);",
+        unifiedDiff:
+          "@@ -1 +1 @@\n-// the old prose\n+// the new prose\n+const parsedValue = parseGatewayConfig(rawInput);",
+      }),
+    ).toEqual(expect.arrayContaining(["parseGatewayConfig", "rawInput", "parsedValue"]));
+    expect(
+      extractEvidenceIdentifiers({
+        findingContent: "The `the` wording is not a repository symbol.",
+        anchorText: "const result = parseGatewayConfig(rawInput);",
+        unifiedDiff: "+// the new prose",
+      }),
+    ).not.toContain("the");
+  });
+
+  it("keeps an exact qualified identifier while rejecting its broad tail", () => {
+    expect(
+      extractEvidenceIdentifiers({
+        findingContent: "Use `String.length` only for UTF-16 units.",
+        anchorText: "const bytes = String.length;",
+      }),
+    ).toContain("String.length");
+    expect(
+      extractEvidenceIdentifiers({
+        findingContent: "The length is checked here.",
+        anchorText: "const length = 3;",
+      }),
+    ).not.toContain("length");
+  });
 });
 
 describe("buildFileEvidence", () => {
@@ -62,6 +95,18 @@ describe("buildFileEvidence", () => {
     expect(evidence.completeFile).toBe(true);
     expect(evidence.text).toBe("1| first\n2| second\n3| third");
     expect([...evidence.visibleLines]).toEqual([1, 2, 3]);
+  });
+
+  it("preserves the citeable delimiter on an empty source line", () => {
+    const evidence = buildFileEvidence("first\n\nthird", {
+      path: "src/a.ts",
+      content: "The empty line is the exact anchor.",
+      startLine: 2,
+      endLine: 2,
+    });
+
+    expect(evidence.text).toBe("1| first\n2| \n3| third");
+    expect(evidence.visibleLines).toContain(2);
   });
 
   it("retrieves a distant implementation of a cited symbol from a large file", () => {

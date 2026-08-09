@@ -41,6 +41,14 @@ async function fixture(): Promise<{
     join(repository, "src/definition.ts"),
     "export function target(): void {\n  target(); // $(touch PWNED)\n}\n",
   );
+  await writeFile(
+    join(repository, "src/z-priority.ts"),
+    "export function target(): void {\n  target();\n}\n",
+  );
+  await writeFile(
+    join(repository, "src/a-lower.ts"),
+    "export function target(): void {\n  target();\n}\n",
+  );
   git(repository, "add", ".");
   git(repository, "commit", "-qm", "fixture");
   const head = commitSha(git(repository, "rev-parse", "HEAD"));
@@ -133,6 +141,26 @@ describe("searchAstGrepAtHead", () => {
       ),
     ).resolves.toEqual([]);
     expect(acquisitions).toBe(0);
+  });
+
+  it("preserves caller-ranked candidate path priority", async () => {
+    const { context, head } = await fixture();
+    const tools = await mkdtemp(join(tmpdir(), "kfq-priority-ast-grep-"));
+    temporaryDirectories.push(tools);
+    const binary = await executable(tools, SUCCESSFUL_TOOL);
+
+    const entries = await searchAstGrepAtHead(
+      {
+        context,
+        head,
+        reviewPath: "src/review.ts",
+        candidatePaths: ["src/z-priority.ts", "src/a-lower.ts"],
+        terms: ["target"],
+      },
+      { acquireBinary: () => Promise.resolve(binary) },
+    );
+
+    expect(entries[0]?.path).toBe("src/z-priority.ts");
   });
 
   it("fails closed on malformed tool output", async () => {
