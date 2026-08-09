@@ -50,6 +50,31 @@ evidence the previous one produced.
 2. Run `npm run check:engine-pin`, which downloads and verifies every platform — not just yours.
 3. Re-run the qualification corpus and record the result.
 
+## Cutting a release
+
+Run `scripts/release.mjs`, never the steps by hand — AGENTS.md's own section explains which
+failure that script exists to make impossible. The phases below are what it does, listed so a
+reader knows what is being checked on their behalf.
+
+1. **Prep on a branch off `dev`:** version bump, the README quickstart's `# vX.Y.Z` comment,
+   `npm run build`. Commit before running the gates, so their reports name a clean tree.
+2. **Run both release gates on the RC tree** (`corpus/seed-gate.mjs`, `corpus/completion-gate.mjs`)
+   and commit their verbatim reports to `corpus/evidence/`. Never pipe `npm run verify` into
+   anything — a pipeline exits with the LAST command's status, so `npm run verify | tail` reads a
+   red chain as green. This has shipped a stale bundle once.
+3. **Release pull request into `main`,** whose tree must be `dev`'s tree, whole:
+   `git rm -rq . && git checkout origin/dev -- .`, then assert
+   `git rev-parse HEAD^{tree}` equals `git rev-parse origin/dev^{tree}`.
+4. **Signed tag on the squash commit:** `git tag -s vX.Y.Z <sha> -m "…" && git push origin vX.Y.Z`.
+   Consumers pin the SHA, so this is what makes the version name mean something.
+5. **GitHub Release for that tag** — the step easiest to forget, because nothing fails without it:
+   `gh release create vX.Y.Z --verify-tag --latest --title "…" --notes "…"`. Without it the
+   repository's "Latest" keeps naming an older version while the tags have moved on. Missed for
+   three consecutive releases (v0.21.0 through v0.21.2) before anyone noticed, which is exactly
+   how silent steps behave.
+6. **Repin both consumers.** In the consumer workflow `uses:` and `ACTION_PIN` move together — its
+   own sync check fails the run otherwise.
+
 ## Commits and pull requests
 
 - English only, in code, comments, commit messages, and pull requests.

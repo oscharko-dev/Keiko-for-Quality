@@ -52,6 +52,7 @@ import {
   tallyOf,
   VERIFY_SYSTEM_PROMPT,
 } from "./verify-claims.js";
+import { buildWholeFileBlock, WHOLE_FILE_PROMPT } from "./whole-file-view.js";
 import { sanitizeFindingBody } from "../publish/sanitize.js";
 import { EngineRunError, type EngineRunOptions, type EngineRunOutput } from "./run.js";
 
@@ -140,6 +141,16 @@ interface FileDispatch {
   readonly changedLines: number;
   /** The `<companion_changes>` block for this file, when it has companions — see `companions.ts`. */
   readonly companionBlock?: string;
+  /**
+   * The complete file with its changed lines marked — see `whole-file-view.ts` for why this is the
+   * primary view and the hunks are the fallback.
+   *
+   * Absent means the file could not be shown whole (deleted, unreadable as a git object, or past
+   * `MAX_REVIEW_FILE_CHARS`), and the review falls back to `renderedDiff`. That fallback is also
+   * the ONLY case where the whole-file verification pass still runs: when the finding call already
+   * read the file, verifying against the same file is paying twice for one look.
+   */
+  readonly wholeFileBlock?: string;
 }
 
 interface EngineComment {
@@ -230,15 +241,20 @@ function systemPrompt(rule: string): string {
   return [
     "You are reviewing one file's change in a single reply. There are NO tools in this mode: you",
     "cannot search or read the repository, and everything you may consult is already in this",
-    "prompt — the numbered diff, and a `<repository_context>` block of precomputed lookups when",
-    "present. Where the review guidance below speaks of searching the repository or spending tool",
-    "calls, read it as: consult the provided context. Scope every claim to what the diff and that",
-    'context substantiate; state a negative ("no caller", "unreachable") only as far as the',
-    "provided context shows it, and say so.",
+    "prompt. Where the review guidance below speaks of searching the repository or spending tool",
+    "calls, read it as: consult the provided context.",
     "",
-    "Diff format: `__new hunk__` lines carry the ABSOLUTE line number in the new file, additions",
-    "marked `+`; `__old hunk__` shows removed lines. Cite `start_line`/`end_line` from the",
-    "numbered lines only.",
+    "You will be given ONE of two views of the file under review, and the user prompt says which:",
+    "a `<current_file>` block holding the COMPLETE file with its changed lines marked — the normal",
+    "case, and the one where absence claims are checkable — or, when the file was too large or",
+    "could not be read, a `<current_file_diff>` block holding only the changed hunks. In the hunk",
+    'view a claim about what the file does or does not do elsewhere is a guess: state a negative ("no',
+    'caller", "unreachable", "never validated") only as far as what you were shown proves it, and',
+    "say what you could not check.",
+    "",
+    "Line numbers mean the same thing in both views: the ABSOLUTE line in the new file. In the hunk",
+    "view, `__new hunk__` carries them with additions marked `+` and `__old hunk__` shows removed",
+    "lines. Cite `start_line`/`end_line` from the numbered lines only.",
     "",
     "A `<companion_changes>` block may follow the diff: the hunks of RELATED files changed in the",
     "SAME pull request (its package manifest, same-stem siblings, version files). Cross-file",
@@ -259,23 +275,33 @@ function systemPrompt(rule: string): string {
   ].join("\n");
 }
 
+/**
+ * One file's user prompt, in whichever view that file could be shown in.
+ *
+ * The view-specific instruction rides here rather than in the system prompt because the view is a
+ * per-FILE fact — one oversized file in a change must not weaken the instructions the other
+ * eighteen are reviewed under, which is exactly what a run-wide system prompt would force.
+ */
 function userPrompt(
   dispatch: FileDispatch,
   pack: string | undefined,
   totalChangedFiles: number,
 ): string {
+  const whole = dispatch.wholeFileBlock;
   return [
     `This file is part of a change touching ${String(totalChangedFiles)} file(s) in total.`,
     "",
     `<current_file_path>${dispatch.path}</current_file_path>`,
     "",
-    "<current_file_diff>",
-    dispatch.renderedDiff,
-    "</current_file_diff>",
+    ...(whole === undefined
+      ? ["<current_file_diff>", dispatch.renderedDiff, "</current_file_diff>"]
+      : [whole, "", WHOLE_FILE_PROMPT]),
     ...(dispatch.companionBlock === undefined ? [] : ["", dispatch.companionBlock]),
     ...(pack === undefined ? [] : ["", pack]),
     "",
-    "Review the change in <current_file_diff> now and reply with the JSON array.",
+    whole === undefined
+      ? "Review the change in <current_file_diff> now and reply with the JSON array."
+      : "Review this change now and reply with the JSON array.",
   ].join("\n");
 }
 
@@ -582,29 +608,43 @@ function companionBlockFor(
   ].join("\n");
 }
 
-/** The dispatch list: the rule-selected changed files, each with its bounded rendered diff. */
+/**
+ * The dispatch list: the rule-selected changed files, each with the complete file where that fits
+ * and its bounded hunks either way.
+ *
+ * The file read is one `git show` per dispatched file — no model call, and the same read the
+ * verification pass was already paying for later in the run. See `whole-file-view.ts` for the
+ * measurement that made the whole file the primary view.
+ */
 async function prepareDispatches(options: EngineRunOptions): Promise<FileDispatch[]> {
   const diffText = await gitDiff(options);
   if (diffText === undefined) throw new EngineRunError("engine.run.spawn_failed");
   const fragments = splitFileDiffs(diffText);
   const companions = companionsByPath([...fragments.keys()]);
-  return dispatchPaths(options, [...fragments.keys()]).map((path) => {
-    const rendered = renderNumberedHunks(fragments.get(path) ?? "");
+  const paths = dispatchPaths(options, [...fragments.keys()]);
+  const dispatches: FileDispatch[] = [];
+  for (const path of paths) {
+    const fragment = fragments.get(path) ?? "";
+    const rendered = renderNumberedHunks(fragment);
     const bounded =
       rendered.length > MAX_DIFF_CHARS
         ? `${rendered.slice(0, MAX_DIFF_CHARS)}\n(truncated: diff exceeds the prompt budget)`
         : rendered;
     const companionBlock = companionBlockFor(companions.get(path) ?? [], fragments);
-    const changedLines = (fragments.get(path) ?? "")
+    const changedLines = fragment
       .split("\n")
       .filter((line) => /^[+-][^+-]/.test(line) || line === "+" || line === "-").length;
-    return {
+    const text = await headFileText(options, path);
+    const whole = text === undefined ? undefined : buildWholeFileBlock(text, fragment);
+    dispatches.push({
       path,
       renderedDiff: bounded,
       changedLines,
       ...(companionBlock === undefined ? {} : { companionBlock }),
-    };
-  });
+      ...(whole === undefined ? {} : { wholeFileBlock: whole.block }),
+    });
+  }
+  return dispatches;
 }
 
 /**
@@ -697,6 +737,13 @@ async function headFileText(options: EngineRunOptions, path: string): Promise<st
  * Drops the claims the file itself contradicts — see `verify-claims.ts` for the measurement that
  * motivates this pass and the honesty rules it keeps.
  *
+ * **Runs only for a file the finding call could NOT be shown whole.** This pass exists because the
+ * model was asked about a file while being shown an excerpt of it; where the whole file is now in
+ * the finding prompt, that gap is closed at the source and a second pass over the same text buys
+ * nothing for the ~2,900 tokens per file it costs. It stays for the fallback path — a file past
+ * `MAX_REVIEW_FILE_CHARS`, a deleted file, an unreadable git object — where the gap is still real,
+ * and it stays unchanged, because a large file is exactly where an excerpt misleads most.
+ *
  * Every early return publishes the claims unchanged: nothing to verify, a file that cannot be
  * read, a file past the size ceiling, a budget already stopped, a failed call, an unparseable
  * reply. A verifier that cannot answer must never become a silent filter.
@@ -706,6 +753,7 @@ async function verifyWholeFileClaims(
   dispatch: FileDispatch,
   comments: readonly EngineComment[],
 ): Promise<readonly EngineComment[]> {
+  if (dispatch.wholeFileBlock !== undefined) return comments;
   const needing = comments.filter((c) => needsWholeFileEvidence(c.content, dispatch.renderedDiff));
   // The allotment is re-checked against CURRENT usage, not just the `spendStopped` flag: that flag
   // is only raised when the NEXT file enters `budgetStopped`, so on the last file — or a one-file

@@ -1,8 +1,9 @@
 // The precision gate's pure half: classify what a reader DID with each published finding.
 //
 // Why this gate exists, and why none of the others could have caught what it measures. On
-// 2026-08-08 the reviewer published 82 findings across twelve live hours on the consumer. The
-// reader refuted 55 of them after verification and fixed 14 — an actionable rate of 17%. Every
+// 2026-08-08 the reviewer published 92 findings across twelve live hours on the consumer. The
+// reader refuted 64 of them after verification and fixed 17 — an actionable rate of 21.0% over
+// the 81 it graded, written down in `evidence/precision-2026-08-08-baseline.md`. Every
 // gate we had was green at the same moment: the seed gate scores RECALL on seeded defects (does
 // the reviewer find the planted bug), the completion gate scores whether a run FINISHES, the
 // corpus scores recall and classification on a fixed basis. A reviewer that finds the planted bug
