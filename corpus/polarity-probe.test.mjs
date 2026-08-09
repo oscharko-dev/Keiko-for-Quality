@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { loadTokenizer, overlap, probe } from "./polarity-probe.mjs";
+import { loadTokenizer, overlap, POLARITY_PAIRS, probe } from "./polarity-probe.mjs";
 
 /**
  * Runs the probe against the REAL `similarity.ts`, not a fixture. That is the point: the evidence
@@ -16,6 +16,13 @@ import { loadTokenizer, overlap, probe } from "./polarity-probe.mjs";
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SOURCE = readFileSync(join(ROOT, "src", "publish", "similarity.ts"), "utf8");
 const tokenizer = loadTokenizer(SOURCE);
+
+test("refuses a source it cannot measure rather than reporting an empty stopword set", () => {
+  // A negative indexOf would slice from the end, give zero stopwords, and report that polarity
+  // survives — the probe contradicting its own evidence while looking like a measurement.
+  assert.throws(() => loadTokenizer("nothing resembling that declaration"), /no `const STOPWORDS`/);
+  assert.throws(() => loadTokenizer('const STOPWORDS = new Set(["the",'), /not terminated/);
+});
 
 test("reads the live stopword set rather than a copy of it", () => {
   assert.ok(tokenizer.stopwords.size > 10, "parsed a plausible stopword set");
@@ -34,6 +41,10 @@ test("a claim and its exact negation collapse to the same tokens", () => {
 
 test("the other two pairs differ only by verb morphology, not by polarity", () => {
   const { pairs } = probe(tokenizer);
+  // Without this, a probe that returned one pair would make the loop body run zero times and the
+  // test pass vacuously — green while measuring nothing.
+  assert.equal(pairs.length, POLARITY_PAIRS.length);
+  assert.ok(pairs.length >= 3);
   for (const pair of pairs.slice(1)) {
     assert.ok(pair.score >= 0.7, `${pair.negative} scores ${String(pair.score)}`);
   }

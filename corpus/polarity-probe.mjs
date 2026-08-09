@@ -21,7 +21,17 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 /** The live stopword set and length floor, read from the function under measurement. */
 export function loadTokenizer(source) {
   const start = source.indexOf("const STOPWORDS");
-  const block = source.slice(start, source.indexOf("]);", start));
+  // Refuse rather than degrade. A negative index would slice from the end of the file, yield an
+  // empty stopword set, and quietly report that polarity SURVIVES — the probe would then contradict
+  // the evidence it exists to support, and look like a measurement while doing it.
+  if (start === -1) {
+    throw new Error(
+      "similarity.ts has no `const STOPWORDS` — this probe cannot measure its tokenizer",
+    );
+  }
+  const end = source.indexOf("]);", start);
+  if (end === -1) throw new Error("the STOPWORDS declaration in similarity.ts is not terminated");
+  const block = source.slice(start, end);
   const stopwords = new Set([...block.matchAll(/"([a-z]+)"/gu)].map((match) => match[1]));
   const floor = Number(/word\.length >= (\d+)/u.exec(source)?.[1] ?? 3);
   return {
