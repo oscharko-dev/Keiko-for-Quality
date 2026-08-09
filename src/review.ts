@@ -114,6 +114,7 @@ import {
 } from "./publish/repository-context.js";
 import { toRetrievedEvidence } from "./publish/retrieved-evidence.js";
 import {
+  MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
   substantiate,
   type EvidenceRetriever,
   type JudgeableFinding,
@@ -1173,10 +1174,11 @@ interface EngineBudget {
  *
  * The evidence stage may take an initial truth judgment, one retrieval-guided truth rerun, a
  * contract-challenge plan, and adversarial falsification, each with bounded source context. 86k is
- * proportional engine headroom for that four-call path (the former three-call path reserved 64k);
- * `substantiate` separately enforces the exact
- * whole-review remainder before every request, so this estimate can never widen the consumer's
- * hard ceiling. The smaller audit reserve is only a cheap start-work trigger;
+ * proportional engine headroom for ordinary provider-reported spend (the former three-call path
+ * reserved 64k). The shared one-path floor keeps one worst-case candidate's bound outside the
+ * engine's start allotment without multiplying that defensive ceiling by all 16 possible
+ * candidates; `substantiate` then atomically admits each sequential workflow against the exact
+ * whole-review remainder. The smaller audit reserve is only a cheap start-work trigger;
  * `auditClassification` enforces the exact remaining allowance before every request as well.
  */
 const SUBSTANTIATE_RESERVE_PER_FINDING = 86_000;
@@ -1184,7 +1186,12 @@ const AUDIT_RESERVE_PER_FINDING = 2_000;
 
 function publicationQualityReserve(maxFindings: number): number {
   const candidates = Math.min(maxFindings, MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR);
-  return candidates * (SUBSTANTIATE_RESERVE_PER_FINDING + AUDIT_RESERVE_PER_FINDING);
+  if (candidates <= 0) return 0;
+  const substantiateReserve = Math.max(
+    candidates * SUBSTANTIATE_RESERVE_PER_FINDING,
+    MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
+  );
+  return substantiateReserve + candidates * AUDIT_RESERVE_PER_FINDING;
 }
 
 /**
@@ -2871,7 +2878,11 @@ function evidenceRetriever(
     requireReviewTime(deadline);
     const prepared = evidence.get(finding.original);
     if (prepared === undefined) throw new Error("finding evidence is unavailable");
-    const sourceSide = challengeAxis === "base" ? "B" : "H";
+    const sourceSide =
+      challengeAxis === "base" ||
+      (challengeAxis === "same_file_contract" && prepared.headText === undefined)
+        ? "B"
+        : "H";
     const followUp = await collectRepositoryContextFollowUp(prepared.repositoryRequest, terms, {
       sourceSide,
     });

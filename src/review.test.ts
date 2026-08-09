@@ -27,6 +27,7 @@ import {
   type ReviewCommentInput,
 } from "./github/client.js";
 import { fingerprint, markerComment } from "./publish/marker.js";
+import { MAX_SUBSTANTIATION_TOKENS_PER_FINDING } from "./publish/substantiate.js";
 import type { ReviewRequest } from "./review.js";
 
 const acquireEngineMock = vi.fn();
@@ -3113,6 +3114,16 @@ describe("performReview: review-cache memoization end to end", () => {
       onJudgePrompt?: (prompt: string) => void;
       onChallengePrompt?: (prompt: string) => void;
       onFalsifierPrompt?: (prompt: string) => void;
+      challengeAxis?:
+        | "same_file_contract"
+        | "caller"
+        | "configuration"
+        | "runtime"
+        | "test"
+        | "base";
+      challengeEvidenceRef?: string;
+      challengeLookupTerm?: string;
+      falsifierEvidenceRef?: string;
       consequence?: "actionable" | "nitpick";
       tokensPerCall?: number;
     }): { impl: typeof fetch; callCount: () => number } {
@@ -3135,9 +3146,9 @@ describe("performReview: review-cache memoization end to end", () => {
                     finish_reason: "stop",
                     message: {
                       content: JSON.stringify({
-                        axis: "caller",
-                        evidence_refs: ["H:1"],
-                        lookup_terms: ["challengeGuard"],
+                        axis: opts.challengeAxis ?? "caller",
+                        evidence_refs: [opts.challengeEvidenceRef ?? "H:1"],
+                        lookup_terms: [opts.challengeLookupTerm ?? "challengeGuard"],
                       }),
                     },
                   },
@@ -3163,13 +3174,13 @@ describe("performReview: review-cache memoization end to end", () => {
                           ? {
                               verdict: "defeated",
                               reason_code: "counterexample",
-                              evidence_refs: ["R4:H:1"],
+                              evidence_refs: [opts.falsifierEvidenceRef ?? "R4:H:1"],
                               lookup_terms: [],
                             }
                           : {
                               verdict: "survives",
                               reason_code: "no_defeater_found",
-                              evidence_refs: ["R4:H:1"],
+                              evidence_refs: [opts.falsifierEvidenceRef ?? "R4:H:1"],
                               lookup_terms: [],
                             },
                       ),
@@ -3246,6 +3257,84 @@ describe("performReview: review-cache memoization end to end", () => {
       }) as typeof fetch;
       return { impl, callCount: () => calls };
     }
+
+    it("routes a deleted-file same-file challenge through immutable BASE", async () => {
+      const deletionRepo = await mkdtemp(join(tmpdir(), "kfq-review-deleted-challenge-"));
+      try {
+        const deletionGit = (args: readonly string[]): string => git(args, deletionRepo);
+        deletionGit(["init", "-q", "-b", "main"]);
+        await mkdir(join(deletionRepo, "src"), { recursive: true });
+        const baseOnlyGuardLine = 1_502;
+        await writeFile(
+          join(deletionRepo, "src/deleted.ts"),
+          [
+            "removedContract();",
+            ...Array.from(
+              { length: baseOnlyGuardLine - 2 },
+              (_value, index) => `const filler${String(index)} = ${String(index)};`,
+            ),
+            "export function baseOnlyGuard(): boolean { return true; }",
+          ].join("\n"),
+        );
+        deletionGit(["add", "-A"]);
+        deletionGit(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+        const deletionBase = deletionGit(["rev-parse", "HEAD"]).trim();
+        await rm(join(deletionRepo, "src/deleted.ts"));
+        deletionGit(["add", "-A"]);
+        deletionGit(["commit", "-q", "-m", "delete", "--no-gpg-sign"]);
+        const deletionHead = deletionGit(["rev-parse", "HEAD"]).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        runEngineMock.mockResolvedValue({
+          stdout: findingsStdout(
+            [
+              {
+                path: "src/deleted.ts",
+                content:
+                  "When this startup call is removed, initialization no longer installs its required guard.",
+                category: "bug",
+                severity: "medium",
+              },
+            ],
+            1,
+          ),
+          ruleDigest: engineDigest,
+        });
+
+        let falsifierPrompt = "";
+        const endpoint = classifyFetchMock({
+          auditPair: { category: "bug", severity: "medium" },
+          judgeEvidenceRef: "B:1",
+          judgeChangeRef: "D:B:1",
+          challengeAxis: "same_file_contract",
+          challengeEvidenceRef: "B:1",
+          challengeLookupTerm: "baseOnlyGuard",
+          falsifierEvidenceRef: `R4:B:${String(baseOnlyGuardLine)}`,
+          onFalsifierPrompt: (prompt) => {
+            falsifierPrompt = prompt;
+          },
+        });
+        globalThis.fetch = endpoint.impl;
+        const client = successfulClient([], deletionHead);
+        const report = await performReview(
+          {
+            ...auditRequest(client.client),
+            base: commitSha(deletionBase),
+            head: commitSha(deletionHead),
+            repositoryPath: deletionRepo,
+          },
+          createSilentDiagnostics(),
+        );
+
+        expect(report.outcome).toBe("complete");
+        expect(report.publish?.published).toBe(1);
+        expect(falsifierPrompt).toContain("R4 = BASE src/deleted.ts");
+        expect(falsifierPrompt).toContain(`R4:B:${String(baseOnlyGuardLine)}|`);
+      } finally {
+        await rm(deletionRepo, { recursive: true, force: true });
+      }
+    });
 
     it("never caches an exact-suppressed fresh path, so a later run verifies it instead of replaying it", async () => {
       const engineDigest = requireEngineDigest();
@@ -3776,7 +3865,7 @@ describe("performReview: review-cache memoization end to end", () => {
       });
     });
 
-    it("hard-blocks an audit request that exceeds the exact whole-review remainder without reclassifying", async () => {
+    it("releases unused atomic-admission headroom for the later classification audit", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       const BODY =
@@ -3796,11 +3885,14 @@ describe("performReview: review-cache memoization end to end", () => {
       });
       globalThis.fetch = impl;
       const { client, created } = successfulClient([]);
-      // Enough for Truth + planner + falsifier (their actual spend is 30), and above the audit's
-      // old 2k heuristic reserve, but below the audit prompt's conservative hard upper bound.
+      // Reserve exactly one maximum substantiation path after the engine. Admission is a check,
+      // not spend: the three actual 10-token role calls leave their unused headroom to the audit.
       const request = {
         ...auditRequest(client),
-        config: { ...AUDIT_CONFIG, tokenBudget: 8_000 },
+        config: {
+          ...AUDIT_CONFIG,
+          tokenBudget: MAX_SUBSTANTIATION_TOKENS_PER_FINDING + 100,
+        },
       };
       const diagnostics = createSilentDiagnostics();
 
@@ -3808,15 +3900,14 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("complete");
       expect(created).toHaveLength(1);
-      expect(created[0]?.body).toContain("`CORRECTNESS · MINOR`");
-      expect(created[0]?.body).not.toContain("`SECURITY");
-      expect(callCount()).toBe(3);
+      expect(created[0]?.body).toContain("`SECURITY · CRITICAL`");
+      expect(callCount()).toBe(5);
 
       const records = diagnostics.drain();
       const audited = records.find((record) => record.code === "classify.audited");
-      expect(audited?.counts).toStrictEqual({ changed: 0, budget_blocked: 1, tokens: 0 });
+      expect(audited?.counts).toStrictEqual({ changed: 1, tokens: 20 });
       const spend = records.find((record) => record.code === "run.spend");
-      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 30, total: 130 });
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 50, total: 150 });
       expect((spend?.counts?.total ?? 0) <= request.config.tokenBudget).toBe(true);
     });
 
@@ -4200,6 +4291,30 @@ describe("performReview: review-cache memoization end to end", () => {
         {
           ...request,
           config: { ...request.config, tokenBudget: 1_500_000 },
+        },
+        createSilentDiagnostics(),
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect((runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number }).allottedBudget).toBe(
+        92_000,
+      );
+    });
+
+    it("floors a single candidate at one atomic path without multiplying it by all slots", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const request = baseRequest(undefined);
+      const report = await performReview(
+        {
+          ...request,
+          config: {
+            ...request.config,
+            maxFindings: 1,
+            tokenBudget: MAX_SUBSTANTIATION_TOKENS_PER_FINDING + 2_000 + 92_000,
+          },
         },
         createSilentDiagnostics(),
       );

@@ -996,7 +996,11 @@ export async function runHistoricalReplayVerification({
         HISTORICAL_REPLAY_STRICTNESS,
         remainingTokens,
         async ({ terms, challengeAxis, knownProvenance }) => {
-          const sourceSide = challengeAxis === "base" ? "B" : "H";
+          const sourceSide =
+            challengeAxis === "base" ||
+            (challengeAxis === "same_file_contract" && sources.headSource === undefined)
+              ? "B"
+              : "H";
           const followUp = await collectRepositoryContextFollowUp(repositoryRequest, terms, {
             sourceSide,
           });

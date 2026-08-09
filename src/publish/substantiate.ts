@@ -14,6 +14,9 @@
  * spends from the same whole-review hard budget.
  */
 
+import { LIMITS as ENGINE_RESULT_LIMITS } from "../engine/result.js";
+import { MAX_EVIDENCE_CHARS } from "./evidence.js";
+import { decodeEvidenceSourcePath, encodeEvidenceSourcePath } from "./evidence-path.js";
 import { validatedRetrieveTerms } from "./repository-context.js";
 
 /** Closed truth vocabulary. Anything outside it is a malformed, undecided verification. */
@@ -418,6 +421,27 @@ const TRUTH_COMPLETION_LIMIT = 4_096;
 const CHALLENGE_COMPLETION_LIMIT = 4_096;
 const FALSIFIER_COMPLETION_LIMIT = 4_096;
 const REQUEST_TOKEN_OVERHEAD = 512;
+const MAX_RETRIEVAL_BYTES = 32_000;
+
+// `repoPath`'s production trust boundary is 4096 UTF-16 code units. Keep the byte expansion here,
+// next to the other prompt caps it prices, so the review-stage reserve covers non-ASCII paths too.
+const MAX_PRODUCTION_PATH_CHARS = 4_096;
+const MAX_UTF8_BYTES_PER_UTF16_CODE_UNIT = 3;
+function maximumChallengeReference(offset: number): VerificationEvidenceRef {
+  const line = String(Number.MAX_SAFE_INTEGER - offset);
+  return `D:B:${line}@H:${line}` as VerificationEvidenceRef;
+}
+
+const MAX_CONTRACT_CHALLENGE: ContractChallengeDecision = {
+  axis: "same_file_contract",
+  evidenceRefs: [
+    maximumChallengeReference(0),
+    maximumChallengeReference(1),
+    maximumChallengeReference(2),
+    maximumChallengeReference(3),
+  ],
+  lookupTerms: ["A".repeat(80), "B".repeat(80), "C".repeat(80)],
+};
 
 interface CallBudget {
   readonly maximum: number | undefined;
@@ -438,6 +462,95 @@ function withoutTrailingSlashes(value: string): string {
 function requestTokenUpperBound(prompt: string, completionLimit: number): number {
   return new TextEncoder().encode(prompt).byteLength + completionLimit + REQUEST_TOKEN_OVERHEAD;
 }
+
+const MAX_RETRIEVAL_APPEND_BYTES = 2 + MAX_RETRIEVAL_BYTES;
+
+/**
+ * Atomic admission price for one complete Truth -> retrieval -> Truth -> Planner -> Falsifier path.
+ *
+ * The initial evidence and finding are concrete, while each deterministic retrieval is priced at
+ * its hard 32k-byte ceiling and the Planner envelope at its longest valid shape. This is a
+ * reservation check, not spend: sequential findings still book only provider-reported usage, so
+ * unused headroom remains available to the next finding.
+ */
+export function substantiationOnePathTokenUpperBound(
+  finding: JudgeableFinding,
+  evidence: string,
+): number {
+  const dossier = buildDossier(finding.content);
+  const truth = requestTokenUpperBound(
+    buildTruthPrompt(finding, evidence, dossier),
+    TRUTH_COMPLETION_LIMIT,
+  );
+  const truthAfterRetrieval = truth + MAX_RETRIEVAL_APPEND_BYTES;
+  const plannerAfterRetrieval =
+    requestTokenUpperBound(
+      buildContractChallengePrompt(finding, evidence),
+      CHALLENGE_COMPLETION_LIMIT,
+    ) + MAX_RETRIEVAL_APPEND_BYTES;
+  const falsifierAfterBothRetrievals =
+    requestTokenUpperBound(
+      buildFalsifierPrompt(finding, evidence, MAX_CONTRACT_CHALLENGE),
+      FALSIFIER_COMPLETION_LIMIT,
+    ) +
+    2 * MAX_RETRIEVAL_APPEND_BYTES;
+  return truth + truthAfterRetrieval + plannerAfterRetrieval + falsifierAfterBothRetrievals;
+}
+
+const MAX_PROMPT_FINDING: JudgeableFinding = {
+  path: "",
+  content: "",
+  startLine: ENGINE_RESULT_LIMITS.maxLine,
+  endLine: ENGINE_RESULT_LIMITS.maxLine,
+};
+const MAX_PROMPT_DOSSIER: Dossier = {
+  namesLocation: false,
+  namesCircumstance: false,
+  isDiffEcho: false,
+};
+const MAX_PATH_BYTES = MAX_PRODUCTION_PATH_CHARS * MAX_UTF8_BYTES_PER_UTF16_CODE_UNIT;
+const MAX_FINDING_BYTES = ENGINE_RESULT_LIMITS.maxBodyChars * MAX_UTF8_BYTES_PER_UTF16_CODE_UNIT;
+const MAX_INITIAL_EVIDENCE_BYTES = MAX_EVIDENCE_CHARS * MAX_UTF8_BYTES_PER_UTF16_CODE_UNIT;
+const MAX_TRUTH_FIXED_BYTES = new TextEncoder().encode(
+  buildTruthPrompt(MAX_PROMPT_FINDING, "", MAX_PROMPT_DOSSIER),
+).byteLength;
+const MAX_PLANNER_FIXED_BYTES = new TextEncoder().encode(
+  buildContractChallengePrompt(MAX_PROMPT_FINDING, ""),
+).byteLength;
+const MAX_FALSIFIER_FIXED_BYTES = new TextEncoder().encode(
+  buildFalsifierPrompt(MAX_PROMPT_FINDING, "", MAX_CONTRACT_CHALLENGE),
+).byteLength;
+const COMPLETION_AND_REQUEST_BYTES = 4_096 + REQUEST_TOKEN_OVERHEAD;
+
+/**
+ * Safe one-finding floor at every production input cap, including three-byte UTF-8 expansion.
+ * Review startup reserves this ONCE, never once per possible candidate; concrete sequential
+ * admission above prevents a partially-started four-call workflow.
+ */
+export const MAX_SUBSTANTIATION_TOKENS_PER_FINDING =
+  MAX_TRUTH_FIXED_BYTES +
+  MAX_PATH_BYTES +
+  MAX_FINDING_BYTES +
+  MAX_INITIAL_EVIDENCE_BYTES +
+  COMPLETION_AND_REQUEST_BYTES +
+  (MAX_TRUTH_FIXED_BYTES +
+    MAX_PATH_BYTES +
+    MAX_FINDING_BYTES +
+    MAX_INITIAL_EVIDENCE_BYTES +
+    MAX_RETRIEVAL_APPEND_BYTES +
+    COMPLETION_AND_REQUEST_BYTES) +
+  (MAX_PLANNER_FIXED_BYTES +
+    MAX_PATH_BYTES +
+    MAX_FINDING_BYTES +
+    MAX_INITIAL_EVIDENCE_BYTES +
+    MAX_RETRIEVAL_APPEND_BYTES +
+    COMPLETION_AND_REQUEST_BYTES) +
+  (MAX_FALSIFIER_FIXED_BYTES +
+    MAX_PATH_BYTES +
+    MAX_FINDING_BYTES +
+    MAX_INITIAL_EVIDENCE_BYTES +
+    2 * MAX_RETRIEVAL_APPEND_BYTES +
+    COMPLETION_AND_REQUEST_BYTES);
 
 function budgetAllows(budget: CallBudget, upperBound: number): boolean {
   return (
@@ -584,6 +697,10 @@ interface EvidenceSource {
   readonly side: EvidenceSide;
 }
 
+interface LabelledEvidenceSource extends EvidenceSource {
+  readonly label: string;
+}
+
 export function evidenceProvenanceKey(
   path: string,
   side: EvidenceSide,
@@ -592,21 +709,29 @@ export function evidenceProvenanceKey(
   return `${path}\u0000${side}\u0000${String(line)}` as EvidenceProvenanceKey;
 }
 
+function repositoryEvidenceSource(row: string): LabelledEvidenceSource | undefined {
+  const match = /^(H[1-8]) = (.+)$/u.exec(row);
+  if (match?.[1] === undefined || match[2] === undefined) return undefined;
+  const path = decodeEvidenceSourcePath(match[2]);
+  return path === undefined ? undefined : { label: match[1], path, side: "H" };
+}
+
+function retrievedEvidenceSource(row: string): LabelledEvidenceSource | undefined {
+  const match = /^(R[1-6]) = (HEAD|BASE) (.+)$/u.exec(row);
+  if (match?.[1] === undefined || match[2] === undefined || match[3] === undefined) {
+    return undefined;
+  }
+  const path = decodeEvidenceSourcePath(match[3]);
+  return path === undefined
+    ? undefined
+    : { label: match[1], path, side: match[2] === "HEAD" ? "H" : "B" };
+}
+
 function evidenceSources(evidence: string): ReadonlyMap<string, EvidenceSource> {
   const sources = new Map<string, EvidenceSource>();
   for (const row of evidence.split("\n")) {
-    const repository = /^(H[1-8]) = (.+)$/u.exec(row);
-    if (repository?.[1] !== undefined && repository[2] !== undefined) {
-      sources.set(repository[1], { path: repository[2], side: "H" });
-      continue;
-    }
-    const retrieved = /^(R[1-6]) = (HEAD|BASE) (.+)$/u.exec(row);
-    if (retrieved?.[1] !== undefined && retrieved[2] !== undefined && retrieved[3] !== undefined) {
-      sources.set(retrieved[1], {
-        path: retrieved[3],
-        side: retrieved[2] === "HEAD" ? "H" : "B",
-      });
-    }
+    const source = repositoryEvidenceSource(row) ?? retrievedEvidenceSource(row);
+    if (source !== undefined) sources.set(source.label, source);
   }
   return sources;
 }
@@ -1000,7 +1125,6 @@ export type HunkReader = (finding: JudgeableFinding) => string;
 
 const MAX_RETRIEVAL_CHUNKS = 3;
 const MAX_RETRIEVAL_LINES = 200;
-const MAX_RETRIEVAL_BYTES = 32_000;
 const MAX_RETRIEVAL_LINE_CHARS = 500;
 
 function recordWithExactKeys(
@@ -1072,7 +1196,9 @@ function renderRetrievedChunks(
     lineCount += chunk.lines.length;
     if (lineCount > MAX_RETRIEVAL_LINES) return undefined;
     const label = `R${String(index + firstReferenceNumber)}`;
-    rows.push(`${label} = ${chunk.side === "H" ? "HEAD" : "BASE"} ${chunk.path}`);
+    rows.push(
+      `${label} = ${chunk.side === "H" ? "HEAD" : "BASE"} ${encodeEvidenceSourcePath(chunk.path)}`,
+    );
     for (const line of chunk.lines) {
       rows.push(`${label}:${chunk.side}:${String(line.line)}| ${line.text}`);
     }
@@ -1484,6 +1610,9 @@ async function judgeOne<T extends JudgeableFinding>(
       budgetBlocked: false,
       metrics,
     };
+  }
+  if (!budgetAllows(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
+    return undecidedResult(finding, strictness, metrics, true);
   }
   return await verifyEvidenceRound(
     { finding, dossier, deps, strictness, budget, retriever, metrics },

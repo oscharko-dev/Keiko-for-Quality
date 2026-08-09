@@ -435,7 +435,7 @@ describe("repository context collection", () => {
         },
       },
     );
-    expect(astPaths).toHaveLength(4);
+    expect(astPaths).toHaveLength(5);
     expect(astPaths[0]).toBe(request.reviewPath);
     expect(empty.entries).toEqual([]);
 
@@ -483,7 +483,7 @@ describe("repository context collection", () => {
       {
         structuralSearch: ({ candidatePaths }) => {
           expect(candidatePaths[0]).toBe(reviewedPath);
-          expect(candidatePaths).toHaveLength(4);
+          expect(candidatePaths).toHaveLength(5);
           return Promise.resolve([
             {
               path: reviewedPath,

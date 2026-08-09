@@ -482,43 +482,42 @@ async function inspectSource(
 async function sourceCandidates(
   request: StructuralSearchRequest,
 ): Promise<readonly SourceCandidate[]> {
-  const paths = [...new Set(request.candidatePaths.slice(0, 32))]
-    .filter(
-      (path) =>
-        languageForPath(path) !== undefined &&
-        (path !== request.reviewPath ||
-          (Number.isSafeInteger(request.findingAnchor.startLine) &&
-            Number.isSafeInteger(request.findingAnchor.endLine) &&
-            request.findingAnchor.startLine > 0 &&
-            request.findingAnchor.endLine >= request.findingAnchor.startLine)),
-    )
-    .slice(0, MAX_STRUCTURAL_FILES);
-  const read = await Promise.all(
-    paths.map(async (path): Promise<SourceCandidate | undefined> => {
-      const spec = languageForPath(path);
-      if (spec === undefined) return undefined;
-      const source = await readTextAtCommit(
-        {
-          ...request.context,
-          timeoutMs: structuralTimeoutMs(request.deadlineMs, request.context.timeoutMs),
-        },
-        request.head,
-        path,
-      );
-      if (source === undefined) return undefined;
-      const bytes = Buffer.from(source, "utf8");
-      return bytes.byteLength > MAX_STRUCTURAL_FILE_BYTES
-        ? undefined
-        : { path, source, lines: source.split("\n"), bytes, spec };
-    }),
+  const paths = [...new Set(request.candidatePaths.slice(0, 32))].filter(
+    (path) =>
+      languageForPath(path) !== undefined &&
+      (path !== request.reviewPath ||
+        (Number.isSafeInteger(request.findingAnchor.startLine) &&
+          Number.isSafeInteger(request.findingAnchor.endLine) &&
+          request.findingAnchor.startLine > 0 &&
+          request.findingAnchor.endLine >= request.findingAnchor.startLine)),
   );
   const selected: SourceCandidate[] = [];
   let total = 0;
-  for (const source of read) {
+  // Read in caller rank order. Parallel reads here would retain up to 32 one-megabyte Git blobs
+  // before applying the 512 KiB structural cap; sequential backfill keeps at most one unadmitted
+  // blob in flight while still skipping absent, unsupported, or oversized leading paths.
+  for (const path of paths) {
+    if (selected.length === MAX_STRUCTURAL_FILES) break;
+    const spec = languageForPath(path);
+    if (spec === undefined) continue;
+    const source = await readTextAtCommit(
+      {
+        ...request.context,
+        timeoutMs: structuralTimeoutMs(request.deadlineMs, request.context.timeoutMs),
+      },
+      request.head,
+      path,
+    );
     if (source === undefined) continue;
-    total += source.bytes.byteLength;
-    if (total > MAX_STRUCTURAL_TOTAL_BYTES) break;
-    selected.push(source);
+    const bytes = Buffer.from(source, "utf8");
+    if (
+      bytes.byteLength > MAX_STRUCTURAL_FILE_BYTES ||
+      total + bytes.byteLength > MAX_STRUCTURAL_TOTAL_BYTES
+    ) {
+      continue;
+    }
+    total += bytes.byteLength;
+    selected.push({ path, source, lines: source.split("\n"), bytes, spec });
   }
   return selected;
 }
@@ -672,7 +671,14 @@ export async function searchAstGrepAtHead(
   if (terms.length === 0) return [];
   structuralTimeoutMs(request.deadlineMs, STRUCTURAL_PROCESS_TIMEOUT_MS);
   const sources = await sourceCandidates(request);
-  if (sources.length === 0) return [];
+  if (sources.length === 0) {
+    // No candidate path means there was no structural search to run. Candidate paths with no
+    // readable, supported, bounded blob mean the requested fallback was unavailable, not that the
+    // repository contained zero matches; the caller decides whether that unavailable result is
+    // optional or must fail the verification closed.
+    if (request.candidatePaths.length === 0) return [];
+    throw new AstGrepSearchError();
+  }
   let binaryPath: string;
   try {
     structuralTimeoutMs(request.deadlineMs, STRUCTURAL_PROCESS_TIMEOUT_MS);

@@ -512,7 +512,10 @@ function reserveReviewedPathAfterTruncation(
 ): readonly string[] {
   if (!truncated || !canSearchReviewedPath(request, allowDistantReviewPath)) return paths;
   const withoutReviewed = paths.filter((path) => path !== request.reviewPath);
-  return [request.reviewPath, ...withoutReviewed].slice(0, Math.max(1, paths.length));
+  // Keep every already-selected fallback path. The reviewed path may be absent on the selected
+  // side (a deletion searched in HEAD or an addition searched in BASE); replacing the fourth real
+  // candidate with that absent path would make the later four-readable-blob cap see only three.
+  return [request.reviewPath, ...withoutReviewed];
 }
 
 async function grepAtHead(

@@ -891,6 +891,78 @@ test("verification routes the closed base challenge through the immutable derive
   assert.deepEqual(result.decisions, [{ databaseId: 1, decision: "keep" }]);
 });
 
+test("verification routes a deleted-file same-file challenge through immutable BASE", async () => {
+  const replayCase = boundReplayCase(1, "src/deleted.ts");
+  const sources = stubHistoricalChange(replayCase, {
+    headSource: undefined,
+    baseSource: "removedContract();\n",
+    unifiedDiff: [
+      "diff --git a/src/deleted.ts b/src/deleted.ts",
+      "deleted file mode 100644",
+      "--- a/src/deleted.ts",
+      "+++ /dev/null",
+      "@@ -1 +0,0 @@",
+      "-removedContract();",
+      "",
+    ].join("\n"),
+  });
+  let followUp;
+  const result = await runHistoricalReplayVerification({
+    databaseIds: [1],
+    cases: [replayCase],
+    repo: "/consumer",
+    maxTokens: 500,
+    judgeEndpoint: { endpoint: "https://model.example.test/v1", token: "secret", model: "m" },
+    readChangeAtCommits: () => sources,
+    buildChangeEvidence: () => ({ text: "B:1| removedContract();\nD:B:1| -removedContract();" }),
+    mappedBaseRangeFromUnifiedDiff: () => {
+      throw new Error("a deletion already carries its exact BASE anchor");
+    },
+    collectInitialRepositoryContext: async (request) => ({
+      headCommit: request.head,
+      entries: [],
+    }),
+    collectRepositoryContextFollowUp: async (request, terms, options) => {
+      followUp = { request, terms, options };
+      return {
+        sourceCommit: request.base,
+        side: "B",
+        entries: [
+          { path: request.baseReviewPath, line: 7, content: "baseOnlyGuard();", kind: "callsite" },
+        ],
+      };
+    },
+    toRetrievedEvidence: (context) => ({
+      chunks: [
+        {
+          path: context.entries[0].path,
+          side: context.side,
+          lines: [{ line: 7, text: "baseOnlyGuard();" }],
+        },
+      ],
+    }),
+    substantiate: async (findings, readEvidence, _endpoint, _strictness, _maximum, retrieve) => {
+      const retrieved = await retrieve({
+        finding: findings[0],
+        currentEvidence: readEvidence(findings[0]),
+        knownProvenance: new Set(),
+        terms: ["baseOnlyGuard"],
+        anchorRefs: ["B:1"],
+        stage: "contract_challenge",
+        challengeAxis: "same_file_contract",
+      });
+      assert.equal(retrieved.chunks[0].side, "B");
+      return substantiationOutcome(findings);
+    },
+  });
+
+  assert.equal(followUp.request.head, replayCase.originalCommitOid);
+  assert.equal(followUp.request.base, sources.baseCommitOid);
+  assert.deepEqual(followUp.request.baseFindingAnchor, { startLine: 1, endLine: 1 });
+  assert.deepEqual(followUp.options, { sourceSide: "B" });
+  assert.deepEqual(result.decisions, [{ databaseId: 1, decision: "keep" }]);
+});
+
 test("verification publishes only aggregate counters for every validated workflow disposition", async () => {
   const cases = Array.from({ length: 6 }, (_, index) =>
     boundReplayCase(index + 1, `src/stage-${String(index + 1)}.ts`),
