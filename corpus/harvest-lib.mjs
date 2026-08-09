@@ -39,6 +39,11 @@ import { classifyReply, isCoverageNotice } from "./precision-gate-lib.mjs";
  * - `refuted_contradicted` — the reader argued it was wrong, and then a later commit edited exactly
  *   that region. Something is off: the refutation, the region match, or both. Kept and reported,
  *   never distilled. This is the guard the whole module exists for.
+ * - `refuted_unconfirmed` — the reader argued it was wrong and git could not answer at all: no
+ *   commit timeline was fetched, or a rebase left the region unmappable. Also never distilled, but
+ *   deliberately NOT the same label as above. `refuted_contradicted` asserts that a commit
+ *   contradicted the reply; folding an absent measurement into it would report a contradiction that
+ *   was never observed, and `aggregate.byLabel` would carry that fiction as a count.
  * - `fixed_confirmed` — the reader said they fixed it and the region changed. The strongest
  *   positive example there is, and the recall side's ground truth.
  * - `fixed_unconfirmed` — the reader said they fixed it and git cannot corroborate (no later
@@ -51,6 +56,7 @@ import { classifyReply, isCoverageNotice } from "./precision-gate-lib.mjs";
 export const HARVEST_LABELS = [
   "refuted_confirmed",
   "refuted_contradicted",
+  "refuted_unconfirmed",
   "fixed_confirmed",
   "fixed_unconfirmed",
   "unanswered",
@@ -146,7 +152,7 @@ export function gradeRecord(record, commits) {
   }
   if (commits.length === 0) {
     return {
-      label: replyVerdict === "refuted" ? "refuted_contradicted" : "fixed_unconfirmed",
+      label: replyVerdict === "refuted" ? "refuted_unconfirmed" : "fixed_unconfirmed",
       replyVerdict,
       gitClassification: "unavailable",
       reply,
@@ -159,7 +165,7 @@ export function gradeRecord(record, commits) {
   // takes the same branch as a missing timeline: unavailable is not a pass.
   if (gitClassification === "outdated_by_rebase") {
     return {
-      label: replyVerdict === "refuted" ? "refuted_contradicted" : "fixed_unconfirmed",
+      label: replyVerdict === "refuted" ? "refuted_unconfirmed" : "fixed_unconfirmed",
       replyVerdict,
       gitClassification,
       reply,

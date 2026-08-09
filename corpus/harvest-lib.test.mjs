@@ -205,8 +205,25 @@ test("a reply neither vocabulary can read is unclassified, never fixed", () => {
  */
 test("no commit timeline means no confirmation — refutations do not pass by default", () => {
   const graded = gradeRecord(recordWithReply("Refuted: the guard is at line 655."), []);
-  assert.equal(graded.label, "refuted_contradicted");
+  // `refuted_unconfirmed`, deliberately NOT `refuted_contradicted`: nothing contradicted this
+  // reply, git simply could not be asked. Folding the two together would report a contradiction
+  // that was never observed, and the aggregate would carry that fiction as a count.
+  assert.equal(graded.label, "refuted_unconfirmed");
   assert.equal(graded.gitClassification, "unavailable");
+});
+
+test("a rebase that unmaps the region is unconfirmed, not contradicted", () => {
+  // A commit that renames the file away leaves `classifyActedUpon` unable to map the region.
+  const gone = {
+    sha: "d".repeat(40),
+    committedDate: "2026-08-08T12:00:00Z",
+    files: [
+      { path: "src/renamed.ts", previousPath: "src/voice.ts", status: "renamed", patch: null },
+    ],
+  };
+  const graded = gradeRecord(recordWithReply("Refuted: the guard is at line 655."), [gone]);
+  assert.equal(graded.gitClassification, "outdated_by_rebase");
+  assert.equal(graded.label, "refuted_unconfirmed");
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -243,6 +260,7 @@ test("every label appears in a tally, so an absent one reads as zero", () => {
   assert.equal(counts.refuted_confirmed, 2);
   assert.equal(counts.fixed_confirmed, 0);
   assert.equal(counts.unanswered, 0);
+  assert.equal(counts.refuted_unconfirmed, 0);
 });
 
 test("the document is deterministic for one input and one generatedAt", () => {
