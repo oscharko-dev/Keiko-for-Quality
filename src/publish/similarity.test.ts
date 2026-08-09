@@ -755,6 +755,33 @@ describe("findsOutdatedRecurrence", () => {
   });
 
   /**
+   * Polarity is invisible to this stage — pinned deliberately, as a warning rather than a defect.
+   *
+   * `tokenize` filters `STOPWORDS`, which contains "not", and drops every word under three
+   * characters, which removes "no". So a claim and its exact negation reduce to the SAME content
+   * words and score a perfect 1.00. That is harmless, even correct, for the job this stage does:
+   * it asks "are these two comments the same complaint", and one complaint reworded across two
+   * pushes genuinely does differ in polarity words alone — the reader is looking at both bodies and
+   * the file, and a suppressed repeat still blocks the merge through the open original.
+   *
+   * It is recorded here because the v0.22.0 wave proposed reusing this bar to match a candidate
+   * finding against a RECORDED RULE ("do not claim X on this path"), where the negation is the
+   * entire content and every phrase carrying it (`does not`, `no guard`, `never clears` — see
+   * `CLAIM_PHRASES` in engine/verify-claims.ts) is a phrase this tokenizer deletes. Measurement and
+   * consequence: `corpus/evidence/precision-instrument-2026-08-09-limits.md`. If a rule-matching
+   * feature ever arrives, it does not come through this function.
+   */
+  it("cannot tell a claim from its negation — 1.00 overlap on opposite meanings", () => {
+    const absent =
+      "There is no guard clearing the pending-read flag before the early return, so a repeated " +
+      "request reuses the stale connector authorization state.";
+    const present = absent.replace("is no guard", "is a guard");
+    expect(
+      findsOutdatedRecurrence(candidate({ body: absent }), [outdated({ body: present })], IDENTITY),
+    ).toBe(true);
+  });
+
+  /**
    * A shared code quote is sufficient on its own for `similarByContent`, and deliberately is NOT
    * reachable here: a snippet identifies a location, and location is exactly what this stage has
    * agreed not to trust.

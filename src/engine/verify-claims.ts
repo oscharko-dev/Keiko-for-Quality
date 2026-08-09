@@ -1,8 +1,13 @@
 /**
  * Whole-file verification for the claims hunks cannot ground.
  *
- * Measured motivation (2026-08-08, twelve live hours on the consumer): of 82 published findings,
- * 55 were refuted by the reader after verification and 14 led to a fix — a 17% actionable rate.
+ * Measured motivation (2026-08-08, twelve live hours on the consumer): 92 findings published, of
+ * which the reader refuted 64 and fixed 17 — a **21.0% actionable rate**, recorded verbatim in
+ * `corpus/evidence/precision-2026-08-08-baseline.md`. That evidence file is the citable number;
+ * an earlier hand count of the same window read 82/55/14 and is kept below only as what the
+ * selector was calibrated against, never as the rate. Two counts of one window must not both be
+ * quoted as the headline, and the reproducible one wins.
+ *
  * Reading every refutation back gives one dominant mechanism, and it is structural rather than a
  * model deficiency: single-shot shows the model the changed hunks, and the model then makes
  * claims about what the FILE does or does not do. "Reject voice provider records that include
