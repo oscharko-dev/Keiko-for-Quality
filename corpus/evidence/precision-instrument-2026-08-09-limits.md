@@ -5,7 +5,7 @@ writing that, four questions were asked of the instruments that would have to po
 answers changed the design. One suspicion was checked and came back clean, and that is recorded
 here too, because a negative result nobody writes down gets re-litigated.
 
-## 1. The precision gate is blind to over-suppression, and over-suppression improves its score
+## 1. The precision gate cannot see a suppressed true positive at all
 
 `precision-gate-lib.mjs`:
 
@@ -17,13 +17,28 @@ export function actionableRate(totals) {
 ```
 
 The population is **published** findings that a reader answered. A finding that a learned rule
-suppresses is never published, never answered, never graded — it leaves the denominator entirely.
-Suppressing a _true_ positive therefore moves the rate **up**.
+suppresses is never published, never answered, never graded — it leaves numerator and denominator
+together.
 
-This is not a defect in the gate; it measures what it says it measures. It is a statement about
-what may be built on top of it: **the precision gate must never be the only detector for a
-suppression mechanism**, because the mechanism's worst failure is invisible to it and rewarded by
-it. Whatever suppresses needs a detector that counts what was removed, not what survived.
+The arithmetic, corrected after both reviewers on this pull request caught the first version of this
+paragraph asserting the opposite. Against the recorded 17/81 = 21.0%:
+
+| what is suppressed                                      | new rate      | direction |
+| ------------------------------------------------------- | ------------- | --------- |
+| a **true** positive (would have been graded `fixed`)    | 16/80 = 20.0% | **down**  |
+| a **false** positive (would have been graded `refuted`) | 17/80 = 21.3% | **up**    |
+
+So the gate does not reward silencing a real defect — it registers a small dip indistinguishable
+from noise, and the recall loss itself is invisible. What it does reward is removing refuted
+findings, which is exactly what a learned rule is built to do, so a rule that works and a rule that
+over-fires move the number the same way.
+
+This is not a defect in the gate; it measures what it says it measures. The consequence stands and
+is unchanged by the correction: **the precision gate must never be the only detector for a
+suppression mechanism.** Its worst failure — a real defect silenced forever — moves the number by
+less than a rounding step and in the same direction as ordinary noise, while the mechanism's
+intended effect moves it up. Whatever suppresses needs a detector that counts what was removed, not
+what survived.
 
 ## 2. `similarity.ts` cannot represent a learned rule — polarity is erased before matching
 
@@ -45,17 +60,21 @@ morphological luck, not a safeguard.
 This is correct behaviour for the job that function was written for. Deduplication asks "are these
 two comments the same complaint", and two paraphrases of one finding genuinely do differ in polarity
 words alone. A learned rule asks the opposite question — its entire content is the negation — and
-every phrase that carries it (`does not`, `no guard`, `never clears`; see `CLAIM_PHRASES` in
-`src/engine/verify-claims.ts`) is a phrase this tokenizer deletes.
+the phrases that carry it are the ones this tokenizer damages. Precisely — and narrowed after a
+reviewer on this pull request showed the first version overstated it: `not` is a stopword and `no`
+is under the three-character floor, so `does not` and `no guard` lose their negation entirely.
+`never clears` does NOT: both tokens survive, and that phrase is unaffected. The erasure is real for
+the `no`/`not` family and is not universal.
 
 Two further measurements, from the same run:
 
-- **The score component carries no information here.** `tokenOverlap` divides by the _smaller_ set,
-  which for a rule-versus-finding comparison is always the rule. A 6-token rule scored **1.00**
-  against a deliberately unrelated 16-token finding that merely reused its domain vocabulary. Only
-  the raw shared-token floor (`MIN_RECURRENCE_SHARED_TOKENS = 8`) prevented a false fire — so the
-  bar in practice is "do these share 8+ content words", and the calibrated 0.70 threshold does no
-  work at all.
+- **The score saturates whenever one side is contained in the other.** `tokenOverlap` divides by
+  the _smaller_ set — whichever that is at runtime; there is no invariant making a rule the shorter
+  side, and a reviewer on this pull request was right to strike the claim that there is. What the
+  measurement shows is narrower and still disqualifying: a 6-token rule scored **1.00** against a
+  deliberately unrelated 16-token finding that merely reused its vocabulary, because containment is
+  enough for a perfect score. Only the raw shared-token floor
+  (`MIN_RECURRENCE_SHARED_TOKENS = 8`) stopped the false fire.
 - **Precise rules fall in a dead band.** `Do not claim missing validation for request headers in
 the routes module.` yields 7 content tokens and therefore can _never_ reach 8 shared — it is
   permanently inert. Rules long enough to fire are long enough to be vague.
@@ -67,23 +86,25 @@ closed `CLAIM_VERBS` / `CLAIM_PHRASES` sets, and one backticked identifier via t
 `BACKTICKED` regex. A rule that cannot be written as `(path, claim-kind, identifier)` is a rule we
 do not understand well enough to enforce silently.
 
-Reproduce: `scratchpad/polarity-proof.mjs` parses `STOPWORDS` out of the source file rather than
-restating it, so it cannot drift from the function it is testing.
+Reproduce: `corpus/polarity-probe.mjs`, committed with this evidence rather than left in a
+scratchpad, and it parses `STOPWORDS` out of `similarity.ts` rather than restating them, so it
+cannot drift from the function it measures. `npm run corpus:polarity`.
 
 ## 3. The automated detectors cover almost none of the surface a rule would act on
 
 | Detector               | Cases                       | Files it could detect over-suppression on                                                                                                                            |
 | ---------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `corpus/run.mjs`       | 44 (12 with `defect: null`) | **none** — every case path is synthetic (`src/auth.ts`, `scripts/tip.mjs`, `.github/workflows/review.yml`). A rule keyed on a consumer path cannot fire here at all. |
+| `corpus/run.mjs`       | 40 (11 with `defect: null`) | **none** — every case path is synthetic (`src/auth.ts`, `scripts/tip.mjs`, `.github/workflows/review.yml`). A rule keyed on a consumer path cannot fire here at all. |
 | `corpus/seed-gate.mjs` | 5 (2 `required: true`)      | **2** — both required cases seed `connectorAuthorization.ts`; `connectorRoutes.ts` appears only inside the advisory multi-push case.                                 |
 
-The seed gate is genuinely sensitive _within_ those two files: the v0.21.2 evidence records exactly
+The seed gate is genuinely sensitive _within_ that one graded file: the v0.21.2 evidence records exactly
 one finding in the seeded file on every passing case, so a rule that ate it would flip the gate red.
 That sensitivity stops at the file boundary, and the consumer's reviewable tree is thousands of
-files wide.
+files wide. One graded file — corrected from two after a reviewer on this pull request read
+`evaluateAttempt` and found that the routes file is edited but never observed.
 
 This is the measured reason the wave's order puts **W6 (widen the measuring stick) before W3
-(activate suppression)**, rather than the intuition that motivated it. Two files is not a detector
+(activate suppression)**, rather than the intuition that motivated it. One file is not a detector
 for a repository-wide mechanism.
 
 One prerequisite falls out of it: `LocalReviewReport` (`src/review.ts`) carries **no suppression

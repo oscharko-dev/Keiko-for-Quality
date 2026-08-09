@@ -776,6 +776,9 @@ describe("findsOutdatedRecurrence", () => {
       "There is no guard clearing the pending-read flag before the early return, so a repeated " +
       "request reuses the stale connector authorization state.";
     const present = absent.replace("is no guard", "is a guard");
+    // `replace` returns the input unchanged when it matches nothing, which would leave two
+    // identical bodies and a test that passes without ever comparing opposite polarity.
+    expect(present).not.toBe(absent);
     expect(
       findsOutdatedRecurrence(candidate({ body: absent }), [outdated({ body: present })], IDENTITY),
     ).toBe(true);
