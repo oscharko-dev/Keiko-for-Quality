@@ -513,6 +513,7 @@ function substantiationOutcome(findings, overrides = {}) {
   const insufficient = (overrides.droppedInsufficientEvidence ?? 0) > 0;
   const undecided = (overrides.undecided ?? 0) > 0;
   const refuted = findings.length === 0 && !insufficient && !undecided;
+  const challenged = findings.length > 0 || (overrides.falsifierDefeated ?? 0) > 0;
   return {
     findings,
     confirmed: findings.length,
@@ -525,6 +526,11 @@ function substantiationOutcome(findings, overrides = {}) {
     retrievalExpanded: 0,
     retrievalNoMatches: 0,
     retrievalFailed: 0,
+    challengePlanned: challenged ? 1 : 0,
+    challengeRetrievalPerformed: challenged ? 1 : 0,
+    challengeExpanded: challenged ? 1 : 0,
+    challengeNoMatches: 0,
+    challengeFailed: 0,
     repaired: 0,
     droppedVague: insufficient ? 1 : 0,
     droppedUnsupported: refuted ? 1 : 0,
@@ -691,6 +697,11 @@ test("verification maps each paranoid outcome to keep/drop/unmeasured without se
     retrievalExpanded: 0,
     retrievalNoMatches: 0,
     retrievalFailed: 0,
+    challengePlanned: 1,
+    challengeRetrievalPerformed: 1,
+    challengeExpanded: 1,
+    challengeNoMatches: 0,
+    challengeFailed: 0,
     undecided: 1,
     budgetBlocked: 0,
   });
@@ -770,6 +781,7 @@ test("verification uses the production diff, initial context, and one follow-up 
     pathValue: FIXED_PATH,
     head: replayCase.originalCommitOid,
     reviewPath: replayCase.path,
+    findingAnchor: { startLine: replayCase.startLine, endLine: replayCase.endLine },
     findingContent: replayCase.content,
     anchorText: "export function parse() {}",
     unifiedDiff: sources.unifiedDiff,
@@ -837,6 +849,11 @@ test("verification publishes only aggregate counters for every validated workflo
     retrievalExpanded: 2,
     retrievalNoMatches: 0,
     retrievalFailed: 1,
+    challengePlanned: 2,
+    challengeRetrievalPerformed: 2,
+    challengeExpanded: 2,
+    challengeNoMatches: 0,
+    challengeFailed: 0,
     undecided: 2,
     budgetBlocked: 1,
   });
@@ -853,6 +870,11 @@ test("verification publishes only aggregate counters for every validated workflo
     "retrievalExpanded",
     "retrievalNoMatches",
     "retrievalFailed",
+    "challengePlanned",
+    "challengeRetrievalPerformed",
+    "challengeExpanded",
+    "challengeNoMatches",
+    "challengeFailed",
     "undecided",
     "budgetBlocked",
   ]);
@@ -912,6 +934,11 @@ test("invalid budget accounting exhausts the local ledger before another verifie
     retrievalExpanded: 0,
     retrievalNoMatches: 0,
     retrievalFailed: 0,
+    challengePlanned: 0,
+    challengeRetrievalPerformed: 0,
+    challengeExpanded: 0,
+    challengeNoMatches: 0,
+    challengeFailed: 0,
     undecided: 0,
     budgetBlocked: 0,
   });
@@ -1243,6 +1270,11 @@ test("durable evidence is aggregate-only and binds every implementation slice by
         retrievalExpanded: 0,
         retrievalNoMatches: 0,
         retrievalFailed: 0,
+        challengePlanned: 2,
+        challengeRetrievalPerformed: 2,
+        challengeExpanded: 2,
+        challengeNoMatches: 0,
+        challengeFailed: 0,
         undecided: 0,
         budgetBlocked: 0,
       },
@@ -1263,22 +1295,22 @@ test("durable evidence is aggregate-only and binds every implementation slice by
   }
   assert.equal(report.binding.endpointSha256.length, 64);
   assert.deepEqual(report.scope, {
-    measuredStage: "post-generation-truth-retrieval-falsifier-workflow",
+    measuredStage: "post-generation-truth-contract-challenge-falsifier-workflow",
     historicalHeadSource: "immutable GitHub originalCommit for the review comment",
     historicalBaseSource:
       "unique merge-base of harvested current target ref and original review commit",
     historicalDiffSource:
       "exact single-change unified diff from derived merge-base to immutable originalCommit",
     repositoryContextSource:
-      "bounded exact originalCommit tree with at most one deterministic identifier follow-up",
+      "bounded exact originalCommit tree with optional truth retrieval and mandatory contract challenge retrieval",
     verificationWorkflow:
-      "truth judge, optional repository retrieval, truth rerun, adversarial falsifier",
+      "truth judge, optional truth retrieval and rerun, mandatory independent contract challenge, adversarial falsifier",
     pullRequestEventBase: "not available in harvest; not measured",
     candidateGeneration: "not measured",
     classificationAndPrWideRanking: "not measured",
     endToEndRecall: "not measured",
   });
-  assert.equal(report.schemaVersion, 4);
+  assert.equal(report.schemaVersion, 5);
   assert.deepEqual(Object.keys(report.binding.sourceSha256), [
     "driver",
     "scorer",

@@ -151,6 +151,7 @@ describe("searchAstGrepAtHead", () => {
         context,
         head,
         reviewPath: "src/review.ts",
+        findingAnchor: { startLine: 1, endLine: 1 },
         candidatePaths: ["src/definition.ts"],
         terms: ["target"],
       },
@@ -169,6 +170,47 @@ describe("searchAstGrepAtHead", () => {
     await expect(readFile(join(repository, "PWNED"), "utf8")).rejects.toThrow();
   });
 
+  it("keeps distant same-file structural contracts while excluding the visible anchor window", async () => {
+    const { repository, context } = await fixture();
+    const source = [
+      "alpha();",
+      ...Array.from({ length: 23 }, (_value, index) => `const filler${String(index)} = true;`),
+      "alpha();",
+      "export function alpha(): void {",
+      "  alpha();",
+      "}",
+    ].join("\n");
+    await writeFile(join(repository, "src/same-file.ts"), `${source}\n`, "utf8");
+    git(repository, "add", "src/same-file.ts");
+    git(repository, "commit", "-qm", "add distant same-file AST fixture");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const tools = await mkdtemp(join(tmpdir(), "kfq-same-file-ast-grep-"));
+    temporaryDirectories.push(tools);
+    const binary = await executable(tools, TERM_PRIORITY_TOOL);
+
+    const entries = await searchAstGrepAtHead(
+      {
+        context,
+        head,
+        reviewPath: "src/same-file.ts",
+        findingAnchor: { startLine: 1, endLine: 1 },
+        candidatePaths: ["src/same-file.ts"],
+        terms: ["alpha"],
+      },
+      { acquireBinary: () => Promise.resolve(binary) },
+    );
+
+    expect(entries.every((entry) => entry.path === "src/same-file.ts" && entry.line > 25)).toBe(
+      true,
+    );
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ line: 26, kind: "definition" }),
+        expect.objectContaining({ line: 27, kind: "callsite" }),
+      ]),
+    );
+  });
+
   it("does not acquire a binary for unsupported source languages", async () => {
     const { context, head } = await fixture();
     let acquisitions = 0;
@@ -178,6 +220,7 @@ describe("searchAstGrepAtHead", () => {
           context,
           head,
           reviewPath: "src/review.ts",
+          findingAnchor: { startLine: 1, endLine: 1 },
           candidatePaths: ["README.txt"],
           terms: ["target"],
         },
@@ -203,6 +246,7 @@ describe("searchAstGrepAtHead", () => {
         context,
         head,
         reviewPath: "src/review.ts",
+        findingAnchor: { startLine: 1, endLine: 1 },
         candidatePaths: ["src/z-priority.ts", "src/a-lower.ts"],
         terms: ["target"],
       },
@@ -248,6 +292,7 @@ describe("searchAstGrepAtHead", () => {
         context,
         head,
         reviewPath: "src/review.ts",
+        findingAnchor: { startLine: 1, endLine: 1 },
         candidatePaths: [
           "src/alpha-definition.ts",
           "tests/alpha-beta.test.ts",
@@ -290,6 +335,7 @@ describe("searchAstGrepAtHead", () => {
           context,
           head,
           reviewPath: "src/review.ts",
+          findingAnchor: { startLine: 1, endLine: 1 },
           candidatePaths: ["src/definition.ts"],
           terms: ["target"],
         },
@@ -312,6 +358,7 @@ describe("searchAstGrepAtHead", () => {
           context,
           head,
           reviewPath: "src/review.ts",
+          findingAnchor: { startLine: 1, endLine: 1 },
           candidatePaths: ["src/definition.ts"],
           terms: ["target"],
         },

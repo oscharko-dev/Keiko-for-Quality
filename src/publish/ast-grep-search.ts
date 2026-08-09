@@ -4,7 +4,11 @@ import type { CommitSha } from "../core/brands.js";
 import { run } from "../git/exec.js";
 import { readTextAtCommit, type GitContext } from "../git/plumbing.js";
 import { acquireDefaultAstGrep } from "./ast-grep-acquire.js";
-import type { RepositoryEvidenceEntry } from "./evidence.js";
+import {
+  isOutsideAnchorContext,
+  type EvidenceLineRange,
+  type RepositoryEvidenceEntry,
+} from "./evidence.js";
 
 export const MAX_STRUCTURAL_FILES = 4;
 export const MAX_STRUCTURAL_TERMS = 3;
@@ -82,6 +86,7 @@ export interface StructuralSearchRequest {
   readonly context: GitContext;
   readonly head: CommitSha;
   readonly reviewPath: string;
+  readonly findingAnchor: EvidenceLineRange;
   readonly candidatePaths: readonly string[];
   readonly terms: readonly string[];
   /** Absolute whole-review boundary. Absent only for standalone callers. */
@@ -478,7 +483,15 @@ async function sourceCandidates(
   request: StructuralSearchRequest,
 ): Promise<readonly SourceCandidate[]> {
   const paths = [...new Set(request.candidatePaths.slice(0, 32))]
-    .filter((path) => path !== request.reviewPath && languageForPath(path) !== undefined)
+    .filter(
+      (path) =>
+        languageForPath(path) !== undefined &&
+        (path !== request.reviewPath ||
+          (Number.isSafeInteger(request.findingAnchor.startLine) &&
+            Number.isSafeInteger(request.findingAnchor.endLine) &&
+            request.findingAnchor.startLine > 0 &&
+            request.findingAnchor.endLine >= request.findingAnchor.startLine)),
+    )
     .slice(0, MAX_STRUCTURAL_FILES);
   const read = await Promise.all(
     paths.map(async (path): Promise<SourceCandidate | undefined> => {
@@ -615,11 +628,14 @@ function boundedStructuralEntries(
   hits: readonly StructuralHit[],
   termCount: number,
   pathCount: number,
+  request: StructuralSearchRequest,
 ): readonly RepositoryEvidenceEntry[] {
   // Anchors that establish requested-term, evidence-kind, and caller-ranked-path diversity are
   // non-negotiable. Their AST-owned source windows come next; repeated identifier sightings are
   // ballast and may use only what remains of the fixed structural result budget.
-  const ranked = uniqueStructuralHits(hits);
+  const eligible = (entry: RepositoryEvidenceEntry): boolean =>
+    entry.path !== request.reviewPath || isOutsideAnchorContext(entry.line, request.findingAnchor);
+  const ranked = uniqueStructuralHits(hits.filter((hit) => eligible(hit.anchor)));
   const reserved = reservedStructuralHits(ranked, termCount, pathCount);
   const reservation = new Set(reserved);
   const ballast = ranked.filter((hit) => !reservation.has(hit));
@@ -627,7 +643,7 @@ function boundedStructuralEntries(
     ...reserved.map((hit) => ({ entry: hit.anchor, anchor: true })),
     ...interleaveContextEntries(reserved),
     ...ballast.map((hit) => ({ entry: hit.anchor, anchor: true })),
-  ];
+  ].filter((candidate) => eligible(candidate.entry));
   const unique = new Map<string, PrioritizedStructuralEntry>();
   for (const candidate of prioritized) {
     const key = `${candidate.entry.path}\u0000${String(candidate.entry.line)}`;
@@ -675,5 +691,5 @@ export async function searchAstGrepAtHead(
       ),
     )
   ).flat();
-  return boundedStructuralEntries(hits, terms.length, sources.length);
+  return boundedStructuralEntries(hits, terms.length, sources.length, request);
 }

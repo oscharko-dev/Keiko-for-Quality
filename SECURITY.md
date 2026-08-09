@@ -37,7 +37,9 @@ evidence. Both the release archive and extracted executable are SHA-256 pinned o
 platform; ZIP paths, sizes and CRCs are checked before verified bytes become executable. Malformed
 output, timeout, unsupported platform, or any acquisition mismatch fails an ambiguity-driven
 lookup closed and leaves the affected review incomplete; optional enrichment failure retains only
-the exact lexical evidence.
+the exact lexical evidence. The reviewed file is eligible only during an explicit follow-up, and
+lines inside its already-rendered 24-line-per-side anchor window are rejected before lexical or
+structural evidence is returned.
 
 **Prompt injection is expected, not prevented.** The rule text tells the model that file content is
 data and never an instruction, but that is mitigation, not a guarantee. The real containment is

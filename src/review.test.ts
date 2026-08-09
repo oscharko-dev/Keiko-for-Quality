@@ -203,6 +203,9 @@ describe("performReview: review-cache memoization end to end", () => {
     await mkdir(join(repo, "src"), { recursive: true });
     await writeFile(join(repo, "src/a.ts"), "export const a = 1;\n");
     await writeFile(join(repo, "src/b.ts"), "export const b = 1;\n");
+    // Independent, unchanged contract evidence for the mandatory post-Truth challenge. The
+    // planner names this symbol and production retrieval renders it in the reserved R4 namespace.
+    await writeFile(join(repo, "src/challenge.ts"), "export const challengeGuard = true;\n");
     git(["add", "-A"]);
     git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
     baseSha = git(["rev-parse", "HEAD"]).trim();
@@ -3100,6 +3103,8 @@ describe("performReview: review-cache memoization end to end", () => {
       judgeAdditionalRefs?: readonly string[];
       judgeTransportFailure?: boolean;
       onJudgePrompt?: (prompt: string) => void;
+      onChallengePrompt?: (prompt: string) => void;
+      onFalsifierPrompt?: (prompt: string) => void;
       consequence?: "actionable" | "nitpick";
       tokensPerCall?: number;
     }): { impl: typeof fetch; callCount: () => number } {
@@ -3109,14 +3114,34 @@ describe("performReview: review-cache memoization end to end", () => {
         calls += 1;
         const parsedBody = JSON.parse(init?.body ?? "{}") as { messages?: { content?: string }[] };
         const prompt = parsedBody.messages?.[0]?.content ?? "";
-        // Substantiation shares this endpoint and runs BEFORE the audit, so it shares this mock.
-        // It answers confirmed/survives unless a case asks otherwise: these cases exist to
-        // pin classification behaviour, and a judge that dropped their findings would make them
-        // assert the wrong stage's failure. `judgeVerdict` is how a case opts into the other side.
+        // Substantiation shares this endpoint and runs BEFORE the audit. Truth confirmation must
+        // pass through the strict planner envelope, real deterministic retrieval, and a falsifier
+        // citation from the retrieved R4-R6 pack before these classification fixtures can publish.
+        if (prompt.includes("Plan one independent contract trace")) {
+          opts.onChallengePrompt?.(prompt);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                choices: [
+                  {
+                    finish_reason: "stop",
+                    message: {
+                      content: JSON.stringify({
+                        axis: "caller",
+                        evidence_refs: ["H:1"],
+                        lookup_terms: ["challengeGuard"],
+                      }),
+                    },
+                  },
+                ],
+                usage: { total_tokens: tokens },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
         if (prompt.includes("Adversarially falsify")) {
-          const stateRef = opts.judgeEvidenceRef ?? "H:1";
-          const line = /:([1-9]\d*)$/u.exec(stateRef)?.[1] ?? "1";
-          const changeRef = opts.judgeChangeRef ?? `D:H:${line}`;
+          opts.onFalsifierPrompt?.(prompt);
           const defeated = opts.consequence === "nitpick";
           return Promise.resolve(
             new Response(
@@ -3130,17 +3155,13 @@ describe("performReview: review-cache memoization end to end", () => {
                           ? {
                               verdict: "defeated",
                               reason_code: "counterexample",
-                              evidence_refs: [stateRef],
+                              evidence_refs: ["R4:H:1"],
                               lookup_terms: [],
                             }
                           : {
                               verdict: "survives",
                               reason_code: "no_defeater_found",
-                              evidence_refs: [
-                                stateRef,
-                                changeRef,
-                                ...(opts.judgeAdditionalRefs ?? []),
-                              ],
+                              evidence_refs: ["R4:H:1"],
                               lookup_terms: [],
                             },
                       ),
@@ -3301,9 +3322,17 @@ describe("performReview: review-cache memoization end to end", () => {
 
       // Vote 1 lands on the SAME pair the finding already carries — `classify.ts`'s fast path,
       // exactly one call, no escalation.
+      let challengePrompt = "";
+      let falsifierPrompt = "";
       const { impl, callCount } = classifyFetchMock({
         auditPair: { category: "bug", severity: "medium" },
         tokensPerCall: 37,
+        onChallengePrompt: (prompt) => {
+          challengePrompt = prompt;
+        },
+        onFalsifierPrompt: (prompt) => {
+          falsifierPrompt = prompt;
+        },
       });
       globalThis.fetch = impl;
       const { client, created } = successfulClient([]);
@@ -3314,18 +3343,27 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(report.outcome).toBe("complete");
       expect(report.publish).toMatchObject({ published: 1, suppressed: 0 });
       expect(created).toHaveLength(1);
-      // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
-      // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(3);
+      // Truth cannot leak its verdict into the independent planner, while the later falsifier must
+      // see and cite the real repository line returned for the planner's bounded lookup.
+      expect(challengePrompt).not.toContain('"verdict":"confirmed"');
+      expect(falsifierPrompt).toContain("R4:H:1| export const challengeGuard = true;");
+      // Truth + planner + falsifier precede the one fast-path classification-audit vote.
+      expect(callCount()).toBe(4);
 
       const records = diagnostics.drain();
       const audited = records.find((r) => r.code === "classify.audited");
       expect(audited?.counts).toStrictEqual({ changed: 0, tokens: 37 });
+      const substantiated = records.find((r) => r.code === "publish.substantiated");
+      expect(substantiated?.counts).toMatchObject({
+        challenge_planned: 1,
+        challenge_retrieval_performed: 1,
+        challenge_expanded: 1,
+        challenge_no_matches: 0,
+        challenge_failed: 0,
+      });
       const spend = records.find((r) => r.code === "run.spend");
-      // `classify` now carries the substantiation judge's spend alongside the audit's: both are
-      // bounded side-calls on the same endpoint, and the ledger has one line for them. What the
-      // judge itself cost stays separately visible in the `publish.substantiated` diagnostic.
-      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 111, total: 211 });
+      // `classify` carries all three verifier roles alongside the audit: four metered calls total.
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 148, total: 248 });
     });
 
     it("never rewrites or audits a claim whose truth judge still needs missing context", async () => {
@@ -3450,9 +3488,9 @@ describe("performReview: review-cache memoization end to end", () => {
       // The replayed finding still goes through sanitization and dedup and publishes normally...
       expect(report.publish).toMatchObject({ published: 1, suppressed: 0 });
       expect(created).toHaveLength(1);
-      // Truth and falsifier both run again. Classification does not: the stored finding already
-      // carries the audited category/severity from the generation run.
-      expect(callCount()).toBe(2);
+      // Truth, contract planning, and falsification all run again. Classification does not: the
+      // stored finding already carries the audited category/severity from the generation run.
+      expect(callCount()).toBe(3);
       expect(
         diagnostics.drain().find((record) => record.code === "classify.audited"),
       ).toBeUndefined();
@@ -3719,7 +3757,15 @@ describe("performReview: review-cache memoization end to end", () => {
       const records = diagnostics.drain();
       expect(records.find((r) => r.code === "classify.audited")).toBeUndefined();
       const substantiated = records.find((r) => r.code === "publish.substantiated");
-      expect(substantiated?.counts).toMatchObject({ undecided: 1, budget_blocked: 1 });
+      expect(substantiated?.counts).toMatchObject({
+        challenge_planned: 0,
+        challenge_retrieval_performed: 0,
+        challenge_expanded: 0,
+        challenge_no_matches: 0,
+        challenge_failed: 0,
+        undecided: 1,
+        budget_blocked: 1,
+      });
     });
 
     it("hard-blocks an audit request that exceeds the exact whole-review remainder without reclassifying", async () => {
@@ -3742,8 +3788,8 @@ describe("performReview: review-cache memoization end to end", () => {
       });
       globalThis.fetch = impl;
       const { client, created } = successfulClient([]);
-      // Enough for truth + consequence (their actual spend is 20), and above the audit's old 2k
-      // heuristic reserve, but below the audit prompt's conservative hard upper bound.
+      // Enough for Truth + planner + falsifier (their actual spend is 30), and above the audit's
+      // old 2k heuristic reserve, but below the audit prompt's conservative hard upper bound.
       const request = {
         ...auditRequest(client),
         config: { ...AUDIT_CONFIG, tokenBudget: 8_000 },
@@ -3756,13 +3802,13 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(created).toHaveLength(1);
       expect(created[0]?.body).toContain("`CORRECTNESS · MINOR`");
       expect(created[0]?.body).not.toContain("`SECURITY");
-      expect(callCount()).toBe(2);
+      expect(callCount()).toBe(3);
 
       const records = diagnostics.drain();
       const audited = records.find((record) => record.code === "classify.audited");
       expect(audited?.counts).toStrictEqual({ changed: 0, budget_blocked: 1, tokens: 0 });
       const spend = records.find((record) => record.code === "run.spend");
-      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 20, total: 120 });
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 30, total: 130 });
       expect((spend?.counts?.total ?? 0) <= request.config.tokenBudget).toBe(true);
     });
 
@@ -3806,7 +3852,15 @@ describe("performReview: review-cache memoization end to end", () => {
         tokens: 0,
       });
       const substantiated = records.find((record) => record.code === "publish.substantiated");
-      expect(substantiated?.counts).toMatchObject({ undecided: 1, budget_blocked: 1 });
+      expect(substantiated?.counts).toMatchObject({
+        challenge_planned: 0,
+        challenge_retrieval_performed: 0,
+        challenge_expanded: 0,
+        challenge_no_matches: 0,
+        challenge_failed: 0,
+        undecided: 1,
+        budget_blocked: 1,
+      });
       const spend = records.find((record) => record.code === "run.spend");
       expect(spend?.counts).toStrictEqual({ engine: 3_000, classify: 0, total: 3_000 });
       expect((spend?.counts?.total ?? 0) <= request.config.tokenBudget).toBe(true);
@@ -3886,9 +3940,8 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(created).toHaveLength(0);
       // Vote 1 disagrees with the finding's own "bug" ("security" != "bug"), so the audit escalates
       // to a second vote before two agreeing votes reach majority — two calls, not one.
-      // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
-      // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(4);
+      // Truth, planner, and falsifier precede the audit's two-vote majority.
+      expect(callCount()).toBe(5);
     });
 
     it("stores the audited path but no entry for a plan-suppressed fresh path", async () => {
@@ -3932,11 +3985,9 @@ describe("performReview: review-cache memoization end to end", () => {
         suppressedExactDuplicate: 1,
       });
       expect(created).toHaveLength(1);
-      // 1 repair call (src/a.ts) + 2 audit calls (src/a.ts's vote 1 disagrees with the just-repaired
-      // "bug", escalating to a vote 2 that agrees) — src/b.ts never calls out at all.
-      // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
-      // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(5);
+      // 1 repair + Truth + planner + falsifier + 2 audit votes for src/a.ts. The marker-suppressed
+      // src/b.ts never reaches any of those publication-time calls.
+      expect(callCount()).toBe(6);
 
       const entries = report.updatedCacheStore?.entries ?? [];
       const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
@@ -3950,14 +4001,9 @@ describe("performReview: review-cache memoization end to end", () => {
       // claim this path was verified under the current cache semantics.
       expect(bEntry).toBeUndefined();
 
-      // run.spend: engine(100) + repair(1 call) + audit(2 calls), all at the mock's default 10
-      // tokens/call — proof the total now covers audit spend incurred during publication, not just
-      // the engine and repair halves `executeEngine` alone used to record.
+      // run.spend: engine(100) + repair(1) + verifier(3) + audit(2), all at ten tokens/call.
       const spend = diagnostics.drain().find((r) => r.code === "run.spend");
-      // `classify` now carries the substantiation judge's spend alongside the audit's: both are
-      // bounded side-calls on the same endpoint, and the ledger has one line for them. What the
-      // judge itself cost stays separately visible in the `publish.substantiated` diagnostic.
-      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 50, total: 150 });
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 60, total: 160 });
     });
 
     it("keeps engine and classify spend correct across the bounded resume when the resumed run also triggers the audit", async () => {
@@ -3992,19 +4038,12 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("complete");
       expect(runEngineMock).toHaveBeenCalledTimes(2);
-      // Fast-path audit vote agrees with the finding's own classification — one call.
-      // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
-      // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(3);
+      // Truth + planner + falsifier + one agreeing fast-path audit vote.
+      expect(callCount()).toBe(4);
 
       const spend = diagnostics.drain().find((r) => r.code === "run.spend");
-      // 30 (the discarded first attempt) + 100 (the resume that stands) = 130 engine tokens, plus
-      // the audit's own 10 (default mock tokens) spent during publication — the ledger accumulates
-      // across BOTH the resume and publication, not just whichever happened to run last.
-      // `classify` now carries the substantiation judge's spend alongside the audit's: both are
-      // bounded side-calls on the same endpoint, and the ledger has one line for them. What the
-      // judge itself cost stays separately visible in the `publish.substantiated` diagnostic.
-      expect(spend?.counts).toStrictEqual({ engine: 130, classify: 30, total: 160 });
+      // 130 engine tokens plus three verifier roles and one audit vote at ten tokens each.
+      expect(spend?.counts).toStrictEqual({ engine: 130, classify: 40, total: 170 });
     });
 
     it("publishes on gpt-oss when the judge cites visible full-file and symbol evidence", async () => {
@@ -4117,7 +4156,14 @@ describe("performReview: review-cache memoization end to end", () => {
         const substantiated = diagnostics
           .drain()
           .find((record) => record.code === "publish.substantiated");
-        expect(substantiated?.counts?.undecided, failure).toBe(1);
+        expect(substantiated?.counts, failure).toMatchObject({
+          challenge_planned: 0,
+          challenge_retrieval_performed: 0,
+          challenge_expanded: 0,
+          challenge_no_matches: 0,
+          challenge_failed: 0,
+          undecided: 1,
+        });
       }
     });
   });

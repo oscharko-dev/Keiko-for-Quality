@@ -1167,11 +1167,11 @@ interface EngineBudget {
 /**
  * Start-work reserves for the mandatory post-generation quality stages.
  *
- * The evidence stage may take an initial truth judgment, one retrieval-guided truth rerun, and
- * adversarial falsification calls, each with bounded source context. 64k is deliberate engine
- * headroom for that path; `substantiate` separately
- * enforces the exact whole-review remainder before every request, so this estimate can never widen
- * the consumer's hard ceiling. The smaller audit reserve is only a cheap start-work trigger;
+ * The evidence stage may take an initial truth judgment, one retrieval-guided truth rerun, a
+ * contract-challenge plan, and adversarial falsification, each with bounded source context. 64k is
+ * deliberate engine headroom for that path; `substantiate` separately enforces the exact
+ * whole-review remainder before every request, so this estimate can never widen the consumer's
+ * hard ceiling. The smaller audit reserve is only a cheap start-work trigger;
  * `auditClassification` enforces the exact remaining allowance before every request as well.
  */
 const SUBSTANTIATE_RESERVE_PER_FINDING = 64_000;
@@ -2765,6 +2765,7 @@ async function prepareFindingEvidence(
     pathValue: run.request.pathValue,
     head: run.request.head,
     reviewPath: read.path,
+    findingAnchor: { startLine: finding.startLine, endLine: finding.endLine },
     findingContent: finding.content,
     anchorText,
     unifiedDiff: read.unifiedDiff,
@@ -2870,6 +2871,11 @@ function recordSubstantiation(
       retrieval_expanded: outcome.retrievalExpanded,
       retrieval_no_matches: outcome.retrievalNoMatches,
       retrieval_failed: outcome.retrievalFailed,
+      challenge_planned: outcome.challengePlanned,
+      challenge_retrieval_performed: outcome.challengeRetrievalPerformed,
+      challenge_expanded: outcome.challengeExpanded,
+      challenge_no_matches: outcome.challengeNoMatches,
+      challenge_failed: outcome.challengeFailed,
       undecided: outcome.undecided,
       budget_blocked: outcome.budgetBlocked,
       tokens: outcome.tokens,
@@ -2884,13 +2890,14 @@ function recordSubstantiation(
  *
  * Placed beside `auditFreshSurvivors` and on the same cohort for the same reason: after
  * `planPublication` has decided what a reader will actually see, so a suppressed duplicate never
- * costs a judge call, and never on a replayed cache hit, which was judged on the run that stored it.
+ * costs a judge call. Replayed generation-cache findings do run through this stage again.
  *
  * The initial dossier includes exact HEAD/BASE state, exact merge-base-to-HEAD changed lines, and
  * bounded repository sightings. A cache hit saves generation only: repository state, structural
  * retrieval, and verifier behavior can change independently of the per-file generation digest, so
- * replay never saves this stage. Either role may request one additional deterministic identifier
- * lookup; that single shared retrieval allowance restarts truth before falsification continues.
+ * replay never saves this stage. Truth may request one deterministic lookup and rerun. Every
+ * confirmed claim then receives a separate contract challenge whose independently selected terms
+ * are retrieved before the adversarial falsifier runs.
  * Wording is never repaired here: an unproven hypothesis leaves the cohort unchanged only in the
  * sense that no replacement is invented — under production's paranoid policy it is withheld.
  *
@@ -2914,7 +2921,7 @@ async function substantiateModelSurvivors(
 
   // Same whole-review ceiling as `auditFreshSurvivors`, enforced inside `substantiate` before
   // every endpoint request. Passing the exact remainder makes the limit hard even when one
-  // finding takes the full truth -> retrieval -> truth -> falsifier path.
+  // finding takes the full truth -> retrieval -> truth -> challenge -> falsifier path.
   const remaining = Math.max(
     0,
     run.request.config.tokenBudget - run.ledger.engine - run.ledger.classify,

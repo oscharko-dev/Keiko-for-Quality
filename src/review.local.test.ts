@@ -99,6 +99,9 @@ describe("performLocalReview (issue #95)", () => {
     git(["init", "-q", "-b", "main"]);
     await mkdir(join(repo, "src"), { recursive: true });
     await writeFile(join(repo, "src/a.ts"), "export const a = 1;\n");
+    // Unchanged repository context for the mandatory contract-challenge retrieval. Truth may
+    // prove the changed line, but the falsifier must cite independently retrieved R4-R6 evidence.
+    await writeFile(join(repo, "src/challenge.ts"), "export const challengeGuard = true;\n");
     git(["add", "-A"]);
     git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
     baseSha = git(["rev-parse", "HEAD"]).trim();
@@ -221,7 +224,7 @@ describe("performLocalReview (issue #95)", () => {
       globalThis.fetch = originalFetch;
     });
 
-    /** Answers truth, falsification, and classification calls this end-to-end path makes. */
+    /** Answers Truth, strict challenge planning, falsification, and classification calls. */
     function auditFetchMock(pair: { category: string; severity: string }): typeof fetch {
       return ((_url: string | URL, init?: RequestInit) => {
         const body = parseChatRequestBody(init);
@@ -233,14 +236,20 @@ describe("performLocalReview (issue #95)", () => {
               evidence_refs: ["H:1", "D:H:1"],
               lookup_terms: [],
             })
-          : prompt.includes("Adversarially falsify")
+          : prompt.includes("Plan one independent contract trace")
             ? JSON.stringify({
-                verdict: "survives",
-                reason_code: "no_defeater_found",
-                evidence_refs: ["H:1", "D:H:1"],
-                lookup_terms: [],
+                axis: "caller",
+                evidence_refs: ["H:1"],
+                lookup_terms: ["challengeGuard"],
               })
-            : JSON.stringify(pair);
+            : prompt.includes("Adversarially falsify")
+              ? JSON.stringify({
+                  verdict: "survives",
+                  reason_code: "no_defeater_found",
+                  evidence_refs: ["R4:H:1"],
+                  lookup_terms: [],
+                })
+              : JSON.stringify(pair);
         return Promise.resolve(
           new Response(
             JSON.stringify({
@@ -431,9 +440,11 @@ describe("performLocalReview (issue #95)", () => {
         const prompt = body.messages?.[0]?.content ?? "";
         const content = prompt.includes("Verify the truth of one AI-generated")
           ? '{"verdict":"confirmed","reason_code":"direct_proof","evidence_refs":["H:1","D:H:1"],"lookup_terms":[]}'
-          : prompt.includes("Adversarially falsify")
-            ? '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["H:1","D:H:1"],"lookup_terms":[]}'
-            : '{"category":"bug","severity":"medium"}';
+          : prompt.includes("Plan one independent contract trace")
+            ? '{"axis":"caller","evidence_refs":["H:1"],"lookup_terms":["challengeGuard"]}'
+            : prompt.includes("Adversarially falsify")
+              ? '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"],"lookup_terms":[]}'
+              : '{"category":"bug","severity":"medium"}';
         return Promise.resolve(
           new Response(
             JSON.stringify({

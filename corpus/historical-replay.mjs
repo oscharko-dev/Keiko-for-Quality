@@ -768,6 +768,11 @@ const STAGE_COUNTER_FIELDS = [
   "retrievalExpanded",
   "retrievalNoMatches",
   "retrievalFailed",
+  "challengePlanned",
+  "challengeRetrievalPerformed",
+  "challengeExpanded",
+  "challengeNoMatches",
+  "challengeFailed",
   "undecided",
   "budgetBlocked",
 ];
@@ -788,6 +793,11 @@ function validSubstantiationOutcome(outcome, finding) {
     "retrievalExpanded",
     "retrievalNoMatches",
     "retrievalFailed",
+    "challengePlanned",
+    "challengeRetrievalPerformed",
+    "challengeExpanded",
+    "challengeNoMatches",
+    "challengeFailed",
     "repaired",
     "droppedVague",
     "droppedUnsupported",
@@ -834,7 +844,18 @@ function validSubstantiationOutcome(outcome, finding) {
       outcome.retrievalPerformed &&
     outcome.retrievalFailed <= outcome.undecided &&
     outcome.retrievalNoMatches <= outcome.droppedInsufficientEvidence &&
-    outcome.retrievalRequested - outcome.retrievalPerformed <= outcome.droppedInsufficientEvidence
+    outcome.retrievalRequested - outcome.retrievalPerformed <=
+      outcome.droppedInsufficientEvidence &&
+    outcome.challengePlanned <= 1 &&
+    outcome.challengeRetrievalPerformed <= outcome.challengePlanned &&
+    outcome.challengeExpanded + outcome.challengeNoMatches <= outcome.challengeRetrievalPerformed &&
+    outcome.challengePlanned ===
+      outcome.challengeExpanded + outcome.challengeNoMatches + outcome.challengeFailed &&
+    outcome.challengeRetrievalPerformed - outcome.challengeExpanded - outcome.challengeNoMatches <=
+      outcome.challengeFailed &&
+    outcome.challengeFailed <= outcome.undecided &&
+    outcome.challengeNoMatches <= outcome.droppedInsufficientEvidence &&
+    outcome.challengeExpanded >= outcome.confirmed + outcome.falsifierDefeated
   );
 }
 
@@ -920,6 +941,7 @@ export async function runHistoricalReplayVerification({
       pathValue: FIXED_PATH,
       head: sources.headCommitOid,
       reviewPath: replayCase.path,
+      findingAnchor: { startLine: replayCase.startLine, endLine: replayCase.endLine },
       findingContent: replayCase.content,
       anchorText,
       unifiedDiff: sources.unifiedDiff,
@@ -1042,20 +1064,20 @@ export function buildRedactedHistoricalReplayEvidence({
     throw new Error("reviewer tree binding is malformed");
   }
   return {
-    schemaVersion: 4,
+    schemaVersion: 5,
     artifact: HISTORICAL_REPLAY_EVIDENCE_ARTIFACT,
     generatedAt,
     scope: {
-      measuredStage: "post-generation-truth-retrieval-falsifier-workflow",
+      measuredStage: "post-generation-truth-contract-challenge-falsifier-workflow",
       historicalHeadSource: "immutable GitHub originalCommit for the review comment",
       historicalBaseSource:
         "unique merge-base of harvested current target ref and original review commit",
       historicalDiffSource:
         "exact single-change unified diff from derived merge-base to immutable originalCommit",
       repositoryContextSource:
-        "bounded exact originalCommit tree with at most one deterministic identifier follow-up",
+        "bounded exact originalCommit tree with optional truth retrieval and mandatory contract challenge retrieval",
       verificationWorkflow:
-        "truth judge, optional repository retrieval, truth rerun, adversarial falsifier",
+        "truth judge, optional truth retrieval and rerun, mandatory independent contract challenge, adversarial falsifier",
       pullRequestEventBase: "not available in harvest; not measured",
       candidateGeneration: "not measured",
       classificationAndPrWideRanking: "not measured",

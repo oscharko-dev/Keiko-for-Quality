@@ -216,6 +216,10 @@ describe("performReview: the gate and the change-level pass share one blob-text 
       divergentGit(["init", "-q", "-b", "main"]);
       await mkdir(join(divergentRepo, "src"), { recursive: true });
       await writeFile(join(divergentRepo, "src/a.ts"), 'export const marker = "merge-base";\n');
+      await writeFile(
+        join(divergentRepo, "src/challenge.ts"),
+        "export const challengeGuard = true;\n",
+      );
       divergentGit(["add", "-A"]);
       divergentGit(["commit", "-q", "-m", "fork", "--no-gpg-sign"]);
       const fork = divergentGit(["rev-parse", "HEAD"]).trim();
@@ -266,9 +270,11 @@ describe("performReview: the gate and the change-level pass share one blob-text 
           judgePrompt = prompt;
           content =
             '{"verdict":"confirmed","reason_code":"direct_proof","evidence_refs":["D:H:1","H:1"],"lookup_terms":[]}';
-        } else if (prompt.startsWith("Adversarially falsify one independently confirmed")) {
+        } else if (prompt.startsWith("Plan one independent contract trace")) {
+          content = '{"axis":"caller","evidence_refs":["H:1"],"lookup_terms":["challengeGuard"]}';
+        } else if (prompt.startsWith("Adversarially falsify one AI-generated code-review claim")) {
           content =
-            '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["D:H:1","H:1"],"lookup_terms":[]}';
+            '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"],"lookup_terms":[]}';
         } else {
           content = '{"category":"bug","severity":"high"}';
         }

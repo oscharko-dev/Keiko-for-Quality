@@ -91,6 +91,7 @@ async function fixture(): Promise<{
     pathValue: process.env.PATH ?? "",
     head,
     reviewPath: "src/review.ts",
+    findingAnchor: { startLine: 1, endLine: 1 },
     findingContent: "Calling useCapability bypasses the runtime guard.",
     anchorText: "const result = useCapability(input);",
   };
@@ -249,6 +250,86 @@ describe("repository context collection", () => {
       content: "return parseGatewayConfigUpload(uploadedConfig);",
       kind: "callsite",
     });
+  });
+
+  it("admits distant same-file producer and consumer evidence only on explicit follow-up", async () => {
+    const { repository, request } = await fixture();
+    const source = [
+      "const voiceRoles = partitionProviders(input);",
+      ...Array.from({ length: 23 }, (_value, index) => `const filler${String(index)} = true;`),
+      "partitionProviders(alreadyVisible);",
+      "export function partitionProviders(input: unknown): unknown { return input; }",
+      "return partitionProviders(providerInput);",
+    ].join("\n");
+    await write(repository, request.reviewPath, `${source}\n`);
+    for (const path of [
+      "src/a-contract.ts",
+      "src/b-contract.ts",
+      "src/c-contract.ts",
+      "src/d-contract.ts",
+    ]) {
+      await write(repository, path, "partitionProviders(crossFileInput);\n");
+    }
+    git(repository, "add", "src");
+    git(repository, "commit", "-qm", "add distant same-file contract");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const anchoredRequest: RepositoryContextRequest = {
+      ...request,
+      head,
+      findingAnchor: { startLine: 1, endLine: 1 },
+      findingContent: "Check `partitionProviders` before deriving voice roles.",
+      anchorText: "const voiceRoles = partitionProviders(input);",
+    };
+
+    const initial = await collectInitialRepositoryContext(anchoredRequest);
+    expect(initial.entries.some((entry) => entry.path === request.reviewPath)).toBe(false);
+
+    const followUp = await collectRepositoryContextFollowUp(
+      anchoredRequest,
+      ["partitionProviders"],
+      {
+        structuralSearch: ({ candidatePaths, findingAnchor }) => {
+          expect(candidatePaths).toContain(request.reviewPath);
+          expect(findingAnchor).toEqual({ startLine: 1, endLine: 1 });
+          return Promise.resolve([
+            {
+              path: request.reviewPath,
+              line: 1,
+              content: "const voiceRoles = partitionProviders(input);",
+              kind: "callsite" as const,
+            },
+            {
+              path: request.reviewPath,
+              line: 25,
+              content: "partitionProviders(alreadyVisible);",
+              kind: "callsite" as const,
+            },
+            {
+              path: request.reviewPath,
+              line: 26,
+              content:
+                "export function partitionProviders(input: unknown): unknown { return input; }",
+              kind: "definition" as const,
+            },
+            {
+              path: request.reviewPath,
+              line: 27,
+              content: "return partitionProviders(providerInput);",
+              kind: "callsite" as const,
+            },
+          ]);
+        },
+      },
+    );
+
+    const sameFile = followUp.entries.filter((entry) => entry.path === request.reviewPath);
+    expect(sameFile).toEqual([
+      expect.objectContaining({ line: 26, kind: "definition" }),
+      expect.objectContaining({ line: 27, kind: "callsite" }),
+    ]);
+    expect(sameFile.some((entry) => entry.line <= 25)).toBe(false);
+    expect(followUp.entries.length).toBeLessThanOrEqual(12);
+    expect(new Set(followUp.entries.map((entry) => entry.path)).size).toBeLessThanOrEqual(5);
   });
 
   it("keeps the one follow-up separate and combines only the same exact commit", async () => {

@@ -65,7 +65,8 @@ export const MAX_REPOSITORY_EVIDENCE_MATCHES = 24;
 /** The change view proves causality but must remain smaller than the state evidence it annotates. */
 export const MAX_DIFF_EVIDENCE_CHARS = 6_000;
 
-const ANCHOR_CONTEXT_LINES = 24;
+/** Radius of the finding window already visible to the truth workflow for a large file. */
+export const ANCHOR_CONTEXT_LINES = 24;
 const SYMBOL_CONTEXT_LINES = 4;
 const MAX_IDENTIFIERS = 6;
 const MAX_OCCURRENCES_PER_IDENTIFIER = 6;
@@ -73,6 +74,29 @@ const MAX_RENDERED_LINE_CHARS = 500;
 const MAX_REPOSITORY_LINE_CHARS = 300;
 const MAX_REPOSITORY_PATHS = 8;
 const MAX_DIFF_EVIDENCE_LINES = 24;
+
+/**
+ * Whether a source line is outside the anchor window `buildFileEvidence` already renders.
+ *
+ * Repository follow-up uses this exact predicate before admitting evidence from the reviewed file.
+ * An invalid range fails closed: it must not turn the whole reviewed file into supplemental
+ * evidence merely because the caller supplied an unusable anchor.
+ */
+export function isOutsideAnchorContext(line: number, anchor: EvidenceLineRange): boolean {
+  if (
+    !Number.isSafeInteger(line) ||
+    line < 1 ||
+    !Number.isSafeInteger(anchor.startLine) ||
+    !Number.isSafeInteger(anchor.endLine) ||
+    anchor.startLine < 1 ||
+    anchor.endLine < anchor.startLine
+  ) {
+    return false;
+  }
+  if (line < anchor.startLine) return anchor.startLine - line > ANCHOR_CONTEXT_LINES;
+  if (line > anchor.endLine) return line - anchor.endLine > ANCHOR_CONTEXT_LINES;
+  return false;
+}
 
 /** Backticked code identifiers only. Prose nouns are too noisy to drive repository retrieval. */
 const BACKTICKED_IDENTIFIER = /`([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)`/gu;

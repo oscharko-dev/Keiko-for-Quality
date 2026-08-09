@@ -18,16 +18,16 @@ const ROOT_KEYS = [
   "score",
 ];
 const SCOPE = {
-  measuredStage: "post-generation-truth-retrieval-falsifier-workflow",
+  measuredStage: "post-generation-truth-contract-challenge-falsifier-workflow",
   historicalHeadSource: "immutable GitHub originalCommit for the review comment",
   historicalBaseSource:
     "unique merge-base of harvested current target ref and original review commit",
   historicalDiffSource:
     "exact single-change unified diff from derived merge-base to immutable originalCommit",
   repositoryContextSource:
-    "bounded exact originalCommit tree with at most one deterministic identifier follow-up",
+    "bounded exact originalCommit tree with optional truth retrieval and mandatory contract challenge retrieval",
   verificationWorkflow:
-    "truth judge, optional repository retrieval, truth rerun, adversarial falsifier",
+    "truth judge, optional truth retrieval and rerun, mandatory independent contract challenge, adversarial falsifier",
   pullRequestEventBase: "not available in harvest; not measured",
   candidateGeneration: "not measured",
   classificationAndPrWideRanking: "not measured",
@@ -94,6 +94,11 @@ const REASON_KEYS = [
 const DECISION_KEYS = ["drop", "keep", "unmeasured"];
 const STAGE_COUNTER_KEYS = [
   "budgetBlocked",
+  "challengeExpanded",
+  "challengeFailed",
+  "challengeNoMatches",
+  "challengePlanned",
+  "challengeRetrievalPerformed",
   "confirmed",
   "droppedInsufficientEvidence",
   "falsifierDefeated",
@@ -376,7 +381,22 @@ function validateExecution(value, plan, failures) {
     stageCounters.retrievalFailed > stageCounters.undecided ||
     stageCounters.retrievalNoMatches > stageCounters.droppedInsufficientEvidence ||
     stageCounters.retrievalRequested - stageCounters.retrievalPerformed >
-      stageCounters.droppedInsufficientEvidence
+      stageCounters.droppedInsufficientEvidence ||
+    stageCounters.challengePlanned > validatedOutcomes ||
+    stageCounters.challengeRetrievalPerformed > stageCounters.challengePlanned ||
+    stageCounters.challengeExpanded + stageCounters.challengeNoMatches >
+      stageCounters.challengeRetrievalPerformed ||
+    stageCounters.challengePlanned !==
+      stageCounters.challengeExpanded +
+        stageCounters.challengeNoMatches +
+        stageCounters.challengeFailed ||
+    stageCounters.challengeRetrievalPerformed -
+      stageCounters.challengeExpanded -
+      stageCounters.challengeNoMatches >
+      stageCounters.challengeFailed ||
+    stageCounters.challengeFailed > stageCounters.undecided ||
+    stageCounters.challengeNoMatches > stageCounters.droppedInsufficientEvidence ||
+    stageCounters.challengeExpanded < stageCounters.confirmed + stageCounters.falsifierDefeated
   ) {
     mark(failures, "execution_stage_arithmetic");
   }
@@ -565,7 +585,7 @@ function validateScore(value, holdoutFromPullRequest, plan, execution, failures)
 }
 
 /**
- * Validates one release-grade schema-v4 historical replay artifact.
+ * Validates one release-grade schema-v5 historical replay artifact.
  *
  * The return shape mirrors the qualification evidence validator so release code can fail closed
  * without learning this schema's internals.
@@ -574,7 +594,7 @@ export function validateHistoricalReplayEvidence(report) {
   const failures = [];
   const root = exactRecord(report, ROOT_KEYS);
   if (root === undefined) return { valid: false, failures: ["root_shape"] };
-  if (root.schemaVersion !== 4 || root.artifact !== HISTORICAL_REPLAY_EVIDENCE_ARTIFACT) {
+  if (root.schemaVersion !== 5 || root.artifact !== HISTORICAL_REPLAY_EVIDENCE_ARTIFACT) {
     mark(failures, "identity");
   }
   if (
