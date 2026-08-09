@@ -336,9 +336,57 @@ describe("runSingleShotEngine", () => {
   });
 
   /**
+   * The whole-file view's two load-bearing properties, in one test: the finding call is given the
+   * complete file with its changed lines marked, and the verification pass therefore does NOT run.
+   *
+   * The second half is the cost half. Verification cost ~2,900 tokens per file — a second send of
+   * the same text — and it existed only because the finding call had been shown an excerpt. Paying
+   * it after the model has already read the file would be the pendulum swing this view was built to
+   * avoid: better findings bought with a bill nobody wants.
+   */
+  it("shows the finding call the whole file, and then skips the verification pass", async () => {
+    const guarded = [
+      "export function parse(raw: string): string | undefined {",
+      "  const value = raw.trim();",
+      "  if (value === '') return undefined;",
+      "  return value;",
+      "}",
+      "export const added = parse('x');",
+    ].join("\n");
+    const { repo, pair } = await makeRepo("kfq-ss-whole-", { "src/a.ts": `${guarded}\n` });
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub(() => ({ status: 200, reply: "[]" }), seen);
+
+    await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+
+    const user = seen[0]?.messages?.[1]?.content ?? "";
+    expect(user).toContain("<current_file>");
+    // The guard the model used to be blind to is now in the finding prompt, at its real line
+    // number. This fixture replaces the whole file, so every line is marked changed — the marker's
+    // discrimination is pinned in whole-file-view.test.ts, on a diff that keeps context lines.
+    expect(user).toContain("3+  if (value === '') return undefined;");
+    expect(user).toContain("6+export const added = parse('x');");
+    expect(user).not.toContain("<current_file_diff>");
+    // What the change removed travels too — a whole-file view is otherwise blind to deletions.
+    expect(user).toContain("<removed_by_this_change>");
+    expect(user).toContain("keep");
+    // One call for the whole file. No verification, because there is nothing left to verify with.
+    expect(seen).toHaveLength(1);
+  });
+
+  /**
    * The false-positive class the verification pass exists for, reproduced from the audited
    * window: the model claims a guard is missing, and the guard sits in the same file outside the
    * hunk it was shown. The verifier is given the whole file and contradicts the claim.
+   *
+   * Since the whole-file view landed this pass runs ONLY on the fallback path — a file the finding
+   * call could not be shown whole. So the fixture is padded past `MAX_REVIEW_FILE_CHARS`, which is
+   * the one situation where the model still reviews an excerpt and can still make this mistake.
+   * The whole-file case has its own test below: there, the verifier must not be called at all.
    */
   it("drops a claim the whole file contradicts and keeps everything else", async () => {
     const guarded = [
@@ -348,6 +396,9 @@ describe("runSingleShotEngine", () => {
       "  return value;",
       "}",
       "export const added = parse('x');",
+      // Past MAX_REVIEW_FILE_CHARS (80k) and comfortably under MAX_VERIFY_FILE_CHARS (160k) —
+      // the middle band, where the finding call still sees an excerpt and the verifier still runs.
+      `// ${"pad ".repeat(25_000)}`,
     ].join("\n");
     const { repo, pair } = await makeRepo("kfq-ss-verify-", { "src/a.ts": `${guarded}\n` });
     const seen: CapturedBody[] = [];
@@ -508,10 +559,10 @@ describe("repair of publisher-rejectable bodies", () => {
       mergeBase: commitSha(base),
     };
 
-    // Three calls, scripted by what each prompt asks for rather than by a counter: the review,
-    // then whole-file verification (the claim opens with a claim verb, so it qualifies), then
-    // the repair. The order is the point — a body about to be dropped must never cost a repair
-    // call, so verification runs first.
+    // Two calls, scripted by what each prompt asks for rather than by a counter: the review — this
+    // file is small, so it is shown whole and needs no verification pass — and then the repair.
+    // The review is recognised by either file view, so this classifier keeps working whichever
+    // band a fixture falls into.
     const seen: CapturedBody[] = [];
     const kinds: string[] = [];
     const fetchImpl = ((_url: string | URL, init?: RequestInit): Promise<Response> => {
@@ -520,7 +571,7 @@ describe("repair of publisher-rejectable bodies", () => {
       const user = body.messages?.[1]?.content ?? "";
       const kind = user.includes("<claims>")
         ? "verify"
-        : user.includes("<current_file_diff>")
+        : user.includes("<current_file_diff>") || user.includes("<current_file>")
           ? "review"
           : "repair";
       kinds.push(kind);
@@ -546,9 +597,11 @@ describe("repair of publisher-rejectable bodies", () => {
       createSilentDiagnostics(),
       fetchImpl,
     );
-    // Three wire calls, in this order: the review, the verification that keeps the claim, and
-    // the one repair that rescues its body.
-    expect(kinds).toEqual(["review", "verify", "repair"]);
+    // Two wire calls, in this order: the review — which now reads the whole file, so there is no
+    // verification pass to run — and the one repair that rescues the body. The verify call this
+    // used to expect is the double payment the whole-file view removed: the same file text, sent a
+    // second time, to ask whether the model should have believed what it had already been shown.
+    expect(kinds).toEqual(["review", "repair"]);
     const parsed = parseEngineResult(output.stdout);
     expect(parsed.findings).toHaveLength(1);
     // The published body is the repaired, backticked form the real sanitizer accepts.
