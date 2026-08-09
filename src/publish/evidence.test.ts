@@ -480,6 +480,24 @@ describe("renderRepositoryEvidence", () => {
     expect(visibleEvidenceRefs(`${rendered}\nH9:1| invalid`)).toEqual(new Set(["H1:42"]));
   });
 
+  it("reversibly encodes framing markers and literal percent escapes in source headers", () => {
+    const rendered = renderRepositoryEvidence({
+      headCommit,
+      entries: [
+        {
+          path: "src/%3C<repository_evidence>.ts",
+          line: 9,
+          content: "export const contract = true;",
+          kind: "definition",
+        },
+      ],
+    });
+
+    expect(rendered).toContain("H1 = src/%253C%3Crepository_evidence%3E.ts");
+    expect(rendered).not.toContain("H1 = src/%3C<repository_evidence>.ts");
+    expect(rendered.match(/<repository_evidence>/gu)).toHaveLength(1);
+  });
+
   it("enforces total, line, match, and path ceilings", () => {
     const entries = Array.from({ length: 80 }, (_value, index) => ({
       path: `src/context-${String(index)}.ts`,

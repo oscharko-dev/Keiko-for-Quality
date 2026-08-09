@@ -12,6 +12,8 @@ import { ExecFailure, gitEnvironment, run, runBoundedLineRecords } from "../git/
 import { readTextAtCommit, verifyCommit, type GitContext } from "../git/plumbing.js";
 import {
   extractEvidenceIdentifiers,
+  isOutsideAnchorContext,
+  type EvidenceLineRange,
   type RepositoryEvidenceContext,
   type RepositoryEvidenceEntry,
   type RepositoryEvidenceKind,
@@ -86,7 +88,14 @@ export interface RepositoryContextRequest {
   readonly repositoryPath: string;
   readonly pathValue: string;
   readonly head: CommitSha;
+  readonly base: CommitSha;
   readonly reviewPath: string;
+  /** Path of the same file in BASE; differs from `reviewPath` for a rename. */
+  readonly baseReviewPath: string;
+  /** Finding range whose already-visible near window same-file retrieval must not duplicate. */
+  readonly findingAnchor: EvidenceLineRange;
+  /** Exact BASE projection of `findingAnchor`; absent means same-file BASE lookup is ineligible. */
+  readonly baseFindingAnchor?: EvidenceLineRange;
   readonly findingContent: string;
   readonly anchorText: string;
   readonly unifiedDiff?: string;
@@ -125,6 +134,49 @@ interface GrepSearchResult {
   readonly matches: readonly RankedGrepMatch[];
   readonly candidatePaths: readonly string[];
   readonly truncated: boolean;
+}
+
+export type RepositoryEvidenceSide = "H" | "B";
+
+/** Exact immutable source selected for one explicit verifier follow-up. */
+export interface RepositoryFollowUpContext {
+  readonly sourceCommit: CommitSha;
+  readonly side: RepositoryEvidenceSide;
+  readonly entries: readonly RepositoryEvidenceEntry[];
+}
+
+function eligibleRepositorySighting(
+  request: RepositoryContextRequest,
+  sighting: GrepMatch,
+  allowDistantReviewPath: boolean,
+): boolean {
+  if (sighting.path !== request.reviewPath) return true;
+  return allowDistantReviewPath && isOutsideAnchorContext(sighting.line, request.findingAnchor);
+}
+
+function eligibleStructuralPath(
+  request: RepositoryContextRequest,
+  sighting: GrepMatch,
+  allowDistantReviewPath: boolean,
+): boolean {
+  if (sighting.path !== request.reviewPath) return true;
+  // A same-file lexical sighting inside the visible window is enough to parse this one bounded
+  // immutable blob: AST may find the requested producer/consumer farther away after git grep's
+  // per-file prefix was consumed by near-anchor duplicates.
+  return canSearchReviewedPath(request, allowDistantReviewPath);
+}
+
+function canSearchReviewedPath(
+  request: RepositoryContextRequest,
+  allowDistantReviewPath: boolean,
+): boolean {
+  return (
+    allowDistantReviewPath &&
+    Number.isSafeInteger(request.findingAnchor.startLine) &&
+    Number.isSafeInteger(request.findingAnchor.endLine) &&
+    request.findingAnchor.startLine > 0 &&
+    request.findingAnchor.endLine >= request.findingAnchor.startLine
+  );
 }
 
 function validTerm(term: string): boolean {
@@ -412,11 +464,27 @@ function interleaveMatches(
 function takeCandidatePaths(
   seen: Set<string>,
   sightings: readonly GrepMatch[],
-  reviewPath: string,
+  request: RepositoryContextRequest,
+  allowDistantReviewPath: boolean,
 ): readonly string[] {
   const selected: string[] = [];
-  for (const sighting of sightings) {
-    if (sighting.path === reviewPath || seen.has(sighting.path)) continue;
+  const sameFile = allowDistantReviewPath
+    ? sightings.find(
+        (sighting) =>
+          sighting.path === request.reviewPath &&
+          eligibleStructuralPath(request, sighting, allowDistantReviewPath),
+      )
+    : undefined;
+  // Reserve the reviewed file before lexical path order consumes the four AST slots. This is the
+  // one path the caller already proved relevant; all other paths retain their original order.
+  const ordered = sameFile === undefined ? sightings : [sameFile, ...sightings];
+  for (const sighting of ordered) {
+    if (
+      !eligibleStructuralPath(request, sighting, allowDistantReviewPath) ||
+      seen.has(sighting.path)
+    ) {
+      continue;
+    }
     seen.add(sighting.path);
     selected.push(sighting.path);
     if (selected.length === MAX_STRUCTURAL_CANDIDATE_PATHS_PER_TERM) return selected;
@@ -436,13 +504,26 @@ function interleavePaths(groups: readonly (readonly string[])[]): readonly strin
   return selected;
 }
 
+function reserveReviewedPathAfterTruncation(
+  paths: readonly string[],
+  request: RepositoryContextRequest,
+  allowDistantReviewPath: boolean,
+  truncated: boolean,
+): readonly string[] {
+  if (!truncated || !canSearchReviewedPath(request, allowDistantReviewPath)) return paths;
+  const withoutReviewed = paths.filter((path) => path !== request.reviewPath);
+  // Keep every already-selected fallback path. The reviewed path may be absent on the selected
+  // side (a deletion searched in HEAD or an addition searched in BASE); replacing the fourth real
+  // candidate with that absent path would make the later four-readable-blob cap see only three.
+  return [request.reviewPath, ...withoutReviewed];
+}
+
 async function grepAtHead(
   context: GitContext,
-  head: CommitSha,
+  request: RepositoryContextRequest,
   terms: readonly string[],
-  reviewPath: string,
   strict = false,
-  deadlineMs?: number,
+  allowDistantReviewPath = false,
 ): Promise<GrepSearchResult> {
   if (terms.length === 0) return { matches: [], candidatePaths: [], truncated: false };
   const seenMatches = new Set<string>();
@@ -451,11 +532,13 @@ async function grepAtHead(
   const pathGroups: (readonly string[])[] = [];
   let truncated = false;
   for (const [termIndex, term] of terms.entries()) {
-    const result = await grepTermAtHead(context, head, term, strict, deadlineMs);
+    const result = await grepTermAtHead(context, request.head, term, strict, request.deadlineMs);
     truncated ||= result.truncated;
-    pathGroups.push(takeCandidatePaths(seenPaths, result.sightings, reviewPath));
+    pathGroups.push(
+      takeCandidatePaths(seenPaths, result.sightings, request, allowDistantReviewPath),
+    );
     const ranked = result.sightings
-      .filter((match) => match.path !== reviewPath)
+      .filter((match) => eligibleRepositorySighting(request, match, allowDistantReviewPath))
       .map((match) => ({ ...match, termRank: termIndex }));
     groups.push(
       result.truncated
@@ -463,9 +546,15 @@ async function grepAtHead(
         : takeUniqueMatches(seenMatches, ranked, matchQuota(termIndex, terms.length)),
     );
   }
+  const candidatePaths = interleavePaths(pathGroups);
   return {
     matches: interleaveMatches(groups),
-    candidatePaths: interleavePaths(pathGroups),
+    candidatePaths: reserveReviewedPathAfterTruncation(
+      candidatePaths,
+      request,
+      allowDistantReviewPath,
+      truncated,
+    ),
     truncated,
   };
 }
@@ -542,12 +631,17 @@ function withoutTermRank(entry: RankedEvidenceEntry): RepositoryEvidenceEntry {
 
 function boundedCodeEntries(
   matches: readonly RankedGrepMatch[],
-  reviewPath: string,
+  request: RepositoryContextRequest,
+  allowDistantReviewPath: boolean,
 ): readonly RepositoryEvidenceEntry[] {
   // `grepAtHead` already orders matches by term relevance and fixed fair reservations. Sorting by
   // path here would silently replace that semantic order with repository naming.
   const candidates = matches
-    .filter((match) => match.path !== reviewPath && match.content.length <= MAX_MATCH_LINE_CHARS)
+    .filter(
+      (match) =>
+        eligibleRepositorySighting(request, match, allowDistantReviewPath) &&
+        match.content.length <= MAX_MATCH_LINE_CHARS,
+    )
     .map(asCodeEntry);
   const selected: RankedEvidenceEntry[] = [];
   const paths = new Set<string>();
@@ -569,14 +663,16 @@ function boundedCodeEntries(
 function boundedEvidenceEntries(
   structural: readonly RepositoryEvidenceEntry[],
   lexical: readonly RepositoryEvidenceEntry[],
-  reviewPath: string,
+  request: RepositoryContextRequest,
   termAnchorCount: number,
 ): readonly RepositoryEvidenceEntry[] {
   const eligible = (
     entries: readonly RepositoryEvidenceEntry[],
   ): readonly RepositoryEvidenceEntry[] =>
     entries.filter(
-      (entry) => entry.path !== reviewPath && entry.content.length <= MAX_MATCH_LINE_CHARS,
+      (entry) =>
+        eligibleRepositorySighting(request, entry, true) &&
+        entry.content.length <= MAX_MATCH_LINE_CHARS,
     );
   const structuralCandidates = eligible(structural);
   const lexicalCandidates = eligible(lexical);
@@ -631,10 +727,42 @@ function lexicalNeedsStructuralFallback(
   );
 }
 
+function hasNoStructuralCandidate(result: GrepSearchResult): boolean {
+  return result.matches.length === 0 && result.candidatePaths.length === 0 && !result.truncated;
+}
+
+function requiresStructuralFallback(
+  result: GrepSearchResult,
+  lexical: readonly RepositoryEvidenceEntry[],
+  terms: readonly string[],
+): boolean {
+  return (
+    result.truncated ||
+    (result.matches.length === 0 && result.candidatePaths.length > 0) ||
+    lexicalNeedsStructuralFallback(result.matches, lexical, terms)
+  );
+}
+
 export interface RepositoryContextDependencies {
+  /** HEAD is the default; BASE is allowed only for the planner's closed `base` challenge axis. */
+  readonly sourceSide?: RepositoryEvidenceSide;
   readonly structuralSearch?: (
     request: StructuralSearchRequest,
   ) => Promise<readonly RepositoryEvidenceEntry[]>;
+}
+
+function followUpSourceRequest(
+  request: RepositoryContextRequest,
+  side: RepositoryEvidenceSide,
+): RepositoryContextRequest {
+  if (side === "H") return request;
+  return {
+    ...request,
+    head: request.base,
+    reviewPath: request.baseReviewPath,
+    // An unmappable HEAD anchor must not make the complete BASE-side reviewed file eligible.
+    findingAnchor: request.baseFindingAnchor ?? { startLine: 0, endLine: 0 },
+  };
 }
 
 function manifestCandidates(reviewPath: string): readonly string[] {
@@ -747,15 +875,8 @@ async function collectCodeEntries(
   terms: readonly string[],
   strict = false,
 ): Promise<readonly RepositoryEvidenceEntry[]> {
-  const result = await grepAtHead(
-    context,
-    request.head,
-    expandedSearchTerms(terms),
-    request.reviewPath,
-    strict,
-    request.deadlineMs,
-  );
-  return boundedCodeEntries(result.matches, request.reviewPath);
+  const result = await grepAtHead(context, request, expandedSearchTerms(terms), strict);
+  return boundedCodeEntries(result.matches, request, false);
 }
 
 /** Initial deterministic stage: finding/anchor/diff identifiers plus relevant manifests. */
@@ -787,43 +908,34 @@ export async function collectRepositoryContextFollowUp(
   request: RepositoryContextRequest,
   retrieveTerms: readonly string[],
   dependencies: RepositoryContextDependencies = {},
-): Promise<RepositoryEvidenceContext> {
-  remainingRepositoryMs(request);
-  const context = await strictlyVerifiedContext(request);
+): Promise<RepositoryFollowUpContext> {
+  const side = dependencies.sourceSide ?? "H";
+  const sourceRequest = followUpSourceRequest(request, side);
+  remainingRepositoryMs(sourceRequest);
+  const context = await strictlyVerifiedContext(sourceRequest);
   const terms = validatedRetrieveTerms(retrieveTerms);
-  const result = await grepAtHead(
-    context,
-    request.head,
-    expandedSearchTerms(terms),
-    request.reviewPath,
-    true,
-    request.deadlineMs,
-  );
-  remainingRepositoryMs(request);
-  const lexical = boundedCodeEntries(result.matches, request.reviewPath);
-  const structuralRequired =
-    result.truncated || lexicalNeedsStructuralFallback(result.matches, lexical, terms);
-  if (result.matches.length === 0 && !result.truncated) {
-    return { headCommit: request.head, entries: lexical };
+  const result = await grepAtHead(context, sourceRequest, expandedSearchTerms(terms), true, true);
+  remainingRepositoryMs(sourceRequest);
+  const lexical = boundedCodeEntries(result.matches, sourceRequest, true);
+  if (hasNoStructuralCandidate(result)) {
+    return { sourceCommit: sourceRequest.head, side, entries: lexical };
   }
+  const structuralRequired = requiresStructuralFallback(result, lexical, terms);
   const structuralTerms = normalizedStructuralTerms(terms);
   try {
     const structural = await (dependencies.structuralSearch ?? searchAstGrepAtHead)({
       context,
-      head: request.head,
-      reviewPath: request.reviewPath,
+      head: sourceRequest.head,
+      reviewPath: sourceRequest.reviewPath,
+      findingAnchor: sourceRequest.findingAnchor,
       candidatePaths: result.candidatePaths,
       terms: structuralTerms,
-      ...(request.deadlineMs === undefined ? {} : { deadlineMs: request.deadlineMs }),
+      ...(sourceRequest.deadlineMs === undefined ? {} : { deadlineMs: sourceRequest.deadlineMs }),
     });
     return {
-      headCommit: request.head,
-      entries: boundedEvidenceEntries(
-        structural,
-        lexical,
-        request.reviewPath,
-        structuralTerms.length,
-      ),
+      sourceCommit: sourceRequest.head,
+      side,
+      entries: boundedEvidenceEntries(structural, lexical, sourceRequest, structuralTerms.length),
     };
   } catch (error) {
     if (structuralRequired) {
@@ -833,16 +945,16 @@ export async function collectRepositoryContextFollowUp(
     }
     // A clear lexical definition remains exact positive evidence. Structural body enrichment is
     // useful but optional on this path, so tool acquisition or parsing failure must not erase it.
-    return { headCommit: request.head, entries: lexical };
+    return { sourceCommit: sourceRequest.head, side, entries: lexical };
   }
 }
 
 /** Pure combination after at most one follow-up; a commit mismatch is rejected, never repaired. */
 export function mergeRepositoryEvidenceContexts(
   initial: RepositoryEvidenceContext,
-  followUp: RepositoryEvidenceContext,
+  followUp: RepositoryFollowUpContext,
 ): RepositoryEvidenceContext {
-  if (initial.headCommit !== followUp.headCommit) return initial;
+  if (followUp.side !== "H" || initial.headCommit !== followUp.sourceCommit) return initial;
   // The judge asked for the follow-up identifiers explicitly. Keep those facts ahead of automatic
   // initial sightings so the later 24-entry/8-path renderer budget cannot discard the answer it
   // requested merely because an alphabetically earlier initial path filled the budget first.

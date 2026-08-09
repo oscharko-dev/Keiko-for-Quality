@@ -4,7 +4,11 @@ import type { CommitSha } from "../core/brands.js";
 import { run } from "../git/exec.js";
 import { readTextAtCommit, type GitContext } from "../git/plumbing.js";
 import { acquireDefaultAstGrep } from "./ast-grep-acquire.js";
-import type { RepositoryEvidenceEntry } from "./evidence.js";
+import {
+  isOutsideAnchorContext,
+  type EvidenceLineRange,
+  type RepositoryEvidenceEntry,
+} from "./evidence.js";
 
 export const MAX_STRUCTURAL_FILES = 4;
 export const MAX_STRUCTURAL_TERMS = 3;
@@ -82,6 +86,7 @@ export interface StructuralSearchRequest {
   readonly context: GitContext;
   readonly head: CommitSha;
   readonly reviewPath: string;
+  readonly findingAnchor: EvidenceLineRange;
   readonly candidatePaths: readonly string[];
   readonly terms: readonly string[];
   /** Absolute whole-review boundary. Absent only for standalone callers. */
@@ -477,35 +482,42 @@ async function inspectSource(
 async function sourceCandidates(
   request: StructuralSearchRequest,
 ): Promise<readonly SourceCandidate[]> {
-  const paths = [...new Set(request.candidatePaths.slice(0, 32))]
-    .filter((path) => path !== request.reviewPath && languageForPath(path) !== undefined)
-    .slice(0, MAX_STRUCTURAL_FILES);
-  const read = await Promise.all(
-    paths.map(async (path): Promise<SourceCandidate | undefined> => {
-      const spec = languageForPath(path);
-      if (spec === undefined) return undefined;
-      const source = await readTextAtCommit(
-        {
-          ...request.context,
-          timeoutMs: structuralTimeoutMs(request.deadlineMs, request.context.timeoutMs),
-        },
-        request.head,
-        path,
-      );
-      if (source === undefined) return undefined;
-      const bytes = Buffer.from(source, "utf8");
-      return bytes.byteLength > MAX_STRUCTURAL_FILE_BYTES
-        ? undefined
-        : { path, source, lines: source.split("\n"), bytes, spec };
-    }),
+  const paths = [...new Set(request.candidatePaths.slice(0, 32))].filter(
+    (path) =>
+      languageForPath(path) !== undefined &&
+      (path !== request.reviewPath ||
+        (Number.isSafeInteger(request.findingAnchor.startLine) &&
+          Number.isSafeInteger(request.findingAnchor.endLine) &&
+          request.findingAnchor.startLine > 0 &&
+          request.findingAnchor.endLine >= request.findingAnchor.startLine)),
   );
   const selected: SourceCandidate[] = [];
   let total = 0;
-  for (const source of read) {
+  // Read in caller rank order. Parallel reads here would retain up to 32 one-megabyte Git blobs
+  // before applying the 512 KiB structural cap; sequential backfill keeps at most one unadmitted
+  // blob in flight while still skipping absent, unsupported, or oversized leading paths.
+  for (const path of paths) {
+    if (selected.length === MAX_STRUCTURAL_FILES) break;
+    const spec = languageForPath(path);
+    if (spec === undefined) continue;
+    const source = await readTextAtCommit(
+      {
+        ...request.context,
+        timeoutMs: structuralTimeoutMs(request.deadlineMs, request.context.timeoutMs),
+      },
+      request.head,
+      path,
+    );
     if (source === undefined) continue;
-    total += source.bytes.byteLength;
-    if (total > MAX_STRUCTURAL_TOTAL_BYTES) break;
-    selected.push(source);
+    const bytes = Buffer.from(source, "utf8");
+    if (
+      bytes.byteLength > MAX_STRUCTURAL_FILE_BYTES ||
+      total + bytes.byteLength > MAX_STRUCTURAL_TOTAL_BYTES
+    ) {
+      continue;
+    }
+    total += bytes.byteLength;
+    selected.push({ path, source, lines: source.split("\n"), bytes, spec });
   }
   return selected;
 }
@@ -615,11 +627,14 @@ function boundedStructuralEntries(
   hits: readonly StructuralHit[],
   termCount: number,
   pathCount: number,
+  request: StructuralSearchRequest,
 ): readonly RepositoryEvidenceEntry[] {
   // Anchors that establish requested-term, evidence-kind, and caller-ranked-path diversity are
   // non-negotiable. Their AST-owned source windows come next; repeated identifier sightings are
   // ballast and may use only what remains of the fixed structural result budget.
-  const ranked = uniqueStructuralHits(hits);
+  const eligible = (entry: RepositoryEvidenceEntry): boolean =>
+    entry.path !== request.reviewPath || isOutsideAnchorContext(entry.line, request.findingAnchor);
+  const ranked = uniqueStructuralHits(hits.filter((hit) => eligible(hit.anchor)));
   const reserved = reservedStructuralHits(ranked, termCount, pathCount);
   const reservation = new Set(reserved);
   const ballast = ranked.filter((hit) => !reservation.has(hit));
@@ -627,7 +642,7 @@ function boundedStructuralEntries(
     ...reserved.map((hit) => ({ entry: hit.anchor, anchor: true })),
     ...interleaveContextEntries(reserved),
     ...ballast.map((hit) => ({ entry: hit.anchor, anchor: true })),
-  ];
+  ].filter((candidate) => eligible(candidate.entry));
   const unique = new Map<string, PrioritizedStructuralEntry>();
   for (const candidate of prioritized) {
     const key = `${candidate.entry.path}\u0000${String(candidate.entry.line)}`;
@@ -656,7 +671,14 @@ export async function searchAstGrepAtHead(
   if (terms.length === 0) return [];
   structuralTimeoutMs(request.deadlineMs, STRUCTURAL_PROCESS_TIMEOUT_MS);
   const sources = await sourceCandidates(request);
-  if (sources.length === 0) return [];
+  if (sources.length === 0) {
+    // No candidate path means there was no structural search to run. Candidate paths with no
+    // readable, supported, bounded blob mean the requested fallback was unavailable, not that the
+    // repository contained zero matches; the caller decides whether that unavailable result is
+    // optional or must fail the verification closed.
+    if (request.candidatePaths.length === 0) return [];
+    throw new AstGrepSearchError();
+  }
   let binaryPath: string;
   try {
     structuralTimeoutMs(request.deadlineMs, STRUCTURAL_PROCESS_TIMEOUT_MS);
@@ -675,5 +697,5 @@ export async function searchAstGrepAtHead(
       ),
     )
   ).flat();
-  return boundedStructuralEntries(hits, terms.length, sources.length);
+  return boundedStructuralEntries(hits, terms.length, sources.length, request);
 }

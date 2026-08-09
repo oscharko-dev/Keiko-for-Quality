@@ -151,6 +151,7 @@ describe("searchAstGrepAtHead", () => {
         context,
         head,
         reviewPath: "src/review.ts",
+        findingAnchor: { startLine: 1, endLine: 1 },
         candidatePaths: ["src/definition.ts"],
         terms: ["target"],
       },
@@ -169,7 +170,48 @@ describe("searchAstGrepAtHead", () => {
     await expect(readFile(join(repository, "PWNED"), "utf8")).rejects.toThrow();
   });
 
-  it("does not acquire a binary for unsupported source languages", async () => {
+  it("keeps distant same-file structural contracts while excluding the visible anchor window", async () => {
+    const { repository, context } = await fixture();
+    const source = [
+      "alpha();",
+      ...Array.from({ length: 23 }, (_value, index) => `const filler${String(index)} = true;`),
+      "alpha();",
+      "export function alpha(): void {",
+      "  alpha();",
+      "}",
+    ].join("\n");
+    await writeFile(join(repository, "src/same-file.ts"), `${source}\n`, "utf8");
+    git(repository, "add", "src/same-file.ts");
+    git(repository, "commit", "-qm", "add distant same-file AST fixture");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const tools = await mkdtemp(join(tmpdir(), "kfq-same-file-ast-grep-"));
+    temporaryDirectories.push(tools);
+    const binary = await executable(tools, TERM_PRIORITY_TOOL);
+
+    const entries = await searchAstGrepAtHead(
+      {
+        context,
+        head,
+        reviewPath: "src/same-file.ts",
+        findingAnchor: { startLine: 1, endLine: 1 },
+        candidatePaths: ["src/same-file.ts"],
+        terms: ["alpha"],
+      },
+      { acquireBinary: () => Promise.resolve(binary) },
+    );
+
+    expect(entries.every((entry) => entry.path === "src/same-file.ts" && entry.line > 25)).toBe(
+      true,
+    );
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ line: 26, kind: "definition" }),
+        expect.objectContaining({ line: 27, kind: "callsite" }),
+      ]),
+    );
+  });
+
+  it("reports candidate sources as unavailable when none has a supported readable blob", async () => {
     const { context, head } = await fixture();
     let acquisitions = 0;
     await expect(
@@ -178,7 +220,32 @@ describe("searchAstGrepAtHead", () => {
           context,
           head,
           reviewPath: "src/review.ts",
+          findingAnchor: { startLine: 1, endLine: 1 },
           candidatePaths: ["README.txt"],
+          terms: ["target"],
+        },
+        {
+          acquireBinary: () => {
+            acquisitions += 1;
+            return Promise.reject(new Error("must not acquire"));
+          },
+        },
+      ),
+    ).rejects.toBeInstanceOf(AstGrepSearchError);
+    expect(acquisitions).toBe(0);
+  });
+
+  it("returns an ordinary zero-match result when no structural candidate path exists", async () => {
+    const { context, head } = await fixture();
+    let acquisitions = 0;
+    await expect(
+      searchAstGrepAtHead(
+        {
+          context,
+          head,
+          reviewPath: "src/review.ts",
+          findingAnchor: { startLine: 1, endLine: 1 },
+          candidatePaths: [],
           terms: ["target"],
         },
         {
@@ -192,6 +259,41 @@ describe("searchAstGrepAtHead", () => {
     expect(acquisitions).toBe(0);
   });
 
+  it("backfills four real sources when a reserved reviewed path is absent", async () => {
+    const { repository, context } = await fixture();
+    for (const path of ["src/b-backfill.ts", "src/c-backfill.ts"] as const) {
+      await writeFile(join(repository, path), "export function target(): void {\n  target();\n}\n");
+    }
+    git(repository, "add", "src/b-backfill.ts", "src/c-backfill.ts");
+    git(repository, "commit", "-qm", "add AST backfill fixtures");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const tools = await mkdtemp(join(tmpdir(), "kfq-backfill-ast-grep-"));
+    temporaryDirectories.push(tools);
+    const binary = await executable(tools, SUCCESSFUL_TOOL);
+
+    const entries = await searchAstGrepAtHead(
+      {
+        context,
+        head,
+        reviewPath: "src/deleted.ts",
+        findingAnchor: { startLine: 1, endLine: 1 },
+        candidatePaths: [
+          "src/deleted.ts",
+          "src/z-priority.ts",
+          "src/a-lower.ts",
+          "src/b-backfill.ts",
+          "src/c-backfill.ts",
+        ],
+        terms: ["target"],
+      },
+      { acquireBinary: () => Promise.resolve(binary) },
+    );
+
+    expect(new Set(entries.map((entry) => entry.path))).toEqual(
+      new Set(["src/z-priority.ts", "src/a-lower.ts", "src/b-backfill.ts", "src/c-backfill.ts"]),
+    );
+  });
+
   it("preserves caller-ranked candidate path priority", async () => {
     const { context, head } = await fixture();
     const tools = await mkdtemp(join(tmpdir(), "kfq-priority-ast-grep-"));
@@ -203,6 +305,7 @@ describe("searchAstGrepAtHead", () => {
         context,
         head,
         reviewPath: "src/review.ts",
+        findingAnchor: { startLine: 1, endLine: 1 },
         candidatePaths: ["src/z-priority.ts", "src/a-lower.ts"],
         terms: ["target"],
       },
@@ -248,6 +351,7 @@ describe("searchAstGrepAtHead", () => {
         context,
         head,
         reviewPath: "src/review.ts",
+        findingAnchor: { startLine: 1, endLine: 1 },
         candidatePaths: [
           "src/alpha-definition.ts",
           "tests/alpha-beta.test.ts",
@@ -290,6 +394,7 @@ describe("searchAstGrepAtHead", () => {
           context,
           head,
           reviewPath: "src/review.ts",
+          findingAnchor: { startLine: 1, endLine: 1 },
           candidatePaths: ["src/definition.ts"],
           terms: ["target"],
         },
@@ -312,6 +417,7 @@ describe("searchAstGrepAtHead", () => {
           context,
           head,
           reviewPath: "src/review.ts",
+          findingAnchor: { startLine: 1, endLine: 1 },
           candidatePaths: ["src/definition.ts"],
           terms: ["target"],
         },

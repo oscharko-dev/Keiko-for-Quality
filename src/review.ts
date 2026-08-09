@@ -97,7 +97,11 @@ import {
 } from "./publish/publisher.js";
 import { isIncompleteNoticeBody } from "./publish/presentation.js";
 import { readChangeUnifiedDiff } from "./publish/change-diff.js";
-import { buildChangeEvidence, type RepositoryEvidenceContext } from "./publish/evidence.js";
+import {
+  buildChangeEvidence,
+  mappedBaseRangeFromUnifiedDiff,
+  type RepositoryEvidenceContext,
+} from "./publish/evidence.js";
 import {
   MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR,
   selectPrWideFindings,
@@ -110,6 +114,7 @@ import {
 } from "./publish/repository-context.js";
 import { toRetrievedEvidence } from "./publish/retrieved-evidence.js";
 import {
+  MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
   substantiate,
   type EvidenceRetriever,
   type JudgeableFinding,
@@ -1167,19 +1172,26 @@ interface EngineBudget {
 /**
  * Start-work reserves for the mandatory post-generation quality stages.
  *
- * The evidence stage may take an initial truth judgment, one retrieval-guided truth rerun, and
- * adversarial falsification calls, each with bounded source context. 64k is deliberate engine
- * headroom for that path; `substantiate` separately
- * enforces the exact whole-review remainder before every request, so this estimate can never widen
- * the consumer's hard ceiling. The smaller audit reserve is only a cheap start-work trigger;
+ * The evidence stage may take an initial truth judgment, one retrieval-guided truth rerun, a
+ * contract-challenge plan, and adversarial falsification, each with bounded source context. 86k is
+ * proportional engine headroom for ordinary provider-reported spend (the former three-call path
+ * reserved 64k). The shared one-path floor keeps one worst-case candidate's bound outside the
+ * engine's start allotment without multiplying that defensive ceiling by all 16 possible
+ * candidates; `substantiate` then atomically admits each sequential workflow against the exact
+ * whole-review remainder. The smaller audit reserve is only a cheap start-work trigger;
  * `auditClassification` enforces the exact remaining allowance before every request as well.
  */
-const SUBSTANTIATE_RESERVE_PER_FINDING = 64_000;
+const SUBSTANTIATE_RESERVE_PER_FINDING = 86_000;
 const AUDIT_RESERVE_PER_FINDING = 2_000;
 
 function publicationQualityReserve(maxFindings: number): number {
   const candidates = Math.min(maxFindings, MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR);
-  return candidates * (SUBSTANTIATE_RESERVE_PER_FINDING + AUDIT_RESERVE_PER_FINDING);
+  if (candidates <= 0) return 0;
+  const substantiateReserve = Math.max(
+    candidates * SUBSTANTIATE_RESERVE_PER_FINDING,
+    MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
+  );
+  return substantiateReserve + candidates * AUDIT_RESERVE_PER_FINDING;
 }
 
 /**
@@ -2673,6 +2685,7 @@ interface SubstantiationResult {
 
 interface JudgeableOriginal extends JudgeableFinding {
   readonly original: EngineFinding;
+  readonly basePath: string;
 }
 
 /** Empty input is the only no-op path. */
@@ -2748,6 +2761,16 @@ async function readFindingEvidence(
     : { path, item, sources, unifiedDiff };
 }
 
+function baseAnchorForFinding(
+  read: EvidenceRead,
+  finding: EngineFinding,
+): { readonly startLine: number; readonly endLine: number } | undefined {
+  const anchor = { startLine: finding.startLine, endLine: finding.endLine };
+  return read.item.status === "D"
+    ? anchor
+    : mappedBaseRangeFromUnifiedDiff(read.unifiedDiff, anchor);
+}
+
 async function prepareFindingEvidence(
   run: PipelineRun,
   context: PublishContext,
@@ -2760,11 +2783,17 @@ async function prepareFindingEvidence(
   const anchorSource = read.item.status === "D" ? read.sources.baseText : read.sources.headText;
   const anchorText = sourceLines(anchorSource, finding.startLine, finding.endLine);
   if (anchorText === undefined) return undefined;
+  const findingAnchor = { startLine: finding.startLine, endLine: finding.endLine };
+  const baseFindingAnchor = baseAnchorForFinding(read, finding);
   const repositoryRequest: RepositoryContextRequest = {
     repositoryPath: run.request.repositoryPath,
     pathValue: run.request.pathValue,
     head: run.request.head,
+    base: context.baseSha,
     reviewPath: read.path,
+    baseReviewPath: (read.item.oldPath ?? read.item.path) as string,
+    findingAnchor,
+    ...(baseFindingAnchor === undefined ? {} : { baseFindingAnchor }),
     findingContent: finding.content,
     anchorText,
     unifiedDiff: read.unifiedDiff,
@@ -2845,12 +2874,19 @@ function evidenceRetriever(
   evidence: ReadonlyMap<EngineFinding, PreparedFindingEvidence>,
   deadline: ReviewDeadline,
 ): EvidenceRetriever<JudgeableOriginal> {
-  return async ({ finding, terms }) => {
+  return async ({ finding, terms, challengeAxis, knownProvenance }) => {
     requireReviewTime(deadline);
     const prepared = evidence.get(finding.original);
     if (prepared === undefined) throw new Error("finding evidence is unavailable");
-    const followUp = await collectRepositoryContextFollowUp(prepared.repositoryRequest, terms);
-    return toRetrievedEvidence(followUp);
+    const sourceSide =
+      challengeAxis === "base" ||
+      (challengeAxis === "same_file_contract" && prepared.headText === undefined)
+        ? "B"
+        : "H";
+    const followUp = await collectRepositoryContextFollowUp(prepared.repositoryRequest, terms, {
+      sourceSide,
+    });
+    return toRetrievedEvidence(followUp, knownProvenance);
   };
 }
 
@@ -2870,6 +2906,11 @@ function recordSubstantiation(
       retrieval_expanded: outcome.retrievalExpanded,
       retrieval_no_matches: outcome.retrievalNoMatches,
       retrieval_failed: outcome.retrievalFailed,
+      challenge_planned: outcome.challengePlanned,
+      challenge_retrieval_performed: outcome.challengeRetrievalPerformed,
+      challenge_expanded: outcome.challengeExpanded,
+      challenge_no_matches: outcome.challengeNoMatches,
+      challenge_failed: outcome.challengeFailed,
       undecided: outcome.undecided,
       budget_blocked: outcome.budgetBlocked,
       tokens: outcome.tokens,
@@ -2884,13 +2925,14 @@ function recordSubstantiation(
  *
  * Placed beside `auditFreshSurvivors` and on the same cohort for the same reason: after
  * `planPublication` has decided what a reader will actually see, so a suppressed duplicate never
- * costs a judge call, and never on a replayed cache hit, which was judged on the run that stored it.
+ * costs a judge call. Replayed generation-cache findings do run through this stage again.
  *
  * The initial dossier includes exact HEAD/BASE state, exact merge-base-to-HEAD changed lines, and
  * bounded repository sightings. A cache hit saves generation only: repository state, structural
  * retrieval, and verifier behavior can change independently of the per-file generation digest, so
- * replay never saves this stage. Either role may request one additional deterministic identifier
- * lookup; that single shared retrieval allowance restarts truth before falsification continues.
+ * replay never saves this stage. Truth may request one deterministic lookup and rerun. Every
+ * confirmed claim then receives a separate contract challenge whose independently selected terms
+ * are retrieved before the adversarial falsifier runs.
  * Wording is never repaired here: an unproven hypothesis leaves the cohort unchanged only in the
  * sense that no replacement is invented — under production's paranoid policy it is withheld.
  *
@@ -2914,7 +2956,7 @@ async function substantiateModelSurvivors(
 
   // Same whole-review ceiling as `auditFreshSurvivors`, enforced inside `substantiate` before
   // every endpoint request. Passing the exact remainder makes the limit hard even when one
-  // finding takes the full truth -> retrieval -> truth -> falsifier path.
+  // finding takes the full truth -> retrieval -> truth -> challenge -> falsifier path.
   const remaining = Math.max(
     0,
     run.request.config.tokenBudget - run.ledger.engine - run.ledger.classify,
@@ -2922,13 +2964,18 @@ async function substantiateModelSurvivors(
 
   const evidence = await evidenceForSurvivors(run, context, modelFindings);
   requireReviewTime(run.deadline);
-  const judgeable = modelFindings.map((survivor) => ({
-    path: survivor.finding.path as string,
-    content: survivor.finding.content,
-    startLine: survivor.finding.startLine,
-    endLine: survivor.finding.endLine,
-    original: survivor.finding,
-  }));
+  const judgeable = modelFindings.map((survivor) => {
+    const prepared = evidence.get(survivor.finding);
+    const path = survivor.finding.path as string;
+    return {
+      path,
+      basePath: prepared?.repositoryRequest.baseReviewPath ?? path,
+      content: survivor.finding.content,
+      startLine: survivor.finding.startLine,
+      endLine: survivor.finding.endLine,
+      original: survivor.finding,
+    };
+  });
   const evidenceByJudgeable = new Map<JudgeableFinding, string>(
     judgeable.map((finding) => [finding, evidence.get(finding.original)?.text ?? ""]),
   );

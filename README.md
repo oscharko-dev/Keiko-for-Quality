@@ -96,20 +96,26 @@ risks from the patch, pull-request intent and trusted merge-base guidelines. A C
 the source; a narrow Integration examiner runs only for contracts, deletions, related files or
 larger changes. They emit structured hypotheses, not finished review prose.
 
-Model hypotheses then pass an independent truth workflow, including generation-cache hits. It combines exact HEAD/BASE source,
-merge-base-to-HEAD diff lines and bounded repository retrieval; a Truth judge must cite positive
-change proof, and a separate Falsifier tries to defeat it. Either may request one deterministic
-lookup of at most three identifiers. Classification and PR-wide ranking happen only after truth is
-established. At most 16 model candidates enter verification and at most eight are published;
-deterministic contract findings alone remain outside those slots. Missing evidence, exhausted
-budget or malformed judge output withholds the affected finding and makes the run incomplete
-rather than clean.
+Model hypotheses then pass an independent truth workflow, including generation-cache hits. It
+combines exact HEAD/BASE source, merge-base-to-HEAD diff lines and bounded repository retrieval. A
+Truth judge must cite positive change proof and may request one deterministic lookup. Every
+confirmed claim then goes to a separate Contract-Challenge planner, which selects one bounded
+disproof axis and forces a second repository lookup before an adversarial Falsifier decides. The
+planner and Falsifier never receive Truth's verdict or rationale. The path has at most four model
+calls per finding under one hard budget. Classification and PR-wide ranking happen only after truth
+survives that challenge. At most 16 model candidates enter verification and at most eight are
+published; deterministic contract findings alone remain outside those slots. Missing evidence,
+exhausted budget or malformed role output withholds the affected finding and makes the run
+incomplete rather than clean.
 
-Repository lookup starts with exact-commit `git grep`. A digest-pinned ast-grep parses bounded HEAD
-blobs received through stdin when ambiguous hits require structural disambiguation, and may enrich
-clear lexical hits with tightly bounded owning-function context. Failure is fatal only when that
-structure is required; optional enrichment failure preserves the exact lexical evidence. Neither
-path scans a checkout or loads repository configuration.
+Repository lookup starts with exact-commit `git grep`: HEAD by default, or the immutable merge base
+for the planner's closed `base` challenge axis. A digest-pinned ast-grep parses bounded blobs from
+that same selected commit through stdin when ambiguous hits require structural disambiguation, and
+may enrich clear lexical hits with tightly bounded owning-function context. Failure is fatal only
+when that structure is required; optional enrichment failure preserves the exact lexical evidence.
+Neither path scans a checkout or loads repository configuration. Initial lookup remains cross-file.
+An explicit judge follow-up may inspect the reviewed file too, but only contract evidence outside
+the already-rendered 24-line-per-side anchor window can be added.
 
 ## Getting started
 

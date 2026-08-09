@@ -68,7 +68,7 @@ function reasonCounts(overrides = {}) {
   };
 }
 
-/** Production-shaped, aggregate-only v4 evidence over the calibrated 92/66 historical cohort. */
+/** Production-shaped, aggregate-only v5 evidence over the calibrated 92/66 historical cohort. */
 export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".repeat(40) } = {}) {
   const sourceRecords = calibratedRecords();
   const decisions = calibratedDecisions(sourceRecords);
@@ -126,6 +126,11 @@ export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".r
         retrievalExpanded: 6,
         retrievalNoMatches: 2,
         retrievalFailed: 0,
+        challengePlanned: 30,
+        challengeRetrievalPerformed: 30,
+        challengeExpanded: 28,
+        challengeNoMatches: 2,
+        challengeFailed: 0,
         undecided: 0,
         budgetBlocked: 0,
       },

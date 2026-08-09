@@ -90,7 +90,10 @@ async function fixture(): Promise<{
     repositoryPath: repository,
     pathValue: process.env.PATH ?? "",
     head,
+    base: head,
     reviewPath: "src/review.ts",
+    baseReviewPath: "src/review.ts",
+    findingAnchor: { startLine: 1, endLine: 1 },
     findingContent: "Calling useCapability bypasses the runtime guard.",
     anchorText: "const result = useCapability(input);",
   };
@@ -139,6 +142,39 @@ describe("repository context collection", () => {
     expect(context.headCommit).toBe(request.head);
     expect(await readFile(join(repository, "src/payload.ts"), "utf8")).toContain("touch PWNED");
     await expect(readFile(join(repository, "PWNED"), "utf8")).rejects.toThrow();
+  });
+
+  it("searches the immutable BASE commit only when the closed base source is requested", async () => {
+    const { repository, request } = await fixture();
+    await write(
+      repository,
+      "src/base-only.ts",
+      "export function removedContract(): boolean { return true; }\n",
+    );
+    git(repository, "add", "src/base-only.ts");
+    git(repository, "commit", "-qm", "add base-only contract");
+    const base = commitSha(git(repository, "rev-parse", "HEAD"));
+    await rm(join(repository, "src/base-only.ts"));
+    git(repository, "add", "-A");
+    git(repository, "commit", "-qm", "remove base-only contract");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const bound = { ...request, head, base };
+
+    const headContext = await collectRepositoryContextFollowUp(bound, ["removedContract"]);
+    const baseContext = await collectRepositoryContextFollowUp(bound, ["removedContract"], {
+      sourceSide: "B",
+      structuralSearch: () => Promise.resolve([]),
+    });
+
+    expect(headContext).toEqual({ sourceCommit: head, side: "H", entries: [] });
+    expect(baseContext.sourceCommit).toBe(base);
+    expect(baseContext.side).toBe("B");
+    expect(baseContext.entries).toContainEqual({
+      path: "src/base-only.ts",
+      line: 1,
+      content: "export function removedContract(): boolean { return true; }",
+      kind: "definition",
+    });
   });
 
   it("keeps strong-term sightings when a later noisy initial term fails", async () => {
@@ -251,6 +287,86 @@ describe("repository context collection", () => {
     });
   });
 
+  it("admits distant same-file producer and consumer evidence only on explicit follow-up", async () => {
+    const { repository, request } = await fixture();
+    const source = [
+      "const voiceRoles = partitionProviders(input);",
+      ...Array.from({ length: 23 }, (_value, index) => `const filler${String(index)} = true;`),
+      "partitionProviders(alreadyVisible);",
+      "export function partitionProviders(input: unknown): unknown { return input; }",
+      "return partitionProviders(providerInput);",
+    ].join("\n");
+    await write(repository, request.reviewPath, `${source}\n`);
+    for (const path of [
+      "src/a-contract.ts",
+      "src/b-contract.ts",
+      "src/c-contract.ts",
+      "src/d-contract.ts",
+    ]) {
+      await write(repository, path, "partitionProviders(crossFileInput);\n");
+    }
+    git(repository, "add", "src");
+    git(repository, "commit", "-qm", "add distant same-file contract");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const anchoredRequest: RepositoryContextRequest = {
+      ...request,
+      head,
+      findingAnchor: { startLine: 1, endLine: 1 },
+      findingContent: "Check `partitionProviders` before deriving voice roles.",
+      anchorText: "const voiceRoles = partitionProviders(input);",
+    };
+
+    const initial = await collectInitialRepositoryContext(anchoredRequest);
+    expect(initial.entries.some((entry) => entry.path === request.reviewPath)).toBe(false);
+
+    const followUp = await collectRepositoryContextFollowUp(
+      anchoredRequest,
+      ["partitionProviders"],
+      {
+        structuralSearch: ({ candidatePaths, findingAnchor }) => {
+          expect(candidatePaths).toContain(request.reviewPath);
+          expect(findingAnchor).toEqual({ startLine: 1, endLine: 1 });
+          return Promise.resolve([
+            {
+              path: request.reviewPath,
+              line: 1,
+              content: "const voiceRoles = partitionProviders(input);",
+              kind: "callsite" as const,
+            },
+            {
+              path: request.reviewPath,
+              line: 25,
+              content: "partitionProviders(alreadyVisible);",
+              kind: "callsite" as const,
+            },
+            {
+              path: request.reviewPath,
+              line: 26,
+              content:
+                "export function partitionProviders(input: unknown): unknown { return input; }",
+              kind: "definition" as const,
+            },
+            {
+              path: request.reviewPath,
+              line: 27,
+              content: "return partitionProviders(providerInput);",
+              kind: "callsite" as const,
+            },
+          ]);
+        },
+      },
+    );
+
+    const sameFile = followUp.entries.filter((entry) => entry.path === request.reviewPath);
+    expect(sameFile).toEqual([
+      expect.objectContaining({ line: 26, kind: "definition" }),
+      expect.objectContaining({ line: 27, kind: "callsite" }),
+    ]);
+    expect(sameFile.some((entry) => entry.line <= 25)).toBe(false);
+    expect(followUp.entries.length).toBeLessThanOrEqual(12);
+    expect(new Set(followUp.entries.map((entry) => entry.path)).size).toBeLessThanOrEqual(5);
+  });
+
   it("keeps the one follow-up separate and combines only the same exact commit", async () => {
     const { request } = await fixture();
     const initial = await collectInitialRepositoryContext(request);
@@ -270,7 +386,7 @@ describe("repository context collection", () => {
     expect(merged.entries.length).toBe(initial.entries.length + followUp.entries.length);
     expect(merged.entries.slice(0, followUp.entries.length)).toEqual(followUp.entries);
 
-    const otherHead = { ...followUp, headCommit: "a".repeat(40) };
+    const otherHead = { ...followUp, sourceCommit: commitSha("a".repeat(40)) };
     expect(mergeRepositoryEvidenceContexts(initial, otherHead)).toBe(initial);
   });
 
@@ -319,7 +435,8 @@ describe("repository context collection", () => {
         },
       },
     );
-    expect(astPaths).toHaveLength(4);
+    expect(astPaths).toHaveLength(5);
+    expect(astPaths[0]).toBe(request.reviewPath);
     expect(empty.entries).toEqual([]);
 
     const structural = await collectRepositoryContextFollowUp(
@@ -329,7 +446,7 @@ describe("repository context collection", () => {
         structuralSearch: ({ candidatePaths }) =>
           Promise.resolve([
             {
-              path: candidatePaths[0] ?? "",
+              path: candidatePaths[1] ?? "",
               line: 1,
               content: "overflowContract();",
               kind: "callsite" as const,
@@ -338,7 +455,53 @@ describe("repository context collection", () => {
       },
     );
     expect(structural.entries).toHaveLength(1);
-    expect(structural.entries[0]?.path).toBe(astPaths[0]);
+    expect(structural.entries[0]?.path).toBe(astPaths[1]);
+  });
+
+  it("reserves a later reviewed file when a saturated grep prefix never reaches it", async () => {
+    const { repository, request } = await fixture();
+    await writeSaturatedTerm(repository, "overflowContract");
+    const reviewedPath = "zz/review.ts";
+    await write(
+      repository,
+      reviewedPath,
+      `${Array.from({ length: 25 }, () => "const padding = true;").join("\n")}\nexport function overflowContract(): boolean { return true; }\n`,
+    );
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "add late reviewed contract");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+
+    const context = await collectRepositoryContextFollowUp(
+      {
+        ...request,
+        head,
+        reviewPath: reviewedPath,
+        baseReviewPath: reviewedPath,
+        findingAnchor: { startLine: 1, endLine: 1 },
+      },
+      ["overflowContract"],
+      {
+        structuralSearch: ({ candidatePaths }) => {
+          expect(candidatePaths[0]).toBe(reviewedPath);
+          expect(candidatePaths).toHaveLength(5);
+          return Promise.resolve([
+            {
+              path: reviewedPath,
+              line: 26,
+              content: "export function overflowContract(): boolean { return true; }",
+              kind: "definition",
+            },
+          ]);
+        },
+      },
+    );
+
+    expect(context.entries).toContainEqual({
+      path: reviewedPath,
+      line: 26,
+      content: "export function overflowContract(): boolean { return true; }",
+      kind: "definition",
+    });
   });
 
   it("reserves structural evidence ahead of twelve lexical ballast entries", async () => {
@@ -655,7 +818,7 @@ describe("repository context collection", () => {
     const { request } = await fixture();
     await expect(
       collectRepositoryContextFollowUp(request, ["DefinitelyMissingIdentifier"]),
-    ).resolves.toEqual({ headCommit: request.head, entries: [] });
+    ).resolves.toEqual({ sourceCommit: request.head, side: "H", entries: [] });
 
     const unavailable = { ...request, head: commitSha("f".repeat(40)) };
     await expect(collectInitialRepositoryContext(unavailable)).resolves.toEqual({

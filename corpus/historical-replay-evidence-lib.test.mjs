@@ -25,6 +25,11 @@ test("accepts the production-shaped 92/66 replay with 62 bound and attempted cas
     retrievalExpanded: 6,
     retrievalNoMatches: 2,
     retrievalFailed: 0,
+    challengePlanned: 30,
+    challengeRetrievalPerformed: 30,
+    challengeExpanded: 28,
+    challengeNoMatches: 2,
+    challengeFailed: 0,
     undecided: 0,
     budgetBlocked: 0,
   });
@@ -113,7 +118,7 @@ test("rejects digest, aggregate arithmetic, population-floor, and extra-field ta
   assert.ok(validateHistoricalReplayEvidence(stageExtra).failures.includes("execution_shape"));
 
   const oldSchema = productionHistoricalReplayEvidenceFixture();
-  oldSchema.schemaVersion = 3;
+  oldSchema.schemaVersion = 4;
   assert.ok(validateHistoricalReplayEvidence(oldSchema).failures.includes("identity"));
 
   const missingStages = productionHistoricalReplayEvidenceFixture();
