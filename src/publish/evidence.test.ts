@@ -182,7 +182,7 @@ describe("buildChangeEvidence", () => {
     expect(evidence.text).toContain("H:2| run();");
     expect(evidence.text).toContain("B:2| if (isReady) run();");
     expect(visibleEvidenceRefs(evidence.text)).toEqual(
-      new Set(["H:1", "H:2", "H:3", "B:1", "B:2", "B:3", "D:B:2", "D:H:2"]),
+      new Set(["H:1", "H:2", "H:3", "B:1", "B:2", "B:3", "D:B:2@H:2", "D:H:2"]),
     );
     expect(evidence.text.length).toBeLessThanOrEqual(40_000);
   });
@@ -300,9 +300,9 @@ describe("renderChangeDiffEvidence", () => {
       endLine: 40,
     });
 
-    expect(rendered).toContain("D:B:40| -if (isReady) run();");
+    expect(rendered).toContain("D:B:40@H:40| -if (isReady) run();");
     expect(rendered).toContain("D:H:40| +run();");
-    expect(visibleEvidenceRefs(rendered)).toEqual(new Set(["D:B:40", "D:H:40"]));
+    expect(visibleEvidenceRefs(rendered)).toEqual(new Set(["D:B:40@H:40", "D:H:40"]));
     expect(renderChangeDiffEvidence(diff, "src/other.ts", { startLine: 40, endLine: 40 })).toBe("");
   });
 
@@ -310,8 +310,105 @@ describe("renderChangeDiffEvidence", () => {
     const diff = `@@ -1 +1 @@\n-old\n+${"x".repeat(501)}`;
     const rendered = renderChangeDiffEvidence(diff, "src/a.ts", { startLine: 1, endLine: 1 });
 
-    expect(rendered).toContain("D:B:1| -old");
+    expect(rendered).toContain("D:B:1@H:1| -old");
     expect(rendered).not.toContain("D:H:1|");
+  });
+
+  it("centres a bounded added-file diff on a late finding anchor", () => {
+    const additions = Array.from(
+      { length: 600 },
+      (_value, index) => `+export const value${String(index + 1)} = ${String(index + 1)};`,
+    );
+    const diff = [
+      "diff --git a/src/large.ts b/src/large.ts",
+      "new file mode 100644",
+      "--- /dev/null",
+      "+++ b/src/large.ts",
+      "@@ -0,0 +1,600 @@",
+      ...additions,
+    ].join("\n");
+
+    const rendered = renderChangeDiffEvidence(diff, "src/large.ts", {
+      startLine: 541,
+      endLine: 546,
+    });
+    const refs = [...visibleEvidenceRefs(rendered)];
+
+    expect(refs).toContain("D:H:541");
+    expect(refs).toContain("D:H:546");
+    expect(refs).not.toContain("D:H:1");
+    expect(refs).toHaveLength(24);
+    expect(refs).toEqual(
+      [...refs].sort((left, right) => Number(left.slice(4)) - Number(right.slice(4))),
+    );
+  });
+
+  it("keeps anchor-near rows from both sides of a grouped late replacement", () => {
+    const removals = Array.from(
+      { length: 80 },
+      (_value, index) => `-const value${String(index + 1)} = "old";`,
+    );
+    const additions = Array.from(
+      { length: 80 },
+      (_value, index) => `+const value${String(index + 1)} = "new";`,
+    );
+    const diff = [
+      "diff --git a/src/large.ts b/src/large.ts",
+      "--- a/src/large.ts",
+      "+++ b/src/large.ts",
+      "@@ -1,80 +1,80 @@",
+      ...removals,
+      ...additions,
+    ].join("\n");
+
+    const rendered = renderChangeDiffEvidence(diff, "src/large.ts", {
+      startLine: 70,
+      endLine: 70,
+    });
+    const refs = [...visibleEvidenceRefs(rendered)];
+    const baseRefs = refs.filter((ref) => ref.startsWith("D:B:"));
+    const headRefs = refs.filter((ref) => ref.startsWith("D:H:"));
+
+    expect(baseRefs).toHaveLength(12);
+    expect(headRefs).toHaveLength(12);
+    expect(refs).toContain("D:B:70@H:1");
+    expect(refs).toContain("D:H:70");
+    expect(refs).not.toContain("D:B:1@H:1");
+    expect(refs).toHaveLength(24);
+    expect(refs).toEqual([...baseRefs, ...headRefs]);
+    expect(refs.indexOf("D:B:70@H:1")).toBeLessThan(refs.indexOf("D:H:70"));
+  });
+
+  it("leaves full-file deletion refs on BASE without a HEAD mapping", () => {
+    const diff = [
+      "diff --git a/src/a.ts b/src/a.ts",
+      "deleted file mode 100644",
+      "--- a/src/a.ts",
+      "+++ /dev/null",
+      "@@ -1,3 +0,0 @@",
+      "-one",
+      "-two",
+      "-three",
+    ].join("\n");
+
+    const rendered = renderChangeDiffEvidence(diff, "src/a.ts", { startLine: 2, endLine: 2 }, "B");
+
+    expect(rendered).toContain("D:B:2| -two");
+    expect(rendered).not.toContain("@H:");
+    expect(visibleEvidenceRefs(rendered)).toEqual(new Set(["D:B:1", "D:B:2", "D:B:3"]));
+  });
+
+  it("recognises only well-formed ordinary and mapped diff refs", () => {
+    const evidence = [
+      "D:B:7@H:9| -mapped",
+      "D:B:8| -unmapped",
+      "D:H:9| +head",
+      "D:B:7@H:0| -zero",
+      "D:B:7@B:9| -wrong side",
+      "D:B:07@H:9| -leading zero",
+    ].join("\n");
+
+    expect(visibleEvidenceRefs(evidence)).toEqual(new Set(["D:B:7@H:9", "D:B:8", "D:H:9"]));
   });
 });
 
