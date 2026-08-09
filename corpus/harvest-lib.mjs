@@ -153,6 +153,18 @@ export function gradeRecord(record, commits) {
     };
   }
   const gitClassification = classifyActedUpon(record, commits).classification;
+  // `outdated_by_rebase` means git could not answer — a patch was unavailable, or the path stopped
+  // existing under a rename this run cannot follow. Reading it as "untouched" would let a
+  // refutation git never corroborated become `refuted_confirmed` and mint a suppression rule. It
+  // takes the same branch as a missing timeline: unavailable is not a pass.
+  if (gitClassification === "outdated_by_rebase") {
+    return {
+      label: replyVerdict === "refuted" ? "refuted_contradicted" : "fixed_unconfirmed",
+      replyVerdict,
+      gitClassification,
+      reply,
+    };
+  }
   const touched = gitClassification === "acted_upon";
   return { label: labelFor(replyVerdict, touched), replyVerdict, gitClassification, reply };
 }
@@ -231,7 +243,7 @@ export function tallyLabels(graded) {
  * The harvest document. Deterministic for a given input and `generatedAt`, like its committed
  * sibling — but unlike it, this one carries bodies and must stay out of the repository.
  */
-export function buildHarvestDocument({ repo, generatedAt, prs }) {
+export function buildHarvestDocument({ repo, generatedAt, prs, skipped = [] }) {
   const pullRequests = prs
     .map((pr) => ({
       number: pr.number,
@@ -239,15 +251,19 @@ export function buildHarvestDocument({ repo, generatedAt, prs }) {
       findings: pr.records
         .filter((record) => !record.isNotice)
         .map((record) => ({ ...record, ...gradeRecord(record, pr.commits) })),
-      recallGaps: pr.recallGaps ?? [],
+      // Absent, not empty: a run without a commit timeline did not measure gaps at all, and an
+      // empty array would read as "we looked and found none".
+      ...(pr.recallGaps === undefined ? {} : { recallGaps: pr.recallGaps }),
     }))
     .sort((a, b) => a.number - b.number);
   const allFindings = pullRequests.flatMap((pr) => pr.findings);
+  const gapsMeasured = pullRequests.every((pr) => pr.recallGaps !== undefined);
   return {
     schemaVersion: 1,
     unredacted: true,
     generatedAt,
     targetRepo: repo,
+    skipped,
     pullRequests,
     aggregate: {
       findings: allFindings.length,
@@ -260,7 +276,9 @@ export function buildHarvestDocument({ repo, generatedAt, prs }) {
             allFindings.filter((finding) => (finding.arenaId ?? "other") === arenaId).length,
           ]),
       ),
-      recallGaps: pullRequests.reduce((sum, pr) => sum + pr.recallGaps.length, 0),
+      recallGaps: gapsMeasured
+        ? pullRequests.reduce((sum, pr) => sum + (pr.recallGaps?.length ?? 0), 0)
+        : null,
     },
   };
 }
