@@ -139,7 +139,6 @@ jobs:
           private-key: ${{ secrets.KFQ_REVIEW_APP_PRIVATE_KEY }}
           owner: oscharko-dev
           repositories: Keiko
-          permission-contents: read
           permission-pull-requests: read
 
       - name: Harvest the fixed historical cohort
