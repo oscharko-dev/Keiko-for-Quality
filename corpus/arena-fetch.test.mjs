@@ -188,6 +188,23 @@ test("discoverPullRequestNumbers sorts the discovered numbers ascending", () => 
   );
 });
 
+/**
+ * The window is measured whole or not at all. Before this, the call asked for 200 and returned
+ * whatever came back, so a busier window was graded on an arbitrary subset — and `precision-gate.mjs`
+ * uses this to decide which pull requests to grade, so the cap would have silently redefined the
+ * population behind a published rate.
+ */
+test("discoverPullRequestNumbers refuses a window it cannot page whole", () => {
+  const atCeiling = Array.from({ length: 1000 }, (_, index) => ({ number: index + 1 }));
+  assert.throws(
+    () =>
+      discoverPullRequestNumbers("owner", "repo", "2026-01-01", "all", () =>
+        JSON.stringify(atCeiling),
+      ),
+    /cannot be measured whole/,
+  );
+});
+
 test("discoverPullRequestNumbers passes the requested state and since-date through to gh", () => {
   let capturedArgs;
   const fakeRunGh = (args) => {

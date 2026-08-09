@@ -47,6 +47,7 @@
     "test:widget": "node --import ./widget/test/ts-hooks.mjs --test widget/test/*.test.mjs",
     "corpus:precision": "node corpus/precision-gate.mjs",
     "corpus:polarity": "node corpus/polarity-probe.mjs",
+    "corpus:harvest": "node corpus/harvest.mjs",
     "test:scripts": "node --test scripts/*.test.mjs",
     "release": "node scripts/release.mjs",
     "release:check": "node scripts/release.mjs check"
