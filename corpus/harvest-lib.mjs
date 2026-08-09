@@ -23,8 +23,93 @@
 // those apart under their own label rather than averaging them into the pile a rule would be
 // distilled from. See `HARVEST_LABELS`.
 
+import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs";
+import { dirname, relative, resolve, sep } from "node:path";
+
 import { classifyActedUpon, classifyAuthor, isIncompleteNotice, lineWindow } from "./arena-lib.mjs";
 import { classifyReply, isCoverageNotice } from "./precision-gate-lib.mjs";
+
+// ---------------------------------------------------------------------------------------------
+// Argument and path validation.
+//
+// Here rather than in the driver because a driver is top-level script code that no test can call.
+// These four decide WHAT gets harvested and WHERE the unredacted document lands — the two questions
+// on which a silent mistake is most expensive — so they belong where a test can reach them.
+// ---------------------------------------------------------------------------------------------
+
+/** `owner/name`, exactly two non-empty components. */
+export function parseRepoArgument(raw) {
+  const parts = typeof raw === "string" ? raw.split("/") : [];
+  if (parts.length !== 2 || parts.includes("")) return undefined;
+  return { owner: parts[0], name: parts[1] };
+}
+
+/** `YYYY-MM-DD`, and a date that exists — `2026-02-31` parses and then is not February. */
+export function isIsoDate(value) {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().startsWith(value);
+}
+
+/**
+ * Every token, or none.
+ *
+ * A typo among valid numbers used to be filtered out, narrowing the population silently while the
+ * run exited 0 — the document gave no sign that an explicitly requested pull request was missing.
+ */
+export function parsePrList(raw) {
+  const tokens = String(raw)
+    .split(",")
+    .map((token) => token.trim());
+  const numbers = tokens.map(Number);
+  const bad = tokens.filter((_, index) => !Number.isInteger(numbers[index]) || numbers[index] <= 0);
+  return bad.length > 0 ? { bad } : { numbers };
+}
+
+/**
+ * The real filesystem location a path names, following symlinks.
+ *
+ * `resolve` is lexical: it flattens `..` and makes the path absolute, and follows nothing. Two
+ * distinct holes came out of that, both found in review. An `--out` that IS a symlink into the
+ * repository, or sits below one, passed the containment check and then had `writeFileSync` follow
+ * it. And a DANGLING link — one whose target does not exist yet, which is the normal case for an
+ * output file — read as absent to `existsSync`, so the ancestor walk appended its own name back
+ * unresolved while the write still followed it.
+ *
+ * So: resolve the link chain first (bounded, because links can cycle), then canonicalize the
+ * nearest ancestor that exists. `fs` is injectable so the whole thing is testable without touching
+ * a real filesystem.
+ */
+export function realLocation(path, fs = { existsSync, lstatSync, readlinkSync, realpathSync }) {
+  let candidate = path;
+  for (let hops = 0; hops < 16; hops += 1) {
+    let stats;
+    try {
+      stats = fs.lstatSync(candidate);
+    } catch {
+      break;
+    }
+    if (!stats.isSymbolicLink()) break;
+    candidate = resolve(dirname(candidate), fs.readlinkSync(candidate));
+  }
+  let probe = candidate;
+  while (!fs.existsSync(probe)) {
+    const parent = dirname(probe);
+    if (parent === probe) return candidate;
+    probe = parent;
+  }
+  return resolve(fs.realpathSync(probe), relative(probe, candidate));
+}
+
+/**
+ * Whether `outPath` lies outside `repoRoot`.
+ *
+ * A path COMPONENT of exactly `..`, never the two leading characters: `relative()` returns
+ * `..harvest.json` for an in-repo file of that name, and a raw prefix test read that as escaping.
+ */
+export function escapesRepository(repoRoot, outPath) {
+  return relative(repoRoot, outPath).split(sep).includes("..");
+}
 
 /**
  * What one graded finding is worth as a teaching example.

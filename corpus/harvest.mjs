@@ -20,8 +20,8 @@
 // never touched that code". That distinction is the point, so it is ON by default and `--no-commits`
 // turns it off for a cheap survey. A survey run cannot confirm a refutation, and its labels say so.
 
-import { existsSync, lstatSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, relative, resolve, sep } from "node:path";
+import { writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -31,7 +31,16 @@ import {
   runGh,
 } from "./arena-fetch.mjs";
 import { classifyActedUpon, clusterAcrossBots, clusterDuplicateFindings } from "./arena-lib.mjs";
-import { buildHarvestDocument, extractHarvestRecords, findRecallGaps } from "./harvest-lib.mjs";
+import {
+  buildHarvestDocument,
+  escapesRepository,
+  extractHarvestRecords,
+  findRecallGaps,
+  isIsoDate,
+  parsePrList,
+  parseRepoArgument,
+  realLocation,
+} from "./harvest-lib.mjs";
 
 const REPO_ROOT = resolve(fileURLToPath(import.meta.url), "..", "..");
 
@@ -49,78 +58,24 @@ function argValue(name) {
   return index === -1 ? undefined : process.argv[index + 1];
 }
 
-const repo = argValue("--repo");
-// Exactly two non-empty components. `owner/name/extra` used to pass and then query `owner/name`
-// while the document recorded `targetRepo: owner/name/extra` — data bound to a repository other
-// than the one the artifact names.
-const repoParts = repo === undefined ? [] : repo.split("/");
-if (repoParts.length !== 2 || repoParts.includes("")) {
+const parsedRepo = parseRepoArgument(argValue("--repo"));
+if (parsedRepo === undefined) {
   usage("--repo <owner/name> is required, with exactly two non-empty components");
 }
-const [owner, name] = repoParts;
+const { owner, name } = parsedRepo;
+const repo = `${owner}/${name}`;
 const since = argValue("--since");
 const prsRaw = argValue("--prs");
 if (since === undefined && prsRaw === undefined) usage("one of --since or --prs is required");
-// Mutually exclusive, and refused rather than silently resolved: the selection below prefers
-// `--prs`, so an automation that kept a stale `--prs` beside a fresh `--since` would harvest a
-// different population and exit 0.
 if (since !== undefined && prsRaw !== undefined) {
   usage("--since and --prs select different populations — pass exactly one");
 }
-
-/** `YYYY-MM-DD`, and a date that exists — `2026-02-31` parses and then is not February. */
-function isIsoDate(value) {
-  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false;
-  const parsed = new Date(`${value}T00:00:00.000Z`);
-  return !Number.isNaN(parsed.valueOf()) && parsed.toISOString().startsWith(value);
-}
-if (since !== undefined && !isIsoDate(since)) {
-  usage(`--since must be YYYY-MM-DD, got: ${since}`);
-}
+if (since !== undefined && !isIsoDate(since)) usage(`--since must be YYYY-MM-DD, got: ${since}`);
 
 const out = argValue("--out");
 if (out === undefined) usage("--out <file.json> is required");
-
-/**
- * The real filesystem location `--out` names, following symlinks.
- *
- * `resolve` is lexical: it flattens `..` and makes the path absolute, and it follows nothing. An
- * `--out` that is itself a symlink into the repository — or that sits below a symlinked directory —
- * therefore passed the containment check and then had `writeFileSync` follow the link and write the
- * unredacted harvest inside the tree. The file usually does not exist yet, so the nearest EXISTING
- * ancestor is canonicalized instead, which is the part a symlink can hide behind.
- */
-function realLocation(path) {
-  // A DANGLING symlink is the case that slipped through the first version: `existsSync` follows
-  // links, so a link whose target does not exist yet reads as absent, the walk moved to its parent,
-  // and the link's own name was appended back unresolved — while `writeFileSync` follows it and
-  // creates the target. Resolved with `lstat`/`readlink` first, before the ancestor walk.
-  let candidate = path;
-  for (let hops = 0; hops < 16; hops += 1) {
-    let stats;
-    try {
-      stats = lstatSync(candidate);
-    } catch {
-      break;
-    }
-    if (!stats.isSymbolicLink()) break;
-    candidate = resolve(dirname(candidate), readlinkSync(candidate));
-  }
-  let probe = candidate;
-  while (!existsSync(probe)) {
-    const parent = dirname(probe);
-    if (parent === probe) return candidate;
-    probe = parent;
-  }
-  return resolve(realpathSync(probe), relative(probe, candidate));
-}
-
 const outPath = realLocation(resolve(out));
-// A path component of exactly `..`, never the two characters: `relative()` returns
-// `..harvest.json` for an in-repo file of that name, and a raw `startsWith("..")` read it as
-// escaping the repository.
-const escapes = relative(REPO_ROOT, outPath).split(sep).includes("..");
-if (!escapes) {
+if (!escapesRepository(REPO_ROOT, outPath)) {
   usage(
     `--out ${outPath} is inside this repository. The harvest carries verbatim third-party comment ` +
       "text and is never committed — write it elsewhere.",
@@ -129,27 +84,19 @@ if (!escapes) {
 
 const withCommits = !process.argv.includes("--no-commits");
 
-/** Every token, or none: a typo in `--prs` narrowed the population silently and exited 0. */
-function parsePrList(raw) {
-  const tokens = raw.split(",").map((token) => token.trim());
-  const numbers = tokens.map(Number);
-  const bad = tokens.filter((_, index) => !Number.isInteger(numbers[index]) || numbers[index] <= 0);
-  if (bad.length > 0)
-    usage(`--prs contains values that are not pull request numbers: ${bad.join(", ")}`);
-  return numbers;
-}
-
 let numbers;
 if (prsRaw === undefined) {
-  // The discovery call now throws rather than truncating a window it cannot page whole; that is an
-  // answer for the operator, not a stack trace.
   try {
     numbers = discoverPullRequestNumbers(owner, name, since, "closed");
   } catch (error) {
     usage(error instanceof Error ? error.message : "could not list pull requests");
   }
 } else {
-  numbers = parsePrList(prsRaw);
+  const parsed = parsePrList(prsRaw);
+  if (parsed.bad !== undefined) {
+    usage(`--prs contains values that are not pull request numbers: ${parsed.bad.join(", ")}`);
+  }
+  numbers = parsed.numbers;
 }
 
 if (numbers.length === 0) usage("no pull requests matched");

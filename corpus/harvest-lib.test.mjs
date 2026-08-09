@@ -3,6 +3,11 @@ import { test } from "node:test";
 
 import {
   buildHarvestDocument,
+  escapesRepository,
+  isIsoDate,
+  parsePrList,
+  parseRepoArgument,
+  realLocation,
   extractHarvestRecords,
   findRecallGaps,
   firstForeignReply,
@@ -293,4 +298,93 @@ test("the document is deterministic for one input and one generatedAt", () => {
   assert.equal(doc.aggregate.byLabel.refuted_confirmed, 1);
   // The flag a reader of this file needs before deciding where to put it.
   assert.equal(doc.unredacted, true);
+});
+
+// ---------------------------------------------------------------------------------------------
+// Argument and path validation — the two questions where a silent mistake is most expensive:
+// what gets harvested, and where the unredacted document lands.
+// ---------------------------------------------------------------------------------------------
+
+test("a repository argument is exactly two non-empty components", () => {
+  assert.deepEqual(parseRepoArgument("owner/name"), { owner: "owner", name: "name" });
+  // `owner/name/extra` used to pass, query owner/name, and record the three-part string as the
+  // document's targetRepo — data bound to a repository the artifact does not name.
+  for (const bad of ["owner/name/extra", "owner", "owner/", "/name", "", undefined, 7]) {
+    assert.equal(parseRepoArgument(bad), undefined, String(bad));
+  }
+});
+
+test("a since-date must exist, not merely match the shape", () => {
+  assert.equal(isIsoDate("2026-08-09"), true);
+  // Parses, and is not February.
+  assert.equal(isIsoDate("2026-02-31"), false);
+  for (const bad of ["last tuesday", "2026-8-9", "20260809", "", undefined, 20260809]) {
+    assert.equal(isIsoDate(bad), false, String(bad));
+  }
+});
+
+test("a pull-request list is accepted whole or rejected whole", () => {
+  assert.deepEqual(parsePrList("3037, 3031,3041"), { numbers: [3037, 3031, 3041] });
+  // The typo that used to be filtered out, narrowing the population while the run exited 0.
+  assert.deepEqual(parsePrList("3037,304O,3041"), { bad: ["304O"] });
+  assert.deepEqual(parsePrList("3037,-1"), { bad: ["-1"] });
+  assert.deepEqual(parsePrList(""), { bad: [""] });
+});
+
+test("an in-repository path is recognised even when its name begins with two dots", () => {
+  // `relative()` returns `..harvest.json` here, and a raw startsWith("..") read that as escaping.
+  assert.equal(escapesRepository("/repo", "/repo/..harvest.json"), false);
+  assert.equal(escapesRepository("/repo", "/repo/corpus/out.json"), false);
+  assert.equal(escapesRepository("/repo", "/elsewhere/out.json"), true);
+});
+
+/** A filesystem stub: `links` maps a path to its target, `present` is the set that exists. */
+function fakeFs(links, present) {
+  return {
+    lstatSync(path) {
+      if (!(path in links) && !present.has(path)) throw new Error("ENOENT");
+      return { isSymbolicLink: () => path in links };
+    },
+    readlinkSync(path) {
+      return links[path];
+    },
+    existsSync(path) {
+      return present.has(path);
+    },
+    realpathSync(path) {
+      return path;
+    },
+  };
+}
+
+test("a symlink pointing into the repository is resolved before the containment check", () => {
+  const fs = fakeFs({ "/outside/link.json": "/repo/secret.json" }, new Set(["/repo", "/outside"]));
+  const resolved = realLocation("/outside/link.json", fs);
+  assert.equal(resolved, "/repo/secret.json");
+  assert.equal(escapesRepository("/repo", resolved), false, "and is then refused");
+});
+
+/**
+ * The case the first version missed. An output file normally does not exist yet, so a link whose
+ * TARGET is absent reads as absent to `existsSync` — the ancestor walk then appended the link's own
+ * name back unresolved, while `writeFileSync` follows it and creates the target inside the repo.
+ */
+test("a DANGLING symlink into the repository is resolved too", () => {
+  const fs = fakeFs({ "/outside/link.json": "/repo/new.json" }, new Set(["/repo", "/outside"]));
+  assert.equal(realLocation("/outside/link.json", fs), "/repo/new.json");
+});
+
+test("a symlinked parent directory cannot hide the target either", () => {
+  const fs = fakeFs({ "/outside/dir": "/repo/inner" }, new Set(["/repo", "/repo/inner"]));
+  assert.equal(realLocation("/outside/dir", fs), "/repo/inner");
+});
+
+test("a symlink cycle terminates instead of hanging", () => {
+  const fs = fakeFs({ "/a": "/b", "/b": "/a" }, new Set(["/"]));
+  assert.equal(typeof realLocation("/a", fs), "string");
+});
+
+test("an ordinary path is returned unchanged", () => {
+  const fs = fakeFs({}, new Set(["/home/user"]));
+  assert.equal(realLocation("/home/user/out.json", fs), "/home/user/out.json");
 });
