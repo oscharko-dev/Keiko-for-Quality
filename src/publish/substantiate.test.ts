@@ -47,6 +47,14 @@ const DELETED_EVIDENCE = [
   "D:B:7| -if (!ready) return;",
 ].join("\n");
 
+const MAPPED_DELETION_EVIDENCE = [
+  "HEAD (proposed code):",
+  "H:20| continueAfterRemovedGuard();",
+  "BASE (before change):",
+  "B:10| if (!ready) return;",
+  "D:B:10@H:20| -if (!ready) return;",
+].join("\n");
+
 function finding(content: string): JudgeableFinding {
   return { path: "src/backoff.ts", content, startLine: 3, endLine: 3 };
 }
@@ -208,7 +216,7 @@ function endpointReplying(replies: readonly ScriptedReply[]): {
 
 function truthRequestUpperBound(candidate: JudgeableFinding, evidence = CHANGE_EVIDENCE): number {
   const prompt = buildTruthPrompt(candidate, evidence, buildDossier(candidate.content));
-  return new TextEncoder().encode(prompt).byteLength + 2_304 + 512;
+  return new TextEncoder().encode(prompt).byteLength + 4_096 + 512;
 }
 
 function retrievedCaller(): RetrievedEvidence {
@@ -258,7 +266,7 @@ describe("role prompts", () => {
 });
 
 describe("strict truth envelope", () => {
-  it("accepts positive state plus exact change proof, including added and deleted lines", () => {
+  it("binds one cited state or change ref to its visible same-line counterpart", () => {
     expect(extractTruthDecision(CONFIRMED, CHANGE_EVIDENCE)).toEqual({
       verdict: "confirmed",
       reasonCode: "direct_proof",
@@ -271,15 +279,57 @@ describe("strict truth envelope", () => {
     expect(
       extractTruthDecision(truth({ evidence_refs: ["D:B:7", "B:7"] }), DELETED_EVIDENCE)?.verdict,
     ).toBe("confirmed");
+    expect(extractTruthDecision(truth({ evidence_refs: ["H:3"] }), CHANGE_EVIDENCE)?.verdict).toBe(
+      "confirmed",
+    );
+    expect(
+      extractTruthDecision(truth({ evidence_refs: ["D:H:3"] }), CHANGE_EVIDENCE)?.verdict,
+    ).toBe("confirmed");
+    expect(extractTruthDecision(truth({ evidence_refs: ["B:7"] }), DELETED_EVIDENCE)?.verdict).toBe(
+      "confirmed",
+    );
+    expect(
+      extractTruthDecision(truth({ evidence_refs: ["B:10"] }), MAPPED_DELETION_EVIDENCE, {
+        startLine: 20,
+        endLine: 20,
+      })?.verdict,
+    ).toBe("confirmed");
+    expect(
+      extractTruthDecision(truth({ evidence_refs: ["D:B:10@H:20"] }), MAPPED_DELETION_EVIDENCE, {
+        startLine: 20,
+        endLine: 20,
+      })?.verdict,
+    ).toBe("confirmed");
     expect(extractEvidenceVerdict(CONFIRMED, CHANGE_EVIDENCE)).toBe("confirmed");
     expect(extractReflectionDecision(CONFIRMED, CHANGE_EVIDENCE)).toBeDefined();
   });
 
   it("does not treat H+B consistency as PR-causality proof", () => {
-    const noChangeRef = truth({ evidence_refs: ["H:3", "B:3"] });
+    const noChangeRef = truth({ evidence_refs: ["H:2", "B:2"] });
     expect(extractTruthDecision(noChangeRef, CHANGE_EVIDENCE)).toBeUndefined();
+  });
+
+  it("requires the proved changed line to fall inside the finding anchor", () => {
+    const broadEvidence = [CHANGE_EVIDENCE, "H:8| unrelated();", "D:H:8| +unrelated();"].join("\n");
     expect(
-      extractTruthDecision(truth({ evidence_refs: ["D:H:3", "H:2"] }), CHANGE_EVIDENCE),
+      extractTruthDecision(truth({ evidence_refs: ["H:8"] }), broadEvidence, finding("claim")),
+    ).toBeUndefined();
+    expect(
+      extractTruthDecision(truth({ evidence_refs: ["H:3"] }), broadEvidence, finding("claim"))
+        ?.verdict,
+    ).toBe("confirmed");
+    expect(
+      extractTruthDecision(truth({ evidence_refs: ["B:7"] }), DELETED_EVIDENCE, {
+        ...finding("deleted claim"),
+        startLine: 7,
+        endLine: 7,
+      })?.verdict,
+    ).toBe("confirmed");
+    expect(
+      extractTruthDecision(truth({ evidence_refs: ["B:10"] }), MAPPED_DELETION_EVIDENCE, {
+        startLine: 10,
+        endLine: 10,
+      }),
     ).toBeUndefined();
   });
 
@@ -353,9 +403,12 @@ describe("strict falsifier envelope", () => {
     expect(extractFalsifierDecision(defeated, CHANGE_EVIDENCE)?.verdict).toBe("defeated");
   });
 
-  it("rejects a persuasive survives answer without exact change proof", () => {
+  it("accepts a survives answer that cites inspected evidence without re-proving truth causality", () => {
     expect(
-      extractFalsifierDecision(falsifier({ evidence_refs: ["H:3", "B:3"] }), CHANGE_EVIDENCE),
+      extractFalsifierDecision(falsifier({ evidence_refs: ["H:3"] }), CHANGE_EVIDENCE)?.verdict,
+    ).toBe("survives");
+    expect(
+      extractFalsifierDecision(falsifier({ evidence_refs: ["H:999"] }), CHANGE_EVIDENCE),
     ).toBeUndefined();
     expect(
       extractFalsifierDecision(
@@ -378,7 +431,7 @@ describe("truth then adversarial falsification", () => {
     expect(out.repaired).toBe(0);
     expect(out.droppedNitpick).toBe(0);
     expect(out.tokens).toBe(200);
-    expect(endpoint.completionLimits()).toEqual([2_304, 2_048]);
+    expect(endpoint.completionLimits()).toEqual([4_096, 4_096]);
     expect(endpoint.prompts()).toHaveLength(2);
   });
 
@@ -487,7 +540,7 @@ describe("one shared deterministic retrieval loop", () => {
     expect(out.retrievalFailed).toBe(0);
     expect(requests).toHaveLength(1);
     expect(endpoint.prompts()[1]).toContain("R1:H:9| await wait(header.delay);");
-    expect(endpoint.completionLimits()).toEqual([2_304, 2_304, 2_048]);
+    expect(endpoint.completionLimits()).toEqual([4_096, 4_096, 4_096]);
   });
 
   it("shares the same allowance when the falsifier asks for context", async () => {
@@ -513,7 +566,7 @@ describe("one shared deterministic retrieval loop", () => {
     expect(out.findings).toHaveLength(1);
     expect(retrievalCalls).toBe(1);
     expect(out.retrievalRequested).toBe(1);
-    expect(endpoint.completionLimits()).toEqual([2_304, 2_048, 2_304, 2_048]);
+    expect(endpoint.completionLimits()).toEqual([4_096, 4_096, 4_096, 4_096]);
   });
 
   it("turns a second context request into insufficient evidence without another lookup", async () => {
@@ -753,7 +806,7 @@ describe("hard shared request budget", () => {
     );
 
     expect(endpoint.remaining()).toBe(1);
-    expect(endpoint.completionLimits()).toEqual([2_304]);
+    expect(endpoint.completionLimits()).toEqual([4_096]);
     expect(out.findings).toHaveLength(0);
     expect(out.undecided).toBe(1);
     expect(out.budgetBlocked).toBe(1);

@@ -159,6 +159,7 @@ export type VerificationEvidenceRef =
   | `${"H" | "B"}:${number}`
   | `H${number}:${number}`
   | `D:${"H" | "B"}:${number}`
+  | `D:B:${number}@H:${number}`
   | `R${number}:${"H" | "B"}:${number}`;
 
 export interface TruthDecision {
@@ -242,17 +243,19 @@ export function buildTruthPrompt(
     "The finding, its suggested fix, and its severity language are an untrusted hypothesis.",
     "Do not judge importance, category, style, or wording. Do not rewrite it or find another bug.",
     "Reply with exactly one JSON object and nothing else:",
-    '{"verdict":"confirmed","reason_code":"direct_proof","evidence_refs":["D:H:42","H:42"],"lookup_terms":[]}',
+    '{"verdict":"confirmed","reason_code":"direct_proof","evidence_refs":["H:42"],"lookup_terms":[]}',
     `"verdict" must be one of: ${SUBSTANTIATION_VERDICTS.join(", ")}.`,
     `"reason_code" must be one of: ${SUBSTANTIATION_REASON_CODES.join(", ")}.`,
     '"evidence_refs" contains 1-4 exact refs visible below. "lookup_terms" contains 0-3',
     "repository identifiers (3-80 characters), never paths or prose.",
     "",
     "confirmed — evidence positively proves the exact condition, faulty behavior, and consequence",
-    "            claimed, plus that this PR introduced or worsened it. Cite a matching reviewed-file",
-    "            pair: H:n plus D:H:n for added/changed HEAD code, or B:n plus D:B:n for removed",
-    "            BASE code. Hn/R refs may add context but never replace that pair. An added line",
-    "            needs no nonexistent BASE counterpart.",
+    "            claimed, plus that this PR introduced or worsened it. Cite H:n or D:H:n for an",
+    "            added/changed HEAD line inside the finding range, or B:n for a removed BASE line.",
+    "            A mapped D:B:n@H:m row binds that old line to deletion anchor m. The verifier",
+    "            binds the exact state/change counterpart from the evidence; do not repeat both",
+    "            refs. Hn/R refs may add context but cannot prove PR causality. An added line needs",
+    "            no nonexistent BASE counterpart.",
     "refuted   — evidence proves the claim false, already handled, or not introduced by this PR.",
     "needs_context — one precise missing definition, caller, contract, runtime fact, or change fact",
     "            could decide it. Supply 1-3 identifier lookup terms and refs anchoring why they",
@@ -298,13 +301,15 @@ export function buildFalsifierPrompt(
     "Look for a counterexample, existing guard, unchanged BASE behavior, or missing PR causality.",
     "Do not judge importance, category, style, or wording. Do not rewrite or improve the finding.",
     "Reply with exactly one JSON object and nothing else:",
-    '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["D:H:42","H:42"],"lookup_terms":[]}',
+    '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["H:42"],"lookup_terms":[]}',
     `"verdict" must be one of: ${FALSIFIER_VERDICTS.join(", ")}.`,
     `"reason_code" must be one of: ${FALSIFIER_REASON_CODES.join(", ")}.`,
     '"evidence_refs" contains 1-4 exact refs visible below. "lookup_terms" contains 0-3',
     "repository identifiers (3-80 characters), never paths or prose.",
     "",
-    "survives — after actively seeking a defeater, positive fault and change proof still holds.",
+    "survives — after actively seeking a defeater, the confirmed proof still holds. Cite the",
+    "           exact evidence inspected for a defeater. Truth already validated PR causality, so",
+    "           do not repeat its D:H/H or D:B/B pair unless that pair is itself relevant here.",
     "defeated — evidence supplies a counterexample/guard, proves unchanged BASE behavior, or fails",
     "           the asserted causality. Cite the defeating evidence, not the original rhetoric.",
     "needs_context — one precise missing repository fact could defeat the claim. Supply 1-3",
@@ -332,8 +337,12 @@ export function buildFalsifierPrompt(
 }
 
 const REQUEST_TIMEOUT_MS = 45_000;
-const TRUTH_COMPLETION_LIMIT = 2_304;
-const FALSIFIER_COMPLETION_LIMIT = 2_048;
+// The pinned gpt-oss-120b serving path was measured at 59/61 undecided with a 256-token truth
+// channel and 1/61 at 4096. Intermediate 2304/2048 limits later produced 30/61 undecided in the
+// release replay. 4096 is therefore the smallest successful operating point we have evidence for;
+// the shared ledger still preflights and charges every request against the whole-review hard cap.
+const TRUTH_COMPLETION_LIMIT = 4_096;
+const FALSIFIER_COMPLETION_LIMIT = 4_096;
 const REQUEST_TOKEN_OVERHEAD = 512;
 
 interface CallBudget {
@@ -468,10 +477,11 @@ function closedValue<T extends string>(value: unknown, vocabulary: readonly T[])
     : undefined;
 }
 
-const BASIC_EVIDENCE_REF = /^(?:[HB]:[1-9]\d*|H[1-8]:[1-9]\d*|D:[HB]:[1-9]\d*)$/u;
+const BASIC_EVIDENCE_REF =
+  /^(?:[HB]:[1-9]\d*|H[1-8]:[1-9]\d*|D:H:[1-9]\d*|D:B:[1-9]\d*(?:@H:[1-9]\d*)?)$/u;
 const RETRIEVED_EVIDENCE_REF = /^R[1-3]:[HB]:[1-9]\d*$/u;
 const EVIDENCE_ROW =
-  /^((?:[HB]:[1-9]\d*|H[1-8]:[1-9]\d*|D:[HB]:[1-9]\d*|R[1-3]:[HB]:[1-9]\d*))\| /u;
+  /^((?:[HB]:[1-9]\d*|H[1-8]:[1-9]\d*|D:H:[1-9]\d*|D:B:[1-9]\d*(?:@H:[1-9]\d*)?|R[1-3]:[HB]:[1-9]\d*))\| /u;
 
 function isEvidenceRef(value: string): value is VerificationEvidenceRef {
   return BASIC_EVIDENCE_REF.test(value) || RETRIEVED_EVIDENCE_REF.test(value);
@@ -532,13 +542,77 @@ function hasBaseStateRef(references: readonly VerificationEvidenceRef[]): boolea
   );
 }
 
-function hasPositiveChangeProof(references: readonly VerificationEvidenceRef[]): boolean {
-  const cited = new Set<string>(references);
-  return references.some((reference) => {
-    const change = /^D:([HB]):([1-9]\d*)$/u.exec(reference);
-    if (change?.[1] === undefined || change[2] === undefined) return false;
-    return cited.has(`${change[1]}:${change[2]}`);
-  });
+function lineFallsInsideFinding(
+  lineText: string,
+  finding: Pick<JudgeableFinding, "startLine" | "endLine"> | undefined,
+): boolean {
+  if (finding === undefined) return true;
+  const line = Number(lineText);
+  return Number.isSafeInteger(line) && line >= finding.startLine && line <= finding.endLine;
+}
+
+interface PositiveProofBinding {
+  readonly counterpart: VerificationEvidenceRef;
+  readonly anchorLine: string;
+}
+
+function mappedBaseBindings(
+  baseLine: string,
+  visible: ReadonlySet<VerificationEvidenceRef>,
+): readonly PositiveProofBinding[] {
+  const bindings: PositiveProofBinding[] = [];
+  for (const candidate of visible) {
+    const mapped = /^D:B:([1-9]\d*)@H:([1-9]\d*)$/u.exec(candidate);
+    if (mapped?.[1] !== baseLine || mapped[2] === undefined) continue;
+    bindings.push({ counterpart: candidate, anchorLine: mapped[2] });
+  }
+  const direct = `D:B:${baseLine}` as VerificationEvidenceRef;
+  if (visible.has(direct)) bindings.push({ counterpart: direct, anchorLine: baseLine });
+  return bindings;
+}
+
+function positiveProofBindings(
+  reference: VerificationEvidenceRef,
+  visible: ReadonlySet<VerificationEvidenceRef>,
+): readonly PositiveProofBinding[] {
+  const state = /^([HB]):([1-9]\d*)$/u.exec(reference);
+  if (state?.[1] !== undefined && state[2] !== undefined) {
+    if (state[1] === "B") return mappedBaseBindings(state[2], visible);
+    return [
+      {
+        counterpart: `D:H:${state[2]}` as VerificationEvidenceRef,
+        anchorLine: state[2],
+      },
+    ];
+  }
+  const headChange = /^D:H:([1-9]\d*)$/u.exec(reference)?.[1];
+  if (headChange !== undefined) {
+    return [{ counterpart: `H:${headChange}` as VerificationEvidenceRef, anchorLine: headChange }];
+  }
+  const baseChange = /^D:B:([1-9]\d*)(?:@H:([1-9]\d*))?$/u.exec(reference);
+  if (baseChange?.[1] !== undefined) {
+    return [
+      {
+        counterpart: `B:${baseChange[1]}` as VerificationEvidenceRef,
+        anchorLine: baseChange[2] ?? baseChange[1],
+      },
+    ];
+  }
+  return [];
+}
+
+function hasPositiveChangeProof(
+  references: readonly VerificationEvidenceRef[],
+  evidence: string,
+  finding?: Pick<JudgeableFinding, "startLine" | "endLine">,
+): boolean {
+  const visible = visibleVerificationRefs(evidence);
+  return references.some((reference) =>
+    positiveProofBindings(reference, visible).some(
+      ({ counterpart, anchorLine }) =>
+        visible.has(counterpart) && lineFallsInsideFinding(anchorLine, finding),
+    ),
+  );
 }
 
 function hasHeadAndBaseState(references: readonly VerificationEvidenceRef[]): boolean {
@@ -603,13 +677,17 @@ function isTruthReason(
 
 function validTruthShape(
   decision: DecisionFields<SubstantiationVerdict, SubstantiationReasonCode>,
+  evidence: string,
+  finding?: Pick<JudgeableFinding, "startLine" | "endLine">,
 ): boolean {
   if (!isTruthReason(decision)) return false;
   if (decision.verdict === "needs_context") {
     return decision.lookupTerms.length > 0 && decision.evidenceRefs.length > 0;
   }
   if (decision.lookupTerms.length !== 0 || decision.evidenceRefs.length === 0) return false;
-  if (decision.verdict === "confirmed") return hasPositiveChangeProof(decision.evidenceRefs);
+  if (decision.verdict === "confirmed") {
+    return hasPositiveChangeProof(decision.evidenceRefs, evidence, finding);
+  }
   return decision.reasonCode !== "not_introduced" || hasHeadAndBaseState(decision.evidenceRefs);
 }
 
@@ -617,6 +695,7 @@ function validTruthShape(
 export function extractTruthDecision(
   text: string | undefined,
   evidence: string,
+  finding?: Pick<JudgeableFinding, "startLine" | "endLine">,
 ): TruthDecision | undefined {
   const decision = parseDecisionFields(
     text,
@@ -624,7 +703,9 @@ export function extractTruthDecision(
     SUBSTANTIATION_VERDICTS,
     SUBSTANTIATION_REASON_CODES,
   );
-  return decision !== undefined && validTruthShape(decision) ? decision : undefined;
+  return decision !== undefined && validTruthShape(decision, evidence, finding)
+    ? decision
+    : undefined;
 }
 
 /** Compatibility name retained for the former one-pass parser. */
@@ -662,7 +743,11 @@ function validFalsifierShape(
     return decision.lookupTerms.length > 0 && decision.evidenceRefs.length > 0;
   }
   if (decision.lookupTerms.length !== 0 || decision.evidenceRefs.length === 0) return false;
-  if (decision.verdict === "survives") return hasPositiveChangeProof(decision.evidenceRefs);
+  // Truth has already passed the strict positive-change proof before the falsifier can run. Making
+  // the adversarial role repeat that same D/H pair conflates the two roles and rejects a valid
+  // `survives` decision when the counterexample search correctly cites a guard, caller, or fault
+  // line instead. Every cited ref is still exact and visible at this boundary.
+  if (decision.verdict === "survives") return true;
   return decision.reasonCode !== "unchanged_base" || hasHeadAndBaseState(decision.evidenceRefs);
 }
 
@@ -911,7 +996,7 @@ async function callTruth(
     TRUTH_COMPLETION_LIMIT,
   );
   return {
-    decision: extractTruthDecision(call.text, evidence),
+    decision: extractTruthDecision(call.text, evidence, finding),
     budgetBlocked: call.budgetBlocked,
   };
 }
