@@ -38,6 +38,14 @@ vi.mock("./engine/run.js", async (importOriginal) => ({
   runEngine: runEngineMock,
 }));
 
+// Repository-context and Git-grep stay real in this end-to-end suite. Only the optional structural
+// enrichment is deterministic: otherwise a clean runner tries to acquire ast-grep through the
+// model endpoint's global fetch mock and makes the test depend on a pre-existing tool cache.
+vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
+}));
+
 const { computeAllottedBudget, performReview } = await import("./review.js");
 const { EngineRunError } = await import("./engine/run.js");
 

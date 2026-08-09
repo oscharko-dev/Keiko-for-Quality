@@ -40,6 +40,13 @@ vi.mock("./engine/single-shot.js", async (importOriginal) => ({
   runSingleShotEngine: runSingleShotEngineMock,
 }));
 
+// Keep exact-HEAD Git retrieval real while replacing only optional structural enrichment. A clean
+// runner has no ast-grep cache, and the model fetch mock must never become the tool downloader.
+vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
+}));
+
 const { performLocalReview } = await import("./review.js");
 // Imported dynamically for the same hoisting reason as `performLocalReview` above: a static
 // import of `./engine/run.js` would evaluate the `vi.mock` factory before `runEngineMock`

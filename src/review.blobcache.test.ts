@@ -31,6 +31,13 @@ vi.mock("./engine/run.js", async (importOriginal) => ({
   runEngine: runEngineMock,
 }));
 
+// This suite keeps the real repository collector and Git plumbing; only ast-grep enrichment is
+// hermetic so a clean runner never needs a downloaded binary or a warm global tool cache.
+vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
+}));
+
 /**
  * A passthrough spy, not a stub: every call still reaches the real implementation (real git,
  * against the real repo built below), so this only adds instrumentation — it must never change
