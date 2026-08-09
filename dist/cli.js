@@ -1,4 +1,4 @@
-// Keiko for Quality CLI 0.21.1 — generated bundle, do not edit.
+// Keiko for Quality CLI 0.21.2 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/cli.ts
@@ -3048,6 +3048,160 @@ function promptIdentityDigest(profile, guidelines) {
 // src/engine/single-shot.ts
 import { createHash as createHash7, randomUUID } from "node:crypto";
 
+// src/engine/verify-claims.ts
+var CLAIM_VERBS = /* @__PURE__ */ new Set([
+  // absence: the file does not do this
+  "add",
+  "ensure",
+  "guard",
+  "reject",
+  "validate",
+  "clear",
+  "handle",
+  "initialize",
+  "reset",
+  "remove",
+  "prevent",
+  "avoid",
+  "restrict",
+  "require",
+  "check",
+  // change: the file does this, and does it wrong
+  "adjust",
+  "update",
+  "replace",
+  "restore",
+  "reinstate",
+  "delete",
+  "move",
+  "propagate",
+  "load",
+  "exclude",
+  "cancel",
+  "correct",
+  "fix",
+  "rename",
+  "align",
+  "switch",
+  "use",
+  "make",
+  "treat",
+  "accept"
+]);
+var TITLE_VERB = /^\s*(?:\*\*\s*)?([A-Za-z]+)/u;
+var CLAIM_PHRASES = [
+  "is missing",
+  "are missing",
+  "does not",
+  "doesn't",
+  "do not",
+  "don't",
+  "never clears",
+  "never checks",
+  "never validates",
+  "never resets",
+  "never removes",
+  "never handles",
+  "never guards",
+  "no guard",
+  "no handling",
+  "no validation",
+  "no check",
+  "no cleanup",
+  "without guard",
+  "without validation",
+  "without checking",
+  "fails to",
+  "omits",
+  "incorrectly",
+  "instead of"
+];
+function opensWithClaimVerb(content) {
+  const firstLine = content.split("\n").find((line) => line.trim() !== "");
+  if (firstLine === void 0) return false;
+  const verb = TITLE_VERB.exec(firstLine)?.[1];
+  return verb !== void 0 && CLAIM_VERBS.has(verb.toLowerCase());
+}
+function statesClaimInProse(content) {
+  const text = content.toLowerCase();
+  return CLAIM_PHRASES.some((phrase) => text.includes(phrase));
+}
+var BACKTICKED = /`([A-Za-z_$][\w$]*)`/gu;
+function needsWholeFileEvidence(content, renderedDiff) {
+  if (opensWithClaimVerb(content) || statesClaimInProse(content)) return true;
+  const symbols = [...content.matchAll(BACKTICKED)].map((m) => m[1]);
+  return symbols.some((symbol) => symbol !== void 0 && !shownWholeWord(symbol, renderedDiff));
+}
+function shownWholeWord(symbol, renderedDiff) {
+  const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
+  return new RegExp(String.raw`(?<![\w$])${escaped}(?![\w$])`, "u").test(renderedDiff);
+}
+function numberFileLines(text) {
+  return text.split("\n").map((line, index) => `${String(index + 1)} ${line}`).join("\n");
+}
+var VERIFY_SYSTEM_PROMPT = [
+  "You verify review claims against the complete file they were written about.",
+  "",
+  "For each numbered claim decide exactly one verdict:",
+  '- "supported": the file does NOT already handle what the claim says is missing or wrong, so the claim stands.',
+  '- "contradicted": the file already does the thing the claim asks for, or the claim rests on a false premise about the code or the language. Cite the line number that shows it.',
+  "",
+  "Judge only what the file shows. A claim you cannot settle from the file is `supported` \u2014",
+  "you are removing claims the file itself refutes, not claims you find unconvincing.",
+  "",
+  'Answer with a JSON array and nothing else: [{"claim": 1, "verdict": "contradicted", "line": 655}]',
+  "Every claim must appear exactly once. `line` is required for `contradicted`, omitted otherwise."
+].join("\n");
+function buildVerifyPrompt(path, numberedFile, claims) {
+  const listed = claims.map((claim, index) => {
+    const where = claim.start_line > 0 ? ` (anchored at line ${String(claim.start_line)})` : " (file level)";
+    return `claim ${String(index + 1)}${where}:
+${claim.content}`;
+  });
+  return [
+    `<file path="${path}">`,
+    numberedFile,
+    "</file>",
+    "",
+    "<claims>",
+    listed.join("\n\n"),
+    "</claims>"
+  ].join("\n");
+}
+function parseVerdicts(reply, claimCount) {
+  let parsed;
+  try {
+    parsed = JSON.parse(reply);
+  } catch {
+    return void 0;
+  }
+  if (!Array.isArray(parsed)) return void 0;
+  return parsed.map((entry) => oneVerdict(entry, claimCount)).filter((verdict) => verdict !== void 0);
+}
+function claimIndex(value, claimCount) {
+  if (typeof value !== "number" || !Number.isInteger(value)) return void 0;
+  return value >= 1 && value <= claimCount ? value : void 0;
+}
+function evidenceLine(value) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) return void 0;
+  return value;
+}
+function oneVerdict(entry, claimCount) {
+  if (typeof entry !== "object" || entry === null) return void 0;
+  const { claim, verdict, line } = entry;
+  const index = claimIndex(claim, claimCount);
+  if (index === void 0 || typeof verdict !== "string") return void 0;
+  return {
+    claim: index,
+    contradicted: verdict.toLowerCase() === "contradicted",
+    line: evidenceLine(line)
+  };
+}
+function tallyOf(verdicts, asked) {
+  if (verdicts === void 0) return { asked, dropped: 0 };
+  return { asked, dropped: verdicts.filter((v) => v.contradicted).length };
+}
+
 // src/engine/run.ts
 import { createHash as createHash6 } from "node:crypto";
 import { mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
@@ -3533,6 +3687,8 @@ var COMPANION_BLOCK_CHARS = 4e3;
 var SECOND_PASS_MIN_CHANGED_LINES = 150;
 var SECOND_PASS_SEED_OFFSET = 1e3;
 var MAX_DIFF_CHARS = 6e4;
+var MAX_VERIFY_FILE_CHARS = 16e4;
+var VERIFY_SEED_OFFSET = 2e3;
 var CATEGORIES = "bug, security, performance, maintainability, test, documentation, other";
 var SEVERITIES = "critical, high, medium, low";
 function renderNumberedHunks(fileDiff) {
@@ -3886,7 +4042,52 @@ async function reviewOneFile(state, dispatch) {
   if (dispatch.changedLines >= SECOND_PASS_MIN_CHANGED_LINES) {
     combined = unionComments(parsed, await secondFocusedPass(state, dispatch, user));
   }
-  state.comments.push(...await repairRejectableBodies(state, combined));
+  const verified = await verifyWholeFileClaims(state, dispatch, combined);
+  state.comments.push(...await repairRejectableBodies(state, verified));
+}
+async function headFileText(options2, path) {
+  try {
+    const result = await run("git", ["--no-pager", "show", `${options2.pair.head}:${path}`], {
+      cwd: options2.repositoryPath,
+      timeoutMs: 3e4,
+      maxBuffer: 64 * 1024 * 1024,
+      env: { PATH: options2.pathValue, LC_ALL: "C" }
+    });
+    return result.stdout.toString("utf8");
+  } catch {
+    return void 0;
+  }
+}
+async function verifyWholeFileClaims(state, dispatch, comments) {
+  const needing = comments.filter((c) => needsWholeFileEvidence(c.content, dispatch.renderedDiff));
+  const spent = state.usage.prompt + state.usage.completion;
+  if (needing.length === 0 || state.spendStopped || spent >= state.options.allottedBudget) {
+    return comments;
+  }
+  const text = await headFileText(state.options, dispatch.path);
+  if (text === void 0 || text.length > MAX_VERIFY_FILE_CHARS) return comments;
+  const reply = await callModel(
+    state.options.config.endpoint,
+    state.token,
+    state.options.config.model,
+    state.seed + VERIFY_SEED_OFFSET,
+    VERIFY_SYSTEM_PROMPT,
+    buildVerifyPrompt(dispatch.path, numberFileLines(text), needing),
+    state.fetchImpl
+  );
+  state.usage.requests += 1;
+  state.usage.prompt += reply.promptTokens;
+  state.usage.completion += reply.completionTokens;
+  if (reply.content === void 0) return comments;
+  const verdicts = parseVerdicts(unfenceJson(reply.content), needing.length);
+  if (verdicts === void 0) return comments;
+  const tally = tallyOf(verdicts, needing.length);
+  state.claimsVerified += tally.asked;
+  state.claimsDropped += tally.dropped;
+  const contradicted = new Set(
+    verdicts.filter((v) => v.contradicted).map((v) => needing[v.claim - 1])
+  );
+  return comments.filter((c) => !contradicted.has(c));
 }
 async function secondFocusedPass(state, dispatch, firstPassUser) {
   const user = [
@@ -4005,7 +4206,9 @@ function initialRunState(options2, rule, dispatches, fetchImpl, token) {
     comments: [],
     warnings: [],
     spendStopped: false,
-    repairedBodies: 0
+    repairedBodies: 0,
+    claimsVerified: 0,
+    claimsDropped: 0
   };
 }
 async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
@@ -4038,6 +4241,8 @@ async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
       cached: 0,
       context_pack_injected: options2.contextPacks === void 0 ? 0 : dispatches.length,
       bodies_repaired: state.repairedBodies,
+      claims_verified: state.claimsVerified,
+      claims_dropped: state.claimsDropped,
       cache_key_rejected: 0,
       bad_request_persisted: 0
     }

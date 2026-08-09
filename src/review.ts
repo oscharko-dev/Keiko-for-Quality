@@ -2966,8 +2966,13 @@ export async function performReview(
   diagnostics: Diagnostics,
 ): Promise<ReviewReport> {
   const ledger: SpendLedger = { allotted: 0, engine: 0, classify: 0 };
+  // Captured so the cleanup below can ask what this run settled as. A `finally` that only sees
+  // the request cannot tell a completed run from an incomplete one, and the notice cleanup's
+  // same-head rule turns on exactly that distinction.
+  let report: ReviewReport | undefined;
   try {
-    return await performReviewInner(request, diagnostics, ledger);
+    report = await performReviewInner(request, diagnostics, ledger);
+    return report;
   } finally {
     // Only when the engine (or a classify call reached during publication) actually spent
     // something: a pre-flight abandon or an empty-inventory run never dispatched the engine at all,
@@ -3016,6 +3021,7 @@ export async function performReview(
           request.identity,
           isIncompleteNoticeBody,
           request.head,
+          report?.outcome === "complete",
         );
         // Gated on `attempted`, not `resolved`: a run where every attempt failed (a token missing
         // the mutation permission, say) must still leave a trace distinguishable from a run with
