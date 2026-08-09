@@ -52,9 +52,9 @@ evidence the previous one produced.
 
 ## Cutting a release
 
-The tag is what consumers execute; the GitHub Release is what they read to decide whether to
-advance. Both, in this order, or the repository's front page keeps advertising a version nobody
-should still be pinning.
+Run `scripts/release.mjs`, never the steps by hand — AGENTS.md's own section explains which
+failure that script exists to make impossible. The phases below are what it does, listed so a
+reader knows what is being checked on their behalf.
 
 1. **Prep on a branch off `dev`:** version bump, the README quickstart's `# vX.Y.Z` comment,
    `npm run build`. Commit before running the gates, so their reports name a clean tree.
