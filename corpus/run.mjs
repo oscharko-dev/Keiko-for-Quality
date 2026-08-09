@@ -18,6 +18,12 @@ import { CASES } from "./cases.mjs";
 // The hook must be registered before the production import below — dynamic imports resolve at
 // runtime, static ones during link, before any code here has run.
 import { generateRuleDocument, registerTsExtensionHooks } from "./rule-source.mjs";
+import {
+  CORPUS_REVIEW_TIMEOUT_SECONDS,
+  corpusReviewDeadlineMs,
+  qualificationEngineImplementation,
+  singleShotCorpusDispatch,
+} from "./single-shot-invocation.mjs";
 
 registerTsExtensionHooks();
 const { repairClassification, auditClassification } = await import("../src/engine/classify.ts");
@@ -456,11 +462,20 @@ async function runSingleShotForCorpus(dir, seed, budgetTokens) {
   const base = git(["rev-parse", "HEAD~1"]);
   const profile = loadReviewProfile(readFileSync(join(HERE, "profile.json"), "utf8"));
   const allotted = budgetTokens ?? 6_000_000;
+  const pair = { base: commitSha(base), head: commitSha(head), mergeBase: commitSha(base) };
+  const dispatch = await singleShotCorpusDispatch({
+    repositoryPath: dir,
+    pair,
+    profile,
+    pathValue: FIXED_PATH,
+    renameDetectionPercent: 50,
+    diagnostics: createSilentDiagnostics(),
+  });
   const output = await runSingleShotEngine(
     {
       binaryPath: "/unused-in-single-shot",
       repositoryPath: dir,
-      pair: { base: commitSha(base), head: commitSha(head), mergeBase: commitSha(base) },
+      pair,
       config: {
         protocol: "openai",
         endpoint: process.env.OCR_LLM_URL ?? "",
@@ -469,7 +484,7 @@ async function runSingleShotForCorpus(dir, seed, budgetTokens) {
         language: "English",
         concurrency: 2,
         fileTimeoutSeconds: 180,
-        reviewTimeoutSeconds: 1800,
+        reviewTimeoutSeconds: CORPUS_REVIEW_TIMEOUT_SECONDS,
         tokenBudget: allotted,
         maxFindings: 50,
         renameDetectionPercent: 50,
@@ -478,8 +493,10 @@ async function runSingleShotForCorpus(dir, seed, budgetTokens) {
       guidelines: { paths: [] },
       env: process.env,
       pathValue: FIXED_PATH,
+      reviewDeadlineMs: corpusReviewDeadlineMs(),
       allottedBudget: allotted,
-      mechanicallyCleanPaths: [],
+      expectedReviewablePaths: dispatch.expectedReviewablePaths,
+      mechanicallyCleanPaths: dispatch.mechanicallyCleanPaths,
       samplingSeed: seed,
     },
     createSilentDiagnostics(),
@@ -1021,8 +1038,13 @@ if (measured) {
 const binding = buildBinding({
   // In single-shot mode the "engine" is the shipped runner source, and hashing exactly that file
   // is the same claim the binary digest makes on the classic path: this is the code whose
-  // judgement the numbers describe. `BINARY` still wins whenever it is set.
-  binary: BINARY ?? join(HERE, "..", "src", "engine", "single-shot.ts"),
+  // judgement the numbers describe. The unused classic binary must not win merely because the
+  // scheduled workflow fetched it before selecting staged mode.
+  binary: qualificationEngineImplementation({
+    singleShot: process.env.KFQ_SINGLE_SHOT === "1",
+    binary: BINARY,
+    repositoryRoot: join(HERE, ".."),
+  }),
   rule: RULE,
   model: process.env.OCR_LLM_MODEL ?? "",
   protocol: process.env.OCR_USE_ANTHROPIC === "true" ? "anthropic" : "openai",

@@ -12,18 +12,24 @@ import {
 interface CannedReply {
   readonly status: number;
   readonly content?: string;
-  readonly tokens?: number;
+  readonly tokens?: unknown;
+  readonly omitUsage?: boolean;
 }
 
 interface RecordedCall {
   readonly url: string;
-  readonly body: { model: string; messages: readonly { content: string }[]; seed: number };
+  readonly body: {
+    model: string;
+    messages: readonly { content: string }[];
+    seed: number;
+    max_completion_tokens: number;
+  };
 }
 
-function chatBody(content: string, tokens: number): string {
+function chatBody(content: string, tokens: unknown, omitUsage = false): string {
   return JSON.stringify({
     choices: [{ message: { content } }],
-    usage: { total_tokens: tokens },
+    ...(omitUsage ? {} : { usage: { total_tokens: tokens } }),
   });
 }
 
@@ -37,7 +43,10 @@ function fakeFetch(replies: readonly CannedReply[]): {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const rawBody = typeof init?.body === "string" ? init.body : "{}";
     calls.push({ url, body: JSON.parse(rawBody) as RecordedCall["body"] });
-    const payload = reply.content === undefined ? "{}" : chatBody(reply.content, reply.tokens ?? 0);
+    const payload =
+      reply.content === undefined
+        ? "{}"
+        : chatBody(reply.content, reply.tokens ?? 100, reply.omitUsage);
     return Promise.resolve(new Response(payload, { status: reply.status }));
   };
   return { fetchImpl, calls };
@@ -54,6 +63,11 @@ function finding(overrides: Partial<ClassifiableFinding> = {}): ClassifiableFind
 }
 
 const DEPS = { endpoint: "https://example.test/openai/v1", token: "t", model: "m" };
+
+function callUpperBound(call: RecordedCall): number {
+  const prompt = call.body.messages[0]?.content ?? "";
+  return new TextEncoder().encode(prompt).byteLength + call.body.max_completion_tokens + 512;
+}
 
 describe("needsClassification", () => {
   it("is false only when both fields carry vocabulary values", () => {
@@ -202,6 +216,92 @@ describe("repairClassification", () => {
     expect(outcome).toMatchObject({ repaired: 1, failed: 0, tokens: 50 });
   });
 
+  it("starts no repair request when the first conservative bound does not fit", async () => {
+    const { fetchImpl, calls } = fakeFetch([
+      { status: 200, content: '{"category":"bug","severity":"high"}' },
+    ]);
+
+    const outcome = await repairClassification([finding()], { ...DEPS, fetchImpl }, 0);
+
+    expect(calls).toHaveLength(0);
+    expect(outcome).toMatchObject({ repaired: 0, failed: 1, tokens: 0, budgetBlocked: 1 });
+  });
+
+  it("enforces the first-call boundary exactly and sends the declared completion cap", async () => {
+    const candidate = finding();
+    const probe = fakeFetch([{ status: 200, content: '{"category":"bug","severity":"high"}' }]);
+    await repairClassification([candidate], { ...DEPS, fetchImpl: probe.fetchImpl });
+    const bound = callUpperBound(probe.calls[0]!);
+    const blocked = fakeFetch([{ status: 200, content: '{"category":"bug","severity":"high"}' }]);
+    const allowed = fakeFetch([
+      { status: 200, content: '{"category":"bug","severity":"high"}', tokens: 100 },
+    ]);
+
+    const blockedOut = await repairClassification(
+      [candidate],
+      { ...DEPS, fetchImpl: blocked.fetchImpl },
+      bound - 1,
+    );
+    const allowedOut = await repairClassification(
+      [candidate],
+      { ...DEPS, fetchImpl: allowed.fetchImpl },
+      bound,
+    );
+
+    expect(blocked.calls).toHaveLength(0);
+    expect(blockedOut.budgetBlocked).toBe(1);
+    expect(allowed.calls).toHaveLength(1);
+    expect(allowed.calls[0]?.body.max_completion_tokens).toBe(4_000);
+    expect(allowedOut).toMatchObject({ repaired: 1, budgetBlocked: 0, tokens: 100 });
+  });
+
+  it("blocks the stern retry after the first malformed answer consumes the allowance", async () => {
+    const candidate = finding();
+    const probe = fakeFetch([{ status: 200, content: "malformed", tokens: 100 }]);
+    await repairClassification([candidate], { ...DEPS, fetchImpl: probe.fetchImpl }, 1_000_000);
+    const bound = callUpperBound(probe.calls[0]!);
+    const actual = fakeFetch([
+      { status: 200, content: "malformed", tokens: bound },
+      { status: 200, content: '{"category":"bug","severity":"high"}' },
+    ]);
+
+    const outcome = await repairClassification(
+      [candidate],
+      { ...DEPS, fetchImpl: actual.fetchImpl },
+      bound,
+    );
+
+    expect(actual.calls).toHaveLength(1);
+    expect(outcome).toMatchObject({ repaired: 0, failed: 1, tokens: bound, budgetBlocked: 1 });
+  });
+
+  it("ignores an answer with missing or impossible usage and conservatively charges its bound", async () => {
+    const candidate = finding();
+    const probe = fakeFetch([{ status: 200, content: '{"category":"bug","severity":"high"}' }]);
+    await repairClassification([candidate], { ...DEPS, fetchImpl: probe.fetchImpl });
+    const bound = callUpperBound(probe.calls[0]!);
+    for (const reply of [
+      { status: 200, content: '{"category":"bug","severity":"high"}', omitUsage: true },
+      {
+        status: 200,
+        content: '{"category":"bug","severity":"high"}',
+        tokens: bound + 1,
+      },
+    ] satisfies readonly CannedReply[]) {
+      const actual = fakeFetch([reply]);
+
+      const outcome = await repairClassification(
+        [candidate],
+        { ...DEPS, fetchImpl: actual.fetchImpl },
+        bound,
+      );
+
+      expect(actual.calls).toHaveLength(1);
+      expect(outcome.findings[0]).toBe(candidate);
+      expect(outcome).toMatchObject({ repaired: 0, failed: 1, tokens: bound, budgetBlocked: 1 });
+    }
+  });
+
   it("keeps the vocabularies closed — every list value round-trips, nothing else does", () => {
     for (const category of FINDING_CATEGORIES) {
       for (const severity of FINDING_SEVERITIES) {
@@ -302,6 +402,46 @@ describe("auditClassification", () => {
     const outcome = await auditClassification(input, { ...DEPS, fetchImpl });
     expect(outcome.findings[0]).toBe(input[0]);
     expect(calls).toHaveLength(0);
+  });
+
+  it("keeps the original and starts no vote when the audit bound does not fit", async () => {
+    const { fetchImpl, calls } = fakeFetch([
+      { status: 200, content: '{"category":"security","severity":"critical"}' },
+    ]);
+    const input = [finding({ category: "bug", severity: "medium" })];
+
+    const outcome = await auditClassification(input, { ...DEPS, fetchImpl }, 0);
+
+    expect(calls).toHaveLength(0);
+    expect(outcome.findings[0]).toBe(input[0]);
+    expect(outcome).toMatchObject({ changed: 0, tokens: 0, budgetBlocked: 1 });
+  });
+
+  it("never adopts a lone disagreeing vote when the next vote is budget-blocked", async () => {
+    const candidate = finding({ category: "bug", severity: "medium" });
+    const probe = fakeFetch([
+      { status: 200, content: '{"category":"security","severity":"critical"}' },
+      { status: 200, content: '{"category":"security","severity":"critical"}' },
+    ]);
+    await auditClassification([candidate], { ...DEPS, fetchImpl: probe.fetchImpl });
+    const bound = callUpperBound(probe.calls[0]!);
+    const actual = fakeFetch([
+      {
+        status: 200,
+        content: '{"category":"security","severity":"critical"}',
+        tokens: bound,
+      },
+    ]);
+
+    const outcome = await auditClassification(
+      [candidate],
+      { ...DEPS, fetchImpl: actual.fetchImpl },
+      bound,
+    );
+
+    expect(actual.calls).toHaveLength(1);
+    expect(outcome.findings[0]).toBe(candidate);
+    expect(outcome).toMatchObject({ changed: 0, tokens: bound, budgetBlocked: 1 });
   });
 
   describe("a lost vote is retried once, but only when the transport itself failed", () => {

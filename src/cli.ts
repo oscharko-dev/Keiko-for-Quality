@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import type { CommitSha } from "./core/brands.js";
 import {
   SUPPORTED_STORE_SCHEMA,
+  entriesUnderCurrentSemantics,
   readStore,
   serializeStore,
   type CacheStore,
@@ -385,7 +386,7 @@ async function loadCacheStore(path: string | undefined): Promise<CacheStore | un
     return EMPTY_STORE;
   }
   const result = readStore(text);
-  return result.ok ? result.store : EMPTY_STORE;
+  return result.ok ? entriesUnderCurrentSemantics(result.store) : EMPTY_STORE;
 }
 
 /**

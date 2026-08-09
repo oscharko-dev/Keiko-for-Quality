@@ -24,6 +24,7 @@ import {
 } from "./publisher.js";
 
 const HEAD = commitSha("b".repeat(40));
+const BASE = commitSha("a".repeat(40));
 const REF: RepoRef = { owner: "acme", repo: "widget" };
 const IDENTITY = "keiko-for-quality[bot]";
 const BODY =
@@ -144,6 +145,7 @@ beforeEach(() => {
     client: api,
     ref: REF,
     pullNumber: 7,
+    baseSha: BASE,
     headSha: HEAD,
     identity: IDENTITY,
     items: new Map([["src/retry.ts", item()]]),

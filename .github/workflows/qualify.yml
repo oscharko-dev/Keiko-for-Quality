@@ -85,6 +85,10 @@ jobs:
           # The endpoint and token stay secrets: those are deployment facts, not the pairing.
           OCR_LLM_MODEL: gpt-oss-120b
           OCR_USE_ANTHROPIC: "false"
+          # Both shipped consumers select the bounded single-shot architecture. Qualification of
+          # the agentic default is qualification of a different reviewer, whatever model and rule
+          # text it shares with production.
+          KFQ_SINGLE_SHOT: "1"
         # A case can fail without the thresholds failing, so the runner's exit code is not the
         # verdict — `check-qualification.mjs` is. Exit 1 means exactly that and is tolerated;
         # anything else is the harness itself dying, and swallowing that would let the next step

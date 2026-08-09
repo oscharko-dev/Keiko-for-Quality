@@ -1,27 +1,22 @@
 /**
- * Single-shot review: one model call per file, everything the model may consult assembled BEFORE
- * the call — the architecture Qodo's PR-Agent (MIT) ships, grafted onto this product's own
- * hardened pipeline instead of replacing it.
+ * Bounded staged review: a risk planner followed by one core examiner and, only when deterministic
+ * change facts justify it, one integration examiner. Everything a stage may consult is assembled
+ * before its call; no model response can spawn an unbounded conversation.
  *
  * Why it exists, in this repository's own numbers: the agentic engine's per-file tool loop spent
  * 2,171,343 tokens against a 1,268,982-token allotment on the nine reviewable files of this
  * product's OWN pull request (#173) and still settled `coverage_gap` — twice, on consecutive
  * heads. A conversation that may spend thirty to sixty rounds per file cannot be budgeted from
  * file size, so the size-scaled allotment is structurally either overrun (cost) or under-covered
- * (quality). One call per file inverts that: the prompt is fully known before it is sent, so the
- * spend per file is bounded by construction, and there is no loop to die mid-file — completion
- * stops being a hoped-for property of a conversation and becomes an arithmetic property of a
- * request. The same shape also deletes two whole classes of paid calls the loop needed: search
- * rounds (the context pack IS the repository view) and the engine's `RE_LOCATION_TASK` (hunks are
- * rendered with absolute new-file line numbers, so the model cites real lines directly — the
- * PR-Agent technique, and their stated reason for it: "we always present __new hunk__ for
- * section, otherwise LLM gets confused").
+ * (quality). This workflow inverts that: every prompt and completion ceiling is known before it is
+ * sent, every request reserves from one shared hard ledger, and there is no free-form loop to die
+ * mid-file. Hunks carry absolute new-file line numbers, so no relocation call is needed.
  *
  * What it deliberately does NOT replace: everything downstream. The runner emits byte-compatible
  * engine stdout — `status` / `summary` / `tool_calls` / `comments` / `warnings` in exactly the
  * shape `result.ts` already parses — so settlement (incomplete-never-clean), classification
  * repair, sanitization, placement, dedup, the review store, and the report formats neither know
- * nor care which runner produced the review. A file whose call fails after its one retry becomes
+ * nor care which runner produced the review. A file whose mandatory examiner fails after its one retry becomes
  * an honest `subtask_error` warning, which is what `settle.ts` already reads as a coverage gap.
  *
  * Trust boundaries are unchanged: the diff and the context pack are candidate-trust data and are
@@ -38,43 +33,37 @@
 
 import { createHash, randomUUID } from "node:crypto";
 
-import { sha256, type Sha256 } from "../core/brands.js";
+import { sha256 } from "../core/brands.js";
 import type { Diagnostics } from "../diagnostics/sink.js";
-import { run } from "../git/exec.js";
+import { gitEnvironment, run } from "../git/exec.js";
+import { readTextAtCommit } from "../git/plumbing.js";
 import { readModelToken } from "../config/runtime.js";
 import { buildRuleFile, serializeRuleFile } from "./rule-file.js";
 import { companionsByPath } from "./companions.js";
-import {
-  buildVerifyPrompt,
-  needsWholeFileEvidence,
-  numberFileLines,
-  parseVerdicts,
-  tallyOf,
-  VERIFY_SYSTEM_PROMPT,
-} from "./verify-claims.js";
 import { buildWholeFileBlock, WHOLE_FILE_PROMPT } from "./whole-file-view.js";
-import { sanitizeFindingBody } from "../publish/sanitize.js";
+import {
+  CORE_ROLE,
+  INTEGRATION_ROLE,
+  buildExaminerPrompt,
+  buildRiskPlannerPrompt,
+  createGenerationLedger,
+  fallbackRiskMap,
+  parseRiskMap,
+  parseStructuredClaims,
+  renderStructuredClaim,
+  requestGeneration,
+  shouldRunIntegrationExaminer,
+  type GenerationCallResult,
+  type GenerationContext,
+  type GenerationRequestLedger,
+  type RiskHypothesis,
+  type StagePrompt,
+} from "./generation-workflow.js";
 import { EngineRunError, type EngineRunOptions, type EngineRunOutput } from "./run.js";
+import { SUPPORTED_MANIFEST_SCHEMA } from "./result.js";
 
-/** Sampling pins, identical in value and rationale to `run.ts` — one reviewer, one temperature. */
-const TEMPERATURE = 0;
+/** Sampling pin, identical in value and rationale to `run.ts`. */
 const DEFAULT_SEED = 42;
-
-/** Completion budget per reply: a findings array is small; a reply that needs more than this is
- *  not a findings array. */
-const MAX_COMPLETION_TOKENS = 3000;
-
-/**
- * One bounded repair call per file whose parsed findings carry publisher-rejectable bodies.
- *
- * Motivated by the first live day: two runs settled `publication_degraded` because exactly one
- * body each died at the sanitizer (class `html` — a bare angle-bracket token), meaning a correct
- * finding was found, paid for, and never reached a reader. The repair asks the model to fix the
- * FORMATTING of the flagged bodies only. A body that still fails after repair is passed through
- * UNCHANGED — the publisher rejects it and the settlement reports the degradation honestly.
- * Silently dropping it here would be the same reader-visible loss with the honesty removed.
- * Exactly one repair round per file, by construction of `repairRejectableBodies`.
- */
 
 /** One bounded retry per file on transport-shaped failures (429/5xx/network). A 4xx is the
  *  request's own fault and retrying it verbatim buys nothing — the file becomes a warning. */
@@ -83,61 +72,25 @@ const RETRIES_PER_FILE = 1;
 /** Per-companion and whole-block character budgets for the `<companion_changes>` section. The
  *  block exists to kill the one-sided-pair false-positive class (37 of 52 findings on the first
  *  live release PR), and three bounded hunks do that; a whole package's diffs would just re-crowd
- *  the prompt the single-shot mode exists to keep small. */
+ *  each staged prompt this bounded mode exists to keep small. */
 const COMPANION_HUNK_CHARS = 1200;
 const COMPANION_BLOCK_CHARS = 4000;
 
-/**
- * Files at or above this many changed lines get a SECOND, focused pass (different seed, a lens
- * fixed on boundaries, error paths, resource lifetimes, and new security surface) whose findings
- * are unioned with the first pass's after de-duplication.
- *
- * Measured motivation (2026-08-08 live audit, Keiko#3020): a ~700-line new security module got
- * the same single call as a two-line dep bump; four author-confirmed logic defects in it were
- * found by a competitor and two more by nobody, while this reviewer's findings on that PR were
- * mostly test housekeeping — and a re-review failed to re-find its own argv critical, which only
- * the store rescued. One extra bounded call on the heavy tail is the cheapest depth that exists:
- * on the audited window it would have added 6 calls across 23 runs.
- */
-const SECOND_PASS_MIN_CHANGED_LINES = 150;
-
-/** Seed offset for the second pass: pinned like everything else, deliberately different from the
- *  first pass so the model walks a different path — the same one-bit-of-entropy reasoning as the
- *  resume seed in `run.ts`. */
-const SECOND_PASS_SEED_OFFSET = 1000;
+/** Distinct pinned seeds keep the two examiner roles reproducible without making them identical. */
+const CORE_EXAMINER_SEED_OFFSET = 1000;
+const INTEGRATION_EXAMINER_SEED_OFFSET = 2000;
 
 /** Character budget for one file's rendered diff inside the prompt. Far above any reviewable
  *  hunk set, far below a generated-bundle flood; a diff past this bound is truncated with an
  *  explicit marker so the model knows it is not seeing the whole change. */
 const MAX_DIFF_CHARS = 60_000;
 
-/**
- * Character ceiling on a file sent to whole-file claim verification (`verify-claims.ts`).
- *
- * 160k characters covers every source file in the audited consumer — the largest carrier of
- * refuted claims was 4,422 lines (~150k) — while keeping one verification call inside the same
- * order of magnitude as the review call it protects. A file past the ceiling publishes its claims
- * unverified rather than truncated: a verifier answering from half a file would produce exactly
- * the confident absence claim this pass exists to remove.
- */
-const MAX_VERIFY_FILE_CHARS = 160_000;
-
-/** Seed offset for the verification call — pinned and distinct, the same one-bit-of-entropy
- *  reasoning as the second pass. */
-const VERIFY_SEED_OFFSET = 2000;
-
-/**
- * The categories and severities the rule text prescribes. The model is told these exact tokens;
- * a reply outside them still parses (classification repair downstream owns the fix), but the
- * prompt states the contract once, in one place.
- */
-const CATEGORIES = "bug, security, performance, maintainability, test, documentation, other";
-const SEVERITIES = "critical, high, medium, low";
-
 interface FileDispatch {
   readonly path: string;
   readonly renderedDiff: string;
-  /** Changed-line count of the raw fragment — the second-pass gate reads it. */
+  /** Exact permitted claim end-lines, derived from the rendered patch rather than model output. */
+  readonly allowedAnchors: readonly number[];
+  /** Changed-line count of the raw fragment — the deterministic integration gate reads it. */
   readonly changedLines: number;
   /** The `<companion_changes>` block for this file, when it has companions — see `companions.ts`. */
   readonly companionBlock?: string;
@@ -146,9 +99,8 @@ interface FileDispatch {
    * primary view and the hunks are the fallback.
    *
    * Absent means the file could not be shown whole (deleted, unreadable as a git object, or past
-   * `MAX_REVIEW_FILE_CHARS`), and the review falls back to `renderedDiff`. That fallback is also
-   * the ONLY case where the whole-file verification pass still runs: when the finding call already
-   * read the file, verifying against the same file is paying twice for one look.
+   * `MAX_REVIEW_FILE_CHARS`), and the examiners fall back to `renderedDiff`. Independent HEAD/BASE
+   * truth verification runs after generation for every publication candidate either way.
    */
   readonly wholeFileBlock?: string;
 }
@@ -168,23 +120,24 @@ interface EngineWarningShape {
   readonly message: string;
 }
 
-interface UsageTotals {
-  prompt: number;
-  completion: number;
-  requests: number;
-}
-
 /**
  * One parsed unified-diff hunk, rendered PR-Agent style: `__new hunk__` carries every kept line
  * prefixed with its ABSOLUTE line number in the new file (additions marked `+`), `__old hunk__`
- * appears only when the hunk deletes anything and carries the removed lines unnumbered. Line
- * numbers are what let the model cite `start_line`/`end_line` directly against the file the
- * publisher will anchor on — no relocation pass, no guessing.
+ * appears only when the hunk deletes anything and carries each removed line with its deletion
+ * anchor. Mode and rename metadata is retained even when Git has no `+++` line or hunk. These
+ * numbers are what let the model cite the publisher's exact anchor — no relocation or guessing.
  */
 export function renderNumberedHunks(fileDiff: string): string {
   const lines = fileDiff.split("\n");
-  const out: string[] = [];
+  const metadata = lines.filter((line) =>
+    /^(?:old mode|new mode|deleted file mode|new file mode|similarity index|rename from|rename to)\b/u.test(
+      line,
+    ),
+  );
+  const out: string[] = metadata.length === 0 ? [] : ["__file metadata__", ...metadata];
   let newLine = 0;
+  let oldLine = 0;
+  let inHunk = false;
   let newBody: string[] = [];
   let oldBody: string[] = [];
   const flush = (): void => {
@@ -195,21 +148,26 @@ export function renderNumberedHunks(fileDiff: string): string {
     oldBody = [];
   };
   for (const line of lines) {
-    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+    const header = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(line);
     if (header !== null) {
       flush();
-      newLine = Number(header[1]);
+      oldLine = Number(header[1]);
+      newLine = Number(header[2]);
+      inHunk = true;
       continue;
     }
-    if (newLine === 0) continue; // file header lines before the first hunk
+    if (!inHunk) continue; // file header lines before the first hunk
     if (line.startsWith("+")) {
       newBody.push(`${String(newLine)} +${line.slice(1)}`);
       newLine += 1;
     } else if (line.startsWith("-")) {
-      oldBody.push(`-${line.slice(1)}`);
+      const anchor = newLine > 0 ? newLine : oldLine;
+      oldBody.push(`${String(anchor)} -${line.slice(1)}`);
+      oldLine += 1;
     } else if (line.startsWith(" ") || line === "") {
       newBody.push(`${String(newLine)}  ${line.slice(1)}`);
       newLine += 1;
+      oldLine += 1;
     }
     // `\ No newline at end of file` and anything else: skipped, never counted.
   }
@@ -217,92 +175,90 @@ export function renderNumberedHunks(fileDiff: string): string {
   return out.join("\n");
 }
 
-/** Splits one multi-file `git diff` into per-path fragments, keyed by the new-side path. */
+function decodedGitPath(value: string): string | undefined {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('"')) return trimmed;
+  if (!trimmed.endsWith('"')) return undefined;
+  const hasOctal = /\\[0-7]{3}/u.test(trimmed);
+  const json = trimmed.replace(/\\([0-7]{3})/gu, (_match, octal: string) => {
+    const hex = Number.parseInt(octal, 8).toString(16).padStart(2, "0");
+    return `\\u00${hex}`;
+  });
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (typeof parsed !== "string") return undefined;
+    return hasOctal ? Buffer.from(parsed, "latin1").toString("utf8") : parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+function withoutPatchPrefix(path: string): string {
+  return path.startsWith("a/") || path.startsWith("b/") ? path.slice(2) : path;
+}
+
+function namedPath(part: string, marker: "---" | "+++" | "rename to"): string | undefined {
+  const escaped = marker.replaceAll("+", "\\+");
+  const raw = new RegExp(`^${escaped} (.+)$`, "mu").exec(part)?.[1];
+  if (raw === undefined) return undefined;
+  const decoded = decodedGitPath(raw);
+  if (decoded === undefined) return undefined;
+  return marker === "rename to" ? decoded : withoutPatchPrefix(decoded);
+}
+
+/** The same-path `diff --git a/x b/x` fallback used by hunkless mode changes. */
+function samePathFromDiffHeader(part: string): string | undefined {
+  const header = part.split("\n", 1)[0];
+  if (header === undefined) return undefined;
+  const quoted = /^("(?:\\.|[^"\\])*") ("(?:\\.|[^"\\])*")$/u.exec(header);
+  if (quoted?.[1] !== undefined && quoted[2] !== undefined) {
+    const oldPath = decodedGitPath(quoted[1]);
+    const newPath = decodedGitPath(quoted[2]);
+    if (oldPath === undefined || newPath === undefined) return undefined;
+    return withoutPatchPrefix(newPath);
+  }
+  let separator = header.indexOf(" b/");
+  while (separator >= 0) {
+    const oldPath = header.slice(2, separator);
+    const newPath = header.slice(separator + 3);
+    if (oldPath === newPath) return newPath;
+    separator = header.indexOf(" b/", separator + 1);
+  }
+  return undefined;
+}
+
+function fragmentPath(part: string): string | undefined {
+  const newPath = namedPath(part, "+++");
+  if (newPath !== undefined && newPath !== "/dev/null") return newPath;
+  const renamed = namedPath(part, "rename to");
+  if (renamed !== undefined) return renamed;
+  const oldPath = namedPath(part, "---");
+  if (newPath === "/dev/null" && oldPath !== undefined) return oldPath;
+  return samePathFromDiffHeader(part);
+}
+
+/** Splits one multi-file patch, retaining deletions and hunkless metadata changes. */
 export function splitFileDiffs(diffText: string): ReadonlyMap<string, string> {
   const byPath = new Map<string, string>();
   const parts = diffText.split(/^diff --git /m).slice(1);
   for (const part of parts) {
-    const newName = /^\+\+\+ (?:b\/)?(.+)$/m.exec(part);
-    if (newName === null) continue;
-    const path = newName[1]?.trim();
-    if (path === undefined || path === "/dev/null") continue;
+    const path = fragmentPath(part);
+    if (path === undefined) continue;
     byPath.set(path, part);
   }
   return byPath;
 }
 
-/**
- * The mode preamble: what is different about this call, stated where the model reads it. The
- * qualified rule text follows verbatim — guidance is product identity — but two of its premises
- * are false in this mode (it describes a searchable repository and tool-call budgeting), so the
- * preamble overrides exactly those and nothing else, and scopes claims to the provided context.
- */
-function systemPrompt(rule: string): string {
-  return [
-    "You are reviewing one file's change in a single reply. There are NO tools in this mode: you",
-    "cannot search or read the repository, and everything you may consult is already in this",
-    "prompt. Where the review guidance below speaks of searching the repository or spending tool",
-    "calls, read it as: consult the provided context.",
-    "",
-    "You will be given ONE of two views of the file under review, and the user prompt says which:",
-    "a `<current_file>` block holding the COMPLETE file with its changed lines marked — the normal",
-    "case, and the one where absence claims are checkable — or, when the file was too large or",
-    "could not be read, a `<current_file_diff>` block holding only the changed hunks. In the hunk",
-    'view a claim about what the file does or does not do elsewhere is a guess: state a negative ("no',
-    'caller", "unreachable", "never validated") only as far as what you were shown proves it, and',
-    "say what you could not check.",
-    "",
-    "Line numbers mean the same thing in both views: the ABSOLUTE line in the new file. In the hunk",
-    "view, `__new hunk__` carries them with additions marked `+` and `__old hunk__` shows removed",
-    "lines. Cite `start_line`/`end_line` from the numbered lines only.",
-    "",
-    "A `<companion_changes>` block may follow the diff: the hunks of RELATED files changed in the",
-    "SAME pull request (its package manifest, same-stem siblings, version files). Cross-file",
-    "consistency claims — versions matching, exports existing, counterparts updated — are",
-    "permitted ONLY when a companion hunk shown here proves them. When a counterpart file is part",
-    "of this change but its hunk is not shown, DO NOT allege any mismatch with it: the pair may",
-    "have moved together, and a claim about an unseen file is a guess wearing a finding's clothes.",
-    "Files listed as changed but not shown are not yours to reason about at all.",
-    "",
-    "Reply with ONLY a JSON array, no prose around it. Each element:",
-    `{"start_line": N, "end_line": N, "category": one of ${CATEGORIES},`,
-    ` "severity": one of ${SEVERITIES}, "content": "the finding body"}.`,
-    "An empty array [] is the correct reply for a clean change — silence is a valid review.",
-    "",
-    "--- review guidance begins ---",
-    rule,
-    "--- review guidance ends ---",
-  ].join("\n");
-}
-
-/**
- * One file's user prompt, in whichever view that file could be shown in.
- *
- * The view-specific instruction rides here rather than in the system prompt because the view is a
- * per-FILE fact — one oversized file in a change must not weaken the instructions the other
- * eighteen are reviewed under, which is exactly what a run-wide system prompt would force.
- */
-function userPrompt(
-  dispatch: FileDispatch,
-  pack: string | undefined,
-  totalChangedFiles: number,
-): string {
-  const whole = dispatch.wholeFileBlock;
-  return [
-    `This file is part of a change touching ${String(totalChangedFiles)} file(s) in total.`,
-    "",
-    `<current_file_path>${dispatch.path}</current_file_path>`,
-    "",
-    ...(whole === undefined
-      ? ["<current_file_diff>", dispatch.renderedDiff, "</current_file_diff>"]
-      : [whole, "", WHOLE_FILE_PROMPT]),
-    ...(dispatch.companionBlock === undefined ? [] : ["", dispatch.companionBlock]),
-    ...(pack === undefined ? [] : ["", pack]),
-    "",
-    whole === undefined
-      ? "Review the change in <current_file_diff> now and reply with the JSON array."
-      : "Review this change now and reply with the JSON array.",
-  ].join("\n");
+function renderedAnchors(renderedDiff: string): readonly number[] {
+  const anchors = new Set<number>();
+  for (const line of renderedDiff.split("\n")) {
+    const anchor = /^(\d+) [+-]/u.exec(line)?.[1];
+    if (anchor !== undefined) anchors.add(Number(anchor));
+  }
+  // A metadata-only change has no changed source line. Line 1 is an explicit, deterministic
+  // metadata anchor; placement can fall back to a file comment when GitHub has no line-side rung.
+  if (anchors.size === 0 && renderedDiff.includes("__file metadata__")) anchors.add(1);
+  return [...anchors].sort((left, right) => left - right);
 }
 
 /** A positive integer, or `undefined` — the one numeric shape a line field may carry. */
@@ -346,9 +302,9 @@ const FENCE = "```";
 const FENCE_LANGUAGE = "json";
 
 /**
- * The text inside a fence that wraps the WHOLE reply, or the trimmed reply when there is none —
- * the one tolerance this mode grants such a reply, shared by the findings parser and the
- * body-repair pass so the two can never disagree about what a fenced reply is.
+ * The text inside a fence that wraps the WHOLE reply, or the trimmed reply when there is none.
+ * Staged structured claims accept no fence; this remains only for the exported legacy-envelope
+ * compatibility parser.
  *
  * A walk rather than the `^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$` it replaces, which Sonar reports
  * as super-linear (S8786): three whitespace-capable quantifiers in a row let one run of whitespace
@@ -394,132 +350,60 @@ export function parseFindingsReply(
   return comments;
 }
 
-/** The reviewable dispatch list under exactly `buildRuleFile`'s include/exclude semantics:
- *  review-relevant, not generated, not in this run's mechanically-clean union — so this runner
- *  reviews precisely the set the engine would have been sent. */
+/**
+ * Intersects the inventory-owned dispatch contract with the fragments Git actually returned.
+ *
+ * This deliberately contains no profile/glob logic. `Inventory` already decided structural
+ * cases that path matching alone cannot recover: deletion-critical paths are reviewable even
+ * outside `reviewRelevant`, while matching binaries and submodule pointers are not. A second
+ * classifier here silently substituted one changed path for another while preserving the weak
+ * `files_reviewed` count. The manifest below records the identities as a second invariant; this
+ * function only decides which expected paths have evidence available to send to a model.
+ */
 function dispatchPaths(options: EngineRunOptions, changedPaths: readonly string[]): string[] {
-  const mechanicallyClean = new Set(options.mechanicallyCleanPaths);
-  return changedPaths.filter(
-    (path) =>
-      options.profile.reviewRelevant.matches(path) &&
-      !options.profile.generated.matches(path) &&
-      !mechanicallyClean.has(path),
-  );
+  const changed = new Set(changedPaths);
+  return [...new Set(options.expectedReviewablePaths)].filter((path) => changed.has(path));
+}
+
+/** Same absolute review boundary the first attempt and every resume share. */
+function remainingInvocationMs(options: EngineRunOptions, maximumMs: number): number {
+  const remaining = Math.max(0, Math.trunc(options.reviewDeadlineMs - Date.now()));
+  if (remaining === 0) throw new EngineRunError("engine.run.timeout");
+  return Math.min(remaining, maximumMs);
 }
 
 async function gitDiff(options: EngineRunOptions): Promise<string | undefined> {
+  const timeoutMs = remainingInvocationMs(options, 30_000);
   try {
     const result = await run(
       "git",
       [
         "--no-pager",
         "diff",
+        "--no-ext-diff",
+        "--no-textconv",
         "--no-color",
+        "--submodule=short",
+        `--find-renames=${String(options.config.renameDetectionPercent)}%`,
+        "--src-prefix=a/",
+        "--dst-prefix=b/",
         "--unified=3",
         options.pair.mergeBase,
         options.pair.head,
       ],
       {
         cwd: options.repositoryPath,
-        timeoutMs: 30_000,
+        timeoutMs,
         maxBuffer: 64 * 1024 * 1024,
-        env: { PATH: options.pathValue, LC_ALL: "C" },
+        env: gitEnvironment(options.pathValue),
       },
     );
     return result.stdout.toString("utf8");
   } catch {
-    return undefined;
-  }
-}
-
-interface ModelReply {
-  readonly content: string | undefined;
-  readonly promptTokens: number;
-  readonly completionTokens: number;
-  readonly transportFailure: boolean;
-}
-
-const FAILED_REPLY: ModelReply = {
-  content: undefined,
-  promptTokens: 0,
-  completionTokens: 0,
-  transportFailure: true,
-};
-
-/** A successful response body as a `ModelReply` — usage read per-field, absent fields count 0,
- *  the same per-field tolerance `model-proxy.ts`'s own accounting applies. */
-function parseModelResponse(text: string): ModelReply {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    return FAILED_REPLY;
-  }
-  const record = parsed as {
-    choices?: { message?: { content?: unknown } }[];
-    usage?: { prompt_tokens?: unknown; completion_tokens?: unknown };
-  };
-  const content = record.choices?.[0]?.message?.content;
-  return {
-    content: typeof content === "string" ? content : undefined,
-    promptTokens: typeof record.usage?.prompt_tokens === "number" ? record.usage.prompt_tokens : 0,
-    completionTokens:
-      typeof record.usage?.completion_tokens === "number" ? record.usage.completion_tokens : 0,
-    transportFailure: false,
-  };
-}
-
-/**
- * The trailing slashes of a configured endpoint, so the request path is appended exactly once.
- *
- * The lookbehind pins the match to the START of that run — which is where a non-global `replace`
- * finds it anyway, since the leftmost match of `\/+$` is by definition the earliest position from
- * which every remaining character is a slash, and such a position is never itself preceded by one.
- * Saying so out loud is what keeps the scan linear (Sonar S8786): without it, every position inside
- * a long run is retried as its own start. Same shape, same fix, and same argument as
- * `URL_TRAILING_PUNCTUATION` in `publish/sanitize.ts`.
- */
-const ENDPOINT_TRAILING_SLASHES = /(?<!\/)\/+$/;
-
-async function callModel(
-  endpoint: string,
-  token: string,
-  model: string,
-  seed: number,
-  system: string,
-  user: string,
-  fetchImpl: typeof fetch,
-): Promise<ModelReply> {
-  try {
-    const url = `${endpoint.replace(ENDPOINT_TRAILING_SLASHES, "")}/chat/completions`;
-    const response = await fetchImpl(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${token}`,
-        "api-key": token,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: TEMPERATURE,
-        seed,
-        max_tokens: MAX_COMPLETION_TOKENS,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-      }),
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      return {
-        ...FAILED_REPLY,
-        transportFailure: response.status === 429 || response.status >= 500,
-      };
+    if (Date.now() >= options.reviewDeadlineMs) {
+      throw new EngineRunError("engine.run.timeout");
     }
-    return parseModelResponse(text);
-  } catch {
-    return FAILED_REPLY;
+    return undefined;
   }
 }
 
@@ -542,33 +426,21 @@ async function inPool<T>(
   await Promise.all(workers);
 }
 
-/** The exact digest `writeRuleFile` records for the engine path, computed without a file: the
- *  rule text is part of the qualified configuration either way. */
-function ruleDigestFor(options: EngineRunOptions): Sha256 {
-  const rule = buildRuleFile(options.profile, options.guidelines, options.mechanicallyCleanPaths);
-  return sha256(createHash("sha256").update(serializeRuleFile(rule)).digest("hex"));
-}
-
 /** Everything the per-file workers share, assembled once per invocation. */
 interface RunState {
   readonly options: EngineRunOptions;
   readonly token: string;
-  readonly system: string;
-  readonly paths: readonly string[];
+  readonly rule: string;
   readonly seed: number;
   readonly fetchImpl: typeof fetch;
-  readonly usage: UsageTotals;
+  readonly ledger: GenerationRequestLedger;
+  /** Absolute wall-clock deadline inherited from `reviewTimeoutSeconds`. */
+  readonly reviewDeadlineMs: number;
   readonly comments: EngineComment[];
   readonly warnings: EngineWarningShape[];
-  spendStopped: boolean;
-  /** Bodies the repair call actually saved — surfaced in `model.usage` so a silent repair
-   *  pipeline failure reads as the regression it is, mirroring `context_pack_injected`. */
-  repairedBodies: number;
-  /** Claims sent to whole-file verification, and the ones the file itself contradicted. Both
-   *  reach `model.usage`: a verification pass that silently stops asking, or starts dropping
-   *  everything, is a regression only counting makes visible. */
-  claimsVerified: number;
-  claimsDropped: number;
+  plannerFallbacks: number;
+  coreExaminations: number;
+  integrationExaminations: number;
 }
 
 /**
@@ -612,16 +484,25 @@ function companionBlockFor(
  * The dispatch list: the rule-selected changed files, each with the complete file where that fits
  * and its bounded hunks either way.
  *
- * The file read is one `git show` per dispatched file — no model call, and the same read the
- * verification pass was already paying for later in the run. See `whole-file-view.ts` for the
- * measurement that made the whole file the primary view.
+ * The file read is one hardened `cat-file blob` through `readTextAtCommit` per dispatched file —
+ * no checkout and no model call. See `whole-file-view.ts` for the measurement that made the whole
+ * file the primary examiner view.
  */
-async function prepareDispatches(options: EngineRunOptions): Promise<FileDispatch[]> {
+interface PreparedDispatches {
+  readonly dispatches: readonly FileDispatch[];
+  /** Expected inventory paths for which the exact base-to-head diff produced no fragment. */
+  readonly missingPaths: readonly string[];
+}
+
+async function prepareDispatches(options: EngineRunOptions): Promise<PreparedDispatches> {
   const diffText = await gitDiff(options);
   if (diffText === undefined) throw new EngineRunError("engine.run.spawn_failed");
   const fragments = splitFileDiffs(diffText);
   const companions = companionsByPath([...fragments.keys()]);
   const paths = dispatchPaths(options, [...fragments.keys()]);
+  const missingPaths = [...new Set(options.expectedReviewablePaths)].filter(
+    (path) => !fragments.has(path),
+  );
   const dispatches: FileDispatch[] = [];
   for (const path of paths) {
     const fragment = fragments.get(path) ?? "";
@@ -636,200 +517,184 @@ async function prepareDispatches(options: EngineRunOptions): Promise<FileDispatc
       .filter((line) => /^[+-][^+-]/.test(line) || line === "+" || line === "-").length;
     const text = await headFileText(options, path);
     const whole = text === undefined ? undefined : buildWholeFileBlock(text, fragment);
+    const anchorSource = whole === undefined ? bounded : rendered;
     dispatches.push({
       path,
       renderedDiff: bounded,
+      allowedAnchors: renderedAnchors(anchorSource),
       changedLines,
       ...(companionBlock === undefined ? {} : { companionBlock }),
       ...(whole === undefined ? {} : { wholeFileBlock: whole.block }),
     });
   }
-  return dispatches;
+  return { dispatches, missingPaths };
+}
+
+function generationContext(state: RunState, dispatch: FileDispatch): GenerationContext {
+  const pack = state.options.contextPacks?.get(dispatch.path);
+  const applicablePathRules = state.options.profile.pathInstructions
+    .filter((entry) => entry.matcher.matches(dispatch.path))
+    .map((entry) => entry.instructions);
+  return {
+    path: dispatch.path,
+    renderedDiff: dispatch.renderedDiff,
+    allowedAnchors: dispatch.allowedAnchors,
+    changedLines: dispatch.changedLines,
+    ...(dispatch.companionBlock === undefined ? {} : { companionBlock: dispatch.companionBlock }),
+    ...(pack === undefined ? {} : { contextPack: pack }),
+    ...(applicablePathRules.length === 0 ? {} : { applicablePathRules }),
+    ...(state.options.changeIntent === undefined
+      ? {}
+      : { changeIntent: state.options.changeIntent }),
+    ...(state.options.trustedGuidance === undefined
+      ? {}
+      : { trustedGuidance: state.options.trustedGuidance }),
+  };
+}
+
+function metadataEvidence(renderedDiff: string): string | undefined {
+  if (!renderedDiff.startsWith("__file metadata__")) return undefined;
+  const hunkStart = renderedDiff.indexOf("\n__new hunk__");
+  return hunkStart < 0 ? renderedDiff : renderedDiff.slice(0, hunkStart);
+}
+
+function evidenceView(dispatch: FileDispatch): string {
+  if (dispatch.wholeFileBlock !== undefined) {
+    const metadata = metadataEvidence(dispatch.renderedDiff);
+    return [
+      dispatch.wholeFileBlock,
+      ...(metadata === undefined
+        ? []
+        : ["", "<current_file_metadata>", metadata, "</current_file_metadata>"]),
+      "",
+      WHOLE_FILE_PROMPT,
+    ].join("\n");
+  }
+  return ["<current_file_diff>", dispatch.renderedDiff, "</current_file_diff>"].join("\n");
+}
+
+/** One transport retry at most. Every attempt performs its own atomic ledger preflight. */
+async function callStage(
+  state: RunState,
+  prompt: StagePrompt,
+  seed: number,
+): Promise<GenerationCallResult> {
+  let result: GenerationCallResult = { kind: "invalid_response" };
+  for (let attempt = 0; attempt <= RETRIES_PER_FILE; attempt += 1) {
+    const remainingReviewMs = state.reviewDeadlineMs - Date.now();
+    if (remainingReviewMs <= 0) return { kind: "transport_failure" };
+    result = await requestGeneration(
+      {
+        endpoint: state.options.config.endpoint,
+        token: state.token,
+        model: state.options.config.model,
+        seed,
+        system: prompt.system,
+        user: prompt.user,
+        timeoutMs: Math.min(state.options.config.fileTimeoutSeconds * 1_000, remainingReviewMs),
+      },
+      state.ledger,
+      state.fetchImpl,
+    );
+    if (result.kind !== "transport_failure") return result;
+  }
+  return result;
+}
+
+function warnExaminer(state: RunState, path: string, role: string): void {
+  state.warnings.push({
+    type: "subtask_error",
+    file: path,
+    message: `single_shot ${role} examiner failed`,
+  });
+}
+
+async function planRisks(
+  state: RunState,
+  context: GenerationContext,
+): Promise<readonly RiskHypothesis[]> {
+  const result = await callStage(state, buildRiskPlannerPrompt(state.rule, context), state.seed);
+  if (result.kind === "success") {
+    const parsed = parseRiskMap(result.content, new Set(context.allowedAnchors));
+    if (parsed !== undefined) return parsed;
+  }
+  state.plannerFallbacks += 1;
+  return fallbackRiskMap(context.renderedDiff);
+}
+
+async function examine(
+  state: RunState,
+  dispatch: FileDispatch,
+  context: GenerationContext,
+  risks: readonly RiskHypothesis[],
+  role: typeof CORE_ROLE | typeof INTEGRATION_ROLE,
+  seedOffset: number,
+): Promise<readonly EngineComment[] | undefined> {
+  const prompt = buildExaminerPrompt(role, context, risks, { view: evidenceView(dispatch) });
+  const result = await callStage(state, prompt, state.seed + seedOffset);
+  if (result.kind !== "success") return undefined;
+  const claims = parseStructuredClaims(result.content, new Set(dispatch.allowedAnchors));
+  if (claims === undefined) return undefined;
+  return claims.map((claim) => renderStructuredClaim(dispatch.path, claim));
 }
 
 /**
- * The allotment gate, enforced BEFORE each file's call on wire-observed spend — the one place the
- * agentic loop could only estimate, this runner can simply check. Files past the stop become
- * warnings, never silent omissions.
+ * One file's bounded workflow. Planner failure falls back to fixed lenses; a mandatory examiner
+ * failure names the file and makes settlement incomplete. No model response can spawn a fourth
+ * generation role.
  */
-function budgetStopped(state: RunState, dispatch: FileDispatch): boolean {
-  if (
-    !state.spendStopped &&
-    state.usage.prompt + state.usage.completion < state.options.allottedBudget
-  ) {
-    return false;
-  }
-  state.spendStopped = true;
-  state.warnings.push({
-    type: "subtask_error",
-    file: dispatch.path,
-    message: "single_shot budget stop before dispatch",
-  });
-  return true;
-}
-
-/** One file's whole review: budget gate, one call plus its bounded retry, strict parse. Every
- *  failure shape lands as an honest `subtask_error` — settlement's coverage gap, never silence. */
 async function reviewOneFile(state: RunState, dispatch: FileDispatch): Promise<void> {
-  if (budgetStopped(state, dispatch)) return;
-  const pack = state.options.contextPacks?.get(dispatch.path);
-  const user = userPrompt(dispatch, pack, state.paths.length);
-  let reply: ModelReply | undefined;
-  for (let attempt = 0; attempt <= RETRIES_PER_FILE; attempt += 1) {
-    reply = await callModel(
-      state.options.config.endpoint,
-      state.token,
-      state.options.config.model,
-      state.seed,
-      state.system,
-      user,
-      state.fetchImpl,
+  const context = generationContext(state, dispatch);
+  const risks = await planRisks(state, context);
+  const core = await examine(state, dispatch, context, risks, CORE_ROLE, CORE_EXAMINER_SEED_OFFSET);
+  if (core === undefined) {
+    warnExaminer(state, dispatch.path, CORE_ROLE);
+    return;
+  }
+  state.coreExaminations += 1;
+
+  let combined = core;
+  if (shouldRunIntegrationExaminer(context)) {
+    const integration = await examine(
+      state,
+      dispatch,
+      context,
+      risks,
+      INTEGRATION_ROLE,
+      INTEGRATION_EXAMINER_SEED_OFFSET,
     );
-    state.usage.requests += 1;
-    state.usage.prompt += reply.promptTokens;
-    state.usage.completion += reply.completionTokens;
-    if (reply.content !== undefined || !reply.transportFailure) break;
+    if (integration === undefined) {
+      warnExaminer(state, dispatch.path, INTEGRATION_ROLE);
+    } else {
+      state.integrationExaminations += 1;
+      combined = unionComments(core, integration);
+    }
   }
-  const content = reply?.content;
-  if (content === undefined) {
-    state.warnings.push({
-      type: "subtask_error",
-      file: dispatch.path,
-      message: "single_shot model call failed",
-    });
-    return;
-  }
-  const parsed = parseFindingsReply(content, dispatch.path);
-  if (parsed === undefined) {
-    state.warnings.push({
-      type: "subtask_error",
-      file: dispatch.path,
-      message: "single_shot reply was not a findings array",
-    });
-    return;
-  }
-  let combined: readonly EngineComment[] = parsed;
-  if (dispatch.changedLines >= SECOND_PASS_MIN_CHANGED_LINES) {
-    combined = unionComments(parsed, await secondFocusedPass(state, dispatch, user));
-  }
-  const verified = await verifyWholeFileClaims(state, dispatch, combined);
-  state.comments.push(...(await repairRejectableBodies(state, verified)));
+  state.comments.push(...combined);
 }
 
-/** The file at the reviewed head, read as a Git object — never from a checkout, the same trust
- *  posture the diff itself is read under. Absent (deleted file, unreadable object) means the
- *  verification simply does not run. */
+/** The file at the reviewed head, read as a Git object — never from a checkout. */
 async function headFileText(options: EngineRunOptions, path: string): Promise<string | undefined> {
+  const timeoutMs = remainingInvocationMs(options, 30_000);
   try {
-    const result = await run("git", ["--no-pager", "show", `${options.pair.head}:${path}`], {
-      cwd: options.repositoryPath,
-      timeoutMs: 30_000,
-      maxBuffer: 64 * 1024 * 1024,
-      env: { PATH: options.pathValue, LC_ALL: "C" },
-    });
-    return result.stdout.toString("utf8");
+    return await readTextAtCommit(
+      {
+        cwd: options.repositoryPath,
+        timeoutMs,
+        pathValue: options.pathValue,
+      },
+      options.pair.head,
+      path,
+    );
   } catch {
+    if (Date.now() >= options.reviewDeadlineMs) {
+      throw new EngineRunError("engine.run.timeout");
+    }
     return undefined;
   }
 }
 
-/**
- * Drops the claims the file itself contradicts — see `verify-claims.ts` for the measurement that
- * motivates this pass and the honesty rules it keeps.
- *
- * **Runs only for a file the finding call could NOT be shown whole.** This pass exists because the
- * model was asked about a file while being shown an excerpt of it; where the whole file is now in
- * the finding prompt, that gap is closed at the source and a second pass over the same text buys
- * nothing for the ~2,900 tokens per file it costs. It stays for the fallback path — a file past
- * `MAX_REVIEW_FILE_CHARS`, a deleted file, an unreadable git object — where the gap is still real,
- * and it stays unchanged, because a large file is exactly where an excerpt misleads most.
- *
- * Every early return publishes the claims unchanged: nothing to verify, a file that cannot be
- * read, a file past the size ceiling, a budget already stopped, a failed call, an unparseable
- * reply. A verifier that cannot answer must never become a silent filter.
- */
-async function verifyWholeFileClaims(
-  state: RunState,
-  dispatch: FileDispatch,
-  comments: readonly EngineComment[],
-): Promise<readonly EngineComment[]> {
-  if (dispatch.wholeFileBlock !== undefined) return comments;
-  const needing = comments.filter((c) => needsWholeFileEvidence(c.content, dispatch.renderedDiff));
-  // The allotment is re-checked against CURRENT usage, not just the `spendStopped` flag: that flag
-  // is only raised when the NEXT file enters `budgetStopped`, so on the last file — or a one-file
-  // review — a stale flag would let this pass spend a whole-file request past the ceiling. The
-  // mode's central promise is that spend per file is bounded by construction, and a verification
-  // call is spend. Skipping it publishes the claims unverified, which is honest; it is not a
-  // coverage gap, so no warning is raised here.
-  const spent = state.usage.prompt + state.usage.completion;
-  if (needing.length === 0 || state.spendStopped || spent >= state.options.allottedBudget) {
-    return comments;
-  }
-  const text = await headFileText(state.options, dispatch.path);
-  if (text === undefined || text.length > MAX_VERIFY_FILE_CHARS) return comments;
-
-  const reply = await callModel(
-    state.options.config.endpoint,
-    state.token,
-    state.options.config.model,
-    state.seed + VERIFY_SEED_OFFSET,
-    VERIFY_SYSTEM_PROMPT,
-    buildVerifyPrompt(dispatch.path, numberFileLines(text), needing),
-    state.fetchImpl,
-  );
-  state.usage.requests += 1;
-  state.usage.prompt += reply.promptTokens;
-  state.usage.completion += reply.completionTokens;
-  if (reply.content === undefined) return comments;
-
-  const verdicts = parseVerdicts(unfenceJson(reply.content), needing.length);
-  if (verdicts === undefined) return comments;
-  const tally = tallyOf(verdicts, needing.length);
-  state.claimsVerified += tally.asked;
-  state.claimsDropped += tally.dropped;
-  const contradicted = new Set(
-    verdicts.filter((v) => v.contradicted).map((v) => needing[v.claim - 1]),
-  );
-  return comments.filter((c) => !contradicted.has(c));
-}
-
-/**
- * The heavy-file second pass: same prompt plus a hard lens, different pinned seed. A transport
- * failure here costs only the extra depth, never the file — the first pass's findings stand, so
- * no warning is raised and the file stays covered.
- */
-async function secondFocusedPass(
-  state: RunState,
-  dispatch: FileDispatch,
-  firstPassUser: string,
-): Promise<readonly EngineComment[]> {
-  const user = [
-    firstPassUser,
-    "",
-    "--- second focused pass ---",
-    "This file is large enough to deserve a second, independent read. Focus EXCLUSIVELY on:",
-    "boundary conditions and off-by-one edges, error and early-return paths, resource lifetimes",
-    "(open/close, spawn/kill, timeout bounds), and the security of newly reachable code paths.",
-    "Do not repeat style, naming, version-consistency, or test-housekeeping observations.",
-    "Reply with the same JSON array format.",
-  ].join("\n");
-  const reply = await callModel(
-    state.options.config.endpoint,
-    state.token,
-    state.options.config.model,
-    state.seed + SECOND_PASS_SEED_OFFSET,
-    state.system,
-    user,
-    state.fetchImpl,
-  );
-  state.usage.requests += 1;
-  state.usage.prompt += reply.promptTokens;
-  state.usage.completion += reply.completionTokens;
-  if (reply.content === undefined) return [];
-  return parseFindingsReply(reply.content, dispatch.path) ?? [];
-}
-
-/** First-pass findings win; a second-pass finding joins only when no first-pass finding already
+/** First-pass findings win; an integration finding joins only when no core finding already
  *  sits on the same lines saying effectively the same thing. */
 function unionComments(
   first: readonly EngineComment[],
@@ -850,87 +715,51 @@ function unionComments(
   return merged;
 }
 
-/** The publisher's verdict on a body, reduced to what the repair loop needs. */
-function bodyRejected(content: string): boolean {
-  return !sanitizeFindingBody(content).ok;
+/** One exact-path coverage partition for the staged runner's v1 run manifest. */
+function coverageEntries(paths: Iterable<string>): readonly { readonly path: string }[] {
+  return [...paths].map((path) => ({ path }));
 }
 
 /**
- * Sends the flagged bodies back to the model once, formatting-repair only, and keeps a repaired
- * body only when the REAL sanitizer now accepts it and the model returned the same count. Any
- * other shape — call failed, wrong count, still rejected — keeps the original: the loss then
- * surfaces downstream as the honest `publication_degraded` it is. See `REPAIR_CALLS_PER_FILE`.
+ * The engine-shaped stdout plus an exact v1 coverage manifest.
+ *
+ * Unlike the released agentic engine, this runner owns every dispatch and can name it. Publishing
+ * only `files_reviewed` here would throw that stronger evidence away and let an unexpected extra
+ * path mask an expected missing path by cardinality. `selected` is the inventory contract;
+ * `completed` and `failed` are disjoint identities measured by this invocation.
  */
-async function repairRejectableBodies(
+function assembleStdout(
   state: RunState,
-  comments: readonly EngineComment[],
-): Promise<readonly EngineComment[]> {
-  const flagged = comments
-    .map((comment, index) => ({ comment, index }))
-    .filter(({ comment }) => bodyRejected(comment.content));
-  if (flagged.length === 0) return comments;
-
-  const system = [
-    "You repair the FORMATTING of code-review finding bodies so a strict publisher accepts them.",
-    "Never change meaning, evidence, or tone. Rules the publisher enforces: no HTML — wrap any",
-    "angle-bracket token in backticks (`LIKE_THIS`); no links, images, or URLs — describe them in",
-    "plain words; no @mentions; no `suggestion` fences (plain `diff` fences are fine); the body",
-    "ends after its last sentence, its closing fence, or a `Source:` line.",
-    "",
-    "Reply with ONLY a JSON array of strings: the repaired bodies, in the exact order given, same",
-    "count as given.",
-  ].join("\n");
-  const user = JSON.stringify(flagged.map(({ comment }) => comment.content));
-
-  const reply = await callModel(
-    state.options.config.endpoint,
-    state.token,
-    state.options.config.model,
-    state.seed,
-    system,
-    user,
-    state.fetchImpl,
-  );
-  state.usage.requests += 1;
-  state.usage.prompt += reply.promptTokens;
-  state.usage.completion += reply.completionTokens;
-  if (reply.content === undefined) return comments;
-
-  let repaired: unknown;
-  try {
-    repaired = JSON.parse(unfenceJson(reply.content));
-  } catch {
-    return comments;
-  }
-  if (!Array.isArray(repaired) || repaired.length !== flagged.length) return comments;
-  const repairedList: readonly unknown[] = repaired as readonly unknown[];
-
-  const result = [...comments];
-  flagged.forEach(({ comment, index }, i) => {
-    const candidate = repairedList[i];
-    if (typeof candidate !== "string" || candidate === "" || bodyRejected(candidate)) return;
-    result[index] = { ...comment, content: candidate };
-    state.repairedBodies += 1;
-  });
-  return result;
-}
-
-/** The engine-shaped stdout — byte-compatible with what `result.ts` parses from the binary. */
-function assembleStdout(state: RunState, dispatched: number, startedMs: number): string {
-  const totalTokens = state.usage.prompt + state.usage.completion;
+  dispatches: readonly FileDispatch[],
+  startedMs: number,
+): string {
+  const selected = [...new Set(state.options.expectedReviewablePaths)];
+  const failed = new Set(state.warnings.map((warning) => warning.file));
+  const completed = dispatches.map((dispatch) => dispatch.path).filter((path) => !failed.has(path));
   return JSON.stringify({
     status: state.warnings.length === 0 ? "success" : "completed_with_errors",
     summary: {
-      files_reviewed: dispatched,
+      files_reviewed: dispatches.length,
       comments: state.comments.length,
-      total_tokens: totalTokens,
-      input_tokens: state.usage.prompt,
-      output_tokens: state.usage.completion,
+      total_tokens: state.ledger.spent,
+      input_tokens: state.ledger.prompt,
+      output_tokens: state.ledger.completion,
       elapsed: `${String(Math.max(1, Math.round((Date.now() - startedMs) / 1000)))}s`,
     },
     tool_calls: { total: 0, by_tool: {} },
     comments: state.comments,
     warnings: state.warnings,
+    manifest: {
+      schema_version: SUPPORTED_MANIFEST_SCHEMA,
+      terminal_state: failed.size === 0 ? "complete" : "partial",
+      coverage: {
+        selected: coverageEntries(selected),
+        completed: coverageEntries(completed),
+        reused: [],
+        failed: coverageEntries(failed),
+        waived: [],
+      },
+    },
     session_id: randomUUID(),
   });
 }
@@ -939,25 +768,57 @@ function assembleStdout(state: RunState, dispatched: number, startedMs: number):
 function initialRunState(
   options: EngineRunOptions,
   rule: string,
-  dispatches: readonly FileDispatch[],
   fetchImpl: typeof fetch,
   token: string,
 ): RunState {
   return {
     options,
     token,
-    system: systemPrompt(rule),
-    paths: dispatches.map((dispatch) => dispatch.path),
+    rule,
     seed: options.samplingSeed ?? DEFAULT_SEED,
     fetchImpl,
-    usage: { prompt: 0, completion: 0, requests: 0 },
+    ledger: createGenerationLedger(options.allottedBudget),
+    reviewDeadlineMs: options.reviewDeadlineMs,
     comments: [],
     warnings: [],
-    spendStopped: false,
-    repairedBodies: 0,
-    claimsVerified: 0,
-    claimsDropped: 0,
+    plannerFallbacks: 0,
+    coreExaminations: 0,
+    integrationExaminations: 0,
   };
+}
+
+/** Missing diff fragments are named failures, never silently omitted from the run's manifest. */
+function warnMissingDispatches(state: RunState, paths: readonly string[]): void {
+  for (const path of paths) {
+    state.warnings.push({
+      type: "subtask_error",
+      file: path,
+      message: "single_shot expected diff fragment missing",
+    });
+  }
+}
+
+function requireCompletedBeforeDeadline(
+  options: EngineRunOptions,
+  state: RunState,
+  diagnostics: Diagnostics,
+  started: number,
+): void {
+  if (Date.now() < options.reviewDeadlineMs) return;
+  diagnostics.record("engine.run.timeout", {
+    headSha: options.pair.head,
+    durationMs: Date.now() - started,
+  });
+  throw new EngineRunError("engine.run.timeout", state.ledger.spent);
+}
+
+async function reviewDispatchPool(
+  state: RunState,
+  dispatches: readonly FileDispatch[],
+): Promise<void> {
+  await inPool(dispatches, state.options.config.concurrency, (dispatch) =>
+    reviewOneFile(state, dispatch),
+  );
 }
 
 /**
@@ -972,21 +833,27 @@ export async function runSingleShotEngine(
   diagnostics: Diagnostics,
   fetchImpl: typeof fetch = fetch,
 ): Promise<EngineRunOutput> {
+  remainingInvocationMs(options, options.config.reviewTimeoutSeconds * 1_000);
   const token = readModelToken(options.config, options.env);
   if (token === undefined) throw new EngineRunError("engine.run.spawn_failed");
   const started = Date.now();
-  const ruleDigest = ruleDigestFor(options);
-  const rule = buildRuleFile(options.profile, options.guidelines, options.mechanicallyCleanPaths)
-    .rules[0]?.rule;
-  if (rule === undefined) throw new EngineRunError("engine.run.spawn_failed");
-
-  const dispatches = await prepareDispatches(options);
-  const state = initialRunState(options, rule, dispatches, fetchImpl, token);
-  await inPool(dispatches, options.config.concurrency, (dispatch) =>
-    reviewOneFile(state, dispatch),
+  const ruleFile = buildRuleFile(
+    options.profile,
+    options.guidelines,
+    options.mechanicallyCleanPaths,
   );
+  const ruleDocument = serializeRuleFile(ruleFile);
+  const ruleDigest = sha256(createHash("sha256").update(ruleDocument).digest("hex"));
 
-  const stdout = assembleStdout(state, dispatches.length, started);
+  const prepared = await prepareDispatches(options);
+  const dispatches = prepared.dispatches;
+  const state = initialRunState(options, ruleDocument, fetchImpl, token);
+  warnMissingDispatches(state, prepared.missingPaths);
+  await reviewDispatchPool(state, dispatches);
+
+  requireCompletedBeforeDeadline(options, state, diagnostics, started);
+
+  const stdout = assembleStdout(state, dispatches, started);
   diagnostics.record("engine.run.completed", {
     headSha: options.pair.head,
     digest: ruleDigest,
@@ -996,18 +863,21 @@ export async function runSingleShotEngine(
   diagnostics.record("model.usage", {
     headSha: options.pair.head,
     counts: {
-      requests: state.usage.requests,
-      prompt: state.usage.prompt,
-      completion: state.usage.completion,
+      requests: state.ledger.requests,
+      prompt: state.ledger.prompt,
+      completion: state.ledger.completion,
+      unreported_usage: state.ledger.unreported,
+      budget_blocked: state.ledger.budgetBlocked,
       cached: 0,
-      context_pack_injected: options.contextPacks === undefined ? 0 : dispatches.length,
-      bodies_repaired: state.repairedBodies,
-      claims_verified: state.claimsVerified,
-      claims_dropped: state.claimsDropped,
+      context_pack_injected: dispatches.filter((dispatch) =>
+        options.contextPacks?.has(dispatch.path),
+      ).length,
+      planner_fallbacks: state.plannerFallbacks,
+      core_examinations: state.coreExaminations,
+      integration_examinations: state.integrationExaminations,
       cache_key_rejected: 0,
       bad_request_persisted: 0,
     },
   });
-  const totalTokens = state.usage.prompt + state.usage.completion;
-  return { stdout, ruleDigest, wireTokens: totalTokens };
+  return { stdout, ruleDigest, wireTokens: state.ledger.spent };
 }

@@ -829,6 +829,36 @@ describe("runCli", () => {
       expect(request.cacheStore).toEqual(store);
     });
 
+    it("drops entries written under retired publication semantics", async () => {
+      const storePath = join(repo, "store.json");
+      await writeFile(
+        storePath,
+        JSON.stringify({
+          schemaVersion: SUPPORTED_STORE_SCHEMA,
+          entries: [
+            {
+              key: "1".repeat(64),
+              baseBlob: "2".repeat(40),
+              headBlob: "3".repeat(40),
+              ruleDigest: "4".repeat(64),
+              engineDigest: "5".repeat(64),
+              prPathSetDigest: "6".repeat(64),
+              semantics: "retired-publication-contract",
+              modelId: "gpt-oss-120b",
+              protocol: "openai",
+              findings: [],
+            },
+          ],
+        }),
+      );
+
+      const { deps, runLocalReview } = makeDeps({ argv: ["--store", storePath] });
+      await runCli(deps);
+
+      const request = runLocalReview.mock.calls[0]?.[0] as { cacheStore?: CacheStore };
+      expect(request.cacheStore?.entries).toEqual([]);
+    });
+
     it("writes the store back on a complete settlement", async () => {
       const storePath = join(repo, "store.json");
       const updated: CacheStore = {

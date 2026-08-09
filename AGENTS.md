@@ -147,6 +147,7 @@ fails silently belongs in a program, not in a memory or a checklist.
 
 ```bash
 npm run release -- prep    --version X.Y.Z          # version, README pin comment, build, verify, commit
+npm run release -- attest  --version X.Y.Z          # validate clean-RC gates, verify, evidence-only commit
 npm run release -- release --version X.Y.Z          # release branch off main, dev's tree, identity asserted
 npm run release -- publish --version X.Y.Z --sha <main-squash>   # signed tag + GitHub Release + check
 npm run release -- repin   --version X.Y.Z --sha <main-squash>   # this repo's self-review pin
@@ -155,13 +156,17 @@ npm run release:check                               # any time: newest tag must 
 
 Four things the script refuses rather than warns about, each an error already made here:
 
-- **No gate evidence, no release.** `prep` fails unless `corpus/evidence/` already carries this
-  version's seed-gate and completion-gate reports. The gates are paid and slow, so the script
-  never runs them — it refuses to ship a version whose evidence nobody wrote down.
+- **No gate evidence, no release.** `prep` first creates the clean versioned RC. Qualification,
+  historical replay, seed and completion run on that commit. The raw qualification `OCR_REPORT`
+  stays outside the repository; `npm run qualification:evidence` converts it to the only redacted
+  JSON schema `attest` accepts. Attestation then accepts only the four new version-scoped evidence
+  files and refuses a report whose version, commit, model or promotion verdict does not match.
+  `release` additionally proves the measured RC is an ancestor of `dev` and that only those evidence
+  files changed afterwards.
 - **`npm run verify` is never piped.** A pipeline exits with its LAST command's status, so
   `npm run verify | tail` reads a red chain as green. That shipped a stale `dist/` on 2026-08-08.
-- **The release tree must equal `dev`'s tree**, asserted with `rev-parse HEAD^{tree}`. A release
-  that is not byte-identical to what the gates ran against is a release with no evidence.
+- **The release tree must equal `dev`'s tree**, asserted with `rev-parse HEAD^{tree}`. Its executable
+  source must equal the measured RC; only the attested release-evidence delta may follow that RC.
 - **The consumer's `uses:` and `ACTION_PIN` move together.** The consumer workflow's own sync
   check fails the run when they disagree; the script counts both rewrites so a half-rewrite stops
   before it is pushed.

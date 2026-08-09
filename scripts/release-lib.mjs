@@ -12,6 +12,9 @@
 // So the rule this file encodes is: every step that can be checked is checked, and a check that
 // fails stops the release rather than printing a warning nobody reads.
 
+import { validateHistoricalReplayEvidence } from "../corpus/historical-replay-evidence-lib.mjs";
+import { validateQualificationEvidence } from "./qualification-evidence-lib.mjs";
+
 /** `X.Y.Z`, the only shape this project's tags have ever had. */
 const VERSION = /^(\d+)\.(\d+)\.(\d+)$/u;
 
@@ -52,13 +55,315 @@ export function bumpQuickstartPin(readme, version) {
  * indistinguishable afterwards, which is the whole reason the evidence exists.
  */
 export function findGateEvidence(fileNames, version) {
-  const seed = fileNames.find(
+  const seedMatches = fileNames.filter(
     (name) => name.startsWith("seed-gate-") && name.endsWith(`-v${version}.md`),
   );
-  const completion = fileNames.find(
+  const completionMatches = fileNames.filter(
     (name) => name.startsWith("completion-") && name.endsWith(`-v${version}.md`),
   );
-  return { seed, completion, complete: seed !== undefined && completion !== undefined };
+  const qualificationMatches = fileNames.filter(
+    (name) => name.startsWith("qualification-") && name.endsWith(`-v${version}.json`),
+  );
+  const historicalReplayMatches = fileNames.filter(
+    (name) => name.startsWith("historical-replay-") && name.endsWith(`-v${version}.json`),
+  );
+  const matches = {
+    seed: seedMatches,
+    completion: completionMatches,
+    qualification: qualificationMatches,
+    historicalReplay: historicalReplayMatches,
+  };
+  const ambiguous = Object.entries(matches)
+    .filter(([, names]) => names.length > 1)
+    .map(([kind, names]) => `${kind}: ${names.join(", ")}`);
+  const exactlyOne = (names) => (names.length === 1 ? names[0] : undefined);
+  const seed = exactlyOne(seedMatches);
+  const completion = exactlyOne(completionMatches);
+  const qualification = exactlyOne(qualificationMatches);
+  const historicalReplay = exactlyOne(historicalReplayMatches);
+  return {
+    seed,
+    completion,
+    qualification,
+    historicalReplay,
+    ambiguous,
+    complete:
+      ambiguous.length === 0 &&
+      seed !== undefined &&
+      completion !== undefined &&
+      qualification !== undefined &&
+      historicalReplay !== undefined,
+  };
+}
+
+const CLEAN_REVIEWER_TREE = /^- Reviewer tree: ([0-9a-f]{12,40}) \(clean\)$/mu;
+const REVIEWER_VERSION = /^- Reviewer under test: keiko-for-quality (\d+\.\d+\.\d+)$/mu;
+const PINNED_MODEL = /^- Model: gpt-oss-120b \(openai\)$/mu;
+const GREEN_SEED = /^- Verdict: GREEN \(required failures: none\)$/mu;
+const GREEN_COMPLETION =
+  /^- \*\*Completion rate: (\d+(?:\.\d+)?)%\*\* \(([1-9]\d*)\/([1-9]\d*) graded attempts, threshold (\d+(?:\.\d+)?)%\) — GREEN$/mu;
+const MINIMUM_COMPLETION_GRADED_ATTEMPTS = 3;
+const MINIMUM_COMPLETION_THRESHOLD_PERCENT = 80;
+
+function completionEvidence(report) {
+  const match = GREEN_COMPLETION.exec(report);
+  if (match === null) return undefined;
+  const [, reportedRateRaw, completeRaw, gradedRaw, thresholdRaw] = match;
+  const reportedRate = Number(reportedRateRaw);
+  const complete = Number(completeRaw);
+  const graded = Number(gradedRaw);
+  const threshold = Number(thresholdRaw);
+  if (
+    !Number.isFinite(reportedRate) ||
+    !Number.isSafeInteger(complete) ||
+    !Number.isSafeInteger(graded) ||
+    !Number.isFinite(threshold)
+  ) {
+    return undefined;
+  }
+  return { reportedRate, complete, graded, threshold };
+}
+
+/** Commit/version binding rendered by both paid gate harnesses. */
+export function gateEvidenceIdentity(report) {
+  return {
+    reviewer: CLEAN_REVIEWER_TREE.exec(report)?.[1],
+    version: REVIEWER_VERSION.exec(report)?.[1],
+  };
+}
+
+/**
+ * Validates the facts inside the two release reports, not merely their filenames.
+ *
+ * A red or dirty report with the right suffix is evidence that the gate did NOT pass. Treating it
+ * as the opposite shipped v0.22.0 over a seed report that literally said "DIRTY — not release
+ * evidence". The release driver calls this before changing a version or writing a commit.
+ */
+export function validateGateEvidence(seedReport, completionReport, expected) {
+  const failures = [];
+  const seedIdentity = gateEvidenceIdentity(seedReport);
+  const completionIdentity = gateEvidenceIdentity(completionReport);
+  const seedTree = seedIdentity.reviewer;
+  const completionTree = completionIdentity.reviewer;
+  if (seedTree === undefined) failures.push("seed_reviewer_not_clean");
+  if (!PINNED_MODEL.test(seedReport)) failures.push("seed_model_mismatch");
+  if (!GREEN_SEED.test(seedReport)) failures.push("seed_not_green");
+  if (completionTree === undefined) failures.push("completion_reviewer_not_clean");
+  if (!PINNED_MODEL.test(completionReport)) failures.push("completion_model_mismatch");
+  const completion = completionEvidence(completionReport);
+  if (completion === undefined) {
+    failures.push("completion_not_green");
+  } else {
+    const computedRate = Number(((completion.complete / completion.graded) * 100).toFixed(1));
+    if (
+      completion.complete > completion.graded ||
+      completion.reportedRate < 0 ||
+      completion.reportedRate > 100 ||
+      completion.reportedRate !== computedRate
+    ) {
+      failures.push("completion_rate_inconsistent");
+    }
+    if (completion.graded < MINIMUM_COMPLETION_GRADED_ATTEMPTS) {
+      failures.push("completion_sample_too_small");
+    }
+    if (completion.threshold < MINIMUM_COMPLETION_THRESHOLD_PERCENT || completion.threshold > 100) {
+      failures.push("completion_threshold_too_low");
+    }
+    if (completion.reportedRate < completion.threshold) {
+      failures.push("completion_below_threshold");
+    }
+  }
+  if (seedIdentity.version !== expected.version) failures.push("seed_version_mismatch");
+  if (completionIdentity.version !== expected.version) failures.push("completion_version_mismatch");
+  if (seedTree !== undefined && !expected.head.startsWith(seedTree)) {
+    failures.push("seed_reviewer_mismatch");
+  }
+  if (completionTree !== undefined && !expected.head.startsWith(completionTree)) {
+    failures.push("completion_reviewer_mismatch");
+  }
+  if (
+    seedTree !== undefined &&
+    completionTree !== undefined &&
+    !seedTree.startsWith(completionTree) &&
+    !completionTree.startsWith(seedTree)
+  ) {
+    failures.push("gate_reviewer_disagreement");
+  }
+  if (/DIRTY|not release evidence/iu.test(seedReport)) failures.push("seed_disqualified");
+  if (/DIRTY|not release evidence/iu.test(completionReport)) {
+    failures.push("completion_disqualified");
+  }
+  return { valid: failures.length === 0, failures };
+}
+
+/** Facts `publish` must prove before it creates the first local or remote release object. */
+export function validatePublishTarget({ version, sha, originMainSha, packageVersion }) {
+  const failures = [];
+  if (sha !== originMainSha) failures.push("publish_sha_not_origin_main");
+  if (packageVersion !== version) failures.push("publish_package_version_mismatch");
+  return { valid: failures.length === 0, failures };
+}
+
+/** Facts `repin` must prove about the already-published tag before rewriting a consumer pin. */
+export function validateRepinTarget({
+  version,
+  sha,
+  packageVersion,
+  tagType,
+  tagCommit,
+  tagSignatureValid,
+}) {
+  const failures = [];
+  if (tagType !== "tag") failures.push("repin_tag_not_annotated");
+  if (tagSignatureValid !== true) failures.push("repin_tag_signature_invalid");
+  if (tagCommit !== sha) failures.push("repin_tag_sha_mismatch");
+  if (packageVersion !== version) failures.push("repin_package_version_mismatch");
+  return { valid: failures.length === 0, failures };
+}
+
+/** Decides whether `publish` creates, pushes, fetches, or reuses a release tag. */
+export function planReleaseTag({ sha, localTagObject, remoteTagObject, remoteTagCommit }) {
+  const failures = [];
+  if (remoteTagObject !== undefined) {
+    if (remoteTagCommit === undefined) failures.push("release_tag_remote_not_annotated");
+    else if (remoteTagCommit !== sha) failures.push("release_tag_remote_sha_mismatch");
+    if (localTagObject !== undefined && localTagObject !== remoteTagObject) {
+      failures.push("release_tag_local_remote_disagreement");
+    }
+  } else if (remoteTagCommit !== undefined) {
+    failures.push("release_tag_remote_shape_invalid");
+  }
+  if (failures.length > 0) return { valid: false, failures };
+  if (remoteTagObject !== undefined) {
+    return {
+      valid: true,
+      failures: [],
+      action: localTagObject === undefined ? "fetch_existing" : "reuse_existing",
+    };
+  }
+  return {
+    valid: true,
+    failures: [],
+    action: localTagObject === undefined ? "create_and_push" : "push_existing",
+  };
+}
+
+export function isVersionedReleaseEvidencePath(path, version) {
+  const escaped = version.replaceAll(".", "\\.");
+  return new RegExp(
+    `^corpus/evidence/(?:(?:seed-gate|completion)-[^/]+-v${escaped}\\.md|` +
+      `(?:qualification|historical-replay)-[^/]+-v${escaped}\\.json)$`,
+    "u",
+  ).test(path);
+}
+
+/** Only new, target-version evidence may be dirty when `attest` commits the public reports. */
+export function validatePrepEvidenceChanges(changes, version) {
+  const invalid = changes.filter((change) => {
+    const status = change.slice(0, 2);
+    const path = change.slice(3);
+    return status !== "??" || !isVersionedReleaseEvidencePath(path, version);
+  });
+  const escaped = version.replaceAll(".", "\\.");
+  const kinds = {
+    seed: new RegExp(`^corpus/evidence/seed-gate-[^/]+-v${escaped}\\.md$`, "u"),
+    completion: new RegExp(`^corpus/evidence/completion-[^/]+-v${escaped}\\.md$`, "u"),
+    qualification: new RegExp(`^corpus/evidence/qualification-[^/]+-v${escaped}\\.json$`, "u"),
+    historicalReplay: new RegExp(
+      `^corpus/evidence/historical-replay-[^/]+-v${escaped}\\.json$`,
+      "u",
+    ),
+  };
+  for (const [kind, pattern] of Object.entries(kinds)) {
+    const count = changes.filter(
+      (change) => change.startsWith("?? ") && pattern.test(change.slice(3)),
+    ).length;
+    if (count !== 1) invalid.push(`${kind}:${String(count)}`);
+  }
+  return { valid: changes.length === 4 && invalid.length === 0, invalid };
+}
+
+/** The committed delta from the measured RC must be the same four files selected for release. */
+export function validateCommittedEvidenceDelta(paths, selectedFileNames, version) {
+  const expected = selectedFileNames.map((name) => `corpus/evidence/${name}`).sort();
+  const actual = [...paths].sort();
+  const valid =
+    expected.length === 4 &&
+    new Set(expected).size === 4 &&
+    expected.every((path) => isVersionedReleaseEvidencePath(path, version)) &&
+    actual.length === expected.length &&
+    actual.every((path, index) => path === expected[index]);
+  return { valid, expected, actual };
+}
+
+function record(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+}
+
+function metric(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function replayMetrics(report, cohort, phase) {
+  const score = record(record(report).score);
+  const selected =
+    cohort === "all"
+      ? record(record(score.all)[phase])
+      : record(record(record(score.chronological).holdout)[phase]);
+  return record(selected.metrics);
+}
+
+/** Machine-checkable provenance and promotion floor for the two quality measurements. */
+export function validateQualityEvidence(qualification, historicalReplay, expected) {
+  const failures = [];
+  const qualificationRoot = record(qualification);
+  const qualificationSchema = validateQualificationEvidence(qualificationRoot);
+  if (!qualificationSchema.valid) failures.push("qualification_schema_mismatch");
+  if (!qualificationSchema.complete) failures.push("qualification_case_coverage_mismatch");
+  const qualificationBinding = record(qualificationRoot.binding);
+  const adapter = record(qualificationBinding.adapter);
+  const qualificationModel = record(qualificationBinding.model);
+  if (qualificationRoot.measured !== true) failures.push("qualification_not_measured");
+  if (adapter.version !== expected.version) failures.push("qualification_version_mismatch");
+  if (adapter.commit !== expected.head) failures.push("qualification_reviewer_mismatch");
+  if (qualificationModel.id !== "gpt-oss-120b" || qualificationModel.protocol !== "openai") {
+    failures.push("qualification_model_mismatch");
+  }
+
+  const historicalRoot = record(historicalReplay);
+  const historicalBinding = record(historicalRoot.binding);
+  const historicalSchema = validateHistoricalReplayEvidence(historicalRoot);
+  if (!historicalSchema.valid) failures.push("historical_schema_mismatch");
+  if (historicalBinding.reviewerTree !== expected.tree) {
+    failures.push("historical_reviewer_mismatch");
+  }
+  if (historicalBinding.model !== "gpt-oss-120b" || historicalBinding.protocol !== "openai") {
+    failures.push("historical_model_mismatch");
+  }
+
+  for (const cohort of ["all", "holdout"]) {
+    const before = replayMetrics(historicalRoot, cohort, "before");
+    const after = replayMetrics(historicalRoot, cohort, "after");
+    const beforePrecision = metric(before.precision);
+    const afterPrecision = metric(after.precision);
+    const retention = metric(after.fixedRetention);
+    const coverage = metric(after.decisionCoverage);
+    const minimumGain = cohort === "all" ? 0.1 : 0.05;
+    if (
+      beforePrecision === undefined ||
+      afterPrecision === undefined ||
+      afterPrecision < beforePrecision + minimumGain
+    ) {
+      failures.push(`historical_${cohort}_precision_gain_missing`);
+    }
+    if (retention === undefined || retention < 0.8) {
+      failures.push(`historical_${cohort}_fixed_retention_low`);
+    }
+    if (coverage === undefined || coverage < 0.75) {
+      failures.push(`historical_${cohort}_decision_coverage_low`);
+    }
+  }
+  return { valid: failures.length === 0, failures };
 }
 
 /**

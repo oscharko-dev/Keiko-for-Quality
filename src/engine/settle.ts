@@ -12,7 +12,7 @@ import { SUPPORTED_MANIFEST_SCHEMA, type EngineFinding, type EngineResult } from
  * such thing as a review that is mostly complete: a consumer either got coverage of their change or
  * they did not, and only one of those may look clean.
  *
- * There are two paths, and the difference is a real difference in what can be proved.
+ * There are three paths, and the difference is a real difference in what can be proved.
  *
  * **Reconciled** — the engine emitted a run manifest. Every inventoried path is matched by identity
  * against the engine's own coverage partitions, so an omission is detected regardless of which file
@@ -23,13 +23,17 @@ import { SUPPORTED_MANIFEST_SCHEMA, type EngineFinding, type EngineResult } from
  * are reviewable, something was skipped. That still catches omission, but not *which* file, and it
  * cannot detect a substitution that keeps the count intact.
  *
+ * **Memoized** — the engine is not invoked because exact cache entries answer every reviewable
+ * path. The cache replaces generation only: replayed findings still pass the current repository
+ * Truth/Falsifier and PR-wide ranking before publication.
+ *
  * The counted path is not a convenience fallback. No published engine release emits a manifest —
  * `internal/session/manifest.go` exists only on the upstream default branch — so it is what a
  * digest-pinned release actually provides today. Which path ran is reported rather than hidden,
  * because a consumer deciding how far to trust a clean result needs to know which question was
  * answered.
  */
-export type SettlementMode = "reconciled" | "counted";
+export type SettlementMode = "reconciled" | "counted" | "memoized";
 
 export type Settlement =
   | {

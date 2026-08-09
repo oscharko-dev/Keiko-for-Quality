@@ -336,8 +336,11 @@ describe("performReview: review-cache memoization end to end", () => {
 
     // The engine was asked to skip exactly the hit path — proof the union reaches the real call,
     // not just a value threaded through settlement math.
-    const [calledOptions] = runEngineMock.mock.calls[0] as [{ mechanicallyCleanPaths: string[] }];
+    const [calledOptions] = runEngineMock.mock.calls[0] as [
+      { mechanicallyCleanPaths: string[]; expectedReviewablePaths: string[] },
+    ];
     expect(calledOptions.mechanicallyCleanPaths).toContain("src/a.ts");
+    expect(calledOptions.expectedReviewablePaths).toEqual(["src/b.ts"]);
 
     expect(report.outcome).toBe("complete");
     expect(report.cacheHits).toBe(1);
@@ -349,6 +352,21 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(report.mechanicallyClean).toBe(0);
     // src/a.ts's original entry survives untouched; src/b.ts is newly admitted.
     expect(report.updatedCacheStore?.entries).toHaveLength(2);
+
+    if (report.updatedCacheStore === undefined) throw new Error("expected cache write-back");
+    acquireEngineMock.mockClear();
+    runEngineMock.mockClear();
+    const secondDiagnostics = createSilentDiagnostics();
+    const second = await performReview(baseRequest(report.updatedCacheStore), secondDiagnostics);
+
+    expect(second.outcome).toBe("complete");
+    expect(second.cacheHits).toBe(2);
+    expect(second.cacheMisses).toBe(0);
+    expect(acquireEngineMock).not.toHaveBeenCalled();
+    expect(runEngineMock).not.toHaveBeenCalled();
+    expect(
+      secondDiagnostics.drain().some((record) => record.code === "settlement.mode.memoized"),
+    ).toBe(true);
   });
 
   it("treats a hit rejected by the path-set digest as an ordinary miss: the file is reviewed and never memoized (v0.10.0, issue #50)", async () => {
@@ -619,6 +637,35 @@ describe("performReview: review-cache memoization end to end", () => {
       // run reached the post-run guard rather than being short-circuited before it.
       expect(runEngineMock).toHaveBeenCalledTimes(1);
       expect(report.outcome).toBe("abandoned");
+      expect(createSpy).not.toHaveBeenCalled();
+    });
+
+    it("rechecks the head after quality planning and never publishes or caches a stale result", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: engineStdoutWithFinding(2),
+        ruleDigest: engineDigest,
+      });
+      const request = baseRequest(undefined);
+      const current = {
+        headSha: commitSha(headSha),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      };
+      const getPullRequestSpy = vi
+        .spyOn(request.client, "getPullRequest")
+        .mockResolvedValueOnce(current) // pre-engine
+        .mockResolvedValueOnce(current) // immediately before quality planning
+        .mockResolvedValue({ ...current, headSha: commitSha("f".repeat(40)) });
+      const createSpy = vi.spyOn(request.client, "createReviewComment");
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("abandoned");
+      expect(report.updatedCacheStore).toBeUndefined();
+      expect(getPullRequestSpy).toHaveBeenCalledTimes(3);
       expect(createSpy).not.toHaveBeenCalled();
     });
   });
@@ -1035,7 +1082,7 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(blobs).toContain(headBlobB);
     });
 
-    it("still writes back a complete review's real findings when the head moves just before publication", async () => {
+    it("does not cache unverified findings when the head moves before the evidence gate", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
@@ -1063,11 +1110,10 @@ describe("performReview: review-cache memoization end to end", () => {
       const report = await performReview(request, createSilentDiagnostics());
 
       expect(report.outcome).toBe("abandoned");
-      // A blob-content-keyed cache entry is exactly as replayable as if this run had reached
-      // publication — the head moving is a fact about the pull request, not about the blobs this
-      // run actually reviewed.
-      expect(report.cacheAppended).toBe(2);
-      expect(report.updatedCacheStore?.entries).toHaveLength(2);
+      // The engine output is blob-stable, but it has not passed the current publication-quality
+      // contract. Caching it under that semantics marker would bypass verification on replay.
+      expect(report.cacheAppended).toBe(0);
+      expect(report.updatedCacheStore).toBeUndefined();
     });
   });
 
@@ -1316,6 +1362,9 @@ describe("performReview: review-cache memoization end to end", () => {
       const secondOptions = runEngineMock.mock.calls[1]?.[0] as { samplingSeed?: number };
       expect(firstOptions.samplingSeed).toBeUndefined();
       expect(secondOptions.samplingSeed).toBe(43);
+      expect(
+        (runEngineMock.mock.calls[0]?.[0] as { reviewDeadlineMs: number }).reviewDeadlineMs,
+      ).toBe((runEngineMock.mock.calls[1]?.[0] as { reviewDeadlineMs: number }).reviewDeadlineMs);
       // A thrown first attempt spends nothing measured, so `remaining` stays the untouched full
       // allotment (see `runEngineWithOneResume`'s own comment) rather than being reduced by
       // anything the resume-floor formula computes — the second call's budget equals the first's.
@@ -1503,9 +1552,11 @@ describe("performReview: review-cache memoization end to end", () => {
       // the blanket skip was introduced to avoid.
       const second = runEngineMock.mock.calls[1]?.[0] as {
         mechanicallyCleanPaths: readonly string[];
+        expectedReviewablePaths: readonly string[];
       };
       expect(second.mechanicallyCleanPaths).toContain("src/a.ts");
       expect(second.mechanicallyCleanPaths).not.toContain("src/b.ts");
+      expect(second.expectedReviewablePaths).toEqual(["src/b.ts"]);
 
       const codes = diagnostics.drain().map((record) => record.code);
       expect(codes).toContain("engine.resumed_gap_targeted");
@@ -1773,8 +1824,10 @@ describe("performReview: review-cache memoization end to end", () => {
 
       const secondOptions = runEngineMock.mock.calls[1]?.[0] as {
         mechanicallyCleanPaths: readonly string[];
+        expectedReviewablePaths: readonly string[];
       };
       expect(secondOptions.mechanicallyCleanPaths).toContain("src/a.ts");
+      expect(secondOptions.expectedReviewablePaths).toEqual(["src/b.ts"]);
     });
 
     it("folds the first attempt's finding into the final result even though the resume never re-covers that path", async () => {
@@ -2927,7 +2980,10 @@ describe("performReview: review-cache memoization end to end", () => {
      * property `ownMarkers`/`toExistingConversation` (`publisher.ts`) require to treat a marker as
      * this reviewer's own.
      */
-    function successfulClient(existing: readonly ReviewComment[] = []): {
+    function successfulClient(
+      existing: readonly ReviewComment[] = [],
+      currentHead = headSha,
+    ): {
       client: GitHubClient;
       created: ReviewCommentInput[];
     } {
@@ -2935,7 +2991,7 @@ describe("performReview: review-cache memoization end to end", () => {
       const createdComments: ReviewComment[] = [];
       const createdInputs: ReviewCommentInput[] = [];
       vi.spyOn(client, "getPullRequest").mockResolvedValue({
-        headSha: commitSha(headSha),
+        headSha: commitSha(currentHead),
         draft: false,
         baseRef: "dev",
         headRepoFullName: undefined,
@@ -3039,6 +3095,11 @@ describe("performReview: review-cache memoization end to end", () => {
       repairPair?: { category: string; severity: string };
       auditPair?: { category: string; severity: string };
       judgeVerdict?: "grounded" | "vague" | "unsupported";
+      judgeEvidenceRef?: string;
+      judgeChangeRef?: string;
+      judgeAdditionalRefs?: readonly string[];
+      judgeTransportFailure?: boolean;
+      onJudgePrompt?: (prompt: string) => void;
       consequence?: "actionable" | "nitpick";
       tokensPerCall?: number;
     }): { impl: typeof fetch; callCount: () => number } {
@@ -3048,20 +3109,41 @@ describe("performReview: review-cache memoization end to end", () => {
         calls += 1;
         const parsedBody = JSON.parse(init?.body ?? "{}") as { messages?: { content?: string }[] };
         const prompt = parsedBody.messages?.[0]?.content ?? "";
-        // Substantiation (v0.17.0) shares this endpoint and runs BEFORE the audit, so it shares
-        // this mock too. It answers `grounded` unless a case asks otherwise: these cases exist to
+        // Substantiation shares this endpoint and runs BEFORE the audit, so it shares this mock.
+        // It answers confirmed/survives unless a case asks otherwise: these cases exist to
         // pin classification behaviour, and a judge that dropped their findings would make them
         // assert the wrong stage's failure. `judgeVerdict` is how a case opts into the other side.
-        // The consequence axis shares the endpoint too, and answers `actionable` unless a case
-        // opts out — same reasoning as the judge branch below it.
-        if (prompt.includes("worth a maintainer's attention")) {
+        if (prompt.includes("Adversarially falsify")) {
+          const stateRef = opts.judgeEvidenceRef ?? "H:1";
+          const line = /:([1-9]\d*)$/u.exec(stateRef)?.[1] ?? "1";
+          const changeRef = opts.judgeChangeRef ?? `D:H:${line}`;
+          const defeated = opts.consequence === "nitpick";
           return Promise.resolve(
             new Response(
               JSON.stringify({
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
-                      content: JSON.stringify({ verdict: opts.consequence ?? "actionable" }),
+                      content: JSON.stringify(
+                        defeated
+                          ? {
+                              verdict: "defeated",
+                              reason_code: "counterexample",
+                              evidence_refs: [stateRef],
+                              lookup_terms: [],
+                            }
+                          : {
+                              verdict: "survives",
+                              reason_code: "no_defeater_found",
+                              evidence_refs: [
+                                stateRef,
+                                changeRef,
+                                ...(opts.judgeAdditionalRefs ?? []),
+                              ],
+                              lookup_terms: [],
+                            },
+                      ),
                     },
                   },
                 ],
@@ -3071,14 +3153,46 @@ describe("performReview: review-cache memoization end to end", () => {
             ),
           );
         }
-        if (prompt.includes("Judge whether one code-review finding")) {
+        if (prompt.includes("Verify the truth of one AI-generated")) {
+          opts.onJudgePrompt?.(prompt);
+          if (opts.judgeTransportFailure === true) {
+            return Promise.reject(new Error("judge transport failure"));
+          }
           return Promise.resolve(
             new Response(
               JSON.stringify({
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
-                      content: JSON.stringify({ verdict: opts.judgeVerdict ?? "grounded" }),
+                      content: ((): string => {
+                        const verdict = opts.judgeVerdict ?? "grounded";
+                        const stateRef = opts.judgeEvidenceRef ?? "H:1";
+                        const line = /:([1-9]\d*)$/u.exec(stateRef)?.[1] ?? "1";
+                        const changeRef = opts.judgeChangeRef ?? `D:H:${line}`;
+                        if (verdict === "vague") {
+                          return JSON.stringify({
+                            verdict: "needs_context",
+                            reason_code: "missing_definition",
+                            evidence_refs: [stateRef],
+                            lookup_terms: ["missingDefinition"],
+                          });
+                        }
+                        if (verdict === "unsupported") {
+                          return JSON.stringify({
+                            verdict: "refuted",
+                            reason_code: "contradicted",
+                            evidence_refs: [stateRef],
+                            lookup_terms: [],
+                          });
+                        }
+                        return JSON.stringify({
+                          verdict: "confirmed",
+                          reason_code: "direct_proof",
+                          evidence_refs: [stateRef, changeRef, ...(opts.judgeAdditionalRefs ?? [])],
+                          lookup_terms: [],
+                        });
+                      })(),
                     },
                   },
                 ],
@@ -3094,7 +3208,7 @@ describe("performReview: review-cache memoization end to end", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              choices: [{ message: { content } }],
+              choices: [{ finish_reason: "stop", message: { content } }],
               usage: { total_tokens: tokens },
             }),
             { status: 200 },
@@ -3104,37 +3218,66 @@ describe("performReview: review-cache memoization end to end", () => {
       return { impl, callCount: () => calls };
     }
 
-    it("never calls the classify endpoint for a fresh finding suppressed at plan time by an exact marker", async () => {
-      const engineDigest = currentPlatformDigest();
+    it("never caches an exact-suppressed fresh path, so a later run verifies it instead of replaying it", async () => {
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       const BODY =
         "This handler swallows the write error and reports success to the caller regardless.";
-      runEngineMock.mockResolvedValue({
-        stdout: findingsStdout(
-          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
-          2,
-          100,
-        ),
-        ruleDigest: engineDigest,
-      });
+      const finding = { path: "src/a.ts", content: BODY, category: "bug", severity: "medium" };
+      runEngineMock
+        .mockResolvedValueOnce({
+          stdout: findingsStdout([finding], 2, 100),
+          ruleDigest: engineDigest,
+        })
+        .mockResolvedValueOnce({
+          // The first run may cache src/b.ts, but src/a.ts must be dispatched again.
+          stdout: findingsStdout([finding], 1, 100),
+          ruleDigest: engineDigest,
+        });
 
-      const { impl, callCount } = classifyFetchMock({});
+      const { impl, callCount } = classifyFetchMock({
+        auditPair: { category: "bug", severity: "medium" },
+      });
       globalThis.fetch = impl;
-      const { client, created } = successfulClient([seededMarker("bug", BODY)]);
+      const firstClient = successfulClient([seededMarker("bug", BODY)]);
+      const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
 
       const diagnostics = createSilentDiagnostics();
-      const report = await performReview(auditRequest(client), diagnostics);
+      const first = await performReview(auditRequest(firstClient.client, empty), diagnostics);
 
-      expect(report.outcome).toBe("complete");
-      expect(report.publish).toMatchObject({
+      expect(first.outcome).toBe("complete");
+      expect(first.publish).toMatchObject({
         published: 0,
         suppressed: 1,
         suppressedExactDuplicate: 1,
       });
-      expect(created).toHaveLength(0);
+      expect(firstClient.created).toHaveLength(0);
       // Already classified (no repair needed) and plan-suppressed (never a `fresh` survivor for the
       // audit) — the classify endpoint is never called at all.
       expect(callCount()).toBe(0);
+      const firstEntries = first.updatedCacheStore?.entries ?? [];
+      expect(firstEntries.some((entry) => String(entry.headBlob) === headBlobA)).toBe(false);
+
+      // Remove the marker on the next run. If src/a.ts had been stored under evidence-gate semantics,
+      // it would now replay as nonfresh and publish with zero verification calls. Instead only the
+      // genuinely clean sibling is a hit and the engine must produce this finding fresh again.
+      const secondClient = successfulClient([]);
+      const second = await performReview(
+        auditRequest(secondClient.client, first.updatedCacheStore),
+        createSilentDiagnostics(),
+      );
+
+      expect(second.outcome).toBe("complete");
+      expect(second.cacheHits).toBe(1);
+      expect(second.cacheMisses).toBe(1);
+      expect(second.publish).toMatchObject({ published: 1, suppressed: 0 });
+      expect(secondClient.created).toHaveLength(1);
+      expect(callCount()).toBeGreaterThan(0);
+      const secondInvocation = runEngineMock.mock.calls[1]?.[0] as {
+        mechanicallyCleanPaths: string[];
+      };
+      expect(secondInvocation.mechanicallyCleanPaths).toContain("src/b.ts");
+      expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/a.ts");
 
       const records = diagnostics.drain();
       expect(records.find((r) => r.code === "classify.audited")).toBeUndefined();
@@ -3185,7 +3328,61 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(spend?.counts).toStrictEqual({ engine: 100, classify: 111, total: 211 });
     });
 
-    it("never audits a cache-replayed finding, even when it survives the plan and publishes", async () => {
+    it("never rewrites or audits a claim whose truth judge still needs missing context", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const ORIGINAL = "`a` can corrupt the downstream index.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: ORIGINAL, category: "bug", severity: "medium" }],
+          2,
+          100,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      let truthCalls = 0;
+      let auditPrompt = "";
+      globalThis.fetch = ((_url: string, init?: { body?: string }) => {
+        const parsedBody = JSON.parse(init?.body ?? "{}") as {
+          messages?: { content?: string }[];
+        };
+        const prompt = parsedBody.messages?.[0]?.content ?? "";
+        let content: string;
+        if (prompt.includes("Verify the truth of one AI-generated")) {
+          truthCalls += 1;
+          content = JSON.stringify({
+            verdict: "needs_context",
+            reason_code: "missing_definition",
+            evidence_refs: ["H:1"],
+            lookup_terms: ["missingDefinition"],
+          });
+        } else {
+          if (prompt.includes("Audit the classification")) auditPrompt = prompt;
+          content = JSON.stringify({ category: "bug", severity: "medium" });
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              choices: [{ finish_reason: "stop", message: { content } }],
+              usage: { total_tokens: 10 },
+            }),
+            { status: 200 },
+          ),
+        );
+      }) as typeof fetch;
+      const { client, created } = successfulClient([]);
+
+      const report = await performReview(auditRequest(client), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({ published: 0 });
+      expect(truthCalls).toBe(1);
+      expect(auditPrompt).toBe("");
+      expect(created).toEqual([]);
+    });
+
+    it("re-verifies a cache-replayed finding without re-running its classification audit", async () => {
       const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
       const engineDigest = requireEngineDigest();
       const model = modelId(AUDIT_CONFIG.model);
@@ -3194,7 +3391,10 @@ describe("performReview: review-cache memoization end to end", () => {
       const head = blobId(headBlobA);
       const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
       const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
-      const BODY = "This cached finding replays without ever asking the classify endpoint again.";
+      const BODY = "This cached finding is regenerated never, but its truth is checked again.";
+      const baseB = blobId(git(["rev-parse", `${baseSha}:src/b.ts`]).trim());
+      const headB = blobId(git(["rev-parse", `${headSha}:src/b.ts`]).trim());
+      const keyB = computeKey(baseB, headB, ruleDigest, engineDigest, model, proto);
       const store: CacheStore = {
         schemaVersion: SUPPORTED_STORE_SCHEMA,
         entries: [
@@ -3219,15 +3419,22 @@ describe("performReview: review-cache memoization end to end", () => {
               },
             ],
           },
+          {
+            key: keyB,
+            baseBlob: baseB,
+            headBlob: headB,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
+            modelId: model,
+            protocol: proto,
+            findings: [],
+          },
         ],
       };
 
-      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      // src/a.ts is a hit and excluded; only src/b.ts is dispatched, with nothing fresh to report.
-      runEngineMock.mockResolvedValue({
-        stdout: findingsStdout([], 1, 50),
-        ruleDigest: engineDigest,
-      });
+      acquireEngineMock.mockRejectedValue(new Error("a fully memoized run must not acquire"));
 
       const { impl, callCount } = classifyFetchMock({});
       globalThis.fetch = impl;
@@ -3237,15 +3444,234 @@ describe("performReview: review-cache memoization end to end", () => {
       const report = await performReview(auditRequest(client, store), diagnostics);
 
       expect(report.outcome).toBe("complete");
-      expect(report.cacheHits).toBe(1);
+      expect(report.cacheHits).toBe(2);
+      expect(acquireEngineMock).not.toHaveBeenCalled();
+      expect(runEngineMock).not.toHaveBeenCalled();
       // The replayed finding still goes through sanitization and dedup and publishes normally...
       expect(report.publish).toMatchObject({ published: 1, suppressed: 0 });
       expect(created).toHaveLength(1);
-      // ...but it was never a candidate for the audit — `freshEngineFindings` never contains it.
-      expect(callCount()).toBe(0);
+      // Truth and falsifier both run again. Classification does not: the stored finding already
+      // carries the audited category/severity from the generation run.
+      expect(callCount()).toBe(2);
+      expect(
+        diagnostics.drain().find((record) => record.code === "classify.audited"),
+      ).toBeUndefined();
     });
 
-    it("skips the audit under a near-exhausted allotment, still publishes with pre-audit classification, and records classify.skipped_budget", async () => {
+    it("refutes and evicts a replayed finding, so the next run regenerates that path", async () => {
+      const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+      const engineDigest = requireEngineDigest();
+      const model = modelId(AUDIT_CONFIG.model);
+      const proto = protocol(AUDIT_CONFIG.protocol);
+      const base = blobId(baseBlobA);
+      const head = blobId(headBlobA);
+      const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+      const BODY = "This cached claim ignores an external guard that now rejects the input.";
+      const baseB = blobId(git(["rev-parse", `${baseSha}:src/b.ts`]).trim());
+      const headB = blobId(git(["rev-parse", `${headSha}:src/b.ts`]).trim());
+      const keyB = computeKey(baseB, headB, ruleDigest, engineDigest, model, proto);
+      const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+      const store: CacheStore = {
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
+        entries: [
+          {
+            key,
+            baseBlob: base,
+            headBlob: head,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
+            modelId: model,
+            protocol: proto,
+            findings: [
+              {
+                path: repoPath("src/a.ts"),
+                content: BODY,
+                startLine: 1,
+                endLine: 1,
+                severity: "medium",
+                category: "bug",
+              },
+            ],
+          },
+          {
+            key: keyB,
+            baseBlob: baseB,
+            headBlob: headB,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
+            modelId: model,
+            protocol: proto,
+            findings: [],
+          },
+        ],
+      };
+
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValueOnce({
+        stdout: findingsStdout([], 1, 50),
+        ruleDigest: engineDigest,
+      });
+      const { impl, callCount } = classifyFetchMock({ judgeVerdict: "unsupported" });
+      globalThis.fetch = impl;
+
+      const first = await performReview(
+        auditRequest(successfulClient([]).client, store),
+        createSilentDiagnostics(),
+      );
+
+      expect(first.outcome).toBe("complete");
+      expect(first.cacheHits).toBe(2);
+      expect(acquireEngineMock).not.toHaveBeenCalled();
+      expect(runEngineMock).not.toHaveBeenCalled();
+      expect(first.publish).toMatchObject({ published: 0 });
+      expect(callCount()).toBe(1);
+      expect(first.updatedCacheStore?.entries.some((entry) => entry.key === key)).toBe(false);
+      if (first.updatedCacheStore === undefined)
+        throw new Error("expected cache eviction write-back");
+
+      const second = await performReview(
+        auditRequest(successfulClient([]).client, first.updatedCacheStore),
+        createSilentDiagnostics(),
+      );
+
+      expect(second.outcome).toBe("complete");
+      expect(second.cacheHits).toBe(1);
+      expect(second.cacheMisses).toBe(1);
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
+      const secondInvocation = runEngineMock.mock.calls[0]?.[0] as {
+        mechanicallyCleanPaths: string[];
+      };
+      expect(secondInvocation.mechanicallyCleanPaths).toContain("src/b.ts");
+      expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/a.ts");
+      // The stale prose never reappears from the store; the second run has no model claim to verify.
+      expect(callCount()).toBe(1);
+    });
+
+    it("evicts a ranked-out cache hit and keeps a path with a ranked-out fresh finding uncached", async () => {
+      const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+      const engineDigest = requireEngineDigest();
+      const model = modelId(AUDIT_CONFIG.model);
+      const proto = protocol(AUDIT_CONFIG.protocol);
+      const base = blobId(baseBlobA);
+      const head = blobId(headBlobA);
+      const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+      const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+      const CACHED_BODY =
+        "`cachedLease` skips its expiry check, so stale holders retain the resource.";
+      const store: CacheStore = {
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
+        entries: [
+          {
+            key,
+            baseBlob: base,
+            headBlob: head,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
+            modelId: model,
+            protocol: proto,
+            findings: [
+              {
+                path: repoPath("src/a.ts"),
+                content: CACHED_BODY,
+                startLine: 1,
+                endLine: 1,
+                severity: "low",
+                category: "bug",
+              },
+            ],
+          },
+        ],
+      };
+      const freshBodies = [
+        "`alphaCursor` ignores its boundary, so pagination repeats the final invoice forever.",
+        "`bravoNonce` reuses the seed, so encrypted sessions receive identical keystreams.",
+        "`charlieQuota` omits tenant ownership, so one account consumes another account's limit.",
+        "`deltaLatch` misses the release branch, so shutdown waits indefinitely for the worker.",
+        "`echoLedger` rounds before aggregation, so monthly balances lose fractional payments.",
+        "`foxtrotParser` accepts the empty header, so malformed packets reach the dispatcher.",
+        "`golfSnapshot` stores the mutable reference, so later edits corrupt the saved revision.",
+        "`hotelRouter` drops the locale prefix, so translated links resolve to missing pages.",
+        "`indiaWriter` acknowledges before flushing, so a crash loses confirmed audit records.",
+      ];
+
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // src/a.ts is the nonfresh cache hit. The engine reviews only src/b.ts and emits nine fresh,
+      // independently worded findings so the intra-run deduplicator correctly leaves all nine for
+      // the PR-wide selector.
+      const rankedStdout = (filesReviewed: number): string =>
+        findingsStdout(
+          freshBodies.map((content) => ({
+            path: "src/b.ts",
+            content,
+            category: "bug",
+            severity: "medium",
+          })),
+          filesReviewed,
+          100,
+        );
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: rankedStdout(1), ruleDigest: engineDigest })
+        .mockResolvedValueOnce({ stdout: rankedStdout(2), ruleDigest: engineDigest });
+
+      const { impl } = classifyFetchMock({
+        auditPair: { category: "bug", severity: "medium" },
+      });
+      globalThis.fetch = impl;
+      const firstClient = successfulClient([]);
+
+      const first = await performReview(
+        auditRequest(firstClient.client, store),
+        createSilentDiagnostics(),
+      );
+
+      expect(first.outcome).toBe("complete");
+      expect(first.publish).toMatchObject({
+        published: 8,
+        suppressed: 2,
+        suppressedRanked: 2,
+      });
+      // Cached and fresh model claims share the same eight-slot cohort. The lower-severity cached
+      // claim loses the rank decision and is removed from the store, not touched back into it.
+      expect(firstClient.created.filter((comment) => comment.path === "src/a.ts")).toHaveLength(0);
+      expect(firstClient.created.filter((comment) => comment.path === "src/b.ts")).toHaveLength(8);
+
+      const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+      const bEntry = first.updatedCacheStore?.entries.find(
+        (entry) => String(entry.headBlob) === headBlobB,
+      );
+      // A partial eight-of-nine entry would turn a PR-global rank decision into a durable per-file
+      // verdict. Both unsafe paths are absent: b is not admitted and a's stale hit is evicted.
+      expect(bEntry).toBeUndefined();
+      expect(first.updatedCacheStore?.entries).toHaveLength(0);
+
+      const callsAfterFirst = runEngineMock.mock.calls.length;
+      const secondClient = successfulClient([]);
+      const second = await performReview(
+        auditRequest(secondClient.client, first.updatedCacheStore),
+        createSilentDiagnostics(),
+      );
+
+      expect(callsAfterFirst).toBe(1);
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      expect(second.cacheHits).toBe(0);
+      expect(second.cacheMisses).toBe(2);
+      const secondInvocation = runEngineMock.mock.calls[1]?.[0] as {
+        mechanicallyCleanPaths: string[];
+      };
+      expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/a.ts");
+      expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/b.ts");
+      expect(
+        second.updatedCacheStore?.entries.some((entry) => String(entry.headBlob) === headBlobB),
+      ).toBe(false);
+    });
+
+    it("fails closed when the remaining budget cannot finish verification and never audits or caches the finding", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       const BODY =
@@ -3265,25 +3691,125 @@ describe("performReview: review-cache memoization end to end", () => {
       });
       globalThis.fetch = impl;
       const { client, created } = successfulClient([]);
-      // tokenBudget below the formula's own floor: `computeAllottedBudget` returns exactly this
-      // value (`Math.min(tokenBudget, clamped)`), so the allotment is deterministic at 50_000.
-      const request = { ...auditRequest(client), config: { ...AUDIT_CONFIG, tokenBudget: 50_000 } };
+      // The mocked engine overshoots into the quality reserve, leaving only 1k. That cannot fund
+      // even the verifier's bounded first request, so the candidate must be withheld rather than
+      // published under its unchecked engine classification.
+      const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+      const request = {
+        ...auditRequest(client, empty),
+        config: { ...AUDIT_CONFIG, tokenBudget: 50_000 },
+      };
 
       const diagnostics = createSilentDiagnostics();
       const report = await performReview(request, diagnostics);
 
-      expect(report.outcome).toBe("complete");
-      expect(created).toHaveLength(1);
-      // Published under the classification the engine reported ("bug"), never the "security" the
-      // (unreached) audit mock was configured to answer with — "CORRECTNESS" is "bug"'s rendered
-      // text-grammar label in `composeFindingBody`'s CATEGORIES table (`publish/presentation.ts`).
-      expect(created[0]?.body).toContain("CORRECTNESS");
+      expect(report.outcome).toBe("incomplete");
+      expect(report.reason).toBe("settlement.incomplete.publication_degraded");
+      expect(report.publish).toMatchObject({
+        published: 0,
+        suppressedEvidence: 1,
+        verificationUndecided: 1,
+      });
+      // The path-anchored incomplete notice may be present, but the unverified finding may not.
+      expect(created.some((comment) => comment.body.includes(BODY))).toBe(false);
+      expect(report.cacheAppended).toBe(0);
+      expect(report.updatedCacheStore).toBeUndefined();
       expect(callCount()).toBe(0);
 
-      const skip = diagnostics.drain().find((r) => r.code === "classify.skipped_budget");
-      // tokenBudget(50_000) - engine(49_000) - classify(0) = 1_000, below the 2_000 reserve for
-      // the one fresh survivor.
-      expect(skip?.counts).toStrictEqual({ skipped: 1, remaining: 1_000 });
+      const records = diagnostics.drain();
+      expect(records.find((r) => r.code === "classify.audited")).toBeUndefined();
+      const substantiated = records.find((r) => r.code === "publish.substantiated");
+      expect(substantiated?.counts).toMatchObject({ undecided: 1, budget_blocked: 1 });
+    });
+
+    it("hard-blocks an audit request that exceeds the exact whole-review remainder without reclassifying", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY =
+        "When the cache is empty, this fallback returns stale state instead of loading a value.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
+          2,
+          100,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      const { impl, callCount } = classifyFetchMock({
+        auditPair: { category: "security", severity: "critical" },
+        tokensPerCall: 10,
+      });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+      // Enough for truth + consequence (their actual spend is 20), and above the audit's old 2k
+      // heuristic reserve, but below the audit prompt's conservative hard upper bound.
+      const request = {
+        ...auditRequest(client),
+        config: { ...AUDIT_CONFIG, tokenBudget: 8_000 },
+      };
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(request, diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(created).toHaveLength(1);
+      expect(created[0]?.body).toContain("`CORRECTNESS · MINOR`");
+      expect(created[0]?.body).not.toContain("`SECURITY");
+      expect(callCount()).toBe(2);
+
+      const records = diagnostics.drain();
+      const audited = records.find((record) => record.code === "classify.audited");
+      expect(audited?.counts).toStrictEqual({ changed: 0, budget_blocked: 1, tokens: 0 });
+      const spend = records.find((record) => record.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 20, total: 120 });
+      expect((spend?.counts?.total ?? 0) <= request.config.tokenBudget).toBe(true);
+    });
+
+    it("withholds a repair-budget-blocked finding when evidence cannot fit either", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY =
+        "When the cache is empty, this fallback returns stale state instead of loading a value.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout([{ path: "src/a.ts", content: BODY }], 2, 3_000),
+        ruleDigest: engineDigest,
+      });
+
+      const { impl, callCount } = classifyFetchMock({
+        repairPair: { category: "security", severity: "critical" },
+        tokensPerCall: 10,
+      });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+      const request = {
+        ...auditRequest(client),
+        config: { ...AUDIT_CONFIG, tokenBudget: 8_000 },
+      };
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(request, diagnostics);
+
+      // Neither classification repair nor the larger evidence request fits. The pipeline invents
+      // no classification, publishes no unverified claim, and reports incomplete instead of clean.
+      expect(report.outcome).toBe("incomplete");
+      expect(created.some((comment) => comment.body.includes(BODY))).toBe(false);
+      expect(report.cacheAppended).toBe(0);
+      expect(callCount()).toBe(0);
+
+      const records = diagnostics.drain();
+      const repaired = records.find((record) => record.code === "classify.repaired");
+      expect(repaired?.counts).toStrictEqual({
+        repaired: 0,
+        failed: 1,
+        budget_blocked: 1,
+        tokens: 0,
+      });
+      const substantiated = records.find((record) => record.code === "publish.substantiated");
+      expect(substantiated?.counts).toMatchObject({ undecided: 1, budget_blocked: 1 });
+      const spend = records.find((record) => record.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 3_000, classify: 0, total: 3_000 });
+      expect((spend?.counts?.total ?? 0) <= request.config.tokenBudget).toBe(true);
     });
 
     it("still audits when the engine overshoots its allotment but the consumer ceiling has room", async () => {
@@ -3365,7 +3891,7 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(callCount()).toBe(4);
     });
 
-    it("stores the audited category for a published finding and the raw category for a plan-suppressed one", async () => {
+    it("stores the audited path but no entry for a plan-suppressed fresh path", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
 
@@ -3419,9 +3945,10 @@ describe("performReview: review-cache memoization end to end", () => {
       // Published under its audited category — the reader saw "maintainability", so that is what
       // must be replayed on a future cache hit.
       expect(aEntry?.findings[0]?.category).toBe("maintainability");
-      // Never audited (plan-suppressed before it could be): the store keeps its raw, as-emitted
-      // category, matching what the ALREADY-published twin it was compared against actually carries.
-      expect(bEntry?.findings[0]?.category).toBe("security");
+      // Never audited because the existing marker suppressed it before the evidence gate. That is
+      // not a publication-quality per-file verdict, so neither a raw finding nor an empty entry may
+      // claim this path was verified under the current cache semantics.
+      expect(bEntry).toBeUndefined();
 
       // run.spend: engine(100) + repair(1 call) + audit(2 calls), all at the mock's default 10
       // tokens/call — proof the total now covers audit spend incurred during publication, not just
@@ -3478,6 +4005,120 @@ describe("performReview: review-cache memoization end to end", () => {
       // bounded side-calls on the same endpoint, and the ledger has one line for them. What the
       // judge itself cost stays separately visible in the `publish.substantiated` diagnostic.
       expect(spend?.counts).toStrictEqual({ engine: 130, classify: 30, total: 160 });
+    });
+
+    it("publishes on gpt-oss when the judge cites visible full-file and symbol evidence", async () => {
+      const contextBase = git(["rev-parse", "HEAD"]).trim();
+      const contextLines = [
+        "export const dispatchEnabled = true;",
+        ...Array.from(
+          { length: 78 },
+          (_value, index) => `const filler${String(index + 2)} = ${String(index + 2)};`,
+        ),
+        "export function distantGuard(): boolean { return dispatchEnabled; }",
+      ];
+      await writeFile(join(repo, "src/context.ts"), `${contextLines.join("\n")}\n`);
+      git(["add", "src/context.ts"]);
+      git(["commit", "-q", "-m", "evidence-context", "--no-gpg-sign"]);
+      const contextHead = git(["rev-parse", "HEAD"]).trim();
+
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY = "When `dispatchEnabled` is false, `distantGuard` still lets the dispatcher run.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/context.ts", content: BODY, category: "bug", severity: "medium" }],
+          1,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      let judgePrompt = "";
+      const { impl } = classifyFetchMock({
+        auditPair: { category: "bug", severity: "medium" },
+        judgeEvidenceRef: "H:1",
+        judgeChangeRef: "D:H:1",
+        judgeAdditionalRefs: ["H:80"],
+        onJudgePrompt: (prompt) => {
+          judgePrompt = prompt;
+        },
+      });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([], contextHead);
+      const request = {
+        ...auditRequest(client),
+        base: commitSha(contextBase),
+        head: commitSha(contextHead),
+        config: { ...AUDIT_CONFIG, model: "gpt-oss-120b" },
+      };
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({ published: 1, suppressed: 0 });
+      expect(created.some((comment) => comment.body.includes(BODY))).toBe(true);
+      // This small file travels whole: the anchor, an unrelated middle line, and the distant cited
+      // symbol are all visible. Line 80 is therefore a real evidence citation, not model metadata.
+      expect(judgePrompt).toContain("1| export const dispatchEnabled = true;");
+      expect(judgePrompt).toContain("40| const filler40 = 40;");
+      expect(judgePrompt).toContain(
+        "80| export function distantGuard(): boolean { return dispatchEnabled; }",
+      );
+    });
+
+    it("fails closed without a cache write when evidence is invented or the verifier transport fails", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY =
+        "When `a` is negative, the assignment accepts it and corrupts the downstream index.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
+          2,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      for (const failure of ["invented-line", "transport"] as const) {
+        const { impl } = classifyFetchMock({
+          auditPair: { category: "bug", severity: "medium" },
+          ...(failure === "invented-line"
+            ? { judgeEvidenceRef: "H:999" }
+            : { judgeTransportFailure: true }),
+        });
+        globalThis.fetch = impl;
+        const { client, created } = successfulClient([]);
+        const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+        const diagnostics = createSilentDiagnostics();
+
+        const report = await performReview(
+          {
+            ...auditRequest(client, empty),
+            config: { ...AUDIT_CONFIG, model: "gpt-oss-120b" },
+          },
+          diagnostics,
+        );
+
+        expect(report.outcome, failure).toBe("incomplete");
+        expect(report.reason, failure).toBe("settlement.incomplete.publication_degraded");
+        expect(report.publish, failure).toMatchObject({
+          published: 0,
+          suppressed: 1,
+          suppressedEvidence: 1,
+          verificationUndecided: 1,
+        });
+        // `created` may contain the honest incomplete notice, but never the unverified finding.
+        expect(
+          created.some((comment) => comment.body.includes(BODY)),
+          failure,
+        ).toBe(false);
+        expect(report.cacheAppended, failure).toBe(0);
+        expect(report.updatedCacheStore, failure).toBeUndefined();
+        const substantiated = diagnostics
+          .drain()
+          .find((record) => record.code === "publish.substantiated");
+        expect(substantiated?.counts?.undecided, failure).toBe(1);
+      }
     });
   });
 

@@ -29,6 +29,14 @@ candidate-provided script, hook, action, package manager, or repository command 
 invoked with a constructed environment and neutralized global and system configuration, because a
 config file can define aliases and hook paths that turn a read into an execution.
 
+**Structural retrieval keeps that boundary.** Follow-up lookup uses `git grep` against the exact
+HEAD first. If its sightings are structurally ambiguous, a fixed ast-grep release receives at most
+four bounded HEAD blobs through stdin — never candidate paths, a checkout, or repository
+configuration. Both the release archive and extracted executable are SHA-256 pinned on every
+supported platform; ZIP paths, sizes and CRCs are checked before verified bytes become executable.
+Malformed output, timeout, unsupported platform, or any acquisition mismatch fails the requested
+lookup closed and leaves the affected review incomplete.
+
 **Prompt injection is expected, not prevented.** The rule text tells the model that file content is
 data and never an instruction, but that is mitigation, not a guarantee. The real containment is
 downstream: everything the model produces passes strict schema validation, path re-validation, and

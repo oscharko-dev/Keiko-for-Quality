@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { RuntimeConfig } from "../config/runtime.js";
 import { repoPath, type Sha256 } from "../core/brands.js";
 import type { EngineFinding } from "../engine/result.js";
@@ -94,10 +96,31 @@ function pathSetToken(item: InventoryItem): string {
  * schema bump (`SUPPORTED_STORE_SCHEMA` is unchanged). The store self-heals forward from there:
  * every entry written from this run on carries the new digest, and replay against those is sound
  * again immediately.
+ *
+ * `renderedChangeIntent` is the exact bounded, framed PR-purpose block the model receives.
+ * `guidelineContextIdentity` binds configured guideline contents read from the exact merge base.
+ * Their digests join the path tokens so identical code reviewed for a materially different purpose
+ * or repository rule cannot reuse the earlier generation verdict. Empty values keep the historical
+ * path-only identity for local reviews with neither contribution.
  */
-export function computePrPathSetDigest(inventory: Inventory): Sha256 {
+export function computePrPathSetDigest(
+  inventory: Inventory,
+  renderedChangeIntent = "",
+  guidelineContextIdentity = "",
+): Sha256 {
   const reviewable = inventory.items.filter((item) => item.reviewable);
-  return computePathSetDigest(reviewable.map(pathSetToken));
+  const tokens = reviewable.map(pathSetToken);
+  if (renderedChangeIntent !== "") {
+    const intentDigest = createHash("sha256").update(renderedChangeIntent, "utf8").digest("hex");
+    tokens.push(`@change-intent:${intentDigest}`);
+  }
+  if (guidelineContextIdentity !== "") {
+    const guidelineDigest = createHash("sha256")
+      .update(guidelineContextIdentity, "utf8")
+      .digest("hex");
+    tokens.push(`@guideline-context:${guidelineDigest}`);
+  }
+  return computePathSetDigest(tokens);
 }
 
 export interface MemoLookupResult {
@@ -144,7 +167,13 @@ function contextMatches(
   pathSetDigest: Sha256,
   contextDigests: ReadonlyMap<string, Sha256> | undefined,
 ): boolean {
-  return entry.prPathSetDigest === (contextDigests?.get(path) ?? pathSetDigest);
+  // A positive entry is a reusable hypothesis: its current-run Truth/Falsifier can overturn it, so
+  // single-shot's narrow companion/context-pack identity is enough to reuse generation. An empty
+  // entry has no hypothesis to verify. Bind that negative verdict to the whole changed-path shape
+  // instead, so a new/deleted/renamed reviewable caller or configuration path forces generation
+  // rather than replaying an unverifiable stale clean result.
+  const expected = entry.findings.length === 0 ? pathSetDigest : contextDigests?.get(path);
+  return entry.prPathSetDigest === (expected ?? pathSetDigest);
 }
 
 export function lookupMemoized(
@@ -212,8 +241,9 @@ export function combinedExcludes(
  * Merges cache-hit findings into the findings the engine itself produced this run.
  *
  * A hit's findings are exactly as untrusted on replay as they were the run they were first
- * produced: they still pass through the existing publisher path — sanitization and marker-based
- * deduplication run again — so nothing here treats a cached finding as pre-cleared for publication.
+ * produced: they still pass through the current truth/falsifier, sanitization, PR-wide ranking,
+ * and marker-based deduplication, so nothing here treats a cached finding as pre-cleared for
+ * publication. The cache saves generation only.
  *
  * Every replayed finding's `path` is remapped to the LOOKUP key — the current path `hits` is keyed
  * by (see `lookupMemoized`) — rather than trusted from the stored entry itself. This is required,
@@ -251,8 +281,8 @@ export interface NewEntryInputs {
    */
   readonly pathSetDigest: Sha256;
   /** Same per-path override as `lookupMemoized`'s parameter of this name, and it must be the SAME
-   *  map the lookup used: an entry written under one context definition and read under another
-   *  would never match itself. */
+   *  map the lookup used. Applied only to positive hypotheses; negative entries retain the whole-
+   *  path-set stamp because they have no finding the current verifier could revalidate. */
   readonly contextDigests?: ReadonlyMap<string, Sha256>;
   readonly config: RuntimeConfig;
 }
@@ -266,6 +296,16 @@ function findingsByPath(findings: readonly EngineFinding[]): ReadonlyMap<string,
     else existing.push(finding);
   }
   return byPath;
+}
+
+/** Negative verdicts need the whole-PR stamp because there is no hypothesis to reverify. */
+function cacheContextDigest(
+  inputs: NewEntryInputs,
+  path: string,
+  pathFindings: readonly EngineFinding[],
+): Sha256 {
+  if (pathFindings.length === 0) return inputs.pathSetDigest;
+  return inputs.contextDigests?.get(path) ?? inputs.pathSetDigest;
 }
 
 /**
@@ -300,20 +340,23 @@ export function buildNewEntries(inputs: NewEntryInputs): CacheEntry[] {
       model,
       proto,
     );
+    const pathFindings = byPath.get(path) ?? [];
     entries.push({
       key,
       baseBlob: item.baseBlob,
       headBlob: item.headBlob,
       ruleDigest: inputs.ruleDigest,
       engineDigest: inputs.engineDigest,
-      prPathSetDigest: inputs.contextDigests?.get(path) ?? inputs.pathSetDigest,
+      // Positive hypotheses can be reverified against current repository context on replay. An
+      // empty result cannot, so it deliberately keeps the conservative whole-PR path-set stamp.
+      prPathSetDigest: cacheContextDigest(inputs, path, pathFindings),
       // Stamped from the constant rather than passed in: only this build knows which publication
       // contract produced these findings, and an entry that lied about it would be replayed by a
       // build whose sanitizer disagrees with the body it stored.
       semantics: PUBLICATION_SEMANTICS,
       modelId: model,
       protocol: proto,
-      findings: byPath.get(path) ?? [],
+      findings: pathFindings,
     });
   }
   return entries;

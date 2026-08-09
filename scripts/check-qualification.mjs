@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 
 import { CASES } from "../corpus/cases.mjs";
 import { cliPathArgument } from "./cli-args.mjs";
+import {
+  QUALIFICATION_EVIDENCE_ARTIFACT,
+  validateQualificationEvidence,
+} from "./qualification-evidence-lib.mjs";
 
 /**
  * Applies the promotion thresholds to a corpus report.
@@ -34,6 +38,14 @@ const reportPath = cliPathArgument(process.argv[2], {
 });
 
 const report = JSON.parse(readFileSync(reportPath, "utf8"));
+const isRedactedEvidence = report?.artifact === QUALIFICATION_EVIDENCE_ARTIFACT;
+if (isRedactedEvidence) {
+  const schema = validateQualificationEvidence(report);
+  if (!schema.valid) {
+    console.error(`FAIL qualification evidence schema: ${schema.failures.join(", ")}`);
+    process.exit(1);
+  }
+}
 const byId = new Map((report.results ?? []).map((r) => [r.id, r]));
 
 /**
@@ -52,7 +64,14 @@ function score(predicate) {
 }
 
 const isSevere = (c) => c.defect !== null && ["critical", "high"].includes(c.defect.severity);
-const publishedCleanly = (c) => (byId.get(c.id)?.rejected ?? [{}]).length === 0;
+function rejectionCount(result) {
+  if (Number.isSafeInteger(result?.rejectedCount) && result.rejectedCount >= 0) {
+    return result.rejectedCount;
+  }
+  return Array.isArray(result?.rejected) ? result.rejected.length : 1;
+}
+
+const publishedCleanly = (c) => rejectionCount(byId.get(c.id)) === 0;
 
 const measured = {
   severeRecall: score(isSevere),
@@ -86,7 +105,10 @@ for (const testCase of CASES) {
   if (result === undefined) {
     console.log(`     absent:    ${testCase.id} — no result in the report`);
   } else if (result.pass !== true) {
-    console.log(`     regressed: ${testCase.id} — ${String(result.detail)}`);
+    const detail = isRedactedEvidence
+      ? "private diagnostic detail omitted from release evidence"
+      : String(result.detail);
+    console.log(`     regressed: ${testCase.id} — ${detail}`);
   }
 }
 

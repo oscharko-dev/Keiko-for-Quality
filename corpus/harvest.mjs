@@ -123,7 +123,11 @@ function harvestOne(number) {
       );
     }
   }
-  const { threads, truncatedThreadCount } = fetchPullRequestReviewThreads(owner, name, number);
+  const { baseSha, threads, truncatedThreadCount } = fetchPullRequestReviewThreads(
+    owner,
+    name,
+    number,
+  );
   // A thread whose replies did not fit one 50-comment page is a conversation we did not read
   // whole, and the missing reply is exactly what decides a disposition. Refused, not graded.
   if (truncatedThreadCount > 0) {
@@ -167,7 +171,13 @@ function harvestOne(number) {
   const recallGaps = withCommits
     ? findRecallGaps(clusterAcrossBots(representatives), actedUpon)
     : undefined;
-  return { number, commits, records, ...(recallGaps === undefined ? {} : { recallGaps }) };
+  return {
+    number,
+    baseSha,
+    commits,
+    records,
+    ...(recallGaps === undefined ? {} : { recallGaps }),
+  };
 }
 
 const prs = [];

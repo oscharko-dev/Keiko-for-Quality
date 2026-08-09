@@ -392,6 +392,23 @@ describe("lookupMemoized: changed-path-set digest (v0.10.0, issue #50)", () => {
 });
 
 describe("computePrPathSetDigest", () => {
+  it("changes when the rendered pull-request purpose changes", () => {
+    const inventory = inventoryOf([rawChange({ path: "src/a.ts" })]);
+    const first = computePrPathSetDigest(inventory, "bounded purpose one");
+    expect(computePrPathSetDigest(inventory, "bounded purpose one")).toBe(first);
+    expect(computePrPathSetDigest(inventory, "bounded purpose two")).not.toBe(first);
+    expect(computePrPathSetDigest(inventory)).not.toBe(first);
+  });
+
+  it("changes when configured merge-base guideline contents change", () => {
+    const inventory = inventoryOf([rawChange({ path: "src/a.ts" })]);
+    const first = computePrPathSetDigest(inventory, "", "guideline-content-v1");
+
+    expect(computePrPathSetDigest(inventory, "", "guideline-content-v1")).toBe(first);
+    expect(computePrPathSetDigest(inventory, "", "guideline-content-v2")).not.toBe(first);
+    expect(computePrPathSetDigest(inventory)).not.toBe(first);
+  });
+
   it("is stable for the same inventory regardless of the order its items were built in", () => {
     const a = rawChange({ path: "src/a.ts" });
     const b = rawChange({ path: "src/b.ts" });
@@ -676,7 +693,7 @@ describe("buildNewEntries", () => {
 });
 
 describe("per-path context digests (single-shot, v0.20.1)", () => {
-  it("replays on a matching per-path digest where the whole-set scalar moved, and refuses a moved group", () => {
+  it("reuses positive hypotheses on matching per-path context and refuses a moved group", () => {
     const changeA = rawChange({ path: "src/a.ts" });
     const changeB = rawChange({
       path: "src/b.ts",
@@ -688,11 +705,20 @@ describe("per-path context digests (single-shot, v0.20.1)", () => {
       ["src/a.ts", sha256("c".repeat(64))],
       ["src/b.ts", sha256("d".repeat(64))],
     ]);
+    const findingForA: EngineFinding = {
+      path: repoPath("src/a.ts"),
+      content: "The unchecked value reaches an unsafe sink.",
+      startLine: 1,
+      endLine: 1,
+      severity: "high",
+      category: "bug",
+    };
+    const findingForB: EngineFinding = { ...findingForA, path: repoPath("src/b.ts") };
     const written = buildNewEntries({
       inventory,
       eligiblePaths: new Set(["src/a.ts", "src/b.ts"]),
       hitPaths: new Set(),
-      findings: [],
+      findings: [findingForA, findingForB],
       ruleDigest: RULE_DIGEST,
       engineDigest: ENGINE_DIGEST,
       pathSetDigest: PATH_SET_DIGEST,
@@ -733,5 +759,38 @@ describe("per-path context digests (single-shot, v0.20.1)", () => {
     );
     expect([...partial.hits.keys()]).toEqual(["src/a.ts"]);
     expect(partial.contextInvalidated).toBe(1);
+  });
+
+  it("binds an empty verdict to the whole path set because no finding exists to reverify", () => {
+    const change = rawChange({ path: "src/a.ts" });
+    const inventory = inventoryOf([change]);
+    const narrow = sha256("c".repeat(64));
+    const digests = new Map<string, Sha256>([["src/a.ts", narrow]]);
+    const written = buildNewEntries({
+      inventory,
+      eligiblePaths: new Set(["src/a.ts"]),
+      hitPaths: new Set(),
+      findings: [],
+      ruleDigest: RULE_DIGEST,
+      engineDigest: ENGINE_DIGEST,
+      pathSetDigest: PATH_SET_DIGEST,
+      contextDigests: digests,
+      config: CONFIG,
+    });
+
+    expect(written[0]?.prPathSetDigest).toBe(PATH_SET_DIGEST);
+    const store: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: written };
+    const widened = lookupMemoized(
+      store,
+      inventory,
+      RULE_DIGEST,
+      ENGINE_DIGEST,
+      CONFIG,
+      sha256("8".repeat(64)),
+      digests,
+    );
+
+    expect(widened.hits.size).toBe(0);
+    expect(widened.contextInvalidated).toBe(1);
   });
 });
