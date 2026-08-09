@@ -32,7 +32,7 @@
     "build": "node scripts/build.mjs",
     "check:bundle": "node scripts/check-bundle.mjs",
     "review": "node --import ./scripts/register-ts-hooks.mjs --experimental-strip-types src/cli.ts",
-    "verify": "npm run typecheck && npm run typecheck:widget && npm run lint && npm run format:check && npm test && npm run test:corpus && npm run test:widget && npm run build && npm run check:bundle",
+    "verify": "npm run typecheck && npm run typecheck:widget && npm run lint && npm run format:check && npm test && npm run test:corpus && npm run test:widget && npm run test:scripts && npm run build && npm run check:bundle",
     "check:engine-pin": "node scripts/check-engine-pin.mjs",
     "corpus": "node corpus/run.mjs",
     "fetch:engine": "node scripts/fetch-engine.mjs",
@@ -45,7 +45,10 @@
     "live:telemetry": "node corpus/live-telemetry.mjs",
     "typecheck:widget": "tsc -p widget/tsconfig.json",
     "test:widget": "node --import ./widget/test/ts-hooks.mjs --test widget/test/*.test.mjs",
-    "corpus:precision": "node corpus/precision-gate.mjs"
+    "corpus:precision": "node corpus/precision-gate.mjs",
+    "test:scripts": "node --test scripts/*.test.mjs",
+    "release": "node scripts/release.mjs",
+    "release:check": "node scripts/release.mjs check"
   },
   "devDependencies": {
     "@eslint/js": "9.39.1",
