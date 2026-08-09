@@ -70,6 +70,24 @@ describe("changedNewFileLines", () => {
   it("finds nothing in a fragment with no hunk header", () => {
     expect([...changedNewFileLines("--- a/x\n+++ b/x\n")]).toEqual([]);
   });
+
+  /**
+   * `\ No newline at end of file` annotates the line above it and occupies no line of its own.
+   * Before this it fell through the walker's chain, leaving the counter un-advanced — so every
+   * marker and every anchor after it in that file shifted by one.
+   */
+  it("does not let a no-newline marker shift every line after it", () => {
+    const diff = [
+      "@@ -1,3 +1,3 @@",
+      " a",
+      "-old tail",
+      "\\ No newline at end of file",
+      "+new tail",
+      " b",
+    ].join("\n");
+    // 'a' is 1; the removal takes no new line; 'new tail' is 2; 'b' is 3.
+    expect([...changedNewFileLines(diff)]).toEqual([2]);
+  });
 });
 
 describe("deletedLineHints", () => {
@@ -159,6 +177,20 @@ describe("fitsWholeFile — what a change has to earn", () => {
 
   it("accepts the same file when the change is substantial", () => {
     expect(fitsWholeFile(big, "d".repeat(6_000))).toBe(true);
+  });
+
+  /**
+   * The raw-size gate is an estimate of the block; this is the block. Numbering adds six or more
+   * characters per line, so a file of very short lines passes the raw ceiling and renders far past
+   * it — and one deleted minified line carries an arbitrary payload that `MAX_DELETED_HINTS` does
+   * not bound, since that limits the COUNT of hints and not their length.
+   */
+  it("falls back when the RENDERED block outgrows the ceiling, not just the raw file", () => {
+    // 30,000 two-character lines: 60,000 raw characters, under the ceiling, but each renders to
+    // roughly eight, so the block lands far above it.
+    const shortLines = "x\n".repeat(30_000);
+    expect(fitsWholeFile(shortLines, "d".repeat(30_000))).toBe(true);
+    expect(buildWholeFileBlock(shortLines, "@@ -1,1 +1,1 @@\n+x")).toBeUndefined();
   });
 
   it("accepts a small file however small its change — the floor overrides the ratio", () => {

@@ -141,6 +141,11 @@ function walkHunks(
       // A removed line occupies no new-file number, so the counter does not advance — it names the
       // line the deletion happened AT, which is what anchors the hint below.
       visit("removed", newLine, line.slice(1));
+    } else if (line.startsWith("\\")) {
+      // `\ No newline at end of file` annotates the line ABOVE it and occupies no line of its own.
+      // Falling through the chain left `newLine` un-advanced for everything after it, which is not
+      // a cosmetic slip: every subsequent marker and every anchor in that file shifts by one.
+      continue;
     } else if (line.startsWith(" ") || line === "") {
       visit("context", newLine, line.slice(1));
       newLine += 1;
@@ -166,6 +171,20 @@ export function deletedLineHints(fileDiff: string): readonly string[] {
 
 /** How many hint lines travel with one file — enough to carry a deleted guard, not a whole rewrite. */
 const MAX_DELETED_HINTS = 60;
+
+/**
+ * The ceiling on the assembled block, checked on what is actually sent.
+ *
+ * `fitsWholeFile` measures the RAW file, and the rendering adds a number and a marker to every line
+ * — six or more characters each, so a 79,000-character file of short lines can render past 100,000.
+ * `MAX_DELETED_HINTS` bounds the COUNT of removed lines and says nothing about their length; one
+ * deleted minified bundle line carries an arbitrary payload. Both holes close here, on the finished
+ * string, because that is the only number that describes what leaves this module.
+ *
+ * Set to 1.5× the raw ceiling: enough headroom for numbering a normal source file, not enough for
+ * a file that is mostly line breaks.
+ */
+const MAX_RENDERED_BLOCK_CHARS = MAX_REVIEW_FILE_CHARS * 1.5;
 
 /**
  * The file, every line numbered, each marked as changed by this pull request or as pre-existing
@@ -219,30 +238,33 @@ export function buildWholeFileBlock(
   const deleted = deletedLineHints(fileDiff);
   const shownHints = deleted.slice(0, MAX_DELETED_HINTS);
   const omitted = deleted.length - shownHints.length;
-  return {
-    changedCount: changed.size,
-    block: [
-      "<current_file>",
-      "The COMPLETE file at the reviewed head. Every line is numbered. The character right after",
-      `the number is \`${CHANGED_MARKER}\` for a line THIS pull request added or changed, and a space`,
-      "for a line that was already there.",
-      "",
-      renderWholeFile(fileText, changed),
-      "</current_file>",
-      ...(shownHints.length === 0
-        ? []
-        : [
-            "",
-            "<removed_by_this_change>",
-            "Lines this pull request DELETED, with the line they were removed at. They are no longer",
-            "in the file above — consult these when judging whether the change dropped something.",
-            "",
-            ...shownHints,
-            ...(omitted > 0 ? [`(${String(omitted)} further removed line(s) not shown)`] : []),
-            "</removed_by_this_change>",
-          ]),
-    ].join("\n"),
-  };
+  const block = [
+    "<current_file>",
+    "The COMPLETE file at the reviewed head. Every line is numbered. The character right after",
+    `the number is \`${CHANGED_MARKER}\` for a line THIS pull request added or changed, and a space`,
+    "for a line that was already there.",
+    "",
+    renderWholeFile(fileText, changed),
+    "</current_file>",
+    ...(shownHints.length === 0
+      ? []
+      : [
+          "",
+          "<removed_by_this_change>",
+          "Lines this pull request DELETED, with the line they were removed at. They are no longer",
+          "in the file above — consult these when judging whether the change dropped something.",
+          "",
+          ...shownHints,
+          ...(omitted > 0 ? [`(${String(omitted)} further removed line(s) not shown)`] : []),
+          "</removed_by_this_change>",
+        ]),
+  ].join("\n");
+  // The raw-size check above is an estimate of this number; this is the number itself. Past it the
+  // file falls back to hunks rather than being truncated, for the same reason as everywhere else in
+  // this module: a partial file presented as a whole one licenses the absence claims it exists to
+  // prevent.
+  if (block.length > MAX_RENDERED_BLOCK_CHARS) return undefined;
+  return { changedCount: changed.size, block };
 }
 
 /**

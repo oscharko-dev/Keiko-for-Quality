@@ -3451,6 +3451,8 @@ function walkHunks(fileDiff, visit) {
       newLine += 1;
     } else if (line.startsWith("-")) {
       visit("removed", newLine, line.slice(1));
+    } else if (line.startsWith("\\")) {
+      continue;
     } else if (line.startsWith(" ") || line === "") {
       visit("context", newLine, line.slice(1));
       newLine += 1;
@@ -3465,6 +3467,7 @@ function deletedLineHints(fileDiff) {
   return hints;
 }
 var MAX_DELETED_HINTS = 60;
+var MAX_RENDERED_BLOCK_CHARS = MAX_REVIEW_FILE_CHARS * 1.5;
 function renderWholeFile(fileText, changed) {
   return fileText.split("\n").map((line, index) => {
     const number = index + 1;
@@ -3484,28 +3487,27 @@ function buildWholeFileBlock(fileText, fileDiff) {
   const deleted = deletedLineHints(fileDiff);
   const shownHints = deleted.slice(0, MAX_DELETED_HINTS);
   const omitted = deleted.length - shownHints.length;
-  return {
-    changedCount: changed.size,
-    block: [
-      "<current_file>",
-      "The COMPLETE file at the reviewed head. Every line is numbered. The character right after",
-      `the number is \`${CHANGED_MARKER}\` for a line THIS pull request added or changed, and a space`,
-      "for a line that was already there.",
+  const block = [
+    "<current_file>",
+    "The COMPLETE file at the reviewed head. Every line is numbered. The character right after",
+    `the number is \`${CHANGED_MARKER}\` for a line THIS pull request added or changed, and a space`,
+    "for a line that was already there.",
+    "",
+    renderWholeFile(fileText, changed),
+    "</current_file>",
+    ...shownHints.length === 0 ? [] : [
       "",
-      renderWholeFile(fileText, changed),
-      "</current_file>",
-      ...shownHints.length === 0 ? [] : [
-        "",
-        "<removed_by_this_change>",
-        "Lines this pull request DELETED, with the line they were removed at. They are no longer",
-        "in the file above \u2014 consult these when judging whether the change dropped something.",
-        "",
-        ...shownHints,
-        ...omitted > 0 ? [`(${String(omitted)} further removed line(s) not shown)`] : [],
-        "</removed_by_this_change>"
-      ]
-    ].join("\n")
-  };
+      "<removed_by_this_change>",
+      "Lines this pull request DELETED, with the line they were removed at. They are no longer",
+      "in the file above \u2014 consult these when judging whether the change dropped something.",
+      "",
+      ...shownHints,
+      ...omitted > 0 ? [`(${String(omitted)} further removed line(s) not shown)`] : [],
+      "</removed_by_this_change>"
+    ]
+  ].join("\n");
+  if (block.length > MAX_RENDERED_BLOCK_CHARS) return void 0;
+  return { changedCount: changed.size, block };
 }
 var WHOLE_FILE_PROMPT = [
   "You are shown the COMPLETE file, not an excerpt. Lines this pull request changed are marked with",
