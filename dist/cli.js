@@ -1,4 +1,4 @@
-// Keiko for Quality CLI 0.21.1 — generated bundle, do not edit.
+// Keiko for Quality CLI 0.21.2 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/cli.ts
