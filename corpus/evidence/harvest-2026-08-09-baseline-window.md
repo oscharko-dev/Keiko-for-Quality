@@ -1,6 +1,11 @@
 # The harvest's first run — the 2026-08-08 window, all three bots, git-corroborated
 
-`npm run corpus:harvest -- --repo oscharko-dev/Keiko --prs 3037,3040,3041,3031,3032,3028,3003,3005,3006`
+```bash
+npm run corpus:harvest -- --repo oscharko-dev/Keiko \
+  --prs 3037,3040,3041,3031,3032,3028,3003,3005,3006 --out ~/kfq-harvest-baseline.json
+```
+
+`--out` is mandatory and must name a path outside this repository — see the posture note at the end.
 
 The same nine pull requests `precision-2026-08-08-baseline.md` graded, read a second way: every
 finding of every bot, every reply, and what the repository's own commits did to the cited region
@@ -16,8 +21,14 @@ afterwards. 279 findings.
 | unanswered          | 11             | 11        |
 | **actionable rate** | **21.0%**      | **21.0%** |
 
-Two independent implementations, reading the same threads through different code, agree to the
-finding. The 21.0% before-value is not an artifact of one classifier.
+What this does and does not establish. Both tools import the **same** `classifyReply`, so a matching
+rate is no independent check on the classifier — if that vocabulary mislabels a reply, both
+instruments mislabel it identically. What is independently implemented is the thread traversal and
+the record extraction: the precision gate walks `thread.comments.nodes` inline, the harvest builds a
+record type first and grades it later. Those agreeing to the finding rules out a traversal error —
+a missed thread, a misidentified author, a notice counted as a finding. It does not rule out a
+classifier error, and the classifier's own weaknesses are catalogued in
+`precision-instrument-2026-08-09-limits.md`.
 
 ## What the gate cannot see: the same window, per bot, with git as a second witness
 
@@ -25,11 +36,16 @@ finding. The 21.0% before-value is not an artifact of one classifier.
 region. `refuted_confirmed` means the reader argued it was wrong **and** no later commit touched it.
 Where prose and behaviour disagree, the finding lands in its own label instead of the pile.
 
-| Bot                   | published | answered | fixed ✓ | refuted ✓ | prose+git agree | **corroborated hit rate** |
-| --------------------- | --------- | -------- | ------- | --------- | --------------- | ------------------------- |
-| **Keiko for Quality** | 92        | 88%      | 17      | 49        | 66              | **25.8%**                 |
-| Codex                 | 140       | 85%      | 93      | 4         | 97              | **95.9%**                 |
-| CodeRabbit            | 43        | 51%      | 18      | 2         | 20              | **90.0%**                 |
+| Bot                    | published | answered | fixed ✓ | refuted ✓ | prose+git agree | **corroborated hit rate** |
+| ---------------------- | --------- | -------- | ------- | --------- | --------------- | ------------------------- |
+| **Keiko for Quality**  | 92        | 88%      | 17      | 49        | 66              | **25.8%**                 |
+| Codex                  | 140       | 85%      | 93      | 4         | 97              | **95.9%**                 |
+| CodeRabbit             | 43        | 51%      | 18      | 2         | 20              | **90.0%**                 |
+| unattributed (`other`) | 4         | —        | 0       | 0         | 0               | —                         |
+
+92 + 140 + 43 + 4 = 279, the harvest's own total. The four unattributed records are findings whose
+author matched no entry in `BOT_IDENTITIES` (`arenaId: null`), which is how a bot that migrates
+logins, or a human opening a review thread, shows up rather than being silently miscounted.
 
 This is the wave's target restated with a sharper instrument than the arena baseline's 67% / 92%,
 and on the _current_ release rather than v0.11.0. On a window where our findings were answered at a

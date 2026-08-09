@@ -28,6 +28,7 @@ import {
   discoverPullRequestNumbers,
   fetchPullRequestCommitTimeline,
   fetchPullRequestReviewThreads,
+  runGh,
 } from "./arena-fetch.mjs";
 import { classifyActedUpon, clusterAcrossBots, clusterDuplicateFindings } from "./arena-lib.mjs";
 import { buildHarvestDocument, extractHarvestRecords, findRecallGaps } from "./harvest-lib.mjs";
@@ -139,6 +140,19 @@ if (numbers.length === 0) usage("no pull requests matched");
  * nobody wanted.
  */
 function harvestOne(number) {
+  // An explicitly named pull request may still be open, and an open history is a moving one: a
+  // refutation looks `refuted_confirmed` only because the push that contradicts it has not landed
+  // yet. `--since` already filters to `closed`; this closes the `--prs` door.
+  if (prsRaw !== undefined) {
+    const state = JSON.parse(
+      runGh(["api", `repos/${owner}/${name}/pulls/${String(number)}`, "--jq", "{state:.state}"]),
+    ).state;
+    if (state !== "closed") {
+      throw new Error(
+        `pull request is ${String(state)} — an open history cannot corroborate a refutation`,
+      );
+    }
+  }
   const { threads, truncatedThreadCount } = fetchPullRequestReviewThreads(owner, name, number);
   // A thread whose replies did not fit one 50-comment page is a conversation we did not read
   // whole, and the missing reply is exactly what decides a disposition. Refused, not graded.
