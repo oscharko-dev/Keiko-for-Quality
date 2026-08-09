@@ -9552,6 +9552,16 @@ function hasNoStructuralCandidate(result) {
 function requiresStructuralFallback(result, lexical, terms) {
   return result.truncated || result.matches.length === 0 && result.candidatePaths.length > 0 || lexicalNeedsStructuralFallback(result.matches, lexical, terms);
 }
+function followUpSourceRequest(request, side) {
+  if (side === "H") return request;
+  return {
+    ...request,
+    head: request.base,
+    reviewPath: request.baseReviewPath,
+    // An unmappable HEAD anchor must not make the complete BASE-side reviewed file eligible.
+    findingAnchor: request.baseFindingAnchor ?? { startLine: 0, endLine: 0 }
+  };
+}
 function manifestCandidates(reviewPath) {
   const segments = reviewPath.split("/").slice(0, -1);
   const directories = [];
@@ -9656,50 +9666,40 @@ async function collectInitialRepositoryContext(request) {
   return { headCommit: request.head, entries: [...code, ...manifests] };
 }
 async function collectRepositoryContextFollowUp(request, retrieveTerms, dependencies = {}) {
-  remainingRepositoryMs(request);
-  const context = await strictlyVerifiedContext(request);
+  const side = dependencies.sourceSide ?? "H";
+  const sourceRequest = followUpSourceRequest(request, side);
+  remainingRepositoryMs(sourceRequest);
+  const context = await strictlyVerifiedContext(sourceRequest);
   const terms = validatedRetrieveTerms(retrieveTerms);
-  const result = await grepAtHead(context, request, expandedSearchTerms(terms), true, true);
-  remainingRepositoryMs(request);
-  const lexical = boundedCodeEntries(result.matches, request, true);
+  const result = await grepAtHead(context, sourceRequest, expandedSearchTerms(terms), true, true);
+  remainingRepositoryMs(sourceRequest);
+  const lexical = boundedCodeEntries(result.matches, sourceRequest, true);
   if (hasNoStructuralCandidate(result)) {
-    return { headCommit: request.head, entries: lexical };
+    return { sourceCommit: sourceRequest.head, side, entries: lexical };
   }
   const structuralRequired = requiresStructuralFallback(result, lexical, terms);
   const structuralTerms = normalizedStructuralTerms(terms);
   try {
     const structural = await (dependencies.structuralSearch ?? searchAstGrepAtHead)({
       context,
-      head: request.head,
-      reviewPath: request.reviewPath,
-      findingAnchor: request.findingAnchor,
+      head: sourceRequest.head,
+      reviewPath: sourceRequest.reviewPath,
+      findingAnchor: sourceRequest.findingAnchor,
       candidatePaths: result.candidatePaths,
       terms: structuralTerms,
-      ...request.deadlineMs === void 0 ? {} : { deadlineMs: request.deadlineMs }
+      ...sourceRequest.deadlineMs === void 0 ? {} : { deadlineMs: sourceRequest.deadlineMs }
     });
     return {
-      headCommit: request.head,
-      entries: boundedEvidenceEntries(structural, lexical, request, structuralTerms.length)
+      sourceCommit: sourceRequest.head,
+      side,
+      entries: boundedEvidenceEntries(structural, lexical, sourceRequest, structuralTerms.length)
     };
   } catch (error) {
     if (structuralRequired) {
       throw new RepositoryContextRetrievalError(error);
     }
-    return { headCommit: request.head, entries: lexical };
+    return { sourceCommit: sourceRequest.head, side, entries: lexical };
   }
-}
-
-// src/publish/retrieved-evidence.ts
-function toRetrievedEvidence(context) {
-  const byPath = /* @__PURE__ */ new Map();
-  for (const entry of context.entries) {
-    const lines = byPath.get(entry.path) ?? [];
-    lines.push({ line: entry.line, text: entry.content });
-    byPath.set(entry.path, lines);
-  }
-  return {
-    chunks: [...byPath].slice(0, 3).map(([path, lines]) => ({ path, side: "H", lines }))
-  };
 }
 
 // src/publish/substantiate.ts
@@ -9997,7 +9997,7 @@ function visibleVerificationRefs(evidence) {
   }
   return references;
 }
-function provenanceKey(path, side, line) {
+function evidenceProvenanceKey(path, side, line) {
   return `${path}\0${side}\0${String(line)}`;
 }
 function evidenceSources(evidence) {
@@ -10018,18 +10018,18 @@ function evidenceSources(evidence) {
   }
   return sources;
 }
-function directRefProvenance(reference, findingPath) {
+function directRefProvenance(reference, findingPath, basePath) {
   const head = /^(?:H|D:H):([1-9]\d*)$/u.exec(reference)?.[1];
-  if (head !== void 0) return provenanceKey(findingPath, "H", head);
+  if (head !== void 0) return evidenceProvenanceKey(findingPath, "H", head);
   const base = /^(?:B|D:B):([1-9]\d*)(?:@H:[1-9]\d*)?$/u.exec(reference)?.[1];
-  return base === void 0 ? void 0 : provenanceKey(findingPath, "B", base);
+  return base === void 0 ? void 0 : evidenceProvenanceKey(basePath, "B", base);
 }
 function sourceRefProvenance(label2, line, expectedSide, sources) {
   if (label2 === void 0 || line === void 0) return void 0;
   const source = sources.get(label2);
   if (source === void 0 || expectedSide !== void 0 && expectedSide !== source.side)
     return void 0;
-  return provenanceKey(source.path, source.side, line);
+  return evidenceProvenanceKey(source.path, source.side, line);
 }
 function labelledRefProvenance(reference, sources) {
   const repository = /^(H[1-8]):([1-9]\d*)$/u.exec(reference);
@@ -10044,11 +10044,11 @@ function labelledRefProvenance(reference, sources) {
     sources
   );
 }
-function evidenceRefProvenance(evidence, findingPath) {
+function evidenceRefProvenance(evidence, findingPath, basePath = findingPath) {
   const sources = evidenceSources(evidence);
   const provenance = /* @__PURE__ */ new Map();
   for (const reference of visibleVerificationRefs(evidence)) {
-    const key = directRefProvenance(reference, findingPath) ?? labelledRefProvenance(reference, sources);
+    const key = directRefProvenance(reference, findingPath, basePath) ?? labelledRefProvenance(reference, sources);
     if (key !== void 0) provenance.set(reference, key);
   }
   return provenance;
@@ -10222,13 +10222,20 @@ function isFalsifierReason(decision) {
   }
   return CONTEXT_REASONS.includes(decision.reasonCode);
 }
+function falsifierEvidenceProvenance(evidence, contract) {
+  return evidenceRefProvenance(
+    evidence,
+    contract.findingPath,
+    contract.basePath ?? contract.findingPath
+  );
+}
 function validFalsifierShape(decision, contract, evidence) {
   if (!isFalsifierReason(decision)) return false;
   if (decision.verdict === "needs_context") {
     return decision.lookupTerms.length > 0 && decision.evidenceRefs.length > 0;
   }
   if (decision.lookupTerms.length !== 0 || decision.evidenceRefs.length === 0) return false;
-  const provenance = evidenceRefProvenance(evidence, contract.findingPath);
+  const provenance = falsifierEvidenceProvenance(evidence, contract);
   const proofProvenance = new Set(
     contract.proofRefs.map((reference) => provenance.get(reference)).filter((key) => key !== void 0)
   );
@@ -10313,7 +10320,7 @@ function validateAndRenderRetrieval(value, firstReferenceNumber, excludedEvidenc
       excluded === void 0 ? chunk : {
         ...chunk,
         lines: chunk.lines.filter(
-          (line) => !excluded.has(provenanceKey(chunk.path, chunk.side, line.line))
+          (line) => !excluded.has(evidenceProvenanceKey(chunk.path, chunk.side, line.line))
         )
       }
     );
@@ -10368,6 +10375,9 @@ async function resolveTruthContext(finding, evidence, decision, retriever, truth
     retrieved = await retriever({
       finding,
       currentEvidence: evidence,
+      knownProvenance: new Set(
+        evidenceRefProvenance(evidence, finding.path, finding.basePath ?? finding.path).values()
+      ),
       terms: decision.lookupTerms,
       anchorRefs: decision.evidenceRefs,
       stage: "truth"
@@ -10428,6 +10438,7 @@ async function callFalsifier(finding, evidence, challenge, truth, deps, budget) 
     decision: extractFalsifierDecision(call.text, evidence, {
       proofRefs: truth.evidenceRefs,
       findingPath: finding.path,
+      ...finding.basePath === void 0 ? {} : { basePath: finding.basePath },
       requireChallengeRetrievedRef: true
     }),
     budgetBlocked: call.budgetBlocked
@@ -10462,6 +10473,13 @@ async function resolveContractChallenge(run2, evidence, challenge) {
     retrieved = await run2.retriever({
       finding: run2.finding,
       currentEvidence: evidence,
+      knownProvenance: new Set(
+        evidenceRefProvenance(
+          evidence,
+          run2.finding.path,
+          run2.finding.basePath ?? run2.finding.path
+        ).values()
+      ),
       terms: challenge.lookupTerms,
       anchorRefs: challenge.evidenceRefs,
       stage: "contract_challenge",
@@ -10605,6 +10623,20 @@ async function substantiate(findings, readHunk, deps, strictness = resolveSubsta
     droppedNitpick: 0,
     tokens: budget.spent,
     strictness
+  };
+}
+
+// src/publish/retrieved-evidence.ts
+function toRetrievedEvidence(context, knownProvenance = /* @__PURE__ */ new Set()) {
+  const byPath = /* @__PURE__ */ new Map();
+  for (const entry of context.entries) {
+    if (knownProvenance.has(evidenceProvenanceKey(entry.path, context.side, entry.line))) continue;
+    const lines = byPath.get(entry.path) ?? [];
+    lines.push({ line: entry.line, text: entry.content });
+    byPath.set(entry.path, lines);
+  }
+  return {
+    chunks: [...byPath].slice(0, 3).map(([path, lines]) => ({ path, side: context.side, lines }))
   };
 }
 
@@ -10901,7 +10933,7 @@ async function settleIncomplete(run2, inventory, cause, memo = INERT_MEMO, batch
     published
   );
 }
-var SUBSTANTIATE_RESERVE_PER_FINDING = 64e3;
+var SUBSTANTIATE_RESERVE_PER_FINDING = 86e3;
 var AUDIT_RESERVE_PER_FINDING = 2e3;
 function publicationQualityReserve(maxFindings) {
   const candidates = Math.min(maxFindings, MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR);
@@ -11568,18 +11600,27 @@ async function readFindingEvidence(run2, context, cache, ctx, finding) {
   const sources = trustworthyEvidenceSources(item, headText, baseText);
   return sources === void 0 || unifiedDiff === void 0 ? void 0 : { path, item, sources, unifiedDiff };
 }
+function baseAnchorForFinding(read, finding) {
+  const anchor = { startLine: finding.startLine, endLine: finding.endLine };
+  return read.item.status === "D" ? anchor : mappedBaseRangeFromUnifiedDiff(read.unifiedDiff, anchor);
+}
 async function prepareFindingEvidence(run2, context, cache, ctx, finding) {
   const read = await readFindingEvidence(run2, context, cache, ctx, finding);
   if (read === void 0) return void 0;
   const anchorSource = read.item.status === "D" ? read.sources.baseText : read.sources.headText;
   const anchorText = sourceLines(anchorSource, finding.startLine, finding.endLine);
   if (anchorText === void 0) return void 0;
+  const findingAnchor = { startLine: finding.startLine, endLine: finding.endLine };
+  const baseFindingAnchor = baseAnchorForFinding(read, finding);
   const repositoryRequest = {
     repositoryPath: run2.request.repositoryPath,
     pathValue: run2.request.pathValue,
     head: run2.request.head,
+    base: context.baseSha,
     reviewPath: read.path,
-    findingAnchor: { startLine: finding.startLine, endLine: finding.endLine },
+    baseReviewPath: read.item.oldPath ?? read.item.path,
+    findingAnchor,
+    ...baseFindingAnchor === void 0 ? {} : { baseFindingAnchor },
     findingContent: finding.content,
     anchorText,
     unifiedDiff: read.unifiedDiff,
@@ -11627,12 +11668,15 @@ function sourceLines(source, startLine, endLine) {
   return lines.slice(startLine - 1, endLine).join("\n");
 }
 function evidenceRetriever(evidence, deadline) {
-  return async ({ finding, terms }) => {
+  return async ({ finding, terms, challengeAxis, knownProvenance }) => {
     requireReviewTime(deadline);
     const prepared = evidence.get(finding.original);
     if (prepared === void 0) throw new Error("finding evidence is unavailable");
-    const followUp = await collectRepositoryContextFollowUp(prepared.repositoryRequest, terms);
-    return toRetrievedEvidence(followUp);
+    const sourceSide = challengeAxis === "base" ? "B" : "H";
+    const followUp = await collectRepositoryContextFollowUp(prepared.repositoryRequest, terms, {
+      sourceSide
+    });
+    return toRetrievedEvidence(followUp, knownProvenance);
   };
 }
 function recordSubstantiation(run2, outcome) {
@@ -11670,13 +11714,18 @@ async function substantiateModelSurvivors(run2, context, modelFindings) {
   );
   const evidence = await evidenceForSurvivors(run2, context, modelFindings);
   requireReviewTime(run2.deadline);
-  const judgeable = modelFindings.map((survivor) => ({
-    path: survivor.finding.path,
-    content: survivor.finding.content,
-    startLine: survivor.finding.startLine,
-    endLine: survivor.finding.endLine,
-    original: survivor.finding
-  }));
+  const judgeable = modelFindings.map((survivor) => {
+    const prepared = evidence.get(survivor.finding);
+    const path = survivor.finding.path;
+    return {
+      path,
+      basePath: prepared?.repositoryRequest.baseReviewPath ?? path,
+      content: survivor.finding.content,
+      startLine: survivor.finding.startLine,
+      endLine: survivor.finding.endLine,
+      original: survivor.finding
+    };
+  });
   const evidenceByJudgeable = new Map(
     judgeable.map((finding) => [finding, evidence.get(finding.original)?.text ?? ""])
   );

@@ -108,13 +108,14 @@ published; deterministic contract findings alone remain outside those slots. Mis
 exhausted budget or malformed role output withholds the affected finding and makes the run
 incomplete rather than clean.
 
-Repository lookup starts with exact-commit `git grep`. A digest-pinned ast-grep parses bounded HEAD
-blobs received through stdin when ambiguous hits require structural disambiguation, and may enrich
-clear lexical hits with tightly bounded owning-function context. Failure is fatal only when that
-structure is required; optional enrichment failure preserves the exact lexical evidence. Neither
-path scans a checkout or loads repository configuration. Initial lookup remains cross-file. An
-explicit judge follow-up may inspect the reviewed file too, but only contract evidence outside the
-already-rendered 24-line-per-side anchor window can be added.
+Repository lookup starts with exact-commit `git grep`: HEAD by default, or the immutable merge base
+for the planner's closed `base` challenge axis. A digest-pinned ast-grep parses bounded blobs from
+that same selected commit through stdin when ambiguous hits require structural disambiguation, and
+may enrich clear lexical hits with tightly bounded owning-function context. Failure is fatal only
+when that structure is required; optional enrichment failure preserves the exact lexical evidence.
+Neither path scans a checkout or loads repository configuration. Initial lookup remains cross-file.
+An explicit judge follow-up may inspect the reviewed file too, but only contract evidence outside
+the already-rendered 24-line-per-side anchor window can be added.
 
 ## Getting started
 

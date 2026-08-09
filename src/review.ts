@@ -97,7 +97,11 @@ import {
 } from "./publish/publisher.js";
 import { isIncompleteNoticeBody } from "./publish/presentation.js";
 import { readChangeUnifiedDiff } from "./publish/change-diff.js";
-import { buildChangeEvidence, type RepositoryEvidenceContext } from "./publish/evidence.js";
+import {
+  buildChangeEvidence,
+  mappedBaseRangeFromUnifiedDiff,
+  type RepositoryEvidenceContext,
+} from "./publish/evidence.js";
 import {
   MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR,
   selectPrWideFindings,
@@ -1168,13 +1172,14 @@ interface EngineBudget {
  * Start-work reserves for the mandatory post-generation quality stages.
  *
  * The evidence stage may take an initial truth judgment, one retrieval-guided truth rerun, a
- * contract-challenge plan, and adversarial falsification, each with bounded source context. 64k is
- * deliberate engine headroom for that path; `substantiate` separately enforces the exact
+ * contract-challenge plan, and adversarial falsification, each with bounded source context. 86k is
+ * proportional engine headroom for that four-call path (the former three-call path reserved 64k);
+ * `substantiate` separately enforces the exact
  * whole-review remainder before every request, so this estimate can never widen the consumer's
  * hard ceiling. The smaller audit reserve is only a cheap start-work trigger;
  * `auditClassification` enforces the exact remaining allowance before every request as well.
  */
-const SUBSTANTIATE_RESERVE_PER_FINDING = 64_000;
+const SUBSTANTIATE_RESERVE_PER_FINDING = 86_000;
 const AUDIT_RESERVE_PER_FINDING = 2_000;
 
 function publicationQualityReserve(maxFindings: number): number {
@@ -2673,6 +2678,7 @@ interface SubstantiationResult {
 
 interface JudgeableOriginal extends JudgeableFinding {
   readonly original: EngineFinding;
+  readonly basePath: string;
 }
 
 /** Empty input is the only no-op path. */
@@ -2748,6 +2754,16 @@ async function readFindingEvidence(
     : { path, item, sources, unifiedDiff };
 }
 
+function baseAnchorForFinding(
+  read: EvidenceRead,
+  finding: EngineFinding,
+): { readonly startLine: number; readonly endLine: number } | undefined {
+  const anchor = { startLine: finding.startLine, endLine: finding.endLine };
+  return read.item.status === "D"
+    ? anchor
+    : mappedBaseRangeFromUnifiedDiff(read.unifiedDiff, anchor);
+}
+
 async function prepareFindingEvidence(
   run: PipelineRun,
   context: PublishContext,
@@ -2760,12 +2776,17 @@ async function prepareFindingEvidence(
   const anchorSource = read.item.status === "D" ? read.sources.baseText : read.sources.headText;
   const anchorText = sourceLines(anchorSource, finding.startLine, finding.endLine);
   if (anchorText === undefined) return undefined;
+  const findingAnchor = { startLine: finding.startLine, endLine: finding.endLine };
+  const baseFindingAnchor = baseAnchorForFinding(read, finding);
   const repositoryRequest: RepositoryContextRequest = {
     repositoryPath: run.request.repositoryPath,
     pathValue: run.request.pathValue,
     head: run.request.head,
+    base: context.baseSha,
     reviewPath: read.path,
-    findingAnchor: { startLine: finding.startLine, endLine: finding.endLine },
+    baseReviewPath: (read.item.oldPath ?? read.item.path) as string,
+    findingAnchor,
+    ...(baseFindingAnchor === undefined ? {} : { baseFindingAnchor }),
     findingContent: finding.content,
     anchorText,
     unifiedDiff: read.unifiedDiff,
@@ -2846,12 +2867,15 @@ function evidenceRetriever(
   evidence: ReadonlyMap<EngineFinding, PreparedFindingEvidence>,
   deadline: ReviewDeadline,
 ): EvidenceRetriever<JudgeableOriginal> {
-  return async ({ finding, terms }) => {
+  return async ({ finding, terms, challengeAxis, knownProvenance }) => {
     requireReviewTime(deadline);
     const prepared = evidence.get(finding.original);
     if (prepared === undefined) throw new Error("finding evidence is unavailable");
-    const followUp = await collectRepositoryContextFollowUp(prepared.repositoryRequest, terms);
-    return toRetrievedEvidence(followUp);
+    const sourceSide = challengeAxis === "base" ? "B" : "H";
+    const followUp = await collectRepositoryContextFollowUp(prepared.repositoryRequest, terms, {
+      sourceSide,
+    });
+    return toRetrievedEvidence(followUp, knownProvenance);
   };
 }
 
@@ -2929,13 +2953,18 @@ async function substantiateModelSurvivors(
 
   const evidence = await evidenceForSurvivors(run, context, modelFindings);
   requireReviewTime(run.deadline);
-  const judgeable = modelFindings.map((survivor) => ({
-    path: survivor.finding.path as string,
-    content: survivor.finding.content,
-    startLine: survivor.finding.startLine,
-    endLine: survivor.finding.endLine,
-    original: survivor.finding,
-  }));
+  const judgeable = modelFindings.map((survivor) => {
+    const prepared = evidence.get(survivor.finding);
+    const path = survivor.finding.path as string;
+    return {
+      path,
+      basePath: prepared?.repositoryRequest.baseReviewPath ?? path,
+      content: survivor.finding.content,
+      startLine: survivor.finding.startLine,
+      endLine: survivor.finding.endLine,
+      original: survivor.finding,
+    };
+  });
   const evidenceByJudgeable = new Map<JudgeableFinding, string>(
     judgeable.map((finding) => [finding, evidence.get(finding.original)?.text ?? ""]),
   );

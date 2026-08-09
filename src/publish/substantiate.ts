@@ -98,6 +98,8 @@ export function resolveSubstantiationStrictness(
 /** Structural slice of a finding this module can verify. */
 export interface JudgeableFinding {
   readonly path: string;
+  /** Trusted path of the same reviewed file in BASE; differs after a rename or copy. */
+  readonly basePath?: string;
   readonly content: string;
   readonly startLine: number;
   readonly endLine: number;
@@ -201,8 +203,10 @@ export interface ContractChallengeDecision {
 export interface FalsifierEvidenceContract {
   /** Positive-proof refs selected by Truth; either terminal verdict must inspect something else. */
   readonly proofRefs: readonly VerificationEvidenceRef[];
-  /** Current finding path binds direct H/B/D refs to canonical source provenance. */
+  /** Current finding path binds direct HEAD refs to canonical source provenance. */
   readonly findingPath: string;
+  /** BASE-side path of the finding; defaults to `findingPath` when the path did not change. */
+  readonly basePath?: string;
   /** An expanded challenge pack requires a citation from its reserved R4-R6 namespace. */
   readonly requireChallengeRetrievedRef: boolean;
 }
@@ -226,6 +230,8 @@ export interface RetrievedEvidence {
 export interface EvidenceLookupRequest<T extends JudgeableFinding = JudgeableFinding> {
   readonly finding: T;
   readonly currentEvidence: string;
+  /** Exact path/side/line facts already visible before this lookup. */
+  readonly knownProvenance: ReadonlySet<EvidenceProvenanceKey>;
   readonly terms: readonly string[];
   readonly anchorRefs: readonly VerificationEvidenceRef[];
   readonly stage: "truth" | "contract_challenge";
@@ -564,15 +570,26 @@ function visibleVerificationRefs(evidence: string): ReadonlySet<VerificationEvid
   return references;
 }
 
-type EvidenceSide = "H" | "B";
+export type EvidenceSide = "H" | "B";
+
+declare const evidenceProvenanceBrand: unique symbol;
+
+/** Canonical source coordinate used to prevent a second role from reusing the first role's fact. */
+export type EvidenceProvenanceKey = string & {
+  readonly [evidenceProvenanceBrand]: true;
+};
 
 interface EvidenceSource {
   readonly path: string;
   readonly side: EvidenceSide;
 }
 
-function provenanceKey(path: string, side: EvidenceSide, line: string | number): string {
-  return `${path}\u0000${side}\u0000${String(line)}`;
+export function evidenceProvenanceKey(
+  path: string,
+  side: EvidenceSide,
+  line: string | number,
+): EvidenceProvenanceKey {
+  return `${path}\u0000${side}\u0000${String(line)}` as EvidenceProvenanceKey;
 }
 
 function evidenceSources(evidence: string): ReadonlyMap<string, EvidenceSource> {
@@ -597,11 +614,12 @@ function evidenceSources(evidence: string): ReadonlyMap<string, EvidenceSource> 
 function directRefProvenance(
   reference: VerificationEvidenceRef,
   findingPath: string,
-): string | undefined {
+  basePath: string,
+): EvidenceProvenanceKey | undefined {
   const head = /^(?:H|D:H):([1-9]\d*)$/u.exec(reference)?.[1];
-  if (head !== undefined) return provenanceKey(findingPath, "H", head);
+  if (head !== undefined) return evidenceProvenanceKey(findingPath, "H", head);
   const base = /^(?:B|D:B):([1-9]\d*)(?:@H:[1-9]\d*)?$/u.exec(reference)?.[1];
-  return base === undefined ? undefined : provenanceKey(findingPath, "B", base);
+  return base === undefined ? undefined : evidenceProvenanceKey(basePath, "B", base);
 }
 
 function sourceRefProvenance(
@@ -609,18 +627,18 @@ function sourceRefProvenance(
   line: string | undefined,
   expectedSide: EvidenceSide | undefined,
   sources: ReadonlyMap<string, EvidenceSource>,
-): string | undefined {
+): EvidenceProvenanceKey | undefined {
   if (label === undefined || line === undefined) return undefined;
   const source = sources.get(label);
   if (source === undefined || (expectedSide !== undefined && expectedSide !== source.side))
     return undefined;
-  return provenanceKey(source.path, source.side, line);
+  return evidenceProvenanceKey(source.path, source.side, line);
 }
 
 function labelledRefProvenance(
   reference: VerificationEvidenceRef,
   sources: ReadonlyMap<string, EvidenceSource>,
-): string | undefined {
+): EvidenceProvenanceKey | undefined {
   const repository = /^(H[1-8]):([1-9]\d*)$/u.exec(reference);
   if (repository !== null) {
     return sourceRefProvenance(repository[1], repository[2], "H", sources);
@@ -637,12 +655,14 @@ function labelledRefProvenance(
 function evidenceRefProvenance(
   evidence: string,
   findingPath: string,
-): ReadonlyMap<VerificationEvidenceRef, string> {
+  basePath = findingPath,
+): ReadonlyMap<VerificationEvidenceRef, EvidenceProvenanceKey> {
   const sources = evidenceSources(evidence);
-  const provenance = new Map<VerificationEvidenceRef, string>();
+  const provenance = new Map<VerificationEvidenceRef, EvidenceProvenanceKey>();
   for (const reference of visibleVerificationRefs(evidence)) {
     const key =
-      directRefProvenance(reference, findingPath) ?? labelledRefProvenance(reference, sources);
+      directRefProvenance(reference, findingPath, basePath) ??
+      labelledRefProvenance(reference, sources);
     if (key !== undefined) provenance.set(reference, key);
   }
   return provenance;
@@ -920,6 +940,17 @@ function isFalsifierReason(
   return (CONTEXT_REASONS as readonly string[]).includes(decision.reasonCode);
 }
 
+function falsifierEvidenceProvenance(
+  evidence: string,
+  contract: FalsifierEvidenceContract,
+): ReadonlyMap<VerificationEvidenceRef, EvidenceProvenanceKey> {
+  return evidenceRefProvenance(
+    evidence,
+    contract.findingPath,
+    contract.basePath ?? contract.findingPath,
+  );
+}
+
 function validFalsifierShape(
   decision: DecisionFields<FalsifierVerdict, FalsifierReasonCode>,
   contract: FalsifierEvidenceContract,
@@ -930,7 +961,7 @@ function validFalsifierShape(
     return decision.lookupTerms.length > 0 && decision.evidenceRefs.length > 0;
   }
   if (decision.lookupTerms.length !== 0 || decision.evidenceRefs.length === 0) return false;
-  const provenance = evidenceRefProvenance(evidence, contract.findingPath);
+  const provenance = falsifierEvidenceProvenance(evidence, contract);
   const proofProvenance = new Set(
     contract.proofRefs
       .map((reference) => provenance.get(reference))
@@ -1080,7 +1111,7 @@ function validateAndRenderRetrieval(
         : {
             ...chunk,
             lines: chunk.lines.filter(
-              (line) => !excluded.has(provenanceKey(chunk.path, chunk.side, line.line)),
+              (line) => !excluded.has(evidenceProvenanceKey(chunk.path, chunk.side, line.line)),
             ),
           },
     );
@@ -1189,6 +1220,9 @@ async function resolveTruthContext<T extends JudgeableFinding>(
     retrieved = await retriever({
       finding,
       currentEvidence: evidence,
+      knownProvenance: new Set(
+        evidenceRefProvenance(evidence, finding.path, finding.basePath ?? finding.path).values(),
+      ),
       terms: decision.lookupTerms,
       anchorRefs: decision.evidenceRefs,
       stage: "truth",
@@ -1272,6 +1306,7 @@ async function callFalsifier(
     decision: extractFalsifierDecision(call.text, evidence, {
       proofRefs: truth.evidenceRefs,
       findingPath: finding.path,
+      ...(finding.basePath === undefined ? {} : { basePath: finding.basePath }),
       requireChallengeRetrievedRef: true,
     }),
     budgetBlocked: call.budgetBlocked,
@@ -1328,6 +1363,13 @@ async function resolveContractChallenge<T extends JudgeableFinding>(
     retrieved = await run.retriever({
       finding: run.finding,
       currentEvidence: evidence,
+      knownProvenance: new Set(
+        evidenceRefProvenance(
+          evidence,
+          run.finding.path,
+          run.finding.basePath ?? run.finding.path,
+        ).values(),
+      ),
       terms: challenge.lookupTerms,
       anchorRefs: challenge.evidenceRefs,
       stage: "contract_challenge",

@@ -25,7 +25,7 @@ const SCOPE = {
   historicalDiffSource:
     "exact single-change unified diff from derived merge-base to immutable originalCommit",
   repositoryContextSource:
-    "bounded exact originalCommit tree with optional truth retrieval and mandatory contract challenge retrieval",
+    "bounded exact originalCommit and derived-merge-base trees with optional truth retrieval and mandatory contract challenge retrieval",
   verificationWorkflow:
     "truth judge, optional truth retrieval and rerun, mandatory independent contract challenge, adversarial falsifier",
   pullRequestEventBase: "not available in harvest; not measured",

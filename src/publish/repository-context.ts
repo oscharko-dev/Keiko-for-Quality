@@ -88,9 +88,14 @@ export interface RepositoryContextRequest {
   readonly repositoryPath: string;
   readonly pathValue: string;
   readonly head: CommitSha;
+  readonly base: CommitSha;
   readonly reviewPath: string;
+  /** Path of the same file in BASE; differs from `reviewPath` for a rename. */
+  readonly baseReviewPath: string;
   /** Finding range whose already-visible near window same-file retrieval must not duplicate. */
   readonly findingAnchor: EvidenceLineRange;
+  /** Exact BASE projection of `findingAnchor`; absent means same-file BASE lookup is ineligible. */
+  readonly baseFindingAnchor?: EvidenceLineRange;
   readonly findingContent: string;
   readonly anchorText: string;
   readonly unifiedDiff?: string;
@@ -129,6 +134,15 @@ interface GrepSearchResult {
   readonly matches: readonly RankedGrepMatch[];
   readonly candidatePaths: readonly string[];
   readonly truncated: boolean;
+}
+
+export type RepositoryEvidenceSide = "H" | "B";
+
+/** Exact immutable source selected for one explicit verifier follow-up. */
+export interface RepositoryFollowUpContext {
+  readonly sourceCommit: CommitSha;
+  readonly side: RepositoryEvidenceSide;
+  readonly entries: readonly RepositoryEvidenceEntry[];
 }
 
 function eligibleRepositorySighting(
@@ -703,9 +717,25 @@ function requiresStructuralFallback(
 }
 
 export interface RepositoryContextDependencies {
+  /** HEAD is the default; BASE is allowed only for the planner's closed `base` challenge axis. */
+  readonly sourceSide?: RepositoryEvidenceSide;
   readonly structuralSearch?: (
     request: StructuralSearchRequest,
   ) => Promise<readonly RepositoryEvidenceEntry[]>;
+}
+
+function followUpSourceRequest(
+  request: RepositoryContextRequest,
+  side: RepositoryEvidenceSide,
+): RepositoryContextRequest {
+  if (side === "H") return request;
+  return {
+    ...request,
+    head: request.base,
+    reviewPath: request.baseReviewPath,
+    // An unmappable HEAD anchor must not make the complete BASE-side reviewed file eligible.
+    findingAnchor: request.baseFindingAnchor ?? { startLine: 0, endLine: 0 },
+  };
 }
 
 function manifestCandidates(reviewPath: string): readonly string[] {
@@ -851,31 +881,34 @@ export async function collectRepositoryContextFollowUp(
   request: RepositoryContextRequest,
   retrieveTerms: readonly string[],
   dependencies: RepositoryContextDependencies = {},
-): Promise<RepositoryEvidenceContext> {
-  remainingRepositoryMs(request);
-  const context = await strictlyVerifiedContext(request);
+): Promise<RepositoryFollowUpContext> {
+  const side = dependencies.sourceSide ?? "H";
+  const sourceRequest = followUpSourceRequest(request, side);
+  remainingRepositoryMs(sourceRequest);
+  const context = await strictlyVerifiedContext(sourceRequest);
   const terms = validatedRetrieveTerms(retrieveTerms);
-  const result = await grepAtHead(context, request, expandedSearchTerms(terms), true, true);
-  remainingRepositoryMs(request);
-  const lexical = boundedCodeEntries(result.matches, request, true);
+  const result = await grepAtHead(context, sourceRequest, expandedSearchTerms(terms), true, true);
+  remainingRepositoryMs(sourceRequest);
+  const lexical = boundedCodeEntries(result.matches, sourceRequest, true);
   if (hasNoStructuralCandidate(result)) {
-    return { headCommit: request.head, entries: lexical };
+    return { sourceCommit: sourceRequest.head, side, entries: lexical };
   }
   const structuralRequired = requiresStructuralFallback(result, lexical, terms);
   const structuralTerms = normalizedStructuralTerms(terms);
   try {
     const structural = await (dependencies.structuralSearch ?? searchAstGrepAtHead)({
       context,
-      head: request.head,
-      reviewPath: request.reviewPath,
-      findingAnchor: request.findingAnchor,
+      head: sourceRequest.head,
+      reviewPath: sourceRequest.reviewPath,
+      findingAnchor: sourceRequest.findingAnchor,
       candidatePaths: result.candidatePaths,
       terms: structuralTerms,
-      ...(request.deadlineMs === undefined ? {} : { deadlineMs: request.deadlineMs }),
+      ...(sourceRequest.deadlineMs === undefined ? {} : { deadlineMs: sourceRequest.deadlineMs }),
     });
     return {
-      headCommit: request.head,
-      entries: boundedEvidenceEntries(structural, lexical, request, structuralTerms.length),
+      sourceCommit: sourceRequest.head,
+      side,
+      entries: boundedEvidenceEntries(structural, lexical, sourceRequest, structuralTerms.length),
     };
   } catch (error) {
     if (structuralRequired) {
@@ -885,16 +918,16 @@ export async function collectRepositoryContextFollowUp(
     }
     // A clear lexical definition remains exact positive evidence. Structural body enrichment is
     // useful but optional on this path, so tool acquisition or parsing failure must not erase it.
-    return { headCommit: request.head, entries: lexical };
+    return { sourceCommit: sourceRequest.head, side, entries: lexical };
   }
 }
 
 /** Pure combination after at most one follow-up; a commit mismatch is rejected, never repaired. */
 export function mergeRepositoryEvidenceContexts(
   initial: RepositoryEvidenceContext,
-  followUp: RepositoryEvidenceContext,
+  followUp: RepositoryFollowUpContext,
 ): RepositoryEvidenceContext {
-  if (initial.headCommit !== followUp.headCommit) return initial;
+  if (followUp.side !== "H" || initial.headCommit !== followUp.sourceCommit) return initial;
   // The judge asked for the follow-up identifiers explicitly. Keep those facts ahead of automatic
   // initial sightings so the later 24-entry/8-path renderer budget cannot discard the answer it
   // requested merely because an alphabetically earlier initial path filled the budget first.

@@ -512,14 +512,15 @@ test("the local dry-run plan reports binding failures and budget without a verif
 function substantiationOutcome(findings, overrides = {}) {
   const insufficient = (overrides.droppedInsufficientEvidence ?? 0) > 0;
   const undecided = (overrides.undecided ?? 0) > 0;
-  const refuted = findings.length === 0 && !insufficient && !undecided;
-  const challenged = findings.length > 0 || (overrides.falsifierDefeated ?? 0) > 0;
+  const falsifierDefeated = (overrides.falsifierDefeated ?? 0) > 0;
+  const truthRefuted = findings.length === 0 && !insufficient && !undecided && !falsifierDefeated;
+  const challenged = findings.length > 0 || falsifierDefeated;
   return {
     findings,
     confirmed: findings.length,
-    droppedRefuted: refuted ? 1 : 0,
+    droppedRefuted: truthRefuted || falsifierDefeated ? 1 : 0,
     droppedInsufficientEvidence: insufficient ? 1 : 0,
-    truthRefuted: refuted ? 1 : 0,
+    truthRefuted: truthRefuted ? 1 : 0,
     falsifierDefeated: 0,
     retrievalRequested: 0,
     retrievalPerformed: 0,
@@ -533,7 +534,7 @@ function substantiationOutcome(findings, overrides = {}) {
     challengeFailed: 0,
     repaired: 0,
     droppedVague: insufficient ? 1 : 0,
-    droppedUnsupported: refuted ? 1 : 0,
+    droppedUnsupported: truthRefuted || falsifierDefeated ? 1 : 0,
     droppedNitpick: 0,
     undecided: 0,
     budgetBlocked: 0,
@@ -569,6 +570,7 @@ function replayVerificationDependencies(substantiate) {
       visibleLines: new Set([1]),
       completeFile: true,
     }),
+    mappedBaseRangeFromUnifiedDiff: (_diff, range) => range,
     collectInitialRepositoryContext: async (request) => ({
       headCommit: request.head,
       entries: [],
@@ -651,6 +653,7 @@ test("verification maps each paranoid outcome to keep/drop/unmeasured without se
         completeFile: true,
       };
     },
+    mappedBaseRangeFromUnifiedDiff: (_diff, range) => range,
     collectInitialRepositoryContext: async (request) => ({
       headCommit: request.head,
       entries: [],
@@ -662,7 +665,13 @@ test("verification maps each paranoid outcome to keep/drop/unmeasured without se
     toRetrievedEvidence: () => ({ chunks: [] }),
     substantiate: async (findings, readEvidence, _endpoint, strictness, remainingTokens) => {
       assert.equal(findings.length, 1);
-      assert.deepEqual(Object.keys(findings[0]), ["path", "content", "startLine", "endLine"]);
+      assert.deepEqual(Object.keys(findings[0]), [
+        "path",
+        "basePath",
+        "content",
+        "startLine",
+        "endLine",
+      ]);
       assert.equal(strictness, "paranoid");
       assert.match(readEvidence(findings[0]), /^H:1\| src\//u);
       assert.equal(remainingTokens, 300 - observed.length * 100);
@@ -738,17 +747,19 @@ test("verification uses the production diff, initial context, and one follow-up 
       assert.equal(options.repositoryContext.headCommit, replayCase.originalCommitOid);
       return { text: "H:1| export function parse() {}\nD:H:1| +export function parse() {}" };
     },
-    collectRepositoryContextFollowUp: async (request, terms) => {
-      followUpRequest = { request, terms };
+    mappedBaseRangeFromUnifiedDiff: (_diff, range) => range,
+    collectRepositoryContextFollowUp: async (request, terms, options) => {
+      followUpRequest = { request, terms, options };
       return {
-        headCommit: request.head,
+        sourceCommit: request.head,
+        side: "H",
         entries: [
           { path: "src/contract.ts", line: 8, content: "parseInput();", kind: "definition" },
         ],
       };
     },
-    toRetrievedEvidence: (context) => {
-      adapterInput = context;
+    toRetrievedEvidence: (context, knownProvenance) => {
+      adapterInput = { context, knownProvenance };
       return {
         chunks: [
           { path: "src/contract.ts", side: "H", lines: [{ line: 8, text: "parseInput();" }] },
@@ -763,8 +774,10 @@ test("verification uses the production diff, initial context, and one follow-up 
       const retrieved = await retrieve({
         finding: findings[0],
         currentEvidence: readEvidence(findings[0]),
+        knownProvenance: new Set(["known"]),
         terms: ["parseInput"],
         anchorRefs: ["H:1"],
+        stage: "truth",
       });
       assert.equal(retrieved.chunks[0].path, "src/contract.ts");
       return substantiationOutcome(findings, {
@@ -780,8 +793,11 @@ test("verification uses the production diff, initial context, and one follow-up 
     repositoryPath: "/consumer",
     pathValue: FIXED_PATH,
     head: replayCase.originalCommitOid,
+    base: sources.baseCommitOid,
     reviewPath: replayCase.path,
+    baseReviewPath: sources.oldPath,
     findingAnchor: { startLine: replayCase.startLine, endLine: replayCase.endLine },
+    baseFindingAnchor: { startLine: replayCase.startLine, endLine: replayCase.endLine },
     findingContent: replayCase.content,
     anchorText: "export function parse() {}",
     unifiedDiff: sources.unifiedDiff,
@@ -789,13 +805,90 @@ test("verification uses the production diff, initial context, and one follow-up 
   assert.deepEqual(followUpRequest, {
     request: initialRequest,
     terms: ["parseInput"],
+    options: { sourceSide: "H" },
   });
-  assert.equal(adapterInput.entries[0].path, "src/contract.ts");
+  assert.equal(adapterInput.context.entries[0].path, "src/contract.ts");
+  assert.deepEqual([...adapterInput.knownProvenance], ["known"]);
   assert.deepEqual(result.decisions, [{ databaseId: 1, decision: "keep" }]);
   assert.equal(result.report.accountedTokens, 125);
   assert.equal(result.report.stageCounters.retrievalRequested, 1);
   assert.equal(result.report.stageCounters.retrievalPerformed, 1);
   assert.equal(result.report.stageCounters.retrievalExpanded, 1);
+});
+
+test("verification routes the closed base challenge through the immutable derived merge-base", async () => {
+  const replayCase = boundReplayCase(1, "src/new-name.ts");
+  const sources = stubHistoricalChange(replayCase, {
+    oldPath: "src/old-name.ts",
+    headSource: "export function parse() {}\n",
+    baseSource: "export function parseOld() {}\n",
+  });
+  let followUp;
+  let adapted;
+  const result = await runHistoricalReplayVerification({
+    databaseIds: [1],
+    cases: [replayCase],
+    repo: "/consumer",
+    maxTokens: 500,
+    judgeEndpoint: { endpoint: "https://model.example.test/v1", token: "secret", model: "m" },
+    readChangeAtCommits: () => sources,
+    buildChangeEvidence: () => ({ text: "H:1| export function parse() {}" }),
+    mappedBaseRangeFromUnifiedDiff: (diff, range) => {
+      assert.equal(diff, sources.unifiedDiff);
+      assert.deepEqual(range, { startLine: 1, endLine: 1 });
+      return { startLine: 7, endLine: 8 };
+    },
+    collectInitialRepositoryContext: async (request) => ({
+      headCommit: request.head,
+      entries: [],
+    }),
+    collectRepositoryContextFollowUp: async (request, terms, options) => {
+      followUp = { request, terms, options };
+      return {
+        sourceCommit: request.base,
+        side: "B",
+        entries: [
+          { path: request.baseReviewPath, line: 12, content: "parseOld();", kind: "callsite" },
+        ],
+      };
+    },
+    toRetrievedEvidence: (context, knownProvenance) => {
+      adapted = { context, knownProvenance };
+      return {
+        chunks: [
+          {
+            path: context.entries[0].path,
+            side: context.side,
+            lines: [{ line: 12, text: "parseOld();" }],
+          },
+        ],
+      };
+    },
+    substantiate: async (findings, readEvidence, _endpoint, _strictness, _maximum, retrieve) => {
+      assert.equal(findings[0].basePath, sources.oldPath);
+      const knownProvenance = new Set(["src/new-name.ts\u0000H\u00001"]);
+      const retrieved = await retrieve({
+        finding: findings[0],
+        currentEvidence: readEvidence(findings[0]),
+        knownProvenance,
+        terms: ["parseOld"],
+        anchorRefs: ["H:1"],
+        stage: "contract_challenge",
+        challengeAxis: "base",
+      });
+      assert.equal(retrieved.chunks[0].side, "B");
+      return substantiationOutcome(findings);
+    },
+  });
+
+  assert.equal(followUp.request.base, sources.baseCommitOid);
+  assert.equal(followUp.request.baseReviewPath, sources.oldPath);
+  assert.deepEqual(followUp.request.baseFindingAnchor, { startLine: 7, endLine: 8 });
+  assert.deepEqual(followUp.options, { sourceSide: "B" });
+  assert.equal(adapted.context.sourceCommit, sources.baseCommitOid);
+  assert.equal(adapted.context.side, "B");
+  assert.deepEqual([...adapted.knownProvenance], ["src/new-name.ts\u0000H\u00001"]);
+  assert.deepEqual(result.decisions, [{ databaseId: 1, decision: "keep" }]);
 });
 
 test("verification publishes only aggregate counters for every validated workflow disposition", async () => {
@@ -812,7 +905,6 @@ test("verification publishes only aggregate counters for every validated workflo
     () => substantiationOutcome([]),
     () =>
       substantiationOutcome([], {
-        truthRefuted: 0,
         falsifierDefeated: 1,
       }),
     () =>
@@ -1155,6 +1247,7 @@ test("a successful verification fails closed when another file replaces its rese
           writeFileSync(outputPath, "foreign replacement");
           return {
             buildChangeEvidence: () => ({ text: "H:1| exact historical source" }),
+            mappedBaseRangeFromUnifiedDiff: (_diff, range) => range,
             collectInitialRepositoryContext: async (request) => ({
               headCommit: request.head,
               entries: [],
@@ -1302,7 +1395,7 @@ test("durable evidence is aggregate-only and binds every implementation slice by
     historicalDiffSource:
       "exact single-change unified diff from derived merge-base to immutable originalCommit",
     repositoryContextSource:
-      "bounded exact originalCommit tree with optional truth retrieval and mandatory contract challenge retrieval",
+      "bounded exact originalCommit and derived-merge-base trees with optional truth retrieval and mandatory contract challenge retrieval",
     verificationWorkflow:
       "truth judge, optional truth retrieval and rerun, mandatory independent contract challenge, adversarial falsifier",
     pullRequestEventBase: "not available in harvest; not measured",
@@ -1355,6 +1448,7 @@ test("execute joins fake verifier decisions, scores them, and writes only the re
         }),
       loadVerificationDependencies: async () => ({
         buildChangeEvidence: () => ({ text: "H:1| exact historical source" }),
+        mappedBaseRangeFromUnifiedDiff: (_diff, range) => range,
         collectInitialRepositoryContext: async (request) => ({
           headCommit: request.head,
           entries: [],

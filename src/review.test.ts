@@ -4190,6 +4190,26 @@ describe("performReview: review-cache memoization end to end", () => {
       acquireEngineMock.mockReset();
     });
 
+    it("reserves proportional headroom for all four mandatory verification calls", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const request = baseRequest(undefined);
+      const report = await performReview(
+        {
+          ...request,
+          config: { ...request.config, tokenBudget: 1_500_000 },
+        },
+        createSilentDiagnostics(),
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect((runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number }).allottedBudget).toBe(
+        92_000,
+      );
+    });
+
     it("prices a smaller allotment when a cache hit removes a file from dispatch", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });

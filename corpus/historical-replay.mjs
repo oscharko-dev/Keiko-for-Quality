@@ -876,6 +876,7 @@ export async function runHistoricalReplayVerification({
   judgeEndpoint,
   readChangeAtCommits = readHistoricalChangeAtCommits,
   buildChangeEvidence,
+  mappedBaseRangeFromUnifiedDiff,
   collectInitialRepositoryContext,
   collectRepositoryContextFollowUp,
   toRetrievedEvidence,
@@ -884,6 +885,7 @@ export async function runHistoricalReplayVerification({
   const { caseIds } = assertDecisionInputs(databaseIds, cases);
   if (
     typeof buildChangeEvidence !== "function" ||
+    typeof mappedBaseRangeFromUnifiedDiff !== "function" ||
     typeof collectInitialRepositoryContext !== "function" ||
     typeof collectRepositoryContextFollowUp !== "function" ||
     typeof toRetrievedEvidence !== "function" ||
@@ -922,6 +924,7 @@ export async function runHistoricalReplayVerification({
     }
     const judgeable = {
       path: replayCase.path,
+      basePath: sources.oldPath,
       content: replayCase.content,
       startLine: replayCase.startLine,
       endLine: replayCase.endLine,
@@ -936,12 +939,20 @@ export async function runHistoricalReplayVerification({
       corroboratedDecisions.unmeasured += 1;
       continue;
     }
+    const findingAnchor = { startLine: replayCase.startLine, endLine: replayCase.endLine };
+    const baseFindingAnchor =
+      sources.headSource === undefined
+        ? findingAnchor
+        : mappedBaseRangeFromUnifiedDiff(sources.unifiedDiff, findingAnchor);
     const repositoryRequest = {
       repositoryPath: repo,
       pathValue: FIXED_PATH,
       head: sources.headCommitOid,
+      base: sources.baseCommitOid,
       reviewPath: replayCase.path,
-      findingAnchor: { startLine: replayCase.startLine, endLine: replayCase.endLine },
+      baseReviewPath: sources.oldPath,
+      findingAnchor,
+      ...(baseFindingAnchor === undefined ? {} : { baseFindingAnchor }),
       findingContent: replayCase.content,
       anchorText,
       unifiedDiff: sources.unifiedDiff,
@@ -984,8 +995,13 @@ export async function runHistoricalReplayVerification({
         judgeEndpoint,
         HISTORICAL_REPLAY_STRICTNESS,
         remainingTokens,
-        async ({ terms }) =>
-          toRetrievedEvidence(await collectRepositoryContextFollowUp(repositoryRequest, terms)),
+        async ({ terms, challengeAxis, knownProvenance }) => {
+          const sourceSide = challengeAxis === "base" ? "B" : "H";
+          const followUp = await collectRepositoryContextFollowUp(repositoryRequest, terms, {
+            sourceSide,
+          });
+          return toRetrievedEvidence(followUp, knownProvenance);
+        },
       );
     } catch {
       // A thrown verifier cannot report what it spent. It received the complete remaining hard
@@ -1075,7 +1091,7 @@ export function buildRedactedHistoricalReplayEvidence({
       historicalDiffSource:
         "exact single-change unified diff from derived merge-base to immutable originalCommit",
       repositoryContextSource:
-        "bounded exact originalCommit tree with optional truth retrieval and mandatory contract challenge retrieval",
+        "bounded exact originalCommit and derived-merge-base trees with optional truth retrieval and mandatory contract challenge retrieval",
       verificationWorkflow:
         "truth judge, optional truth retrieval and rerun, mandatory independent contract challenge, adversarial falsifier",
       pullRequestEventBase: "not available in harvest; not measured",
@@ -1148,7 +1164,7 @@ function sourceDigests() {
 async function productionVerificationDependencies() {
   registerTsExtensionHooks();
   const [
-    { buildChangeEvidence },
+    { buildChangeEvidence, mappedBaseRangeFromUnifiedDiff },
     { collectInitialRepositoryContext, collectRepositoryContextFollowUp },
     { toRetrievedEvidence },
     { substantiate },
@@ -1160,6 +1176,7 @@ async function productionVerificationDependencies() {
   ]);
   return {
     buildChangeEvidence,
+    mappedBaseRangeFromUnifiedDiff,
     collectInitialRepositoryContext,
     collectRepositoryContextFollowUp,
     toRetrievedEvidence,
@@ -1300,6 +1317,7 @@ export async function runHistoricalReplayCommand(argv, env = process.env, depend
       judgeEndpoint,
       readChangeAtCommits,
       buildChangeEvidence: loaded.buildChangeEvidence,
+      mappedBaseRangeFromUnifiedDiff: loaded.mappedBaseRangeFromUnifiedDiff,
       collectInitialRepositoryContext: loaded.collectInitialRepositoryContext,
       collectRepositoryContextFollowUp: loaded.collectRepositoryContextFollowUp,
       toRetrievedEvidence: loaded.toRetrievedEvidence,

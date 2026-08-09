@@ -90,7 +90,9 @@ async function fixture(): Promise<{
     repositoryPath: repository,
     pathValue: process.env.PATH ?? "",
     head,
+    base: head,
     reviewPath: "src/review.ts",
+    baseReviewPath: "src/review.ts",
     findingAnchor: { startLine: 1, endLine: 1 },
     findingContent: "Calling useCapability bypasses the runtime guard.",
     anchorText: "const result = useCapability(input);",
@@ -140,6 +142,39 @@ describe("repository context collection", () => {
     expect(context.headCommit).toBe(request.head);
     expect(await readFile(join(repository, "src/payload.ts"), "utf8")).toContain("touch PWNED");
     await expect(readFile(join(repository, "PWNED"), "utf8")).rejects.toThrow();
+  });
+
+  it("searches the immutable BASE commit only when the closed base source is requested", async () => {
+    const { repository, request } = await fixture();
+    await write(
+      repository,
+      "src/base-only.ts",
+      "export function removedContract(): boolean { return true; }\n",
+    );
+    git(repository, "add", "src/base-only.ts");
+    git(repository, "commit", "-qm", "add base-only contract");
+    const base = commitSha(git(repository, "rev-parse", "HEAD"));
+    await rm(join(repository, "src/base-only.ts"));
+    git(repository, "add", "-A");
+    git(repository, "commit", "-qm", "remove base-only contract");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const bound = { ...request, head, base };
+
+    const headContext = await collectRepositoryContextFollowUp(bound, ["removedContract"]);
+    const baseContext = await collectRepositoryContextFollowUp(bound, ["removedContract"], {
+      sourceSide: "B",
+      structuralSearch: () => Promise.resolve([]),
+    });
+
+    expect(headContext).toEqual({ sourceCommit: head, side: "H", entries: [] });
+    expect(baseContext.sourceCommit).toBe(base);
+    expect(baseContext.side).toBe("B");
+    expect(baseContext.entries).toContainEqual({
+      path: "src/base-only.ts",
+      line: 1,
+      content: "export function removedContract(): boolean { return true; }",
+      kind: "definition",
+    });
   });
 
   it("keeps strong-term sightings when a later noisy initial term fails", async () => {
@@ -351,7 +386,7 @@ describe("repository context collection", () => {
     expect(merged.entries.length).toBe(initial.entries.length + followUp.entries.length);
     expect(merged.entries.slice(0, followUp.entries.length)).toEqual(followUp.entries);
 
-    const otherHead = { ...followUp, headCommit: "a".repeat(40) };
+    const otherHead = { ...followUp, sourceCommit: commitSha("a".repeat(40)) };
     expect(mergeRepositoryEvidenceContexts(initial, otherHead)).toBe(initial);
   });
 
@@ -736,7 +771,7 @@ describe("repository context collection", () => {
     const { request } = await fixture();
     await expect(
       collectRepositoryContextFollowUp(request, ["DefinitelyMissingIdentifier"]),
-    ).resolves.toEqual({ headCommit: request.head, entries: [] });
+    ).resolves.toEqual({ sourceCommit: request.head, side: "H", entries: [] });
 
     const unavailable = { ...request, head: commitSha("f".repeat(40)) };
     await expect(collectInitialRepositoryContext(unavailable)).resolves.toEqual({

@@ -29,17 +29,18 @@ candidate-provided script, hook, action, package manager, or repository command 
 invoked with a constructed environment and neutralized global and system configuration, because a
 config file can define aliases and hook paths that turn a read into an execution.
 
-**Structural retrieval keeps that boundary.** Follow-up lookup uses `git grep` against the exact
-HEAD first. A fixed ast-grep release receives at most four bounded HEAD blobs through stdin — never
-candidate paths, a checkout, or repository configuration — when ambiguous sightings require
-structure and, when available, to add tightly bounded owning-function context to clear lexical
-evidence. Both the release archive and extracted executable are SHA-256 pinned on every supported
-platform; ZIP paths, sizes and CRCs are checked before verified bytes become executable. Malformed
-output, timeout, unsupported platform, or any acquisition mismatch fails an ambiguity-driven
-lookup closed and leaves the affected review incomplete; optional enrichment failure retains only
-the exact lexical evidence. The reviewed file is eligible only during an explicit follow-up, and
-lines inside its already-rendered 24-line-per-side anchor window are rejected before lexical or
-structural evidence is returned.
+**Structural retrieval keeps that boundary.** Follow-up lookup uses `git grep` against an exact
+immutable commit: HEAD normally, or the merge base only for the planner's closed `base` challenge
+axis. A fixed ast-grep release receives at most four bounded blobs from that same commit through
+stdin — never candidate paths, a checkout, or repository configuration — when ambiguous sightings
+require structure and, when available, to add tightly bounded owning-function context to clear
+lexical evidence. Both the release archive and extracted executable are SHA-256 pinned on every
+supported platform; ZIP paths, sizes and CRCs are checked before verified bytes become executable.
+Malformed output, timeout, unsupported platform, or any acquisition mismatch fails an
+ambiguity-driven lookup closed and leaves the affected review incomplete; optional enrichment
+failure retains only the exact lexical evidence. The reviewed file is eligible only during an
+explicit follow-up, and lines inside its already-rendered 24-line-per-side anchor window are
+rejected before lexical or structural evidence is returned.
 
 **Prompt injection is expected, not prevented.** The rule text tells the model that file content is
 data and never an instruction, but that is mitigation, not a guarantee. The real containment is
