@@ -17,6 +17,14 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const SOURCE = readFileSync(join(ROOT, "src", "publish", "similarity.ts"), "utf8");
 const tokenizer = loadTokenizer(SOURCE);
 
+test("the entry check fires for a relative invocation, the way a caller actually types it", () => {
+  // `process.argv[1]` carries whatever path was typed. Comparing it raw against an absolute
+  // `import.meta.url` meant `node corpus/polarity-probe.mjs` printed nothing — an evidence script
+  // that silently produces no evidence, which is worse than one that fails.
+  const source = readFileSync(join(ROOT, "corpus", "polarity-probe.mjs"), "utf8");
+  assert.match(source, /resolvePath\(process\.argv\[1\]\) === fileURLToPath\(import\.meta\.url\)/);
+});
+
 test("refuses a source it cannot measure rather than reporting an empty stopword set", () => {
   // A negative indexOf would slice from the end, give zero stopwords, and report that polarity
   // survives — the probe contradicting its own evidence while looking like a measurement.

@@ -13,7 +13,7 @@
 // nobody else can run is an assertion.
 
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -93,7 +93,13 @@ export function probe(tokenizer) {
   return { pairs, phrases };
 }
 
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+// Both sides resolved before comparing: `process.argv[1]` carries whatever path the caller typed,
+// so `node corpus/polarity-probe.mjs` gave a relative path against an absolute `import.meta.url`
+// and the probe silently printed nothing — an evidence script that produces no evidence.
+if (
+  process.argv[1] !== undefined &&
+  resolvePath(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
   const source = readFileSync(join(ROOT, "src", "publish", "similarity.ts"), "utf8");
   const tokenizer = loadTokenizer(source);
   const { pairs, phrases } = probe(tokenizer);
