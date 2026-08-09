@@ -21,7 +21,7 @@ deliberately separate, not-yet-scoped decision, left alone so the qualification 
 release keeps the same measurement basis it was recorded under (see `corpus/run.mjs`'s own header
 comment).
 
-## Four commands spend real money
+## Four commands and one manual workflow spend real money
 
 `npm run corpus`, `npm run corpus:real`, `npm run corpus:seed`, and `npm run corpus:completion`
 call a real model over a real endpoint — `corpus:real` against however many commits you point it
@@ -33,6 +33,11 @@ reason. Do not run any of them without the user's explicit go-ahead, and do not 
 "double check" an ordinary change — the deterministic half of the corpus (inventory, placement,
 sanitization, settlement) already runs under `npm test`, and both gates' grading logic is
 hermetically covered by `corpus/seed-gate.test.mjs` and `corpus/completion-gate.test.mjs`.
+
+The manual **historical diagnostic** Actions workflow also spends real model tokens. It exists only
+for a small, digest-bound verifier experiment when credentials are intentionally absent locally;
+its required confirmation is not authorization. Apply the same rule: inspect its zero-token plan
+and obtain the user's explicit go-ahead before dispatching it.
 
 ## Recall gates cannot see a reviewer that does not finish
 
