@@ -154,19 +154,19 @@ export function gradeRecord(record, commits) {
   }
   const gitClassification = classifyActedUpon(record, commits).classification;
   const touched = gitClassification === "acted_upon";
-  return {
-    label:
-      replyVerdict === "refuted"
-        ? touched
-          ? "refuted_contradicted"
-          : "refuted_confirmed"
-        : touched
-          ? "fixed_confirmed"
-          : "fixed_unconfirmed",
-    replyVerdict,
-    gitClassification,
-    reply,
-  };
+  return { label: labelFor(replyVerdict, touched), replyVerdict, gitClassification, reply };
+}
+
+/**
+ * The two-by-two the whole module turns on, written out rather than nested into one expression:
+ * what the reader SAID, against whether a later commit touched the region they said it about.
+ *
+ * Note that `touched` means the opposite thing in each row. For a refutation it is bad news — the
+ * argument and the behaviour disagree, so the pair is unusable. For a fix it is corroboration.
+ */
+function labelFor(replyVerdict, touched) {
+  if (replyVerdict === "refuted") return touched ? "refuted_contradicted" : "refuted_confirmed";
+  return touched ? "fixed_confirmed" : "fixed_unconfirmed";
 }
 
 /**
@@ -208,6 +208,18 @@ export function findRecallGaps(crossBotClusters, actedUpon) {
   return gaps;
 }
 
+/**
+ * Code-unit string order, stated rather than left to `Array.sort`'s default.
+ *
+ * The default sorts by string coercion, which happens to be right for these keys and would stop
+ * being right the moment a caller passed anything else. This document is compared across runs, so
+ * the ordering is part of its contract — the same reason `review-cache.ts` names its own.
+ */
+function byCodeUnit(a, b) {
+  if (a < b) return -1;
+  return a > b ? 1 : 0;
+}
+
 /** Every label's count, always all six keys, so an absent label reads as zero rather than absent. */
 export function tallyLabels(graded) {
   const counts = Object.fromEntries(HARVEST_LABELS.map((label) => [label, 0]));
@@ -242,7 +254,7 @@ export function buildHarvestDocument({ repo, generatedAt, prs }) {
       byLabel: tallyLabels(allFindings),
       byBot: Object.fromEntries(
         [...new Set(allFindings.map((finding) => finding.arenaId ?? "other"))]
-          .sort()
+          .sort(byCodeUnit)
           .map((arenaId) => [
             arenaId,
             allFindings.filter((finding) => (finding.arenaId ?? "other") === arenaId).length,

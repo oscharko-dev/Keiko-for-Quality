@@ -48,7 +48,7 @@ function argValue(name) {
 }
 
 const repo = argValue("--repo");
-if (repo === undefined || !repo.includes("/")) usage("--repo <owner/name> is required");
+if (repo?.includes("/") !== true) usage("--repo <owner/name> is required");
 const [owner, name] = repo.split("/");
 const since = argValue("--since");
 const prsRaw = argValue("--prs");
@@ -92,7 +92,10 @@ function harvestOne(number) {
 
   const findings = records.filter((record) => !record.isNotice && record.arenaId !== null);
   const byBot = {};
-  for (const finding of findings) (byBot[finding.arenaId] ??= []).push(finding);
+  for (const finding of findings) {
+    byBot[finding.arenaId] ??= [];
+    byBot[finding.arenaId].push(finding);
+  }
 
   const actedUpon = new Map(
     commits.length === 0
