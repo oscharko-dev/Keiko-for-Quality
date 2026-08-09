@@ -30,12 +30,14 @@ invoked with a constructed environment and neutralized global and system configu
 config file can define aliases and hook paths that turn a read into an execution.
 
 **Structural retrieval keeps that boundary.** Follow-up lookup uses `git grep` against the exact
-HEAD first. If its sightings are structurally ambiguous, a fixed ast-grep release receives at most
-four bounded HEAD blobs through stdin — never candidate paths, a checkout, or repository
-configuration. Both the release archive and extracted executable are SHA-256 pinned on every
-supported platform; ZIP paths, sizes and CRCs are checked before verified bytes become executable.
-Malformed output, timeout, unsupported platform, or any acquisition mismatch fails the requested
-lookup closed and leaves the affected review incomplete.
+HEAD first. A fixed ast-grep release receives at most four bounded HEAD blobs through stdin — never
+candidate paths, a checkout, or repository configuration — when ambiguous sightings require
+structure and, when available, to add tightly bounded owning-function context to clear lexical
+evidence. Both the release archive and extracted executable are SHA-256 pinned on every supported
+platform; ZIP paths, sizes and CRCs are checked before verified bytes become executable. Malformed
+output, timeout, unsupported platform, or any acquisition mismatch fails an ambiguity-driven
+lookup closed and leaves the affected review incomplete; optional enrichment failure retains only
+the exact lexical evidence.
 
 **Prompt injection is expected, not prevented.** The rule text tells the model that file content is
 data and never an instruction, but that is mitigation, not a guarantee. The real containment is

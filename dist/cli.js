@@ -7008,28 +7008,34 @@ var CONTEXT_KIND_ORDER = {
   manifest: 3
 };
 var REPOSITORY_EVIDENCE_KINDS = new Set(Object.keys(CONTEXT_KIND_ORDER));
+function compareRepositoryEntries(left, right) {
+  return CONTEXT_KIND_ORDER[left.kind] - CONTEXT_KIND_ORDER[right.kind] || (left.path < right.path ? -1 : left.path > right.path ? 1 : left.line - right.line);
+}
 function safeRepositoryEntry(entry) {
   return entry.path.length > 0 && entry.path.length <= 512 && !entry.path.includes("\0") && !/[\r\n]/u.test(entry.path) && REPOSITORY_EVIDENCE_KINDS.has(entry.kind) && Number.isSafeInteger(entry.line) && entry.line > 0 && entry.content.length <= MAX_REPOSITORY_LINE_CHARS && !entry.content.includes("\0") && !/[\r\n]/u.test(entry.content);
 }
 function boundedRepositoryEntries(context) {
   const seen = /* @__PURE__ */ new Set();
   const paths = /* @__PURE__ */ new Set();
-  return [...context.entries].filter(safeRepositoryEntry).sort(
-    (left, right) => CONTEXT_KIND_ORDER[left.kind] - CONTEXT_KIND_ORDER[right.kind] || (left.path < right.path ? -1 : left.path > right.path ? 1 : left.line - right.line)
-  ).filter((entry) => {
+  const selected = [];
+  for (const entry of context.entries) {
+    if (!safeRepositoryEntry(entry)) continue;
     const key = `${entry.path}\0${String(entry.line)}\0${entry.content}`;
-    if (seen.has(key)) return false;
-    if (!paths.has(entry.path) && paths.size === MAX_REPOSITORY_PATHS) return false;
+    if (seen.has(key)) continue;
+    if (!paths.has(entry.path) && paths.size === MAX_REPOSITORY_PATHS) continue;
     seen.add(key);
     paths.add(entry.path);
-    return true;
-  }).slice(0, MAX_REPOSITORY_EVIDENCE_MATCHES);
+    selected.push(entry);
+    if (selected.length === MAX_REPOSITORY_EVIDENCE_MATCHES) break;
+  }
+  return selected;
 }
 function defuseCandidateData(value) {
   return value.replaceAll("<repository_evidence>", "<repository-evidence>").replaceAll("</repository_evidence>", "</repository-evidence>").replaceAll("<change_evidence>", "<change-evidence>").replaceAll("</change_evidence>", "</change-evidence>");
 }
 function renderRepositoryCandidate(headCommit, entries) {
-  const paths = [...new Set(entries.map((entry) => entry.path))];
+  const displayed = [...entries].sort(compareRepositoryEntries);
+  const paths = [...new Set(displayed.map((entry) => entry.path))];
   const labels = new Map(paths.map((path, index) => [path, `H${String(index + 1)}`]));
   const header2 = [
     "<repository_evidence>",
@@ -7039,7 +7045,7 @@ function renderRepositoryCandidate(headCommit, entries) {
     ...paths.map((path, index) => `H${String(index + 1)} = ${defuseCandidateData(path)}`),
     ""
   ];
-  const rows = entries.map((entry) => {
+  const rows = displayed.map((entry) => {
     const label = labels.get(entry.path) ?? "H1";
     return `${label}:${String(entry.line)}| ${defuseCandidateData(entry.content)}`;
   });
@@ -7701,6 +7707,13 @@ var AstGrepSearchError = class extends Error {
     this.name = "AstGrepSearchError";
   }
 };
+var STRUCTURAL_KIND_ORDER = {
+  definition: 0,
+  test: 1,
+  callsite: 2
+};
+var DEFINITION_CONTEXT_OFFSETS = [1, 2, 3];
+var OCCURRENCE_CONTEXT_OFFSETS = [-1, 1];
 function asRecord(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new AstGrepSearchError();
@@ -7731,11 +7744,11 @@ function sourceRange(value, source) {
       end: safeInteger(offsets.end, source.bytes.byteLength)
     },
     start: {
-      line: safeInteger(start.line, source.source.split("\n").length),
+      line: safeInteger(start.line, source.lines.length),
       column: safeInteger(start.column, MAX_STRUCTURAL_FILE_BYTES)
     },
     end: {
-      line: safeInteger(end.line, source.source.split("\n").length),
+      line: safeInteger(end.line, source.lines.length),
       column: safeInteger(end.column, MAX_STRUCTURAL_FILE_BYTES)
     }
   };
@@ -7747,7 +7760,7 @@ function sourceRange(value, source) {
   }
   return parsed;
 }
-function exactTerms(terms) {
+function normalizedStructuralTerms(terms) {
   const accepted = [];
   for (const term of terms.slice(0, MAX_STRUCTURAL_TERMS)) {
     const tail = term.split(".").at(-1) ?? term;
@@ -7802,7 +7815,7 @@ async function toolJson(binaryPath, args, source, deadlineMs) {
   }
 }
 function sourceLine(source, line) {
-  const content = source.source.split("\n")[line];
+  const content = source.lines[line];
   return content === void 0 || content.length > MAX_ENTRY_LINE_CHARS ? void 0 : content;
 }
 function validMatchedText(record, terms) {
@@ -7811,7 +7824,19 @@ function validMatchedText(record, terms) {
   }
   return record.text;
 }
-function occurrenceEntry(value, source, terms) {
+function smallestContainingRange(nodes, occurrence) {
+  let selected;
+  for (const node of nodes) {
+    if (node.range.byteOffset.start > occurrence.byteOffset.start || node.range.byteOffset.end < occurrence.byteOffset.end) {
+      continue;
+    }
+    if (selected === void 0 || node.range.byteOffset.end - node.range.byteOffset.start < selected.byteOffset.end - selected.byteOffset.start) {
+      selected = node.range;
+    }
+  }
+  return selected;
+}
+function occurrenceHit(value, source, terms, nodes, pathRank) {
   const record = asRecord(value);
   if (record.file !== "STDIN" || record.language !== source.spec.language) {
     throw new AstGrepSearchError();
@@ -7822,20 +7847,27 @@ function occurrenceEntry(value, source, terms) {
     throw new AstGrepSearchError();
   }
   const content = sourceLine(source, range.start.line);
+  const ownerRange = smallestContainingRange(nodes, range);
   return content === void 0 ? void 0 : {
-    path: source.path,
-    line: range.start.line + 1,
-    content,
-    kind: /(?:(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$)/u.test(
-      source.path
-    ) ? "test" : "callsite"
+    anchor: {
+      path: source.path,
+      line: range.start.line + 1,
+      content,
+      kind: /(?:(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$)/u.test(
+        source.path
+      ) ? "test" : "callsite"
+    },
+    source,
+    ...ownerRange === void 0 ? {} : { ownerRange },
+    termRank: terms.indexOf(text),
+    pathRank
   };
 }
-function parseOccurrences(value, source, terms) {
+function parseOccurrences(value, source, terms, nodes, pathRank) {
   if (!Array.isArray(value) || value.length > MAX_STRUCTURAL_MATCHES) {
     throw new AstGrepSearchError();
   }
-  return value.map((item) => occurrenceEntry(item, source, terms)).filter((item) => item !== void 0);
+  return value.map((item) => occurrenceHit(item, source, terms, nodes, pathRank)).filter((item) => item !== void 0);
 }
 function identifierLine(source, range, name) {
   const finalLine = Math.min(range.end.line, range.start.line + 16);
@@ -7845,84 +7877,87 @@ function identifierLine(source, range, name) {
   }
   return void 0;
 }
-function definitionEntry(record, source, terms) {
-  if (typeof record.name !== "string") throw new AstGrepSearchError();
-  const range = sourceRange(record.range, source);
-  if (!terms.includes(record.name)) return void 0;
-  const line = identifierLine(source, range, record.name);
+function definitionHit(node, source, terms, pathRank) {
+  const termRank = terms.indexOf(node.name);
+  if (termRank < 0) return void 0;
+  const line = identifierLine(source, node.range, node.name);
   const content = line === void 0 ? void 0 : sourceLine(source, line);
-  return line === void 0 || content === void 0 ? void 0 : { path: source.path, line: line + 1, content, kind: "definition" };
+  return line === void 0 || content === void 0 ? void 0 : {
+    anchor: { path: source.path, line: line + 1, content, kind: "definition" },
+    source,
+    ownerRange: node.range,
+    termRank,
+    pathRank
+  };
 }
 function outlineMembers(record) {
   if (record.members === void 0) return [];
   if (!Array.isArray(record.members)) throw new AstGrepSearchError();
   return record.members;
 }
-function outlineDefinitions(items, source, terms) {
+function outlineNodes(items, source) {
   if (!Array.isArray(items)) throw new AstGrepSearchError();
-  const definitions = [];
+  const nodes = [];
   const pending = [...items];
   let visited = 0;
   while (pending.length > 0) {
     visited += 1;
     if (visited > MAX_STRUCTURAL_OUTLINE_NODES) throw new AstGrepSearchError();
     const record = asRecord(pending.shift());
-    const definition = definitionEntry(record, source, terms);
-    if (definition !== void 0) definitions.push(definition);
+    if (typeof record.name !== "string") throw new AstGrepSearchError();
+    nodes.push({ name: record.name, range: sourceRange(record.range, source) });
     pending.push(...outlineMembers(record));
   }
-  return definitions;
+  return nodes;
 }
-function parseOutline(value, source, terms) {
+function parseOutline(value, source) {
   if (!Array.isArray(value) || value.length !== 1) throw new AstGrepSearchError();
   const file = asRecord(value[0]);
   if (file.path !== "STDIN" || file.language !== source.spec.language) {
     throw new AstGrepSearchError();
   }
-  return outlineDefinitions(file.items, source, terms);
+  return outlineNodes(file.items, source);
 }
-async function inspectSource(binaryPath, source, terms, deadlineMs) {
+function scanArguments(source, terms) {
+  return [
+    "scan",
+    "--stdin",
+    "--inline-rules",
+    inlineRule(source.spec, terms),
+    "--json=compact",
+    "--color",
+    "never",
+    "--threads",
+    "1",
+    "--max-results",
+    String(MAX_STRUCTURAL_MATCHES)
+  ];
+}
+function outlineArguments(source) {
+  return [
+    "outline",
+    "--stdin",
+    "--lang",
+    source.spec.language,
+    "--json=compact",
+    "--items",
+    "structure",
+    "--view",
+    "expanded",
+    "--color",
+    "never",
+    "--threads",
+    "1"
+  ];
+}
+async function inspectSource(binaryPath, source, terms, pathRank, deadlineMs) {
   const [matches, outline] = await Promise.all([
-    toolJson(
-      binaryPath,
-      [
-        "scan",
-        "--stdin",
-        "--inline-rules",
-        inlineRule(source.spec, terms),
-        "--json=compact",
-        "--color",
-        "never",
-        "--threads",
-        "1",
-        "--max-results",
-        String(MAX_STRUCTURAL_MATCHES)
-      ],
-      source,
-      deadlineMs
-    ),
-    toolJson(
-      binaryPath,
-      [
-        "outline",
-        "--stdin",
-        "--lang",
-        source.spec.language,
-        "--json=compact",
-        "--items",
-        "structure",
-        "--view",
-        "expanded",
-        "--color",
-        "never",
-        "--threads",
-        "1"
-      ],
-      source,
-      deadlineMs
-    )
+    toolJson(binaryPath, scanArguments(source, terms), source, deadlineMs),
+    toolJson(binaryPath, outlineArguments(source), source, deadlineMs)
   ]);
-  return [...parseOutline(outline, source, terms), ...parseOccurrences(matches, source, terms)];
+  const nodes = parseOutline(outline, source);
+  const definitions = nodes.map((node) => definitionHit(node, source, terms, pathRank)).filter((hit) => hit !== void 0);
+  return [...definitions, ...parseOccurrences(matches, source, terms, nodes, pathRank)];
 }
 async function sourceCandidates(request) {
   const paths = [...new Set(request.candidatePaths.slice(0, 32))].filter((path) => path !== request.reviewPath && languageForPath(path) !== void 0).slice(0, MAX_STRUCTURAL_FILES);
@@ -7940,7 +7975,7 @@ async function sourceCandidates(request) {
       );
       if (source === void 0) return void 0;
       const bytes = Buffer.from(source, "utf8");
-      return bytes.byteLength > MAX_STRUCTURAL_FILE_BYTES ? void 0 : { path, source, bytes, spec };
+      return bytes.byteLength > MAX_STRUCTURAL_FILE_BYTES ? void 0 : { path, source, lines: source.split("\n"), bytes, spec };
     })
   );
   const selected = [];
@@ -7953,8 +7988,99 @@ async function sourceCandidates(request) {
   }
   return selected;
 }
+function compareStructuralHits(left, right) {
+  return left.termRank - right.termRank || left.pathRank - right.pathRank || STRUCTURAL_KIND_ORDER[left.anchor.kind] - STRUCTURAL_KIND_ORDER[right.anchor.kind] || left.anchor.line - right.anchor.line;
+}
+function uniqueStructuralHits(hits) {
+  const unique = /* @__PURE__ */ new Map();
+  for (const hit of [...hits].sort(compareStructuralHits)) {
+    const key = `${hit.anchor.path}\0${String(hit.anchor.line)}`;
+    const existing = unique.get(key);
+    if (existing === void 0 || STRUCTURAL_KIND_ORDER[hit.anchor.kind] < STRUCTURAL_KIND_ORDER[existing.anchor.kind]) {
+      unique.set(key, hit);
+    }
+  }
+  return [...unique.values()].sort(compareStructuralHits);
+}
+function reserveFirstHit(hits, reserved, matches) {
+  const hit = hits.find(matches);
+  if (hit !== void 0 && !reserved.includes(hit)) reserved.push(hit);
+}
+function reservedStructuralHits(hits, termCount, pathCount) {
+  const reserved = [];
+  for (let termRank = 0; termRank < termCount; termRank += 1) {
+    reserveFirstHit(hits, reserved, (hit) => hit.termRank === termRank);
+  }
+  for (const kind of ["definition", "test", "callsite"]) {
+    reserveFirstHit(hits, reserved, (hit) => hit.anchor.kind === kind);
+  }
+  for (let pathRank = 0; pathRank < pathCount; pathRank += 1) {
+    reserveFirstHit(hits, reserved, (hit) => hit.pathRank === pathRank);
+  }
+  return reserved;
+}
+function inclusiveRangeEndLine(source, range) {
+  if (range.byteOffset.end <= range.byteOffset.start) return range.start.line;
+  return lineAtByteOffset(source.bytes, range.byteOffset.end - 1);
+}
+function contextEntries(hit) {
+  const anchorLine = hit.anchor.line - 1;
+  const startLine = hit.ownerRange?.start.line ?? 0;
+  const endLine = hit.ownerRange === void 0 ? Math.max(0, hit.source.lines.length - 1) : inclusiveRangeEndLine(hit.source, hit.ownerRange);
+  const offsets = hit.anchor.kind === "definition" ? DEFINITION_CONTEXT_OFFSETS : OCCURRENCE_CONTEXT_OFFSETS;
+  const entries = [];
+  for (const offset of offsets) {
+    const line = anchorLine + offset;
+    if (line < startLine || line > endLine) continue;
+    const content = sourceLine(hit.source, line);
+    if (content === void 0 || content.trim() === "") continue;
+    entries.push({
+      path: hit.anchor.path,
+      line: line + 1,
+      content,
+      kind: hit.anchor.kind
+    });
+  }
+  return entries;
+}
+function interleaveContextEntries(hits) {
+  const groups = hits.map(contextEntries);
+  const entries = [];
+  const maximumLength = Math.max(0, ...groups.map((group) => group.length));
+  for (let offset = 0; offset < maximumLength; offset += 1) {
+    for (const group of groups) {
+      const entry = group[offset];
+      if (entry !== void 0) entries.push({ entry, anchor: false });
+    }
+  }
+  return entries;
+}
+function boundedStructuralEntries(hits, termCount, pathCount) {
+  const ranked = uniqueStructuralHits(hits);
+  const reserved = reservedStructuralHits(ranked, termCount, pathCount);
+  const reservation = new Set(reserved);
+  const ballast = ranked.filter((hit) => !reservation.has(hit));
+  const prioritized = [
+    ...reserved.map((hit) => ({ entry: hit.anchor, anchor: true })),
+    ...interleaveContextEntries(reserved),
+    ...ballast.map((hit) => ({ entry: hit.anchor, anchor: true }))
+  ];
+  const unique = /* @__PURE__ */ new Map();
+  for (const candidate of prioritized) {
+    const key = `${candidate.entry.path}\0${String(candidate.entry.line)}`;
+    const existing = unique.get(key);
+    if (existing === void 0) {
+      if (unique.size < MAX_STRUCTURAL_MATCHES) unique.set(key, candidate);
+      continue;
+    }
+    if (candidate.anchor && (!existing.anchor || STRUCTURAL_KIND_ORDER[candidate.entry.kind] < STRUCTURAL_KIND_ORDER[existing.entry.kind])) {
+      unique.set(key, candidate);
+    }
+  }
+  return [...unique.values()].map(({ entry }) => entry);
+}
 async function searchAstGrepAtHead(request, dependencies = {}) {
-  const terms = exactTerms(request.terms);
+  const terms = normalizedStructuralTerms(request.terms);
   if (terms.length === 0) return [];
   structuralTimeoutMs(request.deadlineMs, STRUCTURAL_PROCESS_TIMEOUT_MS);
   const sources = await sourceCandidates(request);
@@ -7967,18 +8093,12 @@ async function searchAstGrepAtHead(request, dependencies = {}) {
   } catch (error) {
     throw new AstGrepSearchError(error);
   }
-  const entries = (await Promise.all(
-    sources.map((source) => inspectSource(binaryPath, source, terms, request.deadlineMs))
+  const hits = (await Promise.all(
+    sources.map(
+      (source, pathRank) => inspectSource(binaryPath, source, terms, pathRank, request.deadlineMs)
+    )
   )).flat();
-  const unique = /* @__PURE__ */ new Map();
-  for (const entry of entries) {
-    const key = `${entry.path}\0${String(entry.line)}`;
-    const existing = unique.get(key);
-    if (existing === void 0 || entry.kind === "definition" && existing.kind !== "definition") {
-      unique.set(key, entry);
-    }
-  }
-  return [...unique.values()].slice(0, MAX_STRUCTURAL_MATCHES);
+  return boundedStructuralEntries(hits, terms.length, sources.length);
 }
 
 // src/publish/repository-context.ts
@@ -8232,6 +8352,7 @@ async function grepTermAtHead(context, head, term, strict = false, deadlineMs) {
   }
 }
 function takeUniqueMatches(seen, candidates, maximum) {
+  if (maximum <= 0) return [];
   const selected = [];
   for (const match of candidates) {
     const key = `${match.path}\0${String(match.line)}`;
@@ -8366,7 +8487,7 @@ function boundedCodeEntries(matches, reviewPath) {
   }
   return selected.map(withoutTermRank);
 }
-function boundedEvidenceEntries(structural, lexical, reviewPath) {
+function boundedEvidenceEntries(structural, lexical, reviewPath, termAnchorCount) {
   const eligible = (entries) => entries.filter(
     (entry) => entry.path !== reviewPath && entry.content.length <= MAX_MATCH_LINE_CHARS
   );
@@ -8374,6 +8495,9 @@ function boundedEvidenceEntries(structural, lexical, reviewPath) {
   const lexicalCandidates = eligible(lexical);
   const selected = [];
   const paths = /* @__PURE__ */ new Set();
+  for (const entry of structuralCandidates.slice(0, Math.max(0, termAnchorCount))) {
+    addCodeEntry(selected, paths, entry);
+  }
   for (const kind of ["definition", "test", "callsite"]) {
     addCodeEntry(
       selected,
@@ -8386,7 +8510,6 @@ function boundedEvidenceEntries(structural, lexical, reviewPath) {
     if (reservedStructuralPaths.has(entry.path)) continue;
     if (addCodeEntry(selected, paths, entry)) reservedStructuralPaths.add(entry.path);
   }
-  for (const entry of structuralCandidates) addCodeEntry(selected, paths, entry);
   for (const kind of ["definition", "test", "callsite"]) {
     addCodeEntry(
       selected,
@@ -8394,6 +8517,7 @@ function boundedEvidenceEntries(structural, lexical, reviewPath) {
       lexicalCandidates.find((entry) => entry.kind === kind)
     );
   }
+  for (const entry of structuralCandidates) addCodeEntry(selected, paths, entry);
   for (const candidate of lexicalCandidates) {
     addCodeEntry(selected, paths, candidate);
     if (selected.length === MAX_CODE_ENTRIES) break;
@@ -8528,24 +8652,34 @@ async function collectRepositoryContextFollowUp(request, retrieveTerms, dependen
   );
   remainingRepositoryMs(request);
   const lexical = boundedCodeEntries(result.matches, request.reviewPath);
-  if (!result.truncated && !lexicalNeedsStructuralFallback(result.matches, lexical, terms)) {
+  const structuralRequired = result.truncated || lexicalNeedsStructuralFallback(result.matches, lexical, terms);
+  if (result.matches.length === 0 && !result.truncated) {
     return { headCommit: request.head, entries: lexical };
   }
+  const structuralTerms = normalizedStructuralTerms(terms);
   try {
     const structural = await (dependencies.structuralSearch ?? searchAstGrepAtHead)({
       context,
       head: request.head,
       reviewPath: request.reviewPath,
       candidatePaths: result.candidatePaths,
-      terms,
+      terms: structuralTerms,
       ...request.deadlineMs === void 0 ? {} : { deadlineMs: request.deadlineMs }
     });
     return {
       headCommit: request.head,
-      entries: boundedEvidenceEntries(structural, lexical, request.reviewPath)
+      entries: boundedEvidenceEntries(
+        structural,
+        lexical,
+        request.reviewPath,
+        structuralTerms.length
+      )
     };
   } catch (error) {
-    throw new RepositoryContextRetrievalError(error);
+    if (structuralRequired) {
+      throw new RepositoryContextRetrievalError(error);
+    }
+    return { headCommit: request.head, entries: lexical };
   }
 }
 

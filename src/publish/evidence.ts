@@ -829,6 +829,16 @@ const CONTEXT_KIND_ORDER: Readonly<Record<RepositoryEvidenceKind, number>> = {
 
 const REPOSITORY_EVIDENCE_KINDS: ReadonlySet<string> = new Set(Object.keys(CONTEXT_KIND_ORDER));
 
+function compareRepositoryEntries(
+  left: RepositoryEvidenceEntry,
+  right: RepositoryEvidenceEntry,
+): number {
+  return (
+    CONTEXT_KIND_ORDER[left.kind] - CONTEXT_KIND_ORDER[right.kind] ||
+    (left.path < right.path ? -1 : left.path > right.path ? 1 : left.line - right.line)
+  );
+}
+
 function safeRepositoryEntry(entry: RepositoryEvidenceEntry): boolean {
   return (
     entry.path.length > 0 &&
@@ -849,22 +859,18 @@ function boundedRepositoryEntries(
 ): readonly RepositoryEvidenceEntry[] {
   const seen = new Set<string>();
   const paths = new Set<string>();
-  return [...context.entries]
-    .filter(safeRepositoryEntry)
-    .sort(
-      (left, right) =>
-        CONTEXT_KIND_ORDER[left.kind] - CONTEXT_KIND_ORDER[right.kind] ||
-        (left.path < right.path ? -1 : left.path > right.path ? 1 : left.line - right.line),
-    )
-    .filter((entry) => {
-      const key = `${entry.path}\u0000${String(entry.line)}\u0000${entry.content}`;
-      if (seen.has(key)) return false;
-      if (!paths.has(entry.path) && paths.size === MAX_REPOSITORY_PATHS) return false;
-      seen.add(key);
-      paths.add(entry.path);
-      return true;
-    })
-    .slice(0, MAX_REPOSITORY_EVIDENCE_MATCHES);
+  const selected: RepositoryEvidenceEntry[] = [];
+  for (const entry of context.entries) {
+    if (!safeRepositoryEntry(entry)) continue;
+    const key = `${entry.path}\u0000${String(entry.line)}\u0000${entry.content}`;
+    if (seen.has(key)) continue;
+    if (!paths.has(entry.path) && paths.size === MAX_REPOSITORY_PATHS) continue;
+    seen.add(key);
+    paths.add(entry.path);
+    selected.push(entry);
+    if (selected.length === MAX_REPOSITORY_EVIDENCE_MATCHES) break;
+  }
+  return selected;
 }
 
 function defuseCandidateData(value: string): string {
@@ -879,7 +885,11 @@ function renderRepositoryCandidate(
   headCommit: string,
   entries: readonly RepositoryEvidenceEntry[],
 ): string {
-  const paths = [...new Set(entries.map((entry) => entry.path))];
+  // Selection and all destructive ceilings use the caller's semantic priority. Sorting happens
+  // only after that selection, so stable human-readable output cannot turn alphabetical path order
+  // into an evidence policy or discard a requested follow-up behind lower-ranked ballast.
+  const displayed = [...entries].sort(compareRepositoryEntries);
+  const paths = [...new Set(displayed.map((entry) => entry.path))];
   const labels = new Map(paths.map((path, index) => [path, `H${String(index + 1)}`]));
   const header = [
     "<repository_evidence>",
@@ -889,7 +899,7 @@ function renderRepositoryCandidate(
     ...paths.map((path, index) => `H${String(index + 1)} = ${defuseCandidateData(path)}`),
     "",
   ];
-  const rows = entries.map((entry) => {
+  const rows = displayed.map((entry) => {
     const label = labels.get(entry.path) ?? "H1";
     return `${label}:${String(entry.line)}| ${defuseCandidateData(entry.content)}`;
   });

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -194,6 +194,36 @@ describe("run — failure classification", () => {
 });
 
 describe("runBoundedLineRecords", () => {
+  it("rejects invalid ceilings before spawning the child", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "kfq-bounded-options-"));
+    const marker = join(directory, "spawned");
+    const invalid = [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1];
+    try {
+      for (const value of invalid) {
+        for (const field of ["timeoutMs", "maximumBytes", "maximumRecords"] as const) {
+          const options = {
+            cwd: directory,
+            timeoutMs: 10_000,
+            maximumBytes: 1024,
+            maximumRecords: 2,
+            [field]: value,
+          };
+          const failure = await rejection(
+            runBoundedLineRecords(
+              NODE,
+              ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "yes")`],
+              options,
+            ),
+          );
+          expect(failure.timedOut).toBe(false);
+          await expect(access(marker)).rejects.toThrow();
+        }
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("retains only complete bounded records and marks later stdout truncated", async () => {
     const result = await runBoundedLineRecords(
       NODE,
