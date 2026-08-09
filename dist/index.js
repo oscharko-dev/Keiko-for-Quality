@@ -9166,6 +9166,9 @@ function eligibleRepositorySighting(request, sighting, allowDistantReviewPath) {
 }
 function eligibleStructuralPath(request, sighting, allowDistantReviewPath) {
   if (sighting.path !== request.reviewPath) return true;
+  return canSearchReviewedPath(request, allowDistantReviewPath);
+}
+function canSearchReviewedPath(request, allowDistantReviewPath) {
   return allowDistantReviewPath && Number.isSafeInteger(request.findingAnchor.startLine) && Number.isSafeInteger(request.findingAnchor.endLine) && request.findingAnchor.startLine > 0 && request.findingAnchor.endLine >= request.findingAnchor.startLine;
 }
 function validTerm(term) {
@@ -9414,6 +9417,11 @@ function interleavePaths(groups) {
   }
   return selected;
 }
+function reserveReviewedPathAfterTruncation(paths, request, allowDistantReviewPath, truncated) {
+  if (!truncated || !canSearchReviewedPath(request, allowDistantReviewPath)) return paths;
+  const withoutReviewed = paths.filter((path) => path !== request.reviewPath);
+  return [request.reviewPath, ...withoutReviewed].slice(0, Math.max(1, paths.length));
+}
 async function grepAtHead(context, request, terms, strict = false, allowDistantReviewPath = false) {
   if (terms.length === 0) return { matches: [], candidatePaths: [], truncated: false };
   const seenMatches = /* @__PURE__ */ new Set();
@@ -9432,9 +9440,15 @@ async function grepAtHead(context, request, terms, strict = false, allowDistantR
       result.truncated ? [] : takeUniqueMatches(seenMatches, ranked, matchQuota(termIndex, terms.length))
     );
   }
+  const candidatePaths = interleavePaths(pathGroups);
   return {
     matches: interleaveMatches(groups),
-    candidatePaths: interleavePaths(pathGroups),
+    candidatePaths: reserveReviewedPathAfterTruncation(
+      candidatePaths,
+      request,
+      allowDistantReviewPath,
+      truncated
+    ),
     truncated
   };
 }

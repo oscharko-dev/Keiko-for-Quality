@@ -436,6 +436,7 @@ describe("repository context collection", () => {
       },
     );
     expect(astPaths).toHaveLength(4);
+    expect(astPaths[0]).toBe(request.reviewPath);
     expect(empty.entries).toEqual([]);
 
     const structural = await collectRepositoryContextFollowUp(
@@ -445,7 +446,7 @@ describe("repository context collection", () => {
         structuralSearch: ({ candidatePaths }) =>
           Promise.resolve([
             {
-              path: candidatePaths[0] ?? "",
+              path: candidatePaths[1] ?? "",
               line: 1,
               content: "overflowContract();",
               kind: "callsite" as const,
@@ -454,7 +455,53 @@ describe("repository context collection", () => {
       },
     );
     expect(structural.entries).toHaveLength(1);
-    expect(structural.entries[0]?.path).toBe(astPaths[0]);
+    expect(structural.entries[0]?.path).toBe(astPaths[1]);
+  });
+
+  it("reserves a later reviewed file when a saturated grep prefix never reaches it", async () => {
+    const { repository, request } = await fixture();
+    await writeSaturatedTerm(repository, "overflowContract");
+    const reviewedPath = "zz/review.ts";
+    await write(
+      repository,
+      reviewedPath,
+      `${Array.from({ length: 25 }, () => "const padding = true;").join("\n")}\nexport function overflowContract(): boolean { return true; }\n`,
+    );
+    git(repository, "add", ".");
+    git(repository, "commit", "-qm", "add late reviewed contract");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+
+    const context = await collectRepositoryContextFollowUp(
+      {
+        ...request,
+        head,
+        reviewPath: reviewedPath,
+        baseReviewPath: reviewedPath,
+        findingAnchor: { startLine: 1, endLine: 1 },
+      },
+      ["overflowContract"],
+      {
+        structuralSearch: ({ candidatePaths }) => {
+          expect(candidatePaths[0]).toBe(reviewedPath);
+          expect(candidatePaths).toHaveLength(4);
+          return Promise.resolve([
+            {
+              path: reviewedPath,
+              line: 26,
+              content: "export function overflowContract(): boolean { return true; }",
+              kind: "definition",
+            },
+          ]);
+        },
+      },
+    );
+
+    expect(context.entries).toContainEqual({
+      path: reviewedPath,
+      line: 26,
+      content: "export function overflowContract(): boolean { return true; }",
+      kind: "definition",
+    });
   });
 
   it("reserves structural evidence ahead of twelve lexical ballast entries", async () => {

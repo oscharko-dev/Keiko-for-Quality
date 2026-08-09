@@ -163,6 +163,13 @@ function eligibleStructuralPath(
   // A same-file lexical sighting inside the visible window is enough to parse this one bounded
   // immutable blob: AST may find the requested producer/consumer farther away after git grep's
   // per-file prefix was consumed by near-anchor duplicates.
+  return canSearchReviewedPath(request, allowDistantReviewPath);
+}
+
+function canSearchReviewedPath(
+  request: RepositoryContextRequest,
+  allowDistantReviewPath: boolean,
+): boolean {
   return (
     allowDistantReviewPath &&
     Number.isSafeInteger(request.findingAnchor.startLine) &&
@@ -497,6 +504,17 @@ function interleavePaths(groups: readonly (readonly string[])[]): readonly strin
   return selected;
 }
 
+function reserveReviewedPathAfterTruncation(
+  paths: readonly string[],
+  request: RepositoryContextRequest,
+  allowDistantReviewPath: boolean,
+  truncated: boolean,
+): readonly string[] {
+  if (!truncated || !canSearchReviewedPath(request, allowDistantReviewPath)) return paths;
+  const withoutReviewed = paths.filter((path) => path !== request.reviewPath);
+  return [request.reviewPath, ...withoutReviewed].slice(0, Math.max(1, paths.length));
+}
+
 async function grepAtHead(
   context: GitContext,
   request: RepositoryContextRequest,
@@ -525,9 +543,15 @@ async function grepAtHead(
         : takeUniqueMatches(seenMatches, ranked, matchQuota(termIndex, terms.length)),
     );
   }
+  const candidatePaths = interleavePaths(pathGroups);
   return {
     matches: interleaveMatches(groups),
-    candidatePaths: interleavePaths(pathGroups),
+    candidatePaths: reserveReviewedPathAfterTruncation(
+      candidatePaths,
+      request,
+      allowDistantReviewPath,
+      truncated,
+    ),
     truncated,
   };
 }
