@@ -129,6 +129,26 @@ const SIMILARITY_THRESHOLD = 0.5;
 const MIN_SHARED_TOKENS = 4;
 
 /**
+ * A second, deliberately narrow band for an ANCHORED thread that a contributor already answered
+ * substantively and resolved.
+ *
+ * Keiko#3054 supplied three production misses at the ordinary band's boundary: the same rejected
+ * stable-bundle claim returned first with 19 shared tokens at 0.4419 overlap and then, measured
+ * directly against the original because a correctly suppressed intermediate cannot become future
+ * memory, with 20 at 0.4348; the same rejected provenance-guard claim returned with 14 at 0.4828.
+ * Lowering `SIMILARITY_THRESHOLD` globally would weaken open-thread, intra-run, file-level and
+ * outdated-recurrence precision for the sake of a stronger situation they do not have: a human
+ * disposition at the exact same changed lines.
+ *
+ * This band therefore exists only inside `findsDispositionedConversation`, requires real interval
+ * overlap (no line-tolerance or wide-drift admission), and trades the slightly lower ratio for
+ * a much higher absolute evidence floor. Both conditions must hold. The ordinary 0.50/4 band and
+ * every coordinate-free threshold remain unchanged.
+ */
+const DISPOSITION_SIMILARITY_THRESHOLD = 0.43;
+const MIN_DISPOSITION_SHARED_TOKENS = 14;
+
+/**
  * The bar every coordinate-free admission holds instead of a line anchor — `findsOutdatedRecurrence`,
  * and since 2026-08-06 `findsDispositionedConversation`'s anchor-less clause — and why it is higher.
  *
@@ -338,6 +358,15 @@ function bodiesAreSimilar(candidateBody: string, existingBody: string): boolean 
   return similarByContent(candidateBody, stripComposedArtifacts(existingBody));
 }
 
+/** The calibrated, token-only second band for an anchored substantive disposition. */
+function bodiesMatchDispositionBand(candidateBody: string, existingBody: string): boolean {
+  const { score, shared } = tokenOverlap(
+    tokenize(candidateBody),
+    tokenize(stripComposedArtifacts(existingBody)),
+  );
+  return shared >= MIN_DISPOSITION_SHARED_TOKENS && score >= DISPOSITION_SIMILARITY_THRESHOLD;
+}
+
 /**
  * True when a range is anchored nowhere: either endpoint at or below line 0.
  *
@@ -420,6 +449,26 @@ function isSameFindingAtSameLocation(
   return (
     linesOverlapWithin(candidate, thread, LINE_DRIFT_TOLERANCE) &&
     bodiesEffectivelyIdentical(candidate.body, thread.body)
+  );
+}
+
+/**
+ * The disposition-only production-calibrated admission.
+ *
+ * Unlike `isSameFindingAtSameLocation`, this does not inherit the two-line tolerance or the wide
+ * drift band. Its lower content ratio is justified only when the two real line intervals overlap;
+ * an absent, stale, merely-nearby or drifted coordinate must keep using the stricter existing rules.
+ */
+function isDispositionRestatementAtOverlappingLocation(
+  candidate: SimilarityCandidate,
+  thread: ExistingConversation,
+  identity: string,
+): boolean {
+  return (
+    thread.authorLogin === identity &&
+    thread.path === candidate.path &&
+    linesOverlapWithin(candidate, thread, 0) &&
+    bodiesMatchDispositionBand(candidate.body, thread.body)
   );
 }
 
@@ -509,6 +558,7 @@ export function findsDispositionedConversation(
       thread.resolved &&
       thread.dispositioned &&
       (isSameFindingAtSameLocation(candidate, thread, identity) ||
+        isDispositionRestatementAtOverlappingLocation(candidate, thread, identity) ||
         (carriesNoAnchor(thread) && isSameFindingOnSamePath(candidate, thread, identity))),
   );
 }

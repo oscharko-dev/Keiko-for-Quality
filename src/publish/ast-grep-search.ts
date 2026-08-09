@@ -410,7 +410,6 @@ async function sourceCandidates(
 ): Promise<readonly SourceCandidate[]> {
   const paths = [...new Set(request.candidatePaths.slice(0, 32))]
     .filter((path) => path !== request.reviewPath && languageForPath(path) !== undefined)
-    .sort((left, right) => left.localeCompare(right, "en"))
     .slice(0, MAX_STRUCTURAL_FILES);
   const read = await Promise.all(
     paths.map(async (path): Promise<SourceCandidate | undefined> => {

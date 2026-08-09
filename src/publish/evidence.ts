@@ -82,17 +82,21 @@ const CODE_SHAPED = /(?:[a-z][A-Z]|[_$]|\.)/u;
 /** Syntax, prose, and ubiquitous names that cannot orient a bounded repository lookup. */
 const IDENTIFIER_STOP_WORDS: ReadonlySet<string> = new Set([
   "and",
+  "are",
   "array",
   "async",
   "await",
+  "be",
   "boolean",
   "called",
   "case",
   "catch",
   "class",
+  "code",
   "const",
   "data",
   "default",
+  "does",
   "else",
   "error",
   "export",
@@ -101,30 +105,56 @@ const IDENTIFIER_STOP_WORDS: ReadonlySet<string> = new Set([
   "for",
   "from",
   "function",
+  "has",
+  "have",
   "if",
   "import",
+  "in",
   "input",
   "interface",
+  "into",
+  "is",
+  "it",
+  "its",
   "length",
   "let",
   "new",
+  "not",
   "null",
   "number",
   "object",
+  "of",
+  "on",
+  "only",
+  "or",
   "output",
   "path",
   "return",
+  "should",
   "string",
   "test",
   "text",
+  "than",
+  "that",
+  "the",
+  "their",
+  "then",
+  "there",
+  "these",
+  "they",
   "this",
+  "to",
   "true",
   "type",
   "undefined",
   "value",
+  "was",
+  "were",
   "when",
   "while",
+  "will",
   "with",
+  "would",
 ]);
 
 export interface FileEvidence {
@@ -159,13 +189,26 @@ export interface EvidenceIdentifierInput {
 function usableIdentifier(value: string): boolean {
   if (value.length < 3 || value.length > 80) return false;
   const tail = value.split(".").at(-1)?.toLowerCase() ?? "";
-  return !IDENTIFIER_STOP_WORDS.has(value.toLowerCase()) && !IDENTIFIER_STOP_WORDS.has(tail);
+  // A broad tail such as `length` is useless on its own, but the qualified `String.length`
+  // literal is precise repository evidence. Keep the exact name and let the retrieval layer
+  // independently refuse expansion to the noisy tail.
+  return (
+    !IDENTIFIER_STOP_WORDS.has(value.toLowerCase()) &&
+    (value.includes(".") || !IDENTIFIER_STOP_WORDS.has(tail))
+  );
 }
 
-function bookIdentifiers(scores: Map<string, number>, text: string, weight: number): void {
+function bookIdentifiers(
+  scores: Map<string, number>,
+  text: string,
+  weight: number,
+  requireCodeShape = false,
+): void {
   for (const match of text.matchAll(CODE_IDENTIFIER)) {
     const identifier = match[0];
-    if (!usableIdentifier(identifier)) continue;
+    if (!usableIdentifier(identifier) || (requireCodeShape && !CODE_SHAPED.test(identifier))) {
+      continue;
+    }
     scores.set(identifier, (scores.get(identifier) ?? 0) + weight);
   }
 }
@@ -192,9 +235,14 @@ function changedDiffText(unifiedDiff: string | undefined): string {
  */
 export function extractEvidenceIdentifiers(input: EvidenceIdentifierInput): readonly string[] {
   const scores = new Map<string, number>();
-  for (const identifier of citedIdentifiers(input.findingContent)) scores.set(identifier, 100);
+  for (const identifier of citedIdentifiers(input.findingContent)) {
+    if (usableIdentifier(identifier)) scores.set(identifier, 100);
+  }
   bookIdentifiers(scores, input.anchorText, 12);
-  bookIdentifiers(scores, changedDiffText(input.unifiedDiff), 6);
+  // A whole-file diff can contain thousands of prose words in comments, docs, and string values.
+  // Only names that look syntactically code-shaped may expand the repository search from there;
+  // plain identifiers still enter through the exact anchor or an explicit backtick citation.
+  bookIdentifiers(scores, changedDiffText(input.unifiedDiff), 6, true);
   for (const match of input.findingContent.matchAll(CODE_IDENTIFIER)) {
     const identifier = match[0];
     if (!usableIdentifier(identifier)) continue;
@@ -304,7 +352,10 @@ function renderSelection(
     const omission = previous > 0 && line > previous + 1 ? `… lines omitted …\n` : "";
     const next = `${omission}${numberedLine(line, source, side)}\n`;
     if (chars + next.length > maximumChars) continue;
-    rendered.push(next.trimEnd());
+    // Remove only the framing newline. `trimEnd()` would also erase the space after `H:n|` on an
+    // empty source line, making a line that was counted visible impossible for the strict parser
+    // to cite.
+    rendered.push(next.slice(0, -1));
     visible.add(line);
     chars += next.length;
     previous = line;

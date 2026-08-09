@@ -2312,7 +2312,7 @@ async function acquireEngine(directory, diagnostics, pin = ENGINE_PIN, platform 
 }
 
 // src/git/exec.ts
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 var ExecFailure = class extends Error {
   code;
   /**
@@ -2358,6 +2358,115 @@ function run(command, args, options2) {
       child.stdin?.on("error", () => void 0);
       child.stdin?.end(options2.input);
     }
+  });
+}
+function truncateAccumulator(accumulator) {
+  accumulator.pending = Buffer.alloc(0);
+  accumulator.status = "stdout_truncated";
+}
+function appendCompleteRecord(accumulator, record, options2) {
+  if (accumulator.records.length === options2.maximumRecords || accumulator.completeBytes + record.length > options2.maximumBytes) {
+    truncateAccumulator(accumulator);
+    return false;
+  }
+  accumulator.records.push(Buffer.from(record));
+  accumulator.completeBytes += record.length;
+  return true;
+}
+function appendLineChunk(accumulator, chunk, options2) {
+  if (chunk.length > 0) accumulator.endedOnNewline = chunk.at(-1) === 10;
+  if (accumulator.status === "stdout_truncated") return;
+  const combined = accumulator.pending.length === 0 ? chunk : Buffer.concat([accumulator.pending, chunk], accumulator.pending.length + chunk.length);
+  let cursor = 0;
+  while (cursor < combined.length) {
+    const newline = combined.indexOf(10, cursor);
+    if (newline < 0) break;
+    if (!appendCompleteRecord(accumulator, combined.subarray(cursor, newline + 1), options2)) return;
+    cursor = newline + 1;
+  }
+  const pending = combined.subarray(cursor);
+  if (pending.length > 0 && (accumulator.records.length === options2.maximumRecords || accumulator.completeBytes + pending.length > options2.maximumBytes)) {
+    truncateAccumulator(accumulator);
+    return;
+  }
+  accumulator.pending = Buffer.from(pending);
+}
+function validBoundedLineOptions(options2) {
+  return Number.isSafeInteger(options2.timeoutMs) && options2.timeoutMs > 0 && Number.isSafeInteger(options2.maximumBytes) && options2.maximumBytes > 0 && Number.isSafeInteger(options2.maximumRecords) && options2.maximumRecords > 0;
+}
+function stopTimer(state) {
+  if (state.timer !== void 0) clearTimeout(state.timer);
+}
+function acceptLineData(state, value, options2, kill) {
+  if (state.parseFailed) return;
+  try {
+    appendLineChunk(
+      state.accumulator,
+      Buffer.isBuffer(value) ? value : Buffer.from(value),
+      options2
+    );
+  } catch {
+    state.parseFailed = true;
+    kill();
+  }
+}
+function rejectLineProcess(state, command, reject) {
+  if (state.settled) return;
+  state.settled = true;
+  stopTimer(state);
+  reject(new ExecFailure(command, 1, state.timedOut));
+}
+function finishLineProcess(state, command, code, resolve, reject) {
+  if (state.settled) return;
+  state.settled = true;
+  stopTimer(state);
+  const incomplete2 = !state.accumulator.endedOnNewline;
+  if (state.timedOut || state.parseFailed || code !== 0 || incomplete2) {
+    const failureCode = state.timedOut ? 1 : typeof code === "number" ? code : 1;
+    reject(new ExecFailure(command, failureCode, state.timedOut));
+    return;
+  }
+  resolve({ records: state.accumulator.records, status: state.accumulator.status });
+}
+function runBoundedLineRecords(command, args, options2) {
+  if (!validBoundedLineOptions(options2)) {
+    return Promise.reject(new ExecFailure(command, 1));
+  }
+  return new Promise((resolve, reject) => {
+    const state = {
+      accumulator: {
+        records: [],
+        pending: Buffer.alloc(0),
+        completeBytes: 0,
+        endedOnNewline: true,
+        status: "complete"
+      },
+      settled: false,
+      timedOut: false,
+      parseFailed: false
+    };
+    const child = spawn(command, [...args], {
+      cwd: options2.cwd,
+      env: options2.env ?? {},
+      shell: false,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"]
+    });
+    state.timer = setTimeout(() => {
+      state.timedOut = true;
+      child.kill("SIGKILL");
+    }, options2.timeoutMs);
+    child.stdout.on("data", (value) => {
+      acceptLineData(state, value, options2, () => {
+        child.kill("SIGKILL");
+      });
+    });
+    child.once("error", () => {
+      rejectLineProcess(state, command, reject);
+    });
+    child.once("close", (code) => {
+      finishLineProcess(state, command, code, resolve, reject);
+    });
   });
 }
 function gitEnvironment(pathValue) {
@@ -6828,6 +6937,8 @@ var LINE_TOLERANCE = 2;
 var LINE_DRIFT_TOLERANCE = 40;
 var SIMILARITY_THRESHOLD = 0.5;
 var MIN_SHARED_TOKENS = 4;
+var DISPOSITION_SIMILARITY_THRESHOLD = 0.43;
+var MIN_DISPOSITION_SHARED_TOKENS = 14;
 var RECURRENCE_THRESHOLD = 0.7;
 var MIN_RECURRENCE_SHARED_TOKENS = 8;
 var MIN_SHARED_SNIPPET_CHARS = 24;
@@ -6907,6 +7018,13 @@ function similarByContent(a, b) {
 function bodiesAreSimilar(candidateBody, existingBody) {
   return similarByContent(candidateBody, stripComposedArtifacts(existingBody));
 }
+function bodiesMatchDispositionBand(candidateBody, existingBody) {
+  const { score, shared } = tokenOverlap(
+    tokenize(candidateBody),
+    tokenize(stripComposedArtifacts(existingBody))
+  );
+  return shared >= MIN_DISPOSITION_SHARED_TOKENS && score >= DISPOSITION_SIMILARITY_THRESHOLD;
+}
 function hasNoAnchor(startLine, endLine) {
   return startLine <= 0 || endLine <= 0;
 }
@@ -6930,6 +7048,9 @@ function isSameFindingAtSameLocation(candidate, thread, identity) {
   }
   return linesOverlapWithin(candidate, thread, LINE_DRIFT_TOLERANCE) && bodiesEffectivelyIdentical(candidate.body, thread.body);
 }
+function isDispositionRestatementAtOverlappingLocation(candidate, thread, identity) {
+  return thread.authorLogin === identity && thread.path === candidate.path && linesOverlapWithin(candidate, thread, 0) && bodiesMatchDispositionBand(candidate.body, thread.body);
+}
 function carriesNoAnchor(thread) {
   return thread.startLine === void 0 && thread.endLine === void 0;
 }
@@ -6943,7 +7064,7 @@ function findsSimilarOpenConversation(candidate, existing, identity) {
 }
 function findsDispositionedConversation(candidate, existing, identity) {
   return existing.some(
-    (thread) => thread.resolved && thread.dispositioned && (isSameFindingAtSameLocation(candidate, thread, identity) || carriesNoAnchor(thread) && isSameFindingOnSamePath(candidate, thread, identity))
+    (thread) => thread.resolved && thread.dispositioned && (isSameFindingAtSameLocation(candidate, thread, identity) || isDispositionRestatementAtOverlappingLocation(candidate, thread, identity) || carriesNoAnchor(thread) && isSameFindingOnSamePath(candidate, thread, identity))
   );
 }
 function findsOutdatedRecurrence(candidate, existing, identity) {
@@ -7386,17 +7507,21 @@ var CODE_IDENTIFIER = /[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*/gu;
 var CODE_SHAPED = /(?:[a-z][A-Z]|[_$]|\.)/u;
 var IDENTIFIER_STOP_WORDS = /* @__PURE__ */ new Set([
   "and",
+  "are",
   "array",
   "async",
   "await",
+  "be",
   "boolean",
   "called",
   "case",
   "catch",
   "class",
+  "code",
   "const",
   "data",
   "default",
+  "does",
   "else",
   "error",
   "export",
@@ -7405,30 +7530,56 @@ var IDENTIFIER_STOP_WORDS = /* @__PURE__ */ new Set([
   "for",
   "from",
   "function",
+  "has",
+  "have",
   "if",
   "import",
+  "in",
   "input",
   "interface",
+  "into",
+  "is",
+  "it",
+  "its",
   "length",
   "let",
   "new",
+  "not",
   "null",
   "number",
   "object",
+  "of",
+  "on",
+  "only",
+  "or",
   "output",
   "path",
   "return",
+  "should",
   "string",
   "test",
   "text",
+  "than",
+  "that",
+  "the",
+  "their",
+  "then",
+  "there",
+  "these",
+  "they",
   "this",
+  "to",
   "true",
   "type",
   "undefined",
   "value",
+  "was",
+  "were",
   "when",
   "while",
-  "with"
+  "will",
+  "with",
+  "would"
 ]);
 function citedIdentifiers(content) {
   const seen = /* @__PURE__ */ new Set();
@@ -7445,12 +7596,14 @@ function citedIdentifiers(content) {
 function usableIdentifier(value) {
   if (value.length < 3 || value.length > 80) return false;
   const tail = value.split(".").at(-1)?.toLowerCase() ?? "";
-  return !IDENTIFIER_STOP_WORDS.has(value.toLowerCase()) && !IDENTIFIER_STOP_WORDS.has(tail);
+  return !IDENTIFIER_STOP_WORDS.has(value.toLowerCase()) && (value.includes(".") || !IDENTIFIER_STOP_WORDS.has(tail));
 }
-function bookIdentifiers(scores, text3, weight) {
+function bookIdentifiers(scores, text3, weight, requireCodeShape = false) {
   for (const match of text3.matchAll(CODE_IDENTIFIER)) {
     const identifier = match[0];
-    if (!usableIdentifier(identifier)) continue;
+    if (!usableIdentifier(identifier) || requireCodeShape && !CODE_SHAPED.test(identifier)) {
+      continue;
+    }
     scores.set(identifier, (scores.get(identifier) ?? 0) + weight);
   }
 }
@@ -7462,9 +7615,11 @@ function changedDiffText(unifiedDiff) {
 }
 function extractEvidenceIdentifiers(input) {
   const scores = /* @__PURE__ */ new Map();
-  for (const identifier of citedIdentifiers(input.findingContent)) scores.set(identifier, 100);
+  for (const identifier of citedIdentifiers(input.findingContent)) {
+    if (usableIdentifier(identifier)) scores.set(identifier, 100);
+  }
   bookIdentifiers(scores, input.anchorText, 12);
-  bookIdentifiers(scores, changedDiffText(input.unifiedDiff), 6);
+  bookIdentifiers(scores, changedDiffText(input.unifiedDiff), 6, true);
   for (const match of input.findingContent.matchAll(CODE_IDENTIFIER)) {
     const identifier = match[0];
     if (!usableIdentifier(identifier)) continue;
@@ -7533,7 +7688,7 @@ function renderSelection(fileLines, selected, maximumChars, side) {
     const next = `${omission}${numberedLine(line, source, side)}
 `;
     if (chars + next.length > maximumChars) continue;
-    rendered.push(next.trimEnd());
+    rendered.push(next.slice(0, -1));
     visible.add(line);
     chars += next.length;
     previous = line;
@@ -8759,7 +8914,7 @@ async function inspectSource(binaryPath, source, terms, deadlineMs) {
   return [...parseOutline(outline, source, terms), ...parseOccurrences(matches, source, terms)];
 }
 async function sourceCandidates(request) {
-  const paths = [...new Set(request.candidatePaths.slice(0, 32))].filter((path) => path !== request.reviewPath && languageForPath(path) !== void 0).sort((left, right) => left.localeCompare(right, "en")).slice(0, MAX_STRUCTURAL_FILES);
+  const paths = [...new Set(request.candidatePaths.slice(0, 32))].filter((path) => path !== request.reviewPath && languageForPath(path) !== void 0).slice(0, MAX_STRUCTURAL_FILES);
   const read = await Promise.all(
     paths.map(async (path) => {
       const spec = languageForPath(path);
@@ -8820,6 +8975,7 @@ var MAX_REPOSITORY_INITIAL_TERMS = 6;
 var MAX_REPOSITORY_FOLLOW_UP_TERMS = 3;
 var MAX_GREP_TERMS = 8;
 var MAX_RAW_MATCHES = 96;
+var MAX_STRUCTURAL_CANDIDATE_PATHS_PER_TERM = 4;
 var MAX_CODE_ENTRIES = 12;
 var MAX_CODE_PATHS = 5;
 var MAX_MANIFEST_FILES = 3;
@@ -8837,6 +8993,7 @@ var TERM_STOP_WORDS = /* @__PURE__ */ new Set([
   "config",
   "data",
   "error",
+  "length",
   "input",
   "item",
   "path",
@@ -8844,6 +9001,7 @@ var TERM_STOP_WORDS = /* @__PURE__ */ new Set([
   "state",
   "test",
   "text",
+  "the",
   "value"
 ]);
 var MANIFEST_NAMES = [
@@ -8873,7 +9031,8 @@ var RepositoryContextRetrievalError = class extends Error {
 };
 function validTerm(term) {
   const tail = term.split(".").at(-1)?.toLowerCase() ?? "";
-  return term.length >= 3 && term.length <= 80 && RETRIEVAL_TERM.test(term) && !TERM_STOP_WORDS.has(term.toLowerCase()) && !TERM_STOP_WORDS.has(tail);
+  const qualified = term.includes(".");
+  return term.length >= 3 && term.length <= 80 && RETRIEVAL_TERM.test(term) && !TERM_STOP_WORDS.has(term.toLowerCase()) && (qualified || !TERM_STOP_WORDS.has(tail));
 }
 function boundedRetrieveTerms(terms, maximum) {
   if (maximum <= 0) return [];
@@ -8896,8 +9055,8 @@ function expandedSearchTerms(terms) {
   const seen = /* @__PURE__ */ new Set();
   for (const term of terms) {
     const tail = term.split(".").at(-1) ?? term;
-    for (const candidate of [tail, term]) {
-      if (seen.has(candidate)) continue;
+    for (const candidate of [term, tail]) {
+      if (!validTerm(candidate) || seen.has(candidate)) continue;
       seen.add(candidate);
       expanded.push(candidate);
       if (expanded.length === MAX_GREP_TERMS) return expanded;
@@ -9013,22 +9172,123 @@ function parseGrepOutput(output, head) {
   }
   return matches;
 }
-async function grepAtHead(context, head, terms, strict = false, deadlineMs) {
-  if (terms.length === 0) return [];
-  if (strict && !await strictGrepHasMatch(context, head, terms, deadlineMs)) return [];
+function parseCompleteGrepRecords(records, head) {
+  const matches = [];
+  for (const record of records) {
+    const output = record.toString("utf8");
+    const delimiters = grepDelimiters(output, 0);
+    if (delimiters?.contentEnd !== output.length - 1) {
+      throw new RepositoryContextRetrievalError();
+    }
+    const match = grepMatchAt(output, 0, delimiters, head);
+    if (match === void 0) throw new RepositoryContextRetrievalError();
+    matches.push(match);
+  }
+  return matches;
+}
+async function grepTermAtHead(context, head, term, strict = false, deadlineMs) {
+  if (strict && !await strictGrepHasMatch(context, head, [term], deadlineMs)) {
+    return { sightings: [], truncated: false };
+  }
   try {
     const timeoutMs = boundedRepositoryTimeout(deadlineMs, context.timeoutMs);
-    const result = await run("git", grepArguments(head, terms), {
+    if (strict) {
+      const streamed = await runBoundedLineRecords("git", grepArguments(head, [term]), {
+        cwd: context.cwd,
+        timeoutMs,
+        maximumBytes: GIT_MAX_BUFFER2,
+        maximumRecords: MAX_RAW_MATCHES,
+        env: { ...gitEnvironment(context.pathValue), GIT_LITERAL_PATHSPECS: "1" }
+      });
+      return {
+        sightings: parseCompleteGrepRecords(streamed.records, head),
+        truncated: streamed.status === "stdout_truncated"
+      };
+    }
+    const result = await run("git", grepArguments(head, [term]), {
       cwd: context.cwd,
       timeoutMs,
       maxBuffer: GIT_MAX_BUFFER2,
       env: { ...gitEnvironment(context.pathValue), GIT_LITERAL_PATHSPECS: "1" }
     });
-    return parseGrepOutput(result.stdout.toString("utf8"), head);
+    return {
+      sightings: parseGrepOutput(result.stdout.toString("utf8"), head),
+      truncated: false
+    };
   } catch (error) {
     if (strict) throw new RepositoryContextRetrievalError(error);
-    return [];
+    return { sightings: [], truncated: false };
   }
+}
+function takeUniqueMatches(seen, candidates, maximum) {
+  const selected = [];
+  for (const match of candidates) {
+    const key = `${match.path}\0${String(match.line)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    selected.push(match);
+    if (selected.length === maximum) return selected;
+  }
+  return selected;
+}
+function matchQuota(termIndex, termCount) {
+  const base = Math.floor(MAX_RAW_MATCHES / termCount);
+  const remainder = MAX_RAW_MATCHES % termCount;
+  return base + (termIndex < remainder ? 1 : 0);
+}
+function interleaveMatches(groups) {
+  const selected = [];
+  const maximumGroupLength = Math.max(0, ...groups.map((group) => group.length));
+  for (let offset = 0; offset < maximumGroupLength; offset += 1) {
+    for (const group of groups) {
+      const match = group[offset];
+      if (match !== void 0) selected.push(match);
+    }
+  }
+  return selected;
+}
+function takeCandidatePaths(seen, sightings, reviewPath) {
+  const selected = [];
+  for (const sighting of sightings) {
+    if (sighting.path === reviewPath || seen.has(sighting.path)) continue;
+    seen.add(sighting.path);
+    selected.push(sighting.path);
+    if (selected.length === MAX_STRUCTURAL_CANDIDATE_PATHS_PER_TERM) return selected;
+  }
+  return selected;
+}
+function interleavePaths(groups) {
+  const selected = [];
+  const maximumGroupLength = Math.max(0, ...groups.map((group) => group.length));
+  for (let offset = 0; offset < maximumGroupLength; offset += 1) {
+    for (const group of groups) {
+      const path = group[offset];
+      if (path !== void 0) selected.push(path);
+    }
+  }
+  return selected;
+}
+async function grepAtHead(context, head, terms, reviewPath, strict = false, deadlineMs) {
+  if (terms.length === 0) return { matches: [], candidatePaths: [], truncated: false };
+  const seenMatches = /* @__PURE__ */ new Set();
+  const seenPaths = /* @__PURE__ */ new Set();
+  const groups = [];
+  const pathGroups = [];
+  let truncated = false;
+  for (const [termIndex, term] of terms.entries()) {
+    const result = await grepTermAtHead(context, head, term, strict, deadlineMs);
+    truncated ||= result.truncated;
+    pathGroups.push(takeCandidatePaths(seenPaths, result.sightings, reviewPath));
+    const ranked = result.sightings.filter((match) => match.path !== reviewPath).map((match) => ({ ...match, termRank: termIndex }));
+    groups.push(
+      result.truncated ? [] : takeUniqueMatches(seenMatches, ranked, matchQuota(termIndex, terms.length))
+    );
+  }
+  return {
+    matches: interleaveMatches(groups),
+    candidatePaths: interleavePaths(pathGroups),
+    truncated
+  };
 }
 async function strictGrepHasMatch(context, head, terms, deadlineMs) {
   try {
@@ -9053,17 +9313,35 @@ function asCodeEntry(match) {
   return { ...match, kind: matchKind(match) };
 }
 function addCodeEntry(selected, paths, entry) {
-  if (entry === void 0 || selected.some((item) => item.path === entry.path && item.line === entry.line)) {
-    return;
+  if (entry === void 0 || selected.length === MAX_CODE_ENTRIES || selected.some((item) => item.path === entry.path && item.line === entry.line)) {
+    return false;
   }
-  if (!paths.has(entry.path) && paths.size === MAX_CODE_PATHS) return;
+  if (!paths.has(entry.path) && paths.size === MAX_CODE_PATHS) return false;
   paths.add(entry.path);
   selected.push(entry);
+  return true;
+}
+function reserveRankedEntries(candidates, selected, paths) {
+  const reservedRanks = /* @__PURE__ */ new Set();
+  for (const candidate of candidates) {
+    if (reservedRanks.has(candidate.termRank)) continue;
+    if (addCodeEntry(selected, paths, candidate)) reservedRanks.add(candidate.termRank);
+    if (selected.length === MAX_CODE_ENTRIES) return;
+  }
+}
+function withoutTermRank(entry) {
+  return {
+    path: entry.path,
+    line: entry.line,
+    content: entry.content,
+    kind: entry.kind
+  };
 }
 function boundedCodeEntries(matches, reviewPath) {
-  const candidates = matches.filter((match) => match.path !== reviewPath && match.content.length <= MAX_MATCH_LINE_CHARS).map(asCodeEntry).sort((left, right) => left.path.localeCompare(right.path) || left.line - right.line);
+  const candidates = matches.filter((match) => match.path !== reviewPath && match.content.length <= MAX_MATCH_LINE_CHARS).map(asCodeEntry);
   const selected = [];
   const paths = /* @__PURE__ */ new Set();
+  reserveRankedEntries(candidates, selected, paths);
   for (const kind of ["definition", "test", "callsite"]) {
     addCodeEntry(
       selected,
@@ -9075,20 +9353,37 @@ function boundedCodeEntries(matches, reviewPath) {
     addCodeEntry(selected, paths, candidate);
     if (selected.length === MAX_CODE_ENTRIES) break;
   }
-  return selected;
+  return selected.map(withoutTermRank);
 }
-function boundedEvidenceEntries(entries, reviewPath) {
-  const candidates = entries.filter((entry) => entry.path !== reviewPath && entry.content.length <= MAX_MATCH_LINE_CHARS).sort((left, right) => left.path.localeCompare(right.path) || left.line - right.line);
+function boundedEvidenceEntries(structural, lexical, reviewPath) {
+  const eligible = (entries) => entries.filter(
+    (entry) => entry.path !== reviewPath && entry.content.length <= MAX_MATCH_LINE_CHARS
+  );
+  const structuralCandidates = eligible(structural);
+  const lexicalCandidates = eligible(lexical);
   const selected = [];
   const paths = /* @__PURE__ */ new Set();
   for (const kind of ["definition", "test", "callsite"]) {
     addCodeEntry(
       selected,
       paths,
-      candidates.find((entry) => entry.kind === kind)
+      structuralCandidates.find((entry) => entry.kind === kind)
     );
   }
-  for (const candidate of candidates) {
+  const reservedStructuralPaths = new Set(selected.map((entry) => entry.path));
+  for (const entry of structuralCandidates) {
+    if (reservedStructuralPaths.has(entry.path)) continue;
+    if (addCodeEntry(selected, paths, entry)) reservedStructuralPaths.add(entry.path);
+  }
+  for (const entry of structuralCandidates) addCodeEntry(selected, paths, entry);
+  for (const kind of ["definition", "test", "callsite"]) {
+    addCodeEntry(
+      selected,
+      paths,
+      lexicalCandidates.find((entry) => entry.kind === kind)
+    );
+  }
+  for (const candidate of lexicalCandidates) {
     addCodeEntry(selected, paths, candidate);
     if (selected.length === MAX_CODE_ENTRIES) break;
   }
@@ -9178,14 +9473,15 @@ async function manifestEntries(context, request, terms) {
   return entries;
 }
 async function collectCodeEntries(context, request, terms, strict = false) {
-  const matches = await grepAtHead(
+  const result = await grepAtHead(
     context,
     request.head,
     expandedSearchTerms(terms),
+    request.reviewPath,
     strict,
     request.deadlineMs
   );
-  return boundedCodeEntries(matches, request.reviewPath);
+  return boundedCodeEntries(result.matches, request.reviewPath);
 }
 async function collectInitialRepositoryContext(request) {
   try {
@@ -9211,16 +9507,17 @@ async function collectRepositoryContextFollowUp(request, retrieveTerms, dependen
   remainingRepositoryMs(request);
   const context = await strictlyVerifiedContext(request);
   const terms = validatedRetrieveTerms(retrieveTerms);
-  const matches = await grepAtHead(
+  const result = await grepAtHead(
     context,
     request.head,
     expandedSearchTerms(terms),
+    request.reviewPath,
     true,
     request.deadlineMs
   );
   remainingRepositoryMs(request);
-  const lexical = boundedCodeEntries(matches, request.reviewPath);
-  if (!lexicalNeedsStructuralFallback(matches, lexical, terms)) {
+  const lexical = boundedCodeEntries(result.matches, request.reviewPath);
+  if (!result.truncated && !lexicalNeedsStructuralFallback(result.matches, lexical, terms)) {
     return { headCommit: request.head, entries: lexical };
   }
   try {
@@ -9228,13 +9525,13 @@ async function collectRepositoryContextFollowUp(request, retrieveTerms, dependen
       context,
       head: request.head,
       reviewPath: request.reviewPath,
-      candidatePaths: matches.map((match) => match.path),
+      candidatePaths: result.candidatePaths,
       terms,
       ...request.deadlineMs === void 0 ? {} : { deadlineMs: request.deadlineMs }
     });
     return {
       headCommit: request.head,
-      entries: boundedEvidenceEntries([...structural, ...lexical], request.reviewPath)
+      entries: boundedEvidenceEntries(structural, lexical, request.reviewPath)
     };
   } catch (error) {
     throw new RepositoryContextRetrievalError(error);
