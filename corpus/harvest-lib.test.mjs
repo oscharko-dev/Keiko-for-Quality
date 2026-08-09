@@ -369,14 +369,20 @@ test("a symlink pointing into the repository is resolved before the containment 
  * TARGET is absent reads as absent to `existsSync` — the ancestor walk then appended the link's own
  * name back unresolved, while `writeFileSync` follows it and creates the target inside the repo.
  */
-test("a DANGLING symlink into the repository is resolved too", () => {
+test("a DANGLING symlink into the repository is resolved too, and then refused", () => {
   const fs = fakeFs({ "/outside/link.json": "/repo/new.json" }, new Set(["/repo", "/outside"]));
-  assert.equal(realLocation("/outside/link.json", fs), "/repo/new.json");
+  const resolved = realLocation("/outside/link.json", fs);
+  assert.equal(resolved, "/repo/new.json");
+  // Resolving is only half the guard. Without this the two functions could drift apart and a
+  // dangling link would be resolved correctly and then waved through by the containment check.
+  assert.equal(escapesRepository("/repo", resolved), false);
 });
 
 test("a symlinked parent directory cannot hide the target either", () => {
   const fs = fakeFs({ "/outside/dir": "/repo/inner" }, new Set(["/repo", "/repo/inner"]));
-  assert.equal(realLocation("/outside/dir", fs), "/repo/inner");
+  const resolved = realLocation("/outside/dir", fs);
+  assert.equal(resolved, "/repo/inner");
+  assert.equal(escapesRepository("/repo", resolved), false);
 });
 
 test("a symlink cycle terminates instead of hanging", () => {
@@ -384,7 +390,9 @@ test("a symlink cycle terminates instead of hanging", () => {
   assert.equal(typeof realLocation("/a", fs), "string");
 });
 
-test("an ordinary path is returned unchanged", () => {
+test("an ordinary path outside the repository is returned unchanged and accepted", () => {
   const fs = fakeFs({}, new Set(["/home/user"]));
-  assert.equal(realLocation("/home/user/out.json", fs), "/home/user/out.json");
+  const resolved = realLocation("/home/user/out.json", fs);
+  assert.equal(resolved, "/home/user/out.json");
+  assert.equal(escapesRepository("/repo", resolved), true);
 });
