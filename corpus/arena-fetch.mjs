@@ -174,9 +174,26 @@ export function fetchPullRequestReviewThreads(owner, repo, number, runGhImpl = r
 }
 
 /**
+ * The most pull requests one `--since` window may resolve to. GitHub's search backend stops at
+ * 1000 results however the pages are requested, so this is that ceiling made explicit rather than
+ * a preference — beyond it, no request can tell us what we did not see.
+ */
+const MAX_DISCOVERED_PULL_REQUESTS = 1000;
+
+/**
  * Lists pull request numbers created on or after `sinceDate` (an ISO date, `YYYY-MM-DD`), in
  * ascending number order. Used only by `--since`; a caller that already knows which pull requests
  * to measure has no reason to call this. `runGhImpl` is injectable for the same reason as above.
+ *
+ * A full window or nothing. This asked for 200 and returned whatever came back, so any window with
+ * more than 200 pull requests was measured on an arbitrary subset and reported as if it were the
+ * whole thing — the failure mode `fetchPullRequestReviewThreads` above already refuses, one
+ * function away, by throwing past `MAX_THREAD_PAGES` instead of truncating. It matters most where
+ * it is least visible: `precision-gate.mjs` calls this to decide which pull requests to grade, so
+ * a silent cap would have quietly redefined the population behind a published rate.
+ *
+ * Hitting the ceiling exactly is indistinguishable from being cut off at it, so both throw, and the
+ * message names the only fix that exists — a narrower window.
  */
 export function discoverPullRequestNumbers(
   owner,
@@ -197,11 +214,17 @@ export function discoverPullRequestNumbers(
     "--json",
     "number",
     "--limit",
-    "200",
+    String(MAX_DISCOVERED_PULL_REQUESTS),
   ]);
-  return JSON.parse(raw)
-    .map((entry) => entry.number)
-    .sort((a, b) => a - b);
+  const numbers = JSON.parse(raw);
+  if (numbers.length >= MAX_DISCOVERED_PULL_REQUESTS) {
+    throw new Error(
+      `${owner}/${repo} has at least ${String(MAX_DISCOVERED_PULL_REQUESTS)} pull requests since ` +
+        `${sinceDate} — GitHub search cannot page past that, so this window cannot be measured ` +
+        "whole. Narrow --since and combine the runs.",
+    );
+  }
+  return numbers.map((entry) => entry.number).sort((a, b) => a - b);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -136,6 +136,39 @@ SHA whose executed bundle differs from its reviewed source. Run `npm run verify`
 individual commands — before calling any change done, and commit the regenerated `dist/index.js`
 with the source that produced it. This exact miss has already cost a CI round in this repository.
 
+## Releases go through `scripts/release.mjs` — never by hand
+
+Every step of a release is in that script, and the reason is one specific failure: the GitHub
+Release object for a pushed tag was skipped three times running (v0.21.0, v0.21.1, v0.21.2)
+before anyone noticed the repository's front page still advertising v0.20.1. Nothing failed when
+that step was missed — no red check, no broken consumer, because consumers pin SHAs and every pin
+was correct. What went stale was the only thing a human reads to decide WHAT to pin. A step that
+fails silently belongs in a program, not in a memory or a checklist.
+
+```bash
+npm run release -- prep    --version X.Y.Z          # version, README pin comment, build, verify, commit
+npm run release -- release --version X.Y.Z          # release branch off main, dev's tree, identity asserted
+npm run release -- publish --version X.Y.Z --sha <main-squash>   # signed tag + GitHub Release + check
+npm run release -- repin   --version X.Y.Z --sha <main-squash>   # this repo's self-review pin
+npm run release:check                               # any time: newest tag must have a Release
+```
+
+Four things the script refuses rather than warns about, each an error already made here:
+
+- **No gate evidence, no release.** `prep` fails unless `corpus/evidence/` already carries this
+  version's seed-gate and completion-gate reports. The gates are paid and slow, so the script
+  never runs them — it refuses to ship a version whose evidence nobody wrote down.
+- **`npm run verify` is never piped.** A pipeline exits with its LAST command's status, so
+  `npm run verify | tail` reads a red chain as green. That shipped a stale `dist/` on 2026-08-08.
+- **The release tree must equal `dev`'s tree**, asserted with `rev-parse HEAD^{tree}`. A release
+  that is not byte-identical to what the gates ran against is a release with no evidence.
+- **The consumer's `uses:` and `ACTION_PIN` move together.** The consumer workflow's own sync
+  check fails the run when they disagree; the script counts both rewrites so a half-rewrite stops
+  before it is pushed.
+
+The phases are separate because two of them wait on a pull request merging. A script that polled
+for that would be claiming to have verified something it only waited for.
+
 ## Landing changes here
 
 - **`dev` is the integration branch and the default.** Ordinary work targets `dev`; native
