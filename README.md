@@ -10,6 +10,24 @@
 </p>
 
 <p align="center">
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=alert_status"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=duplicated_lines_density"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=coverage"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=duplicated_lines_density"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=reliability_rating"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=security_rating"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=sqale_rating"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=sqale_index"></a>
+  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=vulnerabilities"></a>
+</p>
+
+<p align="center">
+  <a href="https://sonarcloud.io/project/overview?id=oscharko-dev_Keiko-for-Quality"><picture>
+    <img src="https://sonarcloud.io/images/project_badges/sonarcloud-highlight.svg" width="340" alt="Scanned on SonarQube Cloud badge">
+  </picture></a>
+</p>
+
+<p align="center">
   <!-- Card rendered by the quality-cards workflow (widget/scripts/render-card.mjs) from this
        host's own API data. When quality.keiko.dev is deployed, only the URLs below change to
        https://quality.keiko.dev/widget/oscharko-dev/Keiko-for-Quality.svg . -->
@@ -109,7 +127,7 @@ same run are suppressed — the accounting for every suppression is in the run s
              PR: ${{ github.event.pull_request.number }}
            run: git fetch --no-tags origin "pull/${PR}/head"
 
-         - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.21.1
+         - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.21.2
            env:
              # The credential is passed by variable NAME, never as an input.
              KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
