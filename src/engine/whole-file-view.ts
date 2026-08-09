@@ -187,6 +187,20 @@ const MAX_DELETED_HINTS = 60;
 const MAX_RENDERED_BLOCK_CHARS = MAX_REVIEW_FILE_CHARS * 1.5;
 
 /**
+ * A file's lines, without the phantom one a trailing newline produces.
+ *
+ * `"a\nb\n".split("\n")` is `["a", "b", ""]`, and a POSIX text file ends with a newline, so the
+ * naive split numbered an extra empty line at the end of almost every file. Real line numbers were
+ * never wrong — the phantom is only ever last — but it invites the model to anchor a finding at a
+ * line the file does not have, and placement downstream would have to clamp or reject it.
+ */
+function splitFileLines(fileText: string): readonly string[] {
+  const lines = fileText.split("\n");
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+
+/**
  * The file, every line numbered, each marked as changed by this pull request or as pre-existing
  * context.
  *
@@ -196,8 +210,7 @@ const MAX_RENDERED_BLOCK_CHARS = MAX_REVIEW_FILE_CHARS * 1.5;
  * at all for this view.
  */
 export function renderWholeFile(fileText: string, changed: ReadonlySet<number>): string {
-  return fileText
-    .split("\n")
+  return splitFileLines(fileText)
     .map((line, index) => {
       const number = index + 1;
       const marker = changed.has(number) ? CHANGED_MARKER : CONTEXT_MARKER;

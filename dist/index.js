@@ -3468,8 +3468,13 @@ function deletedLineHints(fileDiff) {
 }
 var MAX_DELETED_HINTS = 60;
 var MAX_RENDERED_BLOCK_CHARS = MAX_REVIEW_FILE_CHARS * 1.5;
+function splitFileLines(fileText) {
+  const lines = fileText.split("\n");
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
 function renderWholeFile(fileText, changed) {
-  return fileText.split("\n").map((line, index) => {
+  return splitFileLines(fileText).map((line, index) => {
     const number = index + 1;
     const marker = changed.has(number) ? CHANGED_MARKER : CONTEXT_MARKER;
     return `${String(number)}${marker}${line}`;

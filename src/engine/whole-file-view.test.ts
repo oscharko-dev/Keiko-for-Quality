@@ -261,3 +261,23 @@ describe("WHOLE_FILE_PROMPT", () => {
     expect(WHOLE_FILE_PROMPT).toContain("deletion-only change");
   });
 });
+
+describe("renderWholeFile — the trailing newline", () => {
+  /**
+   * `"a\nb\n".split("\n")` is `["a", "b", ""]`, and a POSIX text file ends with a newline, so the
+   * naive split numbered a phantom empty line at the end of almost every file. Real line numbers
+   * were never wrong — the phantom is only ever last — but it invites the model to anchor a finding
+   * at a line the file does not have.
+   */
+  it("does not number a line the file does not have", () => {
+    expect(renderWholeFile("a\nb\n", new Set()).split("\n")).toEqual(["1 a", "2 b"]);
+  });
+
+  it("keeps a genuinely empty last line when there is no trailing newline", () => {
+    expect(renderWholeFile("a\n\nb", new Set()).split("\n")).toEqual(["1 a", "2 ", "3 b"]);
+  });
+
+  it("renders a single-line file with no trailing newline unchanged", () => {
+    expect(renderWholeFile("only", new Set([1]))).toBe("1+only");
+  });
+});
