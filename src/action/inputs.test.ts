@@ -140,6 +140,19 @@ describe("action inputs", () => {
     expect(JSON.stringify(config)).not.toContain("super-secret-value");
   });
 
+  it("maps review_timeout_seconds to the one whole-review ceiling", () => {
+    const base = {
+      INPUT_MODEL_PROTOCOL: "openai",
+      INPUT_MODEL_ENDPOINT: "https://api.example.test/v1",
+      INPUT_MODEL_ID: "test-model",
+      INPUT_MODEL_TOKEN_ENV: "KFQ_MODEL_TOKEN",
+    };
+    expect(runtimeConfigFromInputs(base).reviewTimeoutSeconds).toBe(1800);
+    expect(
+      runtimeConfigFromInputs({ ...base, INPUT_REVIEW_TIMEOUT_SECONDS: "37" }).reviewTimeoutSeconds,
+    ).toBe(37);
+  });
+
   // Dark-shipped prototype (issue #80 technique C, contracts/change-pass.ts): defaults off, and
   // an explicit `true` flows through exactly like every other boolean input's `true`.
   describe("crossArtifactPass", () => {

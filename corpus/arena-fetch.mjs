@@ -65,6 +65,7 @@ const REVIEW_THREADS_QUERY = `
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
+      baseRefOid
       headRefOid
       reviewThreads(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
@@ -85,6 +86,8 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
               originalStartLine
               createdAt
               commit { oid }
+              originalCommit { oid }
+              diffHunk
               author { login __typename }
               replyTo { databaseId }
             }
@@ -132,6 +135,7 @@ function mergePage(threads, response, owner, repo, number) {
     threads.push(thread);
   }
   return {
+    baseSha: pullRequest.baseRefOid,
     headSha: pullRequest.headRefOid,
     pageInfo: pullRequest.reviewThreads.pageInfo,
     truncatedThreadCount,
@@ -156,15 +160,19 @@ const MAX_THREAD_PAGES = 50;
  */
 export function fetchPullRequestReviewThreads(owner, repo, number, runGhImpl = runGh) {
   const threads = [];
+  let baseSha = null;
   let headSha = null;
   let after = null;
   let truncatedThreadCount = 0;
   for (let page = 0; page < MAX_THREAD_PAGES; page += 1) {
     const response = runGraphql(runGhImpl, { owner, repo, number }, after);
     const merged = mergePage(threads, response, owner, repo, number);
+    baseSha = merged.baseSha;
     headSha = merged.headSha;
     truncatedThreadCount += merged.truncatedThreadCount;
-    if (!merged.pageInfo.hasNextPage) return { headSha, threads, truncatedThreadCount };
+    if (!merged.pageInfo.hasNextPage) {
+      return { baseSha, headSha, threads, truncatedThreadCount };
+    }
     after = merged.pageInfo.endCursor;
   }
   throw new Error(

@@ -50,6 +50,8 @@ export interface ClassifyEndpoint {
   readonly endpoint: string;
   readonly token: string;
   readonly model: string;
+  /** Absolute whole-review boundary. Absent only for standalone/corpus callers. */
+  readonly deadlineMs?: number;
   /** Injection point for tests; production uses the platform fetch. */
   readonly fetchImpl?: typeof fetch;
 }
@@ -62,6 +64,8 @@ export interface RepairOutcome<T extends ClassifiableFinding> {
   readonly failed: number;
   /** Model tokens the repair itself spent, so the caller can account for them. */
   readonly tokens: number;
+  /** Findings that stayed unresolved because the next request could not fit the hard budget. */
+  readonly budgetBlocked: number;
 }
 
 /** True when the finding would reach the reader without a usable classification. */
@@ -165,15 +169,17 @@ function withoutTrailingSlashes(value: string): string {
 
 interface AttemptResult {
   readonly pair: { category: string; severity: string } | undefined;
-  readonly tokens: number;
   /**
-   * False for a thrown fetch or a non-OK response — a lost attempt that said nothing about the
-   * finding. True whenever a response came back and was read, even if its content did not parse to
-   * a valid pair: that is the model's actual (wrong or malformed) answer, not a dropped call.
+   * False for a thrown fetch, non-OK response, or response without trustworthy token usage — a lost
+   * attempt that cannot safely drive a later call. True when a metered response came back and was
+   * read, even if its content did not parse to a valid pair: that is the model's actual (wrong or
+   * malformed) answer, not a dropped call.
    * `collectAuditVotes` uses this to decide what is worth retrying; `repairClassification`'s stern
-   * retry is unconditional either way and does not need it.
+   * retry is unconditional either way unless the hard budget blocked the call.
    */
   readonly transportOk: boolean;
+  /** No endpoint request was started because its conservative upper bound did not fit. */
+  readonly budgetBlocked: boolean;
 }
 
 /**
@@ -186,12 +192,62 @@ interface AttemptResult {
  * own critical path, both for the initial repair and for the publish-time audit.
  */
 const REQUEST_TIMEOUT_MS = 45_000;
+const MAX_COMPLETION_TOKENS = 4_000;
+const REQUEST_TOKEN_OVERHEAD = 512;
 
-async function requestPair(
+interface CallBudget {
+  readonly maximum: number | undefined;
+  spent: number;
+}
+
+function hardMaximum(maxTokens: number | undefined): number | undefined {
+  if (maxTokens === undefined) return undefined;
+  return Number.isSafeInteger(maxTokens) && maxTokens >= 0 ? maxTokens : 0;
+}
+
+function requestTokenUpperBound(prompt: string): number {
+  return (
+    new TextEncoder().encode(prompt).byteLength + MAX_COMPLETION_TOKENS + REQUEST_TOKEN_OVERHEAD
+  );
+}
+
+function budgetAllows(budget: CallBudget, upperBound: number): boolean {
+  return (
+    budget.maximum === undefined ||
+    (budget.spent <= budget.maximum && upperBound <= budget.maximum - budget.spent)
+  );
+}
+
+function chargeUnreportedUsage(budget: CallBudget, upperBound: number): void {
+  if (budget.maximum === undefined) return;
+  budget.spent += upperBound;
+}
+
+function validReportedUsage(value: unknown, upperBound: number): value is number {
+  return (
+    typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= upperBound
+  );
+}
+
+interface EndpointBody {
+  readonly choices?: readonly { readonly message?: { readonly content?: string } }[];
+  readonly usage?: { readonly total_tokens?: number };
+}
+
+/** `undefined` means the enclosing review has ended and no endpoint call may start. */
+function classifyTimeoutMs(deadlineMs: number | undefined): number | undefined {
+  if (deadlineMs === undefined) return REQUEST_TIMEOUT_MS;
+  const remaining = Math.max(0, Math.trunc(deadlineMs - Date.now()));
+  return remaining === 0 ? undefined : Math.min(REQUEST_TIMEOUT_MS, remaining);
+}
+
+async function fetchClassifyBody(
   prompt: string,
   deps: ClassifyEndpoint,
   seed: number,
-): Promise<AttemptResult> {
+): Promise<EndpointBody | undefined> {
+  const timeoutMs = classifyTimeoutMs(deps.deadlineMs);
+  if (timeoutMs === undefined) return undefined;
   const doFetch = deps.fetchImpl ?? fetch;
   try {
     const response = await doFetch(`${withoutTrailingSlashes(deps.endpoint)}/chat/completions`, {
@@ -211,72 +267,100 @@ async function requestPair(
         seed,
         // Generous on purpose: reasoning models spend tokens before the final channel, and a cap
         // that starves the final answer reads exactly like non-compliance.
-        max_completion_tokens: 4000,
+        max_completion_tokens: MAX_COMPLETION_TOKENS,
       }),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!response.ok) return { pair: undefined, tokens: 0, transportOk: false };
-    const body = (await response.json()) as {
-      choices?: readonly { message?: { content?: string } }[];
-      usage?: { total_tokens?: number };
-    };
-    const content = body.choices?.[0]?.message?.content ?? "";
-    return {
-      pair: validPair(extractObject(content)),
-      tokens: body.usage?.total_tokens ?? 0,
-      transportOk: true,
-    };
+    return response.ok ? ((await response.json()) as EndpointBody) : undefined;
   } catch {
     // A transport failure is a failed attempt, not a crash: the finding keeps what it had and
     // the caller sees the miss in its counters. Swallowing the error VALUE is deliberate — this
     // path must never take down a review that already has its findings in hand.
-    return { pair: undefined, tokens: 0, transportOk: false };
+    return undefined;
   }
+}
+
+function unreportedAttempt(budget: CallBudget, upperBound: number): AttemptResult {
+  chargeUnreportedUsage(budget, upperBound);
+  return {
+    pair: undefined,
+    transportOk: false,
+    budgetBlocked: false,
+  };
+}
+
+async function requestPair(
+  prompt: string,
+  deps: ClassifyEndpoint,
+  seed: number,
+  budget: CallBudget,
+): Promise<AttemptResult> {
+  const upperBound = requestTokenUpperBound(prompt);
+  if (!budgetAllows(budget, upperBound)) {
+    return { pair: undefined, transportOk: false, budgetBlocked: true };
+  }
+  const body = await fetchClassifyBody(prompt, deps, seed);
+  const reportedTokens = body?.usage?.total_tokens;
+  // A reply without trustworthy metering cannot be adopted. Under a cap the whole preflight bound
+  // is charged, so neither a lost response nor a lying provider makes a later call exceed it.
+  if (!validReportedUsage(reportedTokens, upperBound)) return unreportedAttempt(budget, upperBound);
+  budget.spent += reportedTokens;
+  const content = body?.choices?.[0]?.message?.content ?? "";
+  return {
+    pair: validPair(extractObject(content)),
+    transportOk: true,
+    budgetBlocked: false,
+  };
 }
 
 function classifyOnce(
   finding: ClassifiableFinding,
   deps: ClassifyEndpoint,
   stern: boolean,
+  budget: CallBudget,
 ): Promise<AttemptResult> {
   // The repair is a single constrained ask, not a vote — one pinned seed keeps it reproducible.
-  return requestPair(buildPrompt(finding, stern), deps, 42);
+  return requestPair(buildPrompt(finding, stern), deps, 42, budget);
 }
 
 /**
  * Repairs in sequence, not in parallel: the list is short (findings, not files), and a burst of
  * concurrent calls is exactly what tripped the corpus against a freshly provisioned deployment.
+ * `maxTokens`, when present, is one hard allowance shared by every first attempt and stern retry.
  */
 export async function repairClassification<T extends ClassifiableFinding>(
   findings: readonly T[],
   deps: ClassifyEndpoint,
+  maxTokens?: number,
 ): Promise<RepairOutcome<T>> {
   const out: T[] = [];
   let repaired = 0;
   let failed = 0;
-  let tokens = 0;
+  let budgetBlocked = 0;
+  const budget: CallBudget = { maximum: hardMaximum(maxTokens), spent: 0 };
   for (const finding of findings) {
     if (!needsClassification(finding)) {
       out.push(finding);
       continue;
     }
-    const first = await classifyOnce(finding, deps, false);
-    tokens += first.tokens;
+    const first = await classifyOnce(finding, deps, false, budget);
     let pair = first.pair;
-    if (pair === undefined) {
-      const second = await classifyOnce(finding, deps, true);
-      tokens += second.tokens;
+    let blocked = first.budgetBlocked;
+    if (pair === undefined && !blocked) {
+      const second = await classifyOnce(finding, deps, true, budget);
       pair = second.pair;
+      blocked = second.budgetBlocked;
     }
     if (pair === undefined) {
       failed += 1;
+      if (blocked) budgetBlocked += 1;
       out.push(finding);
       continue;
     }
     repaired += 1;
     out.push({ ...finding, category: pair.category, severity: pair.severity });
   }
-  return { findings: out, repaired, failed, tokens };
+  return { findings: out, repaired, failed, tokens: budget.spent, budgetBlocked };
 }
 
 export interface AuditOutcome<T extends ClassifiableFinding> {
@@ -284,6 +368,8 @@ export interface AuditOutcome<T extends ClassifiableFinding> {
   /** Findings whose classification the self-audit moved, in either direction. */
   readonly changed: number;
   readonly tokens: number;
+  /** Findings whose audit kept the original because another vote could not fit the hard budget. */
+  readonly budgetBlocked: number;
 }
 
 /**
@@ -351,11 +437,11 @@ function buildAuditPrompt(finding: ClassifiableFinding): string {
 }
 
 /**
- * One seeded audit vote, retried exactly once on a TRANSPORT failure — a thrown fetch or a non-OK
- * response — and never on a content failure. A dropped connection or a 5xx says nothing about the
- * finding; the vote simply never happened, and paying for three calls to adopt zero information
- * because one of them hit a blip is the failure this closes. A reply that came back but did not
- * parse to a valid pair is different: that IS the model's answer, wrong or malformed, and retrying
+ * One seeded audit vote, retried exactly once on a TRANSPORT or METERING failure — a thrown fetch,
+ * non-OK response, or missing/invalid usage — and never on a content failure. Those failures say
+ * nothing safely usable about the finding; the vote simply never happened. A metered reply that
+ * came back but did not parse to a valid pair is different: that IS the model's answer, wrong or
+ * malformed, and retrying
  * that is `repairClassification`'s stern-retry job on the missing-classification path, not this
  * one's — auditing already-classified findings must not silently double-spend on a bad-but-real
  * reply. The seed stays fixed across the retry: this recovers the SAME vote, it does not cast a
@@ -365,12 +451,12 @@ async function requestAuditVote(
   finding: ClassifiableFinding,
   deps: ClassifyEndpoint,
   seed: number,
+  budget: CallBudget,
 ): Promise<AttemptResult> {
   const prompt = buildAuditPrompt(finding);
-  const first = await requestPair(prompt, deps, seed);
-  if (first.transportOk) return first;
-  const retry = await requestPair(prompt, deps, seed);
-  return { pair: retry.pair, tokens: first.tokens + retry.tokens, transportOk: retry.transportOk };
+  const first = await requestPair(prompt, deps, seed, budget);
+  if (first.transportOk || first.budgetBlocked) return first;
+  return await requestPair(prompt, deps, seed, budget);
 }
 
 function pairKey(pair: { category: string; severity: string } | undefined): string {
@@ -414,22 +500,27 @@ function existingPairKey(finding: ClassifiableFinding): string {
 async function collectAuditVotes(
   finding: ClassifiableFinding,
   deps: ClassifyEndpoint,
-): Promise<{ votes: readonly { category: string; severity: string }[]; tokens: number }> {
+  budget: CallBudget,
+): Promise<{
+  votes: readonly { category: string; severity: string }[];
+  budgetBlocked: boolean;
+}> {
   const votes: { category: string; severity: string }[] = [];
-  let tokens = 0;
-  const first = await requestAuditVote(finding, deps, VOTE_SEEDS[0]);
-  tokens += first.tokens;
+  const first = await requestAuditVote(finding, deps, VOTE_SEEDS[0], budget);
+  if (first.budgetBlocked) return { votes, budgetBlocked: true };
   if (first.pair !== undefined) {
     votes.push(first.pair);
-    if (pairKey(first.pair) === existingPairKey(finding)) return { votes, tokens };
+    if (pairKey(first.pair) === existingPairKey(finding)) {
+      return { votes, budgetBlocked: false };
+    }
   }
   for (let attempt = 1; attempt < 3; attempt += 1) {
-    const result = await requestAuditVote(finding, deps, VOTE_SEEDS[attempt] ?? 42);
-    tokens += result.tokens;
+    const result = await requestAuditVote(finding, deps, VOTE_SEEDS[attempt] ?? 42, budget);
+    if (result.budgetBlocked) return { votes, budgetBlocked: true };
     if (result.pair !== undefined) votes.push(result.pair);
     if (votes.length === 2 && pairKey(votes[0]) === pairKey(votes[1])) break;
   }
-  return { votes, tokens };
+  return { votes, budgetBlocked: false };
 }
 
 /**
@@ -462,22 +553,29 @@ function majorityPair(
  * already carries (`collectAuditVotes`), and the answer adopted in WHICHEVER direction it moves.
  * It never invents: an invalid or failed reply keeps the original classification, and findings
  * still missing their fields belong to the repair pass, not here.
+ * `maxTokens`, when present, is shared by every finding, vote, and same-seed transport retry.
  */
 export async function auditClassification<T extends ClassifiableFinding>(
   findings: readonly T[],
   deps: ClassifyEndpoint,
+  maxTokens?: number,
 ): Promise<AuditOutcome<T>> {
   const out: T[] = [];
   let changed = 0;
-  let tokens = 0;
+  let budgetBlocked = 0;
+  const budget: CallBudget = { maximum: hardMaximum(maxTokens), spent: 0 };
   for (const finding of findings) {
     // Unclassified findings are the repair pass's job; auditing them would double-spend.
     if (needsClassification(finding)) {
       out.push(finding);
       continue;
     }
-    const voted = await collectAuditVotes(finding, deps);
-    tokens += voted.tokens;
+    const voted = await collectAuditVotes(finding, deps, budget);
+    if (voted.budgetBlocked) {
+      budgetBlocked += 1;
+      out.push(finding);
+      continue;
+    }
     const majority = majorityPair(voted.votes);
     if (majority === undefined) {
       out.push(finding);
@@ -489,5 +587,5 @@ export async function auditClassification<T extends ClassifiableFinding>(
       moved ? { ...finding, category: majority.category, severity: majority.severity } : finding,
     );
   }
-  return { findings: out, changed, tokens };
+  return { findings: out, changed, tokens: budget.spent, budgetBlocked };
 }

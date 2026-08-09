@@ -15,8 +15,9 @@
  * guard sits at line 655 of 1129. An excerpt can show presence; it can never show absence. Codex is
  * not smarter — it can open the file.
  *
- * So the model gets the file. Not as a second opinion after the fact (that is `verify-claims.ts`,
- * which cleans up afterwards and stays), but as the thing it reads in the first place.
+ * So the focused examiners get the file as the thing they read in the first place. The independent
+ * publication workflow still verifies every resulting claim against bounded HEAD/BASE evidence;
+ * that fail-closed judge replaces the older generation-local, fail-open `verify-claims.ts` pass.
  *
  * ## The one design rule everything here follows
  *
@@ -37,20 +38,10 @@
 /**
  * The ceiling for sending a file whole in the FINDING call.
  *
- * Deliberately HALF of `MAX_VERIFY_FILE_CHARS` (160k) rather than equal to it, and the gap is the
- * design. Equal ceilings would leave a file that is too large to show whole also too large to
- * verify — every big file would lose both the whole-file view and the verification pass at once,
- * which is strictly worse than what shipped before. Splitting them gives three honest bands:
- *
- * | file size      | finding call sees | verification pass |
- * |----------------|-------------------|-------------------|
- * | ≤ 80k chars    | the whole file    | skipped (it already read the file) |
- * | 80k – 160k     | the hunks         | runs, as before   |
- * | > 160k         | the hunks         | skipped, as before |
- *
- * The lower ceiling is also the honest one for this call specifically: the finding prompt carries
- * the rule document (~16.5k chars) and any companion hunks alongside the file, where the verify
- * prompt carries a few lines of instruction and the claims. Same budget, less room for the file.
+ * The ceiling is deliberately lower than the largest source the downstream evidence builder may
+ * inspect. Generation carries a focused role, risk map and companion hunks beside the file; past
+ * this bound it receives explicit hunks instead of a partial file presented as complete. Later
+ * verification retrieves bounded source specifically for each candidate and has its own limits.
  *
  * 80k characters is roughly a 2,000-line source file — above every hand-written file in the
  * consumer's reviewed surface.
@@ -71,12 +62,9 @@ export const MAX_REVIEW_FILE_CHARS = 80_000;
  * from that measurement rather than from taste: at 12, fourteen of Keiko#3011's nineteen files stay
  * whole and the five worst offenders fall back, cutting roughly 164,000 characters of prompt.
  *
- * The five that fall back are not left unprotected, and this is what makes the rule safe. They take
- * the path that shipped in v0.21.2 — hunks in the finding call, then the whole-file verification
- * pass for any claim that needs the file. A big file with a tiny change is exactly where an absence
- * claim is most tempting, and it is exactly what that pass was built for. So the cost stays
- * CONDITIONAL there — paid only when a claim actually needs the file — while cheap files get the
- * file up front unconditionally, where it costs almost nothing.
+ * The five that fall back are not published on hunk confidence alone. They receive hunks during
+ * generation, and every resulting candidate later passes the independent, fail-closed evidence
+ * workflow. Cheap files get the file up front; expensive context stays conditional on a claim.
  */
 export const MAX_FILE_TO_DIFF_RATIO = 12;
 
@@ -204,8 +192,8 @@ function splitFileLines(fileText: string): readonly string[] {
  * The file, every line numbered, each marked as changed by this pull request or as pre-existing
  * context.
  *
- * The numbering is the same one `numberFileLines` (`verify-claims.ts`) uses and the same one the
- * hunk view emitted, so `start_line` means the identical thing across every stage of this pipeline.
+ * The numbering is the same one the evidence builder and hunk view use, so `start_line` means the
+ * identical thing across every stage of this pipeline.
  * That continuity is why the anchoring, placement, and similarity stages downstream need no change
  * at all for this view.
  */
@@ -223,8 +211,9 @@ export function renderWholeFile(fileText: string, changed: ReadonlySet<number>):
  * Whether this file is worth showing whole, or must fall back to its hunks.
  *
  * Two independent refusals, and they refuse for different reasons. The absolute ceiling is about
- * what fits in one prompt beside the rule document. The ratio is about what the change has earned:
- * a file may be small enough to send and still be a bad trade against a two-line edit.
+ * what fits in one core-examiner prompt beside its role contract and evidence blocks. The ratio is
+ * about what the change has earned: a file may be small enough to send and still be a bad trade
+ * against a two-line edit.
  */
 export function fitsWholeFile(fileText: string, fileDiff: string): boolean {
   if (fileText.length > MAX_REVIEW_FILE_CHARS) return false;
@@ -251,8 +240,7 @@ export function buildWholeFileBlock(
   const deleted = deletedLineHints(fileDiff);
   // More removals than the hint budget means the whole-file view cannot carry the change. It must
   // fall back rather than show 60 of 200 deletions: the removed text IS part of what is under
-  // review, and — because the finding call has the file — the verification pass would not run to
-  // catch what the truncation hid. The engine would count the file as fully reviewed.
+  // review, and the examiner would otherwise count a partial view as the full file.
   if (deleted.length > MAX_DELETED_HINTS) return undefined;
   const shownHints = deleted;
   const block = [

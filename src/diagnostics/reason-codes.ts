@@ -62,6 +62,9 @@ export const REASON_CODES = [
   // reconciled.
   "settlement.mode.reconciled",
   "settlement.mode.counted",
+  // Every reviewable path was answered by an exact cache entry. Generation was skipped, while
+  // cached model findings still pass the current Truth/Falsifier before publication.
+  "settlement.mode.memoized",
   "settlement.incomplete.terminal_state",
   "settlement.incomplete.coverage_gap",
   "settlement.incomplete.coverage_failed",
@@ -180,14 +183,9 @@ export const REASON_CODES = [
   // vague, or contradicted — and a vague one gets exactly one repair before it is dropped. The
   // counts are the whole point of the code: `kept` and `repaired` say what a reader received,
   // `dropped_vague` and `dropped_unsupported` say what this stage removed, and `undecided` says
-  // where it failed to judge and therefore kept the finding rather than letting an outage read as
-  // a quality improvement. Measured over 120 real published findings: it drops 6.7% of findings
-  // that were acted on against 25.3% of those that were not.
+  // where it failed to judge. The production evidence gate withholds those candidates and marks the
+  // review incomplete, so an outage can be neither a false quality improvement nor a false clean.
   "publish.substantiated",
-  // The consumer's whole-run ceiling was too close to fund judging every fresh survivor, so none
-  // were judged. Skipping is always safe here: this stage only ever REMOVES findings a reader
-  // cannot check, so not running it publishes exactly what the previous release published.
-  "publish.substantiation_skipped_budget",
 
   // Bounded resume (#57, v0.11.0): the engine run ended without a usable success — a thrown run
   // error or a non-success status — and was re-invoked exactly once. Emitted at most once per

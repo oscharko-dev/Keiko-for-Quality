@@ -12,7 +12,7 @@ import { currentPlatformDigest } from "./engine/pinned-release.js";
 import { GitHubClient } from "./github/client.js";
 import type * as Plumbing from "./git/plumbing.js";
 import type { GitContext } from "./git/plumbing.js";
-import type { ReviewRequest } from "./review.js";
+import type { LocalReviewRequest, ReviewRequest } from "./review.js";
 
 /**
  * Proves #33: a file that is both a declared contract-pair path (or counterpart) AND a reviewable
@@ -52,7 +52,8 @@ vi.mock("./git/plumbing.js", async (importOriginal) => {
   };
 });
 
-const { performReview } = await import("./review.js");
+const { performLocalReview, performReview } = await import("./review.js");
+const originalFetch = globalThis.fetch;
 
 describe("performReview: the gate and the change-level pass share one blob-text cache (#33)", () => {
   let repo: string;
@@ -102,6 +103,7 @@ describe("performReview: the gate and the change-level pass share one blob-text 
   });
 
   afterAll(async () => {
+    globalThis.fetch = originalFetch;
     await rm(repo, { recursive: true, force: true });
   });
 
@@ -191,5 +193,137 @@ describe("performReview: the gate and the change-level pass share one blob-text 
     for (const key of readTextAtCommitCalls) counts.set(key, (counts.get(key) ?? 0) + 1);
     expect(counts.get(serverKey)).toBe(1);
     expect(counts.get(clientKey)).toBe(1);
+  });
+
+  it("builds verifier BASE evidence from the reviewed merge-base, not an advanced target ref", async () => {
+    const divergentRepo = await mkdtemp(join(tmpdir(), "kfq-evidence-merge-base-"));
+    const divergentGit = (args: readonly string[]): string =>
+      execFileSync("git", args, {
+        cwd: divergentRepo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.test",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.test",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+        },
+      });
+
+    try {
+      divergentGit(["init", "-q", "-b", "main"]);
+      await mkdir(join(divergentRepo, "src"), { recursive: true });
+      await writeFile(join(divergentRepo, "src/a.ts"), 'export const marker = "merge-base";\n');
+      divergentGit(["add", "-A"]);
+      divergentGit(["commit", "-q", "-m", "fork", "--no-gpg-sign"]);
+      const fork = divergentGit(["rev-parse", "HEAD"]).trim();
+
+      divergentGit(["checkout", "-q", "-b", "topic"]);
+      await writeFile(join(divergentRepo, "src/a.ts"), 'export const marker = "proposed";\n');
+      divergentGit(["add", "-A"]);
+      divergentGit(["commit", "-q", "-m", "topic", "--no-gpg-sign"]);
+      const topic = divergentGit(["rev-parse", "HEAD"]).trim();
+
+      divergentGit(["checkout", "-q", "-b", "advanced-target", fork]);
+      await writeFile(join(divergentRepo, "src/a.ts"), 'export const marker = "event-base";\n');
+      divergentGit(["add", "-A"]);
+      divergentGit(["commit", "-q", "-m", "target", "--no-gpg-sign"]);
+      const eventBase = divergentGit(["rev-parse", "HEAD"]).trim();
+
+      const body = "When this module loads, `marker` now selects the proposed branch.";
+      const engineDigest = "d".repeat(64);
+      acquireEngineMock.mockReset();
+      runEngineMock.mockReset();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "success",
+          summary: { files_reviewed: 1, total_tokens: 100, budget_exceeded: false },
+          comments: [
+            {
+              path: "src/a.ts",
+              content: body,
+              start_line: 1,
+              end_line: 1,
+              category: "bug",
+              severity: "high",
+            },
+          ],
+        }),
+        ruleDigest: engineDigest,
+      });
+
+      let judgePrompt = "";
+      globalThis.fetch = ((_url: string | URL, init?: RequestInit) => {
+        const request = JSON.parse(typeof init?.body === "string" ? init.body : "{}") as {
+          messages?: readonly { readonly content?: string }[];
+        };
+        const prompt = request.messages?.[0]?.content ?? "";
+        let content: string;
+        if (prompt.startsWith("Verify the truth of one AI-generated code-review finding")) {
+          judgePrompt = prompt;
+          content =
+            '{"verdict":"confirmed","reason_code":"direct_proof","evidence_refs":["D:H:1","H:1"],"lookup_terms":[]}';
+        } else if (prompt.startsWith("Adversarially falsify one independently confirmed")) {
+          content =
+            '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["D:H:1","H:1"],"lookup_terms":[]}';
+        } else {
+          content = '{"category":"bug","severity":"high"}';
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              choices: [{ finish_reason: "stop", message: { content } }],
+              usage: { total_tokens: 25 },
+            }),
+            { status: 200 },
+          ),
+        );
+      }) as typeof fetch;
+
+      const profile = compileProfile({
+        version: 1,
+        reviewRelevant: ["src/**"],
+        deletionCritical: [],
+        generated: [],
+        excluded: [],
+        benignWarnings: [],
+        pathInstructions: [],
+      } satisfies ReviewProfile);
+      const config: RuntimeConfig = {
+        protocol: "openai",
+        endpoint: "https://model.example.test/v1",
+        model: "gpt-oss-test",
+        tokenEnvName: "MODEL_TOKEN",
+        language: "English",
+        concurrency: 1,
+        fileTimeoutSeconds: 300,
+        reviewTimeoutSeconds: 1800,
+        tokenBudget: 2_000_000,
+        maxFindings: 50,
+        renameDetectionPercent: 50,
+      };
+      const request: LocalReviewRequest = {
+        base: commitSha(eventBase),
+        head: commitSha(topic),
+        repositoryPath: divergentRepo,
+        config,
+        profile,
+        guidelines: { paths: [] },
+        env: { MODEL_TOKEN: "fake-token" },
+        pathValue: process.env.PATH ?? "/usr/bin:/bin",
+      };
+
+      const report = await performLocalReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(report.findings).toHaveLength(1);
+      expect(judgePrompt).toContain('B:1| export const marker = "merge-base";');
+      expect(judgePrompt).not.toContain('B:1| export const marker = "event-base";');
+    } finally {
+      await rm(divergentRepo, { recursive: true, force: true });
+    }
   });
 });

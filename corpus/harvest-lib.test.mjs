@@ -36,6 +36,8 @@ function comment(overrides = {}) {
     originalStartLine: 40,
     createdAt: "2026-08-08T10:00:00Z",
     commit: { oid: "a".repeat(40) },
+    originalCommit: { oid: "d".repeat(40) },
+    diffHunk: "@@ -39,3 +39,4 @@\n context\n+added\n context",
     author: { login: KFQ, __typename: "Bot" },
     replyTo: null,
     ...overrides,
@@ -93,6 +95,59 @@ test("keeps every reply body — the half the committed evidence document drops"
   assert.equal(records[0].replies[0].body, "Refuted: the guard is at line 655.");
   assert.equal(records[0].replies[0].isHuman, true);
   assert.equal(records[0].arenaId, "kfq");
+  assert.equal(records[0].commitOid, "a".repeat(40));
+  assert.equal(records[0].originalCommitOid, "d".repeat(40));
+  assert.equal(records[0].diffHunk, "@@ -39,3 +39,4 @@\n context\n+added\n context");
+});
+
+test("an absent original root commit or diff hunk stays explicitly unmeasured", () => {
+  for (const diffHunk of [null, ""]) {
+    const { records } = extractHarvestRecords([
+      thread([comment({ originalCommit: null, diffHunk })]),
+    ]);
+    assert.equal(records[0].commitOid, "a".repeat(40), "current binding remains audit-only");
+    assert.equal(records[0].originalCommitOid, null);
+    assert.equal(records[0].diffHunk, null);
+  }
+});
+
+test("a malformed root commit oid is rejected instead of selecting the wrong historical tree", () => {
+  for (const oid of ["abc", "A".repeat(40), "g".repeat(40), 7]) {
+    assert.throws(
+      () => extractHarvestRecords([thread([comment({ commit: { oid } })])]),
+      /root commit oid must be exactly 40 lowercase hex characters/,
+    );
+  }
+  for (const commit of [7, "not-an-object", []]) {
+    assert.throws(
+      () => extractHarvestRecords([thread([comment({ commit })])]),
+      /root commit must be null or an object carrying an oid/,
+    );
+  }
+});
+
+test("a malformed original root commit oid is rejected at the replay trust boundary", () => {
+  for (const oid of ["abc", "A".repeat(40), "g".repeat(40), 7]) {
+    assert.throws(
+      () => extractHarvestRecords([thread([comment({ originalCommit: { oid } })])]),
+      /root original commit oid must be exactly 40 lowercase hex characters/,
+    );
+  }
+  for (const originalCommit of [7, "not-an-object", []]) {
+    assert.throws(
+      () => extractHarvestRecords([thread([comment({ originalCommit })])]),
+      /root original commit must be null or an object carrying an oid/,
+    );
+  }
+});
+
+test("a malformed root diff hunk is rejected instead of being mistaken for the reviewed patch", () => {
+  for (const diffHunk of ["not a hunk", 7, "@@ malformed @@\n+x"]) {
+    assert.throws(
+      () => extractHarvestRecords([thread([comment({ diffHunk })])]),
+      /root diff hunk must be null or a non-empty unified-diff hunk/,
+    );
+  }
 });
 
 test("a bot reply is marked as not human, from __typename rather than from the login", () => {
@@ -135,9 +190,11 @@ test("a coverage notice is a notice, not a finding", () => {
   const doc = buildHarvestDocument({
     repo: "o/r",
     generatedAt: "2026-08-09T00:00:00Z",
-    prs: [{ number: 1, commits: [], records, recallGaps: [] }],
+    prs: [{ number: 1, baseSha: "b".repeat(40), commits: [], records, recallGaps: [] }],
   });
+  assert.equal(doc.schemaVersion, 2);
   assert.equal(doc.aggregate.findings, 0);
+  assert.equal(doc.pullRequests[0].baseCommitOid, "b".repeat(40));
 });
 
 // ---------------------------------------------------------------------------------------------

@@ -527,14 +527,23 @@ The corpus costs real model tokens, so it is not part of `verify`:
 npm run fetch:engine -- /tmp/ocr        # digest-verified before it becomes executable
 OCR_BINARY=/tmp/ocr \
 OCR_LLM_URL=... OCR_LLM_TOKEN=... OCR_LLM_MODEL=... \
-OCR_REPORT=/tmp/report.json npm run corpus
-npm run check:qualification -- /tmp/report.json
+OCR_REPORT=/tmp/qualification-raw.json npm run corpus
+npm run check:qualification -- /tmp/qualification-raw.json
+npm run qualification:evidence -- \
+  --raw /tmp/qualification-raw.json \
+  --out corpus/evidence/qualification-YYYY-MM-DD-vX.Y.Z.json
 ```
 
 `corpus/run.mjs` builds the rule document from `corpus/profile.json` through the production builder,
 so a measurement cannot silently be taken against rule text the product does not ship. Add `--only
 <case-id>` to iterate on one case. `.github/workflows/qualify.yml` runs the same thing weekly and
 files an issue when the thresholds stop being met.
+
+`OCR_REPORT` is private diagnostic output and must stay outside the repository: it can contain full
+finding bodies, including rejected output. `qualification:evidence` is the release boundary. It
+copies only fixed identifiers, digests, booleans and counts into a version-bound JSON file and
+refuses both a raw report inside the checkout and an output outside `corpus/evidence/`. Release
+attestation rejects the raw schema even when its scores are green.
 
 `npm test` runs Vitest, which transpiles without type-checking — it will happily go green on code
 `tsc` rejects. Run `npm run verify`, not `npm test`, before believing a change is done.

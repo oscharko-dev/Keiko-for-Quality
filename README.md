@@ -91,6 +91,24 @@ Categories: security · correctness · performance · maintainability · tests �
 Findings that restate an open conversation, a resolved disposition, or another finding in the
 same run are suppressed — the accounting for every suppression is in the run summary.
 
+The measured `gpt-oss-120b` workflow separates jobs instead of overloading one prompt. A Scout maps
+risks from the patch, pull-request intent and trusted merge-base guidelines. A Core examiner checks
+the source; a narrow Integration examiner runs only for contracts, deletions, related files or
+larger changes. They emit structured hypotheses, not finished review prose.
+
+Model hypotheses then pass an independent truth workflow, including generation-cache hits. It combines exact HEAD/BASE source,
+merge-base-to-HEAD diff lines and bounded repository retrieval; a Truth judge must cite positive
+change proof, and a separate Falsifier tries to defeat it. Either may request one deterministic
+lookup of at most three identifiers. Classification and PR-wide ranking happen only after truth is
+established. At most 16 model candidates enter verification and at most eight are published;
+deterministic contract findings alone remain outside those slots. Missing evidence, exhausted
+budget or malformed judge output withholds the affected finding and makes the run incomplete
+rather than clean.
+
+Repository lookup starts with exact-commit `git grep`. Only when those hits are structurally
+ambiguous does a digest-pinned ast-grep fallback parse bounded HEAD blobs received through stdin;
+it never scans a checkout or loads repository configuration.
+
 ## Getting started
 
 1. Create the GitHub App for your installation (see

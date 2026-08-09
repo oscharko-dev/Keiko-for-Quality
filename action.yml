@@ -19,9 +19,9 @@ inputs:
     description: >-
       Optional newline- or comma-separated repository-relative paths to this repository's own
       written engineering guidance — AGENTS.md, CONTRIBUTING.md, a review-standards document.
-      Read from the trusted base checkout and given to the reviewer as background, so a finding can
-      cite the rule it rests on instead of arguing from general principle. At most 8 documents and
-      64 KB in total; a missing path is skipped and recorded, never fatal.
+      Complete documents are read as Git objects from the verified merge base and shown once to the
+      risk Scout, never taken from the candidate head. At most 8 documents and 48,000 rendered
+      characters; an over-limit, malformed or missing document is omitted whole, never truncated.
     required: false
     default: ""
 
@@ -74,7 +74,9 @@ inputs:
     required: false
     default: "300"
   review_timeout_seconds:
-    description: Whole-review wall-clock ceiling.
+    description: >-
+      One absolute wall-clock ceiling for the whole review, shared by generation, every resume,
+      repository retrieval, truth/falsification, change-pass, and classification calls.
     required: false
     default: "1800"
   token_budget:

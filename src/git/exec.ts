@@ -19,6 +19,8 @@ export interface ExecOptions {
   readonly timeoutMs: number;
   readonly maxBuffer: number;
   readonly env?: NodeJS.ProcessEnv;
+  /** Bounded trusted input written directly to the child's stdin; never parsed by a shell. */
+  readonly input?: Buffer;
 }
 
 export class ExecFailure extends Error {
@@ -46,7 +48,7 @@ export function run(
   options: ExecOptions,
 ): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
-    execFile(
+    const child = execFile(
       command,
       [...args],
       {
@@ -69,6 +71,14 @@ export function run(
         reject(new ExecFailure(command, code, error.killed === true));
       },
     );
+    // `execFile` does not expose an `input` option. Writing to the returned child's pipe keeps the
+    // same shell-free process boundary while allowing parsers such as ast-grep to inspect an exact
+    // Git blob without materializing it as a candidate-controlled file. Ignore a late EPIPE here:
+    // the callback above remains the single source of the process result.
+    if (options.input !== undefined) {
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(options.input);
+    }
   });
 }
 
@@ -88,6 +98,10 @@ export function gitEnvironment(pathValue: string): NodeJS.ProcessEnv {
     GIT_TERMINAL_PROMPT: "0",
     GIT_ASKPASS: "",
     GIT_OPTIONAL_LOCKS: "0",
+    // Object replacement and pathspec magic are ambient Git behaviours, not properties of the
+    // immutable commit/path pair a caller asked us to read.
+    GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_LITERAL_PATHSPECS: "1",
     GIT_ALLOW_PROTOCOL: "file:https",
     LC_ALL: "C",
   };

@@ -4,6 +4,13 @@ import { join } from "node:path";
 
 import type { CommitSha, RepoPath, Sha256 } from "./core/brands.js";
 import {
+  ReviewDeadlineExceeded,
+  requireReviewTime,
+  reviewDeadlineExpired,
+  startReviewDeadline,
+  type ReviewDeadline,
+} from "./core/review-deadline.js";
+import {
   buildNewEntries,
   combinedExcludes,
   computePrPathSetDigest,
@@ -13,6 +20,7 @@ import {
 import {
   PARSE_LIMITS,
   appendEntries,
+  removeEntriesByKey,
   type CacheEntry,
   type CacheStore,
 } from "./cache/review-cache.js";
@@ -23,7 +31,7 @@ import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
 import { acquireEngine } from "./engine/acquire.js";
 import { collectContextPacks } from "./engine/context-pack.js";
-import { companionsByPath, companionContextDigest, isLockfilePath } from "./engine/companions.js";
+import { companionsByPath, isLockfilePath, singleShotContextDigest } from "./engine/companions.js";
 import { currentPlatformDigest, ENGINE_PIN } from "./engine/pinned-release.js";
 import {
   auditClassification,
@@ -38,6 +46,9 @@ import {
   type RunStatus,
 } from "./engine/result.js";
 import { promptIdentityDigest } from "./engine/rule-identity.js";
+import { renderChangeIntent } from "./engine/model-proxy.js";
+import { GENERATION_WORKFLOW_IDENTITY } from "./engine/generation-workflow.js";
+import { loadGuidelineContext, type GuidelineContextResult } from "./engine/guideline-context.js";
 import { runSingleShotEngine } from "./engine/single-shot.js";
 import {
   EngineRunError,
@@ -78,13 +89,32 @@ import {
   planPublication,
   publishIncompleteNotice,
   type ExistingConversationsPrefetch,
+  type PlanCounters,
   type PlannedFinding,
   type PublicationPlan,
   type PublishContext,
   type PublishOutcome,
 } from "./publish/publisher.js";
 import { isIncompleteNoticeBody } from "./publish/presentation.js";
-import { substantiate } from "./publish/substantiate.js";
+import { readChangeUnifiedDiff } from "./publish/change-diff.js";
+import { buildChangeEvidence, type RepositoryEvidenceContext } from "./publish/evidence.js";
+import {
+  MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR,
+  selectPrWideFindings,
+  selectVerificationCandidates,
+} from "./publish/pr-wide-selection.js";
+import {
+  collectInitialRepositoryContext,
+  collectRepositoryContextFollowUp,
+  type RepositoryContextRequest,
+} from "./publish/repository-context.js";
+import { toRetrievedEvidence } from "./publish/retrieved-evidence.js";
+import {
+  substantiate,
+  type EvidenceRetriever,
+  type JudgeableFinding,
+  type SubstantiationOutcome,
+} from "./publish/substantiate.js";
 
 export interface ReviewRequest {
   readonly client: GitHubClient;
@@ -270,6 +300,12 @@ export interface LocalReviewReport {
   readonly outcome: ReviewOutcome;
   readonly reason?: ReasonCode;
   readonly findings: readonly LocalReviewFinding[];
+  /** What the independent evidence gate withheld before a finding could reach a reader. */
+  readonly quality?: {
+    readonly evidenceWithheld: number;
+    readonly rankedOut: number;
+    readonly verificationUndecided: number;
+  };
   /** This run's real spend, mirroring the `run.spend` diagnostic the action path records. */
   readonly spend: {
     readonly engine: number;
@@ -342,6 +378,11 @@ interface SpendLedger {
   classify: number;
 }
 
+/** Exact unspent portion of the consumer's whole-review ceiling, never a negative allowance. */
+function remainingWholeReviewBudget(request: PipelineRequest, ledger: SpendLedger): number {
+  return Math.max(0, request.config.tokenBudget - ledger.engine - ledger.classify);
+}
+
 /**
  * The values one run fixes before it starts and every settlement and publication step below threads
  * verbatim: what is being reviewed, where this run's spend accumulates, and where its diagnostics go.
@@ -363,6 +404,7 @@ interface PipelineRun {
   readonly request: PipelineRequest;
   readonly ledger: SpendLedger;
   readonly diagnostics: Diagnostics;
+  readonly deadline: ReviewDeadline;
 }
 
 /**
@@ -373,6 +415,7 @@ interface ReviewRun {
   readonly request: ReviewRequest;
   readonly ledger: SpendLedger;
   readonly diagnostics: Diagnostics;
+  readonly deadline: ReviewDeadline;
   /** See `CreditedPaths` — filled by `executeEngine`, read by the report. */
   readonly credited: CreditedPaths;
 }
@@ -389,6 +432,7 @@ interface LocalRun {
   readonly request: LocalReviewRequest;
   readonly ledger: SpendLedger;
   readonly diagnostics: Diagnostics;
+  readonly deadline: ReviewDeadline;
   /** See `CreditedPaths` — filled by `executeEngine`, read by the report. */
   readonly credited: CreditedPaths;
   /** `promptIdentityDigest` — identifies the guidance this run reviewed under. */
@@ -641,6 +685,7 @@ function publishContextFor(request: ReviewRequest, inventory: Inventory): Publis
     client: request.client,
     ref: request.ref,
     pullNumber: request.pullNumber,
+    baseSha: inventory.pair.mergeBase,
     headSha: request.head,
     identity: request.identity,
     items: itemIndex(inventory),
@@ -660,6 +705,10 @@ interface MemoContext {
   /** Per-path companion-context digests (single-shot mode, v0.20.1) — the SAME map lookup and
    *  entry-building must share; see `singleShotContextDigests` and `companions.ts`. */
   readonly contextDigests?: ReadonlyMap<string, Sha256>;
+  /** Exact packs hashed into `contextDigests` and later reused by the engine invocation. */
+  readonly contextPacks: ReadonlyMap<string, string>;
+  /** Trusted merge-base instructions, loaded once before lookup and consumed only by the Scout. */
+  readonly guidelineContext?: GuidelineContextResult;
   /** Eligible paths a stored entry answered on content alone, but whose path-set context had moved. */
   readonly contextInvalidated: number;
 }
@@ -671,6 +720,7 @@ const INERT_MEMO: MemoContext = {
   ruleDigest: undefined,
   engineDigest: undefined,
   pathSetDigest: undefined,
+  contextPacks: new Map(),
   contextInvalidated: 0,
 };
 
@@ -686,12 +736,18 @@ const INERT_MEMO: MemoContext = {
  */
 interface FindingBatch {
   readonly findings: readonly EngineFinding[];
+  /** Every model-authored finding that must pass truth/falsifier in this run, including cache hits. */
+  readonly verify: ReadonlySet<EngineFinding>;
+  /** This run's newly generated findings; only these need a fresh classification audit. */
   readonly fresh: ReadonlySet<EngineFinding>;
 }
 
 /** Nothing found, and so no engine output that could be fresh — every settlement path that reaches
  *  publication with nothing of its own to carry gets this. */
-const EMPTY_BATCH: FindingBatch = { findings: [], fresh: new Set() };
+const EMPTY_BATCH: FindingBatch = { findings: [], verify: new Set(), fresh: new Set() };
+
+/** No fresh finding made its path unsafe for cache admission in this run. */
+const NO_UNCACHEABLE_PATHS: ReadonlySet<string> = new Set();
 
 /**
  * Why a run settled incomplete: the reason code both the published notice and the report carry, and —
@@ -737,20 +793,31 @@ function localCacheCounts(memo: MemoContext): { cacheHits: number; cacheMisses: 
  * digest, no platform digest, no diagnostic. That is what makes the feature genuinely inert rather
  * than merely unused when the consumer never configures `review_store_path`.
  */
-function prepareMemoization(
+async function prepareMemoization(
   request: PipelineRequest,
   inventory: Inventory,
   diagnostics: Diagnostics,
-): MemoContext {
-  if (request.cacheStore === undefined) return INERT_MEMO;
-  return memoWithLookup(request, inventory, diagnostics);
+): Promise<MemoContext> {
+  const [contextPacks, guidelineContext] = await Promise.all([
+    prepareContextPacks(request, inventory),
+    prepareGuidelineContext(request, inventory),
+  ]);
+  if (request.cacheStore === undefined) {
+    return {
+      ...INERT_MEMO,
+      contextPacks,
+      ...(guidelineContext === undefined ? {} : { guidelineContext }),
+    };
+  }
+  return memoWithLookup(request, inventory, diagnostics, contextPacks, guidelineContext);
 }
 
 /**
  * The per-path cache-context expectation for single-shot runs, or `undefined` on the agentic path.
  *
- * In single-shot mode a file's verdict depends on exactly what its one prompt contained: its own
- * diff (the six-field key), the rule, and its companions' hunks — so the replay-context stamp is
+ * In staged single-shot mode a file's verdict depends on every bounded prompt contribution: its
+ * own diff (the six-field key), companions, context pack, trusted merge-base guidance, stated
+ * purpose, and workflow version. The replay-context stamp therefore binds those exact inputs plus
  * the companion group's base→head identity (`companions.ts`), not the whole pull request's
  * path-set shape. Measured motivation (2026-08-08 live audit): whole-set invalidation re-reviewed
  * 113–116 files three times in twenty-five minutes and accounted for 89% of the window's spend,
@@ -761,6 +828,8 @@ function prepareMemoization(
 function singleShotContextDigests(
   request: PipelineRequest,
   inventory: Inventory,
+  contextPacks: ReadonlyMap<string, string>,
+  guidelineContext: GuidelineContextResult | undefined,
 ): ReadonlyMap<string, Sha256> | undefined {
   if (request.env.KFQ_SINGLE_SHOT !== "1") return undefined;
   const identity = new Map<string, string>();
@@ -771,25 +840,75 @@ function singleShotContextDigests(
     );
   }
   const companions = companionsByPath([...identity.keys()]);
+  const renderedChangeIntent = renderedRequestChangeIntent(request);
+  const guidelineIdentity = configuredGuidelineContextIdentity(request, guidelineContext);
   const digests = new Map<string, Sha256>();
   for (const [path, group] of companions) {
     digests.set(
       path,
-      companionContextDigest(group, (companion) => identity.get(companion)),
+      singleShotContextDigest(group, (companion) => identity.get(companion), {
+        renderedChangeIntent,
+        contextPack: contextPacks.get(path) ?? "",
+        guidelineContextIdentity: guidelineIdentity,
+        workflowIdentity: GENERATION_WORKFLOW_IDENTITY,
+      }),
     );
   }
   return digests;
+}
+
+/** Exact prompt contribution of candidate-authored PR intent, shared by both cache contexts. */
+function renderedRequestChangeIntent(request: PipelineRequest): string {
+  return request.changeIntent === undefined || request.changeIntent === ""
+    ? ""
+    : renderChangeIntent(request.changeIntent);
+}
+
+/** Empty configurations stay path-only; configured files bind their exact merge-base result. */
+function configuredGuidelineContextIdentity(
+  request: PipelineRequest,
+  guidelineContext: GuidelineContextResult | undefined,
+): string {
+  return request.guidelines.paths.length === 0 ? "" : (guidelineContext?.cacheIdentity ?? "");
+}
+
+/** Emits cache counters without making the cache-construction function carry reporting details. */
+function recordCacheLookupDiagnostics(
+  request: PipelineRequest,
+  diagnostics: Diagnostics,
+  hits: number,
+  misses: number,
+  contextInvalidated: number,
+): void {
+  diagnostics.record("cache.hits", { headSha: request.head, counts: { hits, misses } });
+  // Distinct from `cache.hits`' own miss count (v0.10.0, issue #50): this tells an operator how
+  // many misses were specifically invalidated by the changed-file context rather than new bytes.
+  diagnostics.record("cache.context_invalidated", {
+    headSha: request.head,
+    counts: { invalidated: contextInvalidated },
+  });
 }
 
 function memoWithLookup(
   request: PipelineRequest,
   inventory: Inventory,
   diagnostics: Diagnostics,
+  contextPacks: ReadonlyMap<string, string>,
+  guidelineContext: GuidelineContextResult | undefined,
 ): MemoContext {
   const ruleDigest = promptIdentityDigest(request.profile, request.guidelines);
   const engineDigest = currentPlatformDigest();
-  const pathSetDigest = computePrPathSetDigest(inventory);
-  const contextDigests = singleShotContextDigests(request, inventory);
+  const pathSetDigest = computePrPathSetDigest(
+    inventory,
+    renderedRequestChangeIntent(request),
+    configuredGuidelineContextIdentity(request, guidelineContext),
+  );
+  const contextDigests = singleShotContextDigests(
+    request,
+    inventory,
+    contextPacks,
+    guidelineContext,
+  );
   const { hits, eligiblePaths, contextInvalidated } = lookupMemoized(
     request.cacheStore,
     inventory,
@@ -807,19 +926,17 @@ function memoWithLookup(
     engineDigest,
     pathSetDigest,
     ...(contextDigests === undefined ? {} : { contextDigests }),
+    contextPacks,
+    ...(guidelineContext === undefined ? {} : { guidelineContext }),
     contextInvalidated,
   };
-  diagnostics.record("cache.hits", {
-    headSha: request.head,
-    counts: { hits: hits.size, misses: eligiblePaths.size - hits.size },
-  });
-  // Distinct from `cache.hits`' own miss count (v0.10.0, issue #50): this tells an operator how
-  // many of those misses were specifically a content match the pull request's changed-file set
-  // invalidated, rather than the file's own bytes never having been reviewed before.
-  diagnostics.record("cache.context_invalidated", {
-    headSha: request.head,
-    counts: { invalidated: contextInvalidated },
-  });
+  recordCacheLookupDiagnostics(
+    request,
+    diagnostics,
+    hits.size,
+    eligiblePaths.size - hits.size,
+    contextInvalidated,
+  );
   return memo;
 }
 
@@ -838,11 +955,12 @@ function truncatedCacheFields(
   memo: MemoContext,
   findings: readonly EngineFinding[],
   covered: ReadonlySet<string> | undefined,
+  uncacheablePaths: ReadonlySet<string> = NO_UNCACHEABLE_PATHS,
 ): { cacheAppended: number; updatedCacheStore?: CacheStore } {
   const finalized =
     covered === undefined
       ? undefined
-      : finalizeCacheStore(request, inventory, memo, findings, covered);
+      : finalizeCacheStore(request, inventory, memo, findings, covered, uncacheablePaths);
   return {
     cacheAppended: finalized?.appended ?? 0,
     ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
@@ -867,13 +985,21 @@ async function publishIncompleteSettlement(
   anchor: string | undefined,
   batch: FindingBatch,
 ): Promise<AuditedPublication | undefined> {
+  requireReviewTime(run.deadline);
   const prefetch =
     batch.findings.length > 0 || anchor !== undefined
       ? await prefetchExistingConversations(context)
       : undefined;
+  requireReviewTime(run.deadline);
   const published =
     batch.findings.length === 0 ? undefined : await publishAudited(run, context, batch, prefetch);
   if (anchor !== undefined) {
+    requireReviewTime(run.deadline);
+    if (!(await headIsCurrent(run.request))) {
+      run.diagnostics.record("publish.abandoned_stale_head", { headSha: run.request.head });
+      throw new StaleHeadBeforePublication();
+    }
+    requireReviewTime(run.deadline);
     await publishIncompleteNotice(
       context,
       cause.reason,
@@ -884,6 +1010,64 @@ async function publishIncompleteSettlement(
     );
   }
   return published;
+}
+
+/** Builds the common incomplete report after the optional publication-quality pass has finished. */
+function incompleteSettlementReport(
+  run: ReviewRun,
+  inventory: Inventory,
+  cause: IncompleteCause,
+  memo: MemoContext,
+  engineFindings: readonly EngineFinding[],
+  covered: ReadonlySet<string> | undefined,
+  published: AuditedPublication | undefined,
+): ReviewReport {
+  const storedFindings =
+    published === undefined
+      ? engineFindings
+      : findingsForStorage(engineFindings, published.qualityByOriginal, published.droppedOriginals);
+  const verifiedCovered =
+    (published?.outcome.verificationUndecided ?? 0) === 0 ? covered : undefined;
+  const uncacheablePaths = published?.uncacheablePaths ?? NO_UNCACHEABLE_PATHS;
+  return {
+    outcome: "incomplete",
+    reason: cause.reason,
+    ...inventoryCounts(inventory),
+    ...truncatedCacheFields(
+      run.request,
+      inventory,
+      memo,
+      storedFindings,
+      verifiedCovered,
+      uncacheablePaths,
+    ),
+    ...cacheCounts(memo),
+    ...(published === undefined ? {} : { publish: published.outcome }),
+  };
+}
+
+/**
+ * Fail-closed whole-review timeout. It deliberately performs no publication, head lookup, or cache
+ * write: once the absolute boundary is reached, another call would turn the configured ceiling
+ * into a suggestion. The action consumes the incomplete report itself as the blocking outcome.
+ */
+function reviewDeadlineReport(
+  run: ReviewRun,
+  inventory: Inventory,
+  memo: MemoContext = INERT_MEMO,
+): ReviewReport {
+  run.diagnostics.record("engine.run.timeout", { headSha: run.request.head });
+  run.diagnostics.record("settlement.incomplete.engine_error", {
+    headSha: run.request.head,
+    counts: { review_timeout: 1 },
+  });
+  return {
+    outcome: "incomplete",
+    reason: "settlement.incomplete.engine_error",
+    ...inventoryCounts(inventory),
+    ...cacheCounts(memo),
+    cacheAppended: 0,
+  };
 }
 
 /**
@@ -927,6 +1111,7 @@ async function settleIncomplete(
   batch: FindingBatch = EMPTY_BATCH,
   covered?: ReadonlySet<string>,
 ): Promise<ReviewReport> {
+  if (reviewDeadlineExpired(run.deadline)) return reviewDeadlineReport(run, inventory, memo);
   run.diagnostics.record(cause.reason, {
     headSha: run.request.head,
     ...(cause.counts !== undefined ? { counts: cause.counts } : {}),
@@ -943,40 +1128,58 @@ async function settleIncomplete(
 
   if (!(await headIsCurrent(run.request))) {
     run.diagnostics.record("publish.abandoned_stale_head", { headSha: run.request.head });
-    // The store write still happens (2026-08-06): an entry is keyed by blob content, not head
-    // sha, so a racing push does not invalidate what this run's engine already judged — the same
-    // argument `abandonStalePublish` makes on the complete path. Heads move most often exactly
-    // during the rapid-push sequences where a truncated run's verdicts are worth the most;
-    // dropping them here reinstated the #75 non-convergence for every such race. `covered`
-    // (present only for verdict-surviving reasons) is what gates the write, exactly as below.
+    // No fresh verdict is cached before the evidence gate has run. A blob-addressed engine verdict
+    // remains content-stable across a racing push, but it is not yet a publication-quality verdict:
+    // storing it under the new semantics marker would let the next run bypass substantiation.
     return {
       ...abandonedReport(inventory, memo),
-      ...truncatedCacheFields(run.request, inventory, memo, engineFindings, covered),
+      ...truncatedCacheFields(run.request, inventory, memo, engineFindings, undefined),
     };
   }
+  if (reviewDeadlineExpired(run.deadline)) return reviewDeadlineReport(run, inventory, memo);
 
   const context = publishContextFor(run.request, inventory);
   const anchor = noticeAnchor(inventory);
-  const published = await publishIncompleteSettlement(run, context, cause, anchor, batch);
-
-  // What the store should remember for a finding this settlement carried — see `findingsForStorage`.
-  const storedFindings =
-    published === undefined
-      ? engineFindings
-      : findingsForStorage(engineFindings, published.auditedByOriginal);
-  return {
-    outcome: "incomplete",
-    reason: cause.reason,
-    ...inventoryCounts(inventory),
-    ...truncatedCacheFields(run.request, inventory, memo, storedFindings, covered),
-    ...cacheCounts(memo),
-    ...(published === undefined ? {} : { publish: published.outcome }),
-  };
+  let published: AuditedPublication | undefined;
+  try {
+    published = await publishIncompleteSettlement(run, context, cause, anchor, batch);
+  } catch (error) {
+    if (error instanceof StaleHeadBeforePublication) return abandonedReport(inventory, memo);
+    if (error instanceof ReviewDeadlineExceeded) return reviewDeadlineReport(run, inventory, memo);
+    throw error;
+  }
+  return incompleteSettlementReport(
+    run,
+    inventory,
+    cause,
+    memo,
+    engineFindings,
+    covered,
+    published,
+  );
 }
 
 interface EngineBudget {
   readonly excluded: readonly string[];
   readonly allottedBudget: number;
+}
+
+/**
+ * Start-work reserves for the mandatory post-generation quality stages.
+ *
+ * The evidence stage may take an initial truth judgment, one retrieval-guided truth rerun, and
+ * adversarial falsification calls, each with bounded source context. 64k is deliberate engine
+ * headroom for that path; `substantiate` separately
+ * enforces the exact whole-review remainder before every request, so this estimate can never widen
+ * the consumer's hard ceiling. The smaller audit reserve is only a cheap start-work trigger;
+ * `auditClassification` enforces the exact remaining allowance before every request as well.
+ */
+const SUBSTANTIATE_RESERVE_PER_FINDING = 64_000;
+const AUDIT_RESERVE_PER_FINDING = 2_000;
+
+function publicationQualityReserve(maxFindings: number): number {
+  const candidates = Math.min(maxFindings, MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR);
+  return candidates * (SUBSTANTIATE_RESERVE_PER_FINDING + AUDIT_RESERVE_PER_FINDING);
 }
 
 /**
@@ -994,8 +1197,12 @@ function computeEngineBudget(
 ): EngineBudget {
   const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
   const excludedSet = new Set(excluded);
+  const engineCeiling = Math.max(
+    1,
+    request.config.tokenBudget - publicationQualityReserve(request.config.maxFindings),
+  );
   const allottedBudget = computeAllottedBudget(
-    request.config.tokenBudget,
+    engineCeiling,
     dispatchedPathCount(inventory, excludedSet),
     reviewableChangedLines(inventory, excludedSet),
   );
@@ -1014,17 +1221,21 @@ function bookPropagatedEngineFailure(error: unknown, ledger: SpendLedger): void 
   if (error instanceof EngineRunError) ledger.engine += error.wireTokens ?? 0;
 }
 
-/** The invocation options `executeEngine` hands `runEngineWithOneResume` — assembly plus the one
- *  preparation step (`dispatchContextPacks`) that needs the same exclude union, split out for that
- *  function's own line budget. */
-async function engineInvocationOptions(
+/** The invocation options `executeEngine` hands `runEngineWithOneResume`. */
+function engineInvocationOptions(
   request: PipelineRequest,
+  deadline: ReviewDeadline,
   inventory: Inventory,
   binaryPath: string,
   allottedBudget: number,
   excluded: readonly string[],
-): Promise<EngineRunOptions> {
-  const contextPacks = await dispatchContextPacks(request, inventory, excluded);
+  preparedContextPacks: ReadonlyMap<string, string>,
+  guidelineContext: GuidelineContextResult | undefined,
+): EngineRunOptions {
+  const excludedSet = new Set(excluded);
+  const contextPacks = new Map(
+    [...preparedContextPacks].filter(([path]) => !excludedSet.has(path)),
+  );
   return {
     binaryPath,
     repositoryPath: request.repositoryPath,
@@ -1034,37 +1245,57 @@ async function engineInvocationOptions(
     guidelines: request.guidelines,
     env: request.env,
     pathValue: request.pathValue,
+    reviewDeadlineMs: deadline.expiresAtMs,
     ...(request.changeIntent === undefined ? {} : { changeIntent: request.changeIntent }),
+    ...(request.env.KFQ_SINGLE_SHOT !== "1" || guidelineContext?.instruction === undefined
+      ? {}
+      : { trustedGuidance: guidelineContext.instruction }),
     ...(contextPacks.size === 0 ? {} : { contextPacks }),
     allottedBudget,
+    expectedReviewablePaths: [...inventory.reviewablePaths].filter(
+      (path) => !excludedSet.has(path),
+    ),
     mechanicallyCleanPaths: excluded,
   };
 }
 
 /**
- * The per-file context packs for exactly the paths this run will dispatch — reviewable minus the
- * same exclude union the budget was computed from, so a cache hit or mechanically-clean path never
- * pays for a lookup no engine conversation will read. Two git subprocesses regardless of file
- * count, and `collectContextPacks` resolves every internal failure to "no pack", so this call can
- * shrink the injection but never the review.
+ * Loads trusted guideline identity for every runner before cache lookup. Only staged Scout receives
+ * the rendered instruction; the agentic engine keeps its repository tools, but its generation
+ * cache still moves when a configured merge-base guideline changes at the same path.
  */
-async function dispatchContextPacks(
+async function prepareGuidelineContext(
   request: PipelineRequest,
   inventory: Inventory,
-  excluded: readonly string[],
+): Promise<GuidelineContextResult | undefined> {
+  return loadGuidelineContext({
+    repositoryPath: request.repositoryPath,
+    pathValue: request.pathValue,
+    mergeBase: inventory.pair.mergeBase,
+    guidelines: request.guidelines,
+  });
+}
+
+/**
+ * Prepares context before cache lookup because its exact rendered bytes are part of a single-shot
+ * verdict. A cache hit can therefore be trusted only after the same pack has been recomputed and
+ * hashed. The engine later filters hits from this map without collecting it a second time.
+ */
+async function prepareContextPacks(
+  request: PipelineRequest,
+  inventory: Inventory,
 ): Promise<ReadonlyMap<string, string>> {
-  // Opt-in, defaulted OFF by a measurement, not a mood (2026-08-07, four paid runs on the
-  // Keiko#3011 merge — evidence: corpus/evidence/cost-ab-2026-08-07-context-packs.md). On the
-  // live endpoint, which the same day's probe showed caches nothing, no pack configuration beat
-  // the baseline's cost, and run-to-run variance under pinned sampling (1.80M / 1.84M / 2.58M
-  // tokens, 0 to 3 findings, one commit) is far too large for any single-run comparison to
-  // license a default. The mechanism itself is built, tested, and correct; it becomes economical
-  // the day the serving path discounts a stable prefix, and until then it costs every turn. Same
-  // escape-hatch pattern as `OCR_ALLOW_MODEL_DEVIATION` in `corpus/run.mjs`: deliberate
-  // experiments set KFQ_CONTEXT_PACKS=1; nothing else pays.
-  if (request.env.KFQ_CONTEXT_PACKS !== "1") return new Map();
-  const excludedSet = new Set(excluded);
-  const paths = [...inventory.reviewablePaths].filter((path) => !excludedSet.has(path));
+  // The 2026-08-07 A/B that defaulted packs OFF measured the agentic runner: the same context rode
+  // roughly fifteen turns per file and cost +21.8% on an endpoint with no prompt caching. The
+  // staged runner uses it only in its bounded Planner/Core/Integration prompts, rather than an
+  // unbounded tool conversation. Agentic reviews therefore keep the explicit KFQ_CONTEXT_PACKS
+  // experiment switch; production staged reviews always receive eligible packs so their examiners
+  // do not have to guess what a repository search would say.
+  if (request.env.KFQ_SINGLE_SHOT !== "1" && request.env.KFQ_CONTEXT_PACKS !== "1") {
+    return new Map();
+  }
+  const mechanicallyClean = new Set(mechanicallyCleanPaths(inventory));
+  const paths = [...inventory.reviewablePaths].filter((path) => !mechanicallyClean.has(path));
   return collectContextPacks({
     repositoryPath: request.repositoryPath,
     pair: inventory.pair,
@@ -1076,9 +1307,9 @@ async function dispatchContextPacks(
 /**
  * The one place both engine attempts (first dispatch and targeted resume) choose their runner.
  *
- * `KFQ_SINGLE_SHOT=1` selects the single-shot runner (`single-shot.ts`) — one model call per
- * file, engine-compatible output, no tool loop — behind the same escape-hatch pattern as
- * `KFQ_CONTEXT_PACKS`. Everything downstream (parse, settle, resume, publish, store) is runner-
+ * `KFQ_SINGLE_SHOT=1` selects the bounded staged runner (`single-shot.ts`) — Scout, mandatory Core,
+ * and a deterministically-triggered Integration examiner, with engine-compatible output and no
+ * open-ended tool loop. Everything downstream (parse, settle, resume, publish, store) is runner-
  * agnostic by construction: both produce the stdout shape `result.ts` parses. The targeted-gap
  * resume therefore works unchanged in single-shot mode, retrying exactly the files whose calls
  * failed.
@@ -1087,26 +1318,61 @@ function invokeEngine(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
 ): Promise<EngineRunOutput> {
+  if (Date.now() >= options.reviewDeadlineMs) {
+    return Promise.reject(new EngineRunError("engine.run.timeout"));
+  }
   if (options.env.KFQ_SINGLE_SHOT === "1") return runSingleShotEngine(options, diagnostics);
   return runEngine(options, diagnostics);
 }
 
 /** The budget booking plus the fully assembled invocation — the two preparations that share one
  *  exclude union, folded together for `executeEngine`'s own line budget. */
-async function preparedInvocation(
+function preparedInvocation(
   request: PipelineRequest,
+  deadline: ReviewDeadline,
   inventory: Inventory,
   memo: MemoContext,
   ledger: SpendLedger,
   binaryPath: string,
-): Promise<EngineRunOptions> {
+): EngineRunOptions {
   const { excluded, allottedBudget } = computeEngineBudget(request, inventory, memo);
   ledger.allotted = allottedBudget;
-  return engineInvocationOptions(request, inventory, binaryPath, allottedBudget, excluded);
+  return engineInvocationOptions(
+    request,
+    deadline,
+    inventory,
+    binaryPath,
+    allottedBudget,
+    excluded,
+    memo.contextPacks,
+    memo.guidelineContext,
+  );
+}
+
+function recordRejectedEngineFindings(
+  parsed: EngineResult,
+  diagnostics: Diagnostics,
+  headSha: CommitSha,
+): void {
+  if (parsed.rejectedFindings === 0) return;
+  diagnostics.record("engine.result.findings_rejected", {
+    headSha,
+    counts: { rejected: parsed.rejectedFindings },
+  });
+}
+
+async function reviewEngineBinaryPath(
+  request: PipelineRequest,
+  workspace: string,
+  diagnostics: Diagnostics,
+): Promise<string> {
+  if (request.env.KFQ_SINGLE_SHOT === "1") return join(workspace, "unused-by-staged-runner");
+  return (await acquireEngine(workspace, diagnostics)).binaryPath;
 }
 
 async function executeEngine(
   request: PipelineRequest,
+  deadline: ReviewDeadline,
   inventory: Inventory,
   memo: MemoContext,
   ledger: SpendLedger,
@@ -1115,33 +1381,37 @@ async function executeEngine(
 ): Promise<Settlement> {
   const workspace = await mkdtemp(join(tmpdir(), "kfq-engine-bin-"));
   try {
-    const engine = await acquireEngine(workspace, diagnostics);
+    requireReviewTime(deadline);
+    // The staged runner is an HTTP-only workflow and never executes the pinned engine binary.
+    // Keep the invocation shape shared, but do not make staged reviews depend on platform support,
+    // archive download, extraction, or executable startup merely to supply an ignored path.
+    const binaryPath = await reviewEngineBinaryPath(request, workspace, diagnostics);
+    requireReviewTime(deadline);
     const {
       result: parsed,
       engineTokens,
       alreadyReviewedPaths,
     } = await runEngineWithOneResume(
-      await preparedInvocation(request, inventory, memo, ledger, engine.binaryPath),
+      preparedInvocation(request, deadline, inventory, memo, ledger, binaryPath),
       diagnostics,
       ledger,
       inventory.reviewablePaths,
     );
     ledger.engine += engineTokens;
+    requireReviewTime(deadline);
     // Findings this adapter refused while keeping the run (see `EngineResult.rejectedFindings`).
     // Recorded only when non-zero: a zero here is the ordinary case, and a line for it would
     // bury the one occurrence that matters under nineteen that do not.
-    if (parsed.rejectedFindings > 0) {
-      diagnostics.record("engine.result.findings_rejected", {
-        headSha: inventory.pair.head,
-        counts: { rejected: parsed.rejectedFindings },
-      });
-    }
+    recordRejectedEngineFindings(parsed, diagnostics, inventory.pair.head);
     const { result: classified, classifyTokens } = await repairEngineFindings(
       parsed,
       request,
+      deadline,
       diagnostics,
+      remainingWholeReviewBudget(request, ledger),
     );
     ledger.classify += classifyTokens;
+    requireReviewTime(deadline);
     // Widened, never replaced: `alreadyReviewedPaths` (empty except after a resume that narrowed
     // its own dispatch — see `ResumeOutcome`'s doc comment) tells `settle()` those paths are
     // covered by the FIRST attempt, not by the returned result's own coverage, exactly the same
@@ -1170,11 +1440,19 @@ async function executeEngine(
  * the engine), and a configured-but-unset token means a dry run. Neither caller treats the two
  * reasons differently, so extracting the check once is what keeps them from drifting apart.
  */
-function classifyDeps(request: PipelineRequest): ClassifyEndpoint | undefined {
+function classifyDeps(
+  request: PipelineRequest,
+  deadline: ReviewDeadline,
+): ClassifyEndpoint | undefined {
   if (request.config.protocol === "anthropic") return undefined;
   const token = readModelToken(request.config, request.env);
   if (token === undefined) return undefined;
-  return { endpoint: request.config.endpoint, token, model: request.config.model };
+  return {
+    endpoint: request.config.endpoint,
+    token,
+    model: request.config.model,
+    deadlineMs: deadline.expiresAtMs,
+  };
 }
 
 /**
@@ -1264,7 +1542,7 @@ async function compareMatchedPairs(
     const leftBase = await readTextAtCommitCached(
       blobCache,
       ctx,
-      request.base,
+      inventory.pair.mergeBase,
       (item.oldPath ?? item.path) as string,
     );
     const side: ChangedSide = { item, text: left, baseText: leftBase };
@@ -1378,7 +1656,7 @@ async function collectPinDesyncFindings(
     const base = await readTextAtCommitCached(
       blobCache,
       ctx,
-      request.base,
+      inventory.pair.mergeBase,
       (item.oldPath ?? item.path) as string,
     );
     const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
@@ -1507,6 +1785,7 @@ const CHANGE_PASS_RESERVE_TOKENS = 10_000;
  */
 async function collectChangePassFindings(
   request: PipelineRequest,
+  deadline: ReviewDeadline,
   inventory: Inventory,
   ledger: SpendLedger,
   diagnostics: Diagnostics,
@@ -1515,11 +1794,12 @@ async function collectChangePassFindings(
   blobCache: BlobTextCache = new Map(),
 ): Promise<readonly EngineFinding[]> {
   if (request.config.crossArtifactPass !== true) return [];
-  const deps = classifyDeps(request);
+  requireReviewTime(deadline);
+  const deps = classifyDeps(request, deadline);
   if (deps === undefined) return [];
   // Same ceiling and same reasoning as `auditFreshSurvivors`' guard below: the consumer's declared
   // budget, never the engine's size-scaled allotment, which live runs legally overshoot.
-  const remaining = request.config.tokenBudget - ledger.engine - ledger.classify;
+  const remaining = remainingWholeReviewBudget(request, ledger);
   if (remaining < CHANGE_PASS_RESERVE_TOKENS) {
     diagnostics.record("contracts.change_pass", {
       headSha: request.head,
@@ -1531,11 +1811,13 @@ async function collectChangePassFindings(
   const files: ChangedFile[] = [];
   for (const item of inventory.items) {
     if (!item.reviewable) continue;
+    requireReviewTime(deadline);
     const source = await readTextAtCommitCached(blobCache, ctx, request.head, item.path as string);
     if (source !== undefined) files.push({ path: item.path as string, source });
   }
-  const { findings, tokens } = await runChangePass(files, deps);
+  const { findings, tokens, budgetBlocked } = await runChangePass(files, deps, remaining);
   ledger.classify += tokens;
+  requireReviewTime(deadline);
   const anchorable = findings.filter((finding) =>
     inventory.reviewablePaths.has(finding.path as string),
   );
@@ -1545,7 +1827,7 @@ async function collectChangePassFindings(
       findings: anchorable.length,
       dropped_unanchorable: findings.length - anchorable.length,
       tokens,
-      skipped_budget: 0,
+      skipped_budget: budgetBlocked ? 1 : 0,
     },
   });
   return anchorable;
@@ -1603,7 +1885,9 @@ async function collectChangePassFindings(
 async function repairEngineFindings(
   parsed: EngineResult,
   request: PipelineRequest,
+  deadline: ReviewDeadline,
   diagnostics: Diagnostics,
+  maxTokens: number,
 ): Promise<{ result: EngineResult; classifyTokens: number }> {
   // `settle` (`settle.ts`'s `commonDisqualifier`) disqualifies any result over `config.maxFindings`
   // as implausible — a misconfigured model, a runaway run, or a successful prompt injection, not a
@@ -1628,13 +1912,19 @@ async function repairEngineFindings(
     return { result: parsed, classifyTokens: 0 };
   }
   if (parsed.findings.length === 0) return { result: parsed, classifyTokens: 0 };
-  const deps = classifyDeps(request);
+  requireReviewTime(deadline);
+  const deps = classifyDeps(request, deadline);
   if (deps === undefined) return { result: parsed, classifyTokens: 0 };
   if (!parsed.findings.some(needsClassification)) return { result: parsed, classifyTokens: 0 };
 
-  const outcome = await repairClassification(parsed.findings, deps);
+  const outcome = await repairClassification(parsed.findings, deps, maxTokens);
   diagnostics.record("classify.repaired", {
-    counts: { repaired: outcome.repaired, failed: outcome.failed, tokens: outcome.tokens },
+    counts: {
+      repaired: outcome.repaired,
+      failed: outcome.failed,
+      ...nonzeroPublicationCount("budget_blocked", outcome.budgetBlocked),
+      tokens: outcome.tokens,
+    },
   });
   return { result: { ...parsed, findings: outcome.findings }, classifyTokens: outcome.tokens };
 }
@@ -2089,6 +2379,9 @@ async function attemptResume(
         ...options,
         samplingSeed: RESUME_SEED,
         allottedBudget: remaining,
+        expectedReviewablePaths: options.expectedReviewablePaths.filter(
+          (path) => !alreadyReviewedPaths.includes(path),
+        ),
         mechanicallyCleanPaths: [...options.mechanicallyCleanPaths, ...alreadyReviewedPaths],
       },
       diagnostics,
@@ -2186,6 +2479,9 @@ async function runEngineWithOneResume(
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   } catch (error) {
     if (!(error instanceof EngineRunError)) throw error;
+    // The timeout belongs to the enclosing review, not to this attempt. Once exhausted, a resume
+    // cannot manufacture another full `reviewTimeoutSeconds` window.
+    if (Date.now() >= options.reviewDeadlineMs) throw error;
     // The absorbed first attempt's wire-counted spend (2026-08-06): this error never propagates —
     // the resume below IS the recovery — so `executeEngine`'s propagated-error booking never sees
     // it, and this catch is its one chance to reach the ledger. Nothing self-reported exists to
@@ -2237,8 +2533,20 @@ function publicationDegraded(outcome: PublishOutcome): boolean {
     // A finding whose publish call itself failed was contained per finding rather than allowed to
     // abort the loop (publisher.ts), but containment does not make it published: the consumer
     // never saw it, so the run cannot read as fully reviewed.
-    (outcome.apiFailures ?? 0) > 0
+    (outcome.apiFailures ?? 0) > 0 ||
+    // A verifier outage withheld fresh claims instead of publishing them. The withholding is the
+    // safe publication decision; this flag is what stops that outage from masquerading as clean.
+    (outcome.verificationUndecided ?? 0) > 0
   );
+}
+
+/** Emits optional diagnostic counts only when the measured value is non-zero. */
+function nonzeroPublicationCount(
+  key: string,
+  value: number | undefined,
+): Readonly<Record<string, number>> {
+  if (value === undefined || value === 0) return {};
+  return { [key]: value };
 }
 
 /**
@@ -2255,15 +2563,11 @@ function publicationDegradedCounts(outcome: PublishOutcome): Readonly<Record<str
     rejected_sanitization: outcome.rejectedSanitization,
     readback_failures: outcome.readbackFailures,
     api_failures: outcome.apiFailures ?? 0,
+    ...nonzeroPublicationCount("verification_undecided", outcome.verificationUndecided),
+    ...nonzeroPublicationCount("suppressed_evidence", outcome.suppressedEvidence),
+    ...nonzeroPublicationCount("suppressed_ranked", outcome.suppressedRanked),
   };
 }
-
-/** Reserved budget per fresh survivor the audit MIGHT still classify, in tokens (v0.12.0). One vote
- *  is roughly 1k prompt tokens plus a bounded completion; this is not a worst-case bound on the
- *  escalated path (up to three votes), but a deliberately cheap trigger that keeps the audit's
- *  typical (one-vote, fast-path — see `classify.ts`'s `collectAuditVotes`) cost inside the
- *  consumer's own ceiling, rather than only reacting after an overdraw already happened. */
-const AUDIT_RESERVE_PER_FINDING = 2_000;
 
 /** No fresh survivor was substituted. Every skip path in `auditFreshSurvivors` returns this. */
 const NO_AUDITED: ReadonlyMap<EngineFinding, EngineFinding> = new Map();
@@ -2285,7 +2589,8 @@ async function auditFreshSurvivors(
   fresh: readonly PlannedFinding[],
 ): Promise<ReadonlyMap<EngineFinding, EngineFinding>> {
   if (fresh.length === 0) return NO_AUDITED;
-  const deps = classifyDeps(run.request);
+  requireReviewTime(run.deadline);
+  const deps = classifyDeps(run.request, run.deadline);
   if (deps === undefined) return NO_AUDITED;
 
   // The consumer's declared whole-run ceiling, minus whatever the engine and repair — both already
@@ -2300,7 +2605,7 @@ async function auditFreshSurvivors(
   // v0.12.0 run, 2026-08-04, evidence in corpus/evidence/). Guarding the audit on that number
   // disabled it in exactly the expensive runs where a second opinion matters most, while the
   // ceiling this guard exists to protect — the consumer's — still had millions of tokens of room.
-  const remaining = run.request.config.tokenBudget - run.ledger.engine - run.ledger.classify;
+  const remaining = remainingWholeReviewBudget(run.request, run.ledger);
   if (remaining < AUDIT_RESERVE_PER_FINDING * fresh.length) {
     run.diagnostics.record("classify.skipped_budget", {
       headSha: run.request.head,
@@ -2312,11 +2617,17 @@ async function auditFreshSurvivors(
   const audit = await auditClassification(
     fresh.map((survivor) => survivor.finding),
     deps,
+    remaining,
   );
   run.ledger.classify += audit.tokens;
   run.diagnostics.record("classify.audited", {
-    counts: { changed: audit.changed, tokens: audit.tokens },
+    counts: {
+      changed: audit.changed,
+      ...nonzeroPublicationCount("budget_blocked", audit.budgetBlocked),
+      tokens: audit.tokens,
+    },
   });
+  requireReviewTime(run.deadline);
 
   // `auditClassification` (`classify.ts`) returns findings in input order, so index-pairing with
   // `fresh` — built from that same call's input a line above — is sound; this is the one place that
@@ -2329,136 +2640,313 @@ async function auditFreshSurvivors(
   return byOriginal;
 }
 
-/**
- * What one substantiation pass may cost per finding: the judge, one repair, and one re-judge.
- * Measured over 120 real published findings at 1,777 tokens each end to end, so this reserves
- * roughly three times what the average actually spends — the guard exists to keep a nearly spent
- * budget from starting work it cannot finish, not to price the common case.
- */
-const SUBSTANTIATE_RESERVE_PER_FINDING = 6_000;
-
-/** What the substantiation stage changed: which survivors leave, and which carry a rewritten body. */
-interface SubstantiationResult {
-  readonly dropped: ReadonlySet<EngineFinding>;
-  readonly repaired: ReadonlyMap<EngineFinding, EngineFinding>;
+/** Audits verified prose and maps the classification verdict back to the engine original. */
+async function auditEffectiveFreshSurvivors(
+  run: PipelineRun,
+  fresh: readonly PlannedFinding[],
+  repaired: ReadonlyMap<EngineFinding, EngineFinding>,
+): Promise<ReadonlyMap<EngineFinding, EngineFinding>> {
+  const effective = fresh.map((survivor) => {
+    const replacement = repaired.get(survivor.finding);
+    return replacement === undefined ? survivor : { ...survivor, finding: replacement };
+  });
+  const audited = await auditFreshSurvivors(run, effective);
+  return new Map(
+    fresh.flatMap((survivor, index) => {
+      const effectiveFinding = effective[index]?.finding;
+      const classified = effectiveFinding === undefined ? undefined : audited.get(effectiveFinding);
+      return classified === undefined ? [] : [[survivor.finding, classified] as const];
+    }),
+  );
 }
 
-/** Every skip path returns this — nothing dropped, nothing rewritten, publication unchanged. */
-const NO_SUBSTANTIATION: SubstantiationResult = { dropped: new Set(), repaired: new Map() };
+/** What truth verification decided. It may drop prose, never rewrite it. */
+interface SubstantiationResult {
+  readonly dropped: ReadonlySet<EngineFinding>;
+  /** Permanently empty compatibility channel: verification is keep/drop only. */
+  readonly repaired: ReadonlyMap<EngineFinding, EngineFinding>;
+  /** Content decisions: refuted or insufficiently evidenced. Safe to withhold. */
+  readonly withheld: number;
+  /** Infrastructure/evidence gaps. Withheld, but the review must not read as complete. */
+  readonly undecided: number;
+}
+
+interface JudgeableOriginal extends JudgeableFinding {
+  readonly original: EngineFinding;
+}
+
+/** Empty input is the only no-op path. */
+const NO_SUBSTANTIATION: SubstantiationResult = {
+  dropped: new Set(),
+  repaired: new Map(),
+  withheld: 0,
+  undecided: 0,
+};
+
+interface EvidenceSources {
+  readonly headText: string | undefined;
+  readonly baseText: string | undefined;
+}
+
+interface PreparedFindingEvidence extends EvidenceSources {
+  readonly text: string;
+  readonly unifiedDiff: string;
+  readonly repositoryRequest: RepositoryContextRequest;
+  readonly repositoryContext: RepositoryEvidenceContext;
+}
+
+interface EvidenceRead {
+  readonly path: string;
+  readonly item: InventoryItem;
+  readonly sources: EvidenceSources;
+  readonly unifiedDiff: string;
+}
+
+/** Missing source is legitimate only on the side the inventory proves does not exist. */
+function trustworthyEvidenceSources(
+  item: InventoryItem | undefined,
+  headText: string | undefined,
+  baseText: string | undefined,
+): EvidenceSources | undefined {
+  if (item === undefined) return undefined;
+  if (item.status === "A") {
+    return headText === undefined ? undefined : { headText, baseText: undefined };
+  }
+  if (item.status === "D") {
+    return baseText === undefined ? undefined : { headText: undefined, baseText };
+  }
+  return headText === undefined || baseText === undefined ? undefined : { headText, baseText };
+}
+
+async function readFindingEvidence(
+  run: PipelineRun,
+  context: PublishContext,
+  cache: BlobTextCache,
+  ctx: GitContext,
+  finding: EngineFinding,
+): Promise<EvidenceRead | undefined> {
+  const path = finding.path as string;
+  const item = context.items.get(path);
+  if (item === undefined) return undefined;
+  const basePath = (item.oldPath ?? item.path) as string;
+  const [headText, baseText, unifiedDiff] = await Promise.all([
+    readTextAtCommitCached(cache, ctx, run.request.head, path),
+    readTextAtCommitCached(cache, ctx, context.baseSha, basePath),
+    readChangeUnifiedDiff({
+      repositoryPath: run.request.repositoryPath,
+      pathValue: run.request.pathValue,
+      base: context.baseSha,
+      head: run.request.head,
+      path,
+      renameDetectionPercent: run.request.config.renameDetectionPercent,
+      ...(item.oldPath === undefined ? {} : { oldPath: item.oldPath as string }),
+    }),
+  ]);
+  const sources = trustworthyEvidenceSources(item, headText, baseText);
+  return sources === undefined || unifiedDiff === undefined
+    ? undefined
+    : { path, item, sources, unifiedDiff };
+}
+
+async function prepareFindingEvidence(
+  run: PipelineRun,
+  context: PublishContext,
+  cache: BlobTextCache,
+  ctx: GitContext,
+  finding: EngineFinding,
+): Promise<PreparedFindingEvidence | undefined> {
+  const read = await readFindingEvidence(run, context, cache, ctx, finding);
+  if (read === undefined) return undefined;
+  const anchorSource = read.item.status === "D" ? read.sources.baseText : read.sources.headText;
+  const anchorText = sourceLines(anchorSource, finding.startLine, finding.endLine);
+  if (anchorText === undefined) return undefined;
+  const repositoryRequest: RepositoryContextRequest = {
+    repositoryPath: run.request.repositoryPath,
+    pathValue: run.request.pathValue,
+    head: run.request.head,
+    reviewPath: read.path,
+    findingContent: finding.content,
+    anchorText,
+    unifiedDiff: read.unifiedDiff,
+    deadlineMs: run.deadline.expiresAtMs,
+  };
+  const repositoryContext = await collectInitialRepositoryContext(repositoryRequest);
+  const dossier = buildChangeEvidence(
+    read.sources.headText,
+    read.sources.baseText,
+    {
+      path: read.path,
+      content: finding.content,
+      startLine: finding.startLine,
+      endLine: finding.endLine,
+    },
+    { unifiedDiff: read.unifiedDiff, repositoryContext },
+  );
+  return dossier.text === ""
+    ? undefined
+    : {
+        ...read.sources,
+        text: dossier.text,
+        unifiedDiff: read.unifiedDiff,
+        repositoryRequest,
+        repositoryContext,
+      };
+}
 
 /**
- * How much of the file around a finding the judge is shown. Enough that a guard, an early return,
- * or the caller two lines up is visible; far short of the whole file, because the question is
- * whether the CLAIM is checkable against what it cites, and a judge handed everything starts
- * reviewing at review prices.
- */
-const HUNK_CONTEXT_LINES = 12;
-
-/**
- * Reads the code each fresh survivor sits on, once, through the same per-run cache the
- * deterministic gates already populate — so a finding on a file a gate has read costs no second
- * git subprocess.
+ * Reads each model survivor's full head-side file once, then deterministically retrieves the exact
+ * anchor and every occurrence of the symbols its prose cites. This replaces the old ±12-line view,
+ * which could not show an existing guard six hundred lines away — the measured dominant source of
+ * false positives.
  *
  * Pre-fetched into a map rather than read lazily inside `substantiate`, which keeps that module
  * free of git and of async I/O: it takes a plain synchronous reader, so every one of its branches
  * is exercised by a test with no filesystem at all.
  */
-async function hunksForSurvivors(
+async function evidenceForSurvivors(
   run: PipelineRun,
-  fresh: readonly PlannedFinding[],
-): Promise<ReadonlyMap<string, string>> {
+  context: PublishContext,
+  modelFindings: readonly PlannedFinding[],
+): Promise<ReadonlyMap<EngineFinding, PreparedFindingEvidence>> {
   const cache: BlobTextCache = new Map();
   const ctx = gitContext(run.request);
-  const hunks = new Map<string, string>();
-  for (const survivor of fresh) {
+  const evidence = new Map<EngineFinding, PreparedFindingEvidence>();
+  for (const survivor of modelFindings) {
+    requireReviewTime(run.deadline);
     const finding = survivor.finding;
-    const path = finding.path as string;
-    const key = `${path}:${String(finding.startLine)}`;
-    if (hunks.has(key)) continue;
-    const text = await readTextAtCommitCached(cache, ctx, run.request.head, path);
-    if (text === undefined) continue;
-    const lines = text.split("\n");
-    const from = Math.max(0, finding.startLine - HUNK_CONTEXT_LINES - 1);
-    const to = Math.min(lines.length, finding.endLine + HUNK_CONTEXT_LINES);
-    // Absolute line numbers inline, not a bare slice. The finding cites a line, and a slice with no
-    // positions makes the judge match on text alone. Lu et al. 2025 (arXiv:2505.17928) ablate the
-    // three options on an otherwise identical pipeline: no position at all scores CPI1 12.21,
-    // RELATIVE positions score 9.50 — worse than nothing — and inline absolute numbers score 17.51.
-    // The middle result is why this is written out rather than left to judgement later.
-    hunks.set(
-      key,
-      lines
-        .slice(from, to)
-        .map((line, offset) => `${String(from + offset + 1)}| ${line}`)
-        .join("\n"),
-    );
+    const prepared = await prepareFindingEvidence(run, context, cache, ctx, finding);
+    if (prepared !== undefined) evidence.set(finding, prepared);
   }
-  return hunks;
+  return evidence;
+}
+
+/** Exact anchor text for deterministic retrieval planning; no clamping or partial ranges. */
+function sourceLines(
+  source: string | undefined,
+  startLine: number,
+  endLine: number,
+): string | undefined {
+  if (
+    source === undefined ||
+    !Number.isSafeInteger(startLine) ||
+    !Number.isSafeInteger(endLine) ||
+    startLine < 1 ||
+    endLine < startLine
+  ) {
+    return undefined;
+  }
+  const text = source.endsWith("\n") ? source.slice(0, -1) : source;
+  const lines = text.split("\n");
+  if (endLine > lines.length) return undefined;
+  return lines.slice(startLine - 1, endLine).join("\n");
+}
+
+function evidenceRetriever(
+  evidence: ReadonlyMap<EngineFinding, PreparedFindingEvidence>,
+  deadline: ReviewDeadline,
+): EvidenceRetriever<JudgeableOriginal> {
+  return async ({ finding, terms }) => {
+    requireReviewTime(deadline);
+    const prepared = evidence.get(finding.original);
+    if (prepared === undefined) throw new Error("finding evidence is unavailable");
+    const followUp = await collectRepositoryContextFollowUp(prepared.repositoryRequest, terms);
+    return toRetrievedEvidence(followUp);
+  };
+}
+
+function recordSubstantiation(
+  run: PipelineRun,
+  outcome: SubstantiationOutcome<JudgeableOriginal>,
+): void {
+  run.ledger.classify += outcome.tokens;
+  run.diagnostics.record("publish.substantiated", {
+    counts: {
+      kept: outcome.findings.length,
+      truth_refuted: outcome.truthRefuted,
+      falsifier_defeated: outcome.falsifierDefeated,
+      insufficient_evidence: outcome.droppedInsufficientEvidence,
+      retrieval_requested: outcome.retrievalRequested,
+      retrieval_performed: outcome.retrievalPerformed,
+      retrieval_expanded: outcome.retrievalExpanded,
+      retrieval_no_matches: outcome.retrievalNoMatches,
+      retrieval_failed: outcome.retrievalFailed,
+      undecided: outcome.undecided,
+      budget_blocked: outcome.budgetBlocked,
+      tokens: outcome.tokens,
+    },
+  });
 }
 
 /**
- * Judges the fresh survivors, and repairs the ones whose defect is real but unstated.
+ * Verifies every current publication candidate authored by a model — fresh generation, change-pass
+ * output, and replayed cache findings — through a truth judge and an independent adversarial
+ * falsifier. Deterministic contract gates are deliberately absent from this cohort.
  *
  * Placed beside `auditFreshSurvivors` and on the same cohort for the same reason: after
  * `planPublication` has decided what a reader will actually see, so a suppressed duplicate never
  * costs a judge call, and never on a replayed cache hit, which was judged on the run that stored it.
  *
- * Measured over 120 real published findings with their own anchor hunks: 81.7% kept, 15.0% dropped
- * as contradicted by the code they cite, 3.3% dropped as unstateable after one repair. Against
- * production's own outcome — did anyone touch the line afterwards — it drops 6.7% of the findings
- * that WERE acted on and 25.3% of those that were not, a factor of 3.8 in the right direction.
+ * The initial dossier includes exact HEAD/BASE state, exact merge-base-to-HEAD changed lines, and
+ * bounded repository sightings. A cache hit saves generation only: repository state, structural
+ * retrieval, and verifier behavior can change independently of the per-file generation digest, so
+ * replay never saves this stage. Either role may request one additional deterministic identifier
+ * lookup; that single shared retrieval allowance restarts truth before falsification continues.
+ * Wording is never repaired here: an unproven hypothesis leaves the cohort unchanged only in the
+ * sense that no replacement is invented — under production's paranoid policy it is withheld.
  *
- * Skipping is always safe here, and that asymmetry is deliberate: this stage removes findings a
- * reader cannot check, so failing to run it publishes exactly what v0.16.0 published.
+ * This call is deliberately fail-closed for the OpenAI-compatible production path. A missing file,
+ * unreachable judge, malformed verdict, or fabricated evidence line withholds the fresh candidate
+ * and increments `undecided`; the caller turns that count into an incomplete review instead of a
+ * false clean result. Anthropic retains the pre-existing no-audit path until this independent judge
+ * has a native protocol adapter; Keiko's measured/deployed `gpt-oss-120b` path is OpenAI-compatible.
  */
-async function substantiateFreshSurvivors(
+async function substantiateModelSurvivors(
   run: PipelineRun,
-  fresh: readonly PlannedFinding[],
+  context: PublishContext,
+  modelFindings: readonly PlannedFinding[],
 ): Promise<SubstantiationResult> {
-  if (fresh.length === 0) return NO_SUBSTANTIATION;
-  const deps = classifyDeps(run.request);
+  if (modelFindings.length === 0) return NO_SUBSTANTIATION;
+  requireReviewTime(run.deadline);
+  const deps = classifyDeps(run.request, run.deadline);
+  // This verifier speaks the same OpenAI-compatible protocol Keiko deploys with gpt-oss-120b.
+  // Anthropic keeps its existing strictly-parsed engine path until a native adapter exists.
   if (deps === undefined) return NO_SUBSTANTIATION;
 
-  // Same ceiling and same argument as `auditFreshSurvivors`: the consumer's whole-run budget, not
-  // the engine's size-scaled allotment, which a run that dispatches everything up front legally
-  // overshoots.
-  const remaining = run.request.config.tokenBudget - run.ledger.engine - run.ledger.classify;
-  if (remaining < SUBSTANTIATE_RESERVE_PER_FINDING * fresh.length) {
-    run.diagnostics.record("publish.substantiation_skipped_budget", {
-      headSha: run.request.head,
-      counts: { skipped: fresh.length, remaining },
-    });
-    return NO_SUBSTANTIATION;
-  }
+  // Same whole-review ceiling as `auditFreshSurvivors`, enforced inside `substantiate` before
+  // every endpoint request. Passing the exact remainder makes the limit hard even when one
+  // finding takes the full truth -> retrieval -> truth -> falsifier path.
+  const remaining = Math.max(
+    0,
+    run.request.config.tokenBudget - run.ledger.engine - run.ledger.classify,
+  );
 
-  const hunks = await hunksForSurvivors(run, fresh);
-  const judgeable = fresh.map((survivor) => ({
+  const evidence = await evidenceForSurvivors(run, context, modelFindings);
+  requireReviewTime(run.deadline);
+  const judgeable = modelFindings.map((survivor) => ({
     path: survivor.finding.path as string,
     content: survivor.finding.content,
     startLine: survivor.finding.startLine,
     endLine: survivor.finding.endLine,
     original: survivor.finding,
   }));
+  const evidenceByJudgeable = new Map<JudgeableFinding, string>(
+    judgeable.map((finding) => [finding, evidence.get(finding.original)?.text ?? ""]),
+  );
 
   const outcome = await substantiate(
     judgeable,
-    (finding) => hunks.get(`${finding.path}:${String(finding.startLine)}`) ?? "",
+    (finding) => evidenceByJudgeable.get(finding) ?? "",
     deps,
+    // Production does not publish a candidate the verifier could not check. Unlike a silent drop,
+    // `outcome.undecided` is surfaced as incomplete by the caller below.
+    "paranoid",
+    remaining,
+    evidenceRetriever(evidence, run.deadline),
   );
-  run.ledger.classify += outcome.tokens;
-  run.diagnostics.record("publish.substantiated", {
-    counts: {
-      kept: outcome.findings.length,
-      repaired: outcome.repaired,
-      dropped_vague: outcome.droppedVague,
-      dropped_unsupported: outcome.droppedUnsupported,
-      dropped_nitpick: outcome.droppedNitpick,
-      undecided: outcome.undecided,
-      tokens: outcome.tokens,
-    },
-  });
+  recordSubstantiation(run, outcome);
+  requireReviewTime(run.deadline);
 
-  return partitionSubstantiated(judgeable, outcome.findings);
+  return partitionSubstantiated(judgeable, outcome);
 }
 
 /**
@@ -2470,45 +2958,243 @@ async function substantiateFreshSurvivors(
  * audit silently failing to apply to anything at all.
  */
 function partitionSubstantiated(
-  judged: readonly { readonly original: EngineFinding; readonly content: string }[],
-  kept: readonly { readonly original: EngineFinding; readonly content: string }[],
+  judged: readonly JudgeableOriginal[],
+  outcome: SubstantiationOutcome<JudgeableOriginal>,
 ): SubstantiationResult {
+  // Accept only exact input objects. A clone with edited prose would silently restore the rewrite
+  // path this workflow removed; treating it as unverified keeps publication fail-closed.
+  const judgedObjects = new Set(judged);
+  const kept = outcome.findings.filter((entry) => judgedObjects.has(entry));
+  const unexpectedReplacements = outcome.findings.length - kept.length;
   const survived = new Set(kept.map((entry) => entry.original));
   const dropped = new Set(
     judged.filter((entry) => !survived.has(entry.original)).map((entry) => entry.original),
   );
-  const repaired = new Map<EngineFinding, EngineFinding>();
-  for (const entry of kept) {
-    if (entry.content !== entry.original.content) {
-      repaired.set(entry.original, { ...entry.original, content: entry.content });
-    }
-  }
-  return { dropped, repaired };
+  return {
+    dropped,
+    repaired: new Map(),
+    withheld: outcome.droppedVague + outcome.droppedUnsupported + outcome.droppedNitpick,
+    undecided: outcome.undecided + unexpectedReplacements,
+  };
 }
 
 /** `publishAudited`'s result: the outcome `executePublication` produced, plus which fresh survivors
  *  were actually audited, so a caller can decide what the review cache should remember for each. */
 interface AuditedPublication {
   readonly outcome: PublishOutcome;
-  readonly auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
+  /** Final classification-audited form for fresh findings that survived the quality gates. */
+  readonly qualityByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
+  /** Model findings intentionally withheld or unverified; they must not reappear from the cache. */
+  readonly droppedOriginals: ReadonlySet<EngineFinding>;
+  /** Paths whose model verdict was suppressed, refuted, or removed by PR-wide ranking. */
+  readonly uncacheablePaths: ReadonlySet<string>;
 }
 
 /**
- * Substitutes each plan survivor with its audited classification wherever the audit actually
- * reclassified it, leaving every other survivor exactly as `planPublication` produced it. Returns
- * `survivors` unchanged (the same array reference) when nothing was audited, so a caller that
- * spreads the result back over `plan` (`{ ...plan, survivors }`) always produces a plan equivalent
- * to the original.
+ * Paths whose current model result cannot be represented by a complete per-file cache entry.
+ *
+ * A fresh original absent from `planned` was suppressed before the evidence gate (sanitization,
+ * intra-run clustering, or an existing conversation). A ranked-out original was verified but lost
+ * a PR-global decision. Neither outcome says the file is clean, so one such original makes the
+ * entire path ineligible rather than storing an empty or partial finding list. Replayed cache hits
+ * participate too: an unsafe replay is evicted so it cannot recur next run.
  */
-function substituteAudited(
+function uncacheableModelPaths(
+  modelOriginals: ReadonlySet<EngineFinding>,
+  initiallyPlanned: readonly PlannedFinding[],
+  dropped: ReadonlySet<EngineFinding>,
+  rankedOut: readonly EngineFinding[],
+  selectedOriginals: ReadonlySet<EngineFinding>,
+  finallyPlannedOriginals: ReadonlySet<EngineFinding>,
+): ReadonlySet<string> {
+  const plannedOriginals = new Set(initiallyPlanned.map((survivor) => survivor.finding));
+  const paths = new Set<string>();
+  for (const original of modelOriginals) {
+    if (!plannedOriginals.has(original)) paths.add(original.path as string);
+  }
+  for (const original of dropped) paths.add(original.path as string);
+  for (const original of rankedOut) paths.add(original.path as string);
+  for (const original of selectedOriginals) {
+    if (modelOriginals.has(original) && !finallyPlannedOriginals.has(original)) {
+      paths.add(original.path as string);
+    }
+  }
+  return paths;
+}
+
+function qualityReplacements(
+  substantiated: SubstantiationResult,
+  audited: ReadonlyMap<EngineFinding, EngineFinding>,
+): ReadonlyMap<EngineFinding, EngineFinding> {
+  const combined = new Map<EngineFinding, EngineFinding>(substantiated.repaired);
+  for (const [original, classified] of audited) {
+    const base = combined.get(original) ?? original;
+    combined.set(original, {
+      ...base,
+      category: classified.category,
+      severity: classified.severity,
+    });
+  }
+  return combined;
+}
+
+function originalByEffectiveFinding(
   survivors: readonly PlannedFinding[],
-  auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>,
-): readonly PlannedFinding[] {
-  if (auditedByOriginal.size === 0) return survivors;
-  return survivors.map((survivor) => {
-    const audited = auditedByOriginal.get(survivor.finding);
-    return audited === undefined ? survivor : { ...survivor, finding: audited };
-  });
+  replacements: ReadonlyMap<EngineFinding, EngineFinding>,
+): ReadonlyMap<EngineFinding, EngineFinding> {
+  return new Map(
+    survivors.map((survivor) => [
+      replacements.get(survivor.finding) ?? survivor.finding,
+      survivor.finding,
+    ]),
+  );
+}
+
+function originalsInPlan(
+  survivors: readonly PlannedFinding[],
+  originals: ReadonlyMap<EngineFinding, EngineFinding>,
+): ReadonlySet<EngineFinding> {
+  return new Set(survivors.map((survivor) => originals.get(survivor.finding) ?? survivor.finding));
+}
+
+function addPlanCounters(
+  initial: PlanCounters,
+  final: PlanCounters,
+  evidenceSuppressed: number,
+  rankedSuppressed: number,
+  verificationUndecided: number,
+): PlanCounters {
+  return {
+    suppressed: initial.suppressed + final.suppressed + evidenceSuppressed + rankedSuppressed,
+    suppressedIntraRun: (initial.suppressedIntraRun ?? 0) + (final.suppressedIntraRun ?? 0),
+    suppressedExactDuplicate: initial.suppressedExactDuplicate + final.suppressedExactDuplicate,
+    suppressedSimilar: initial.suppressedSimilar + final.suppressedSimilar,
+    suppressedDispositioned: initial.suppressedDispositioned + final.suppressedDispositioned,
+    suppressedEvidence: evidenceSuppressed,
+    suppressedRanked: rankedSuppressed,
+    verificationUndecided,
+    suppressedRecurrence: (initial.suppressedRecurrence ?? 0) + (final.suppressedRecurrence ?? 0),
+    rejectedSanitization: initial.rejectedSanitization + final.rejectedSanitization,
+    // Only the final cohort reaches a reader. Counting the initial pass too would double-count
+    // every unchanged survivor merely because quality replacements require a second full plan.
+    neutralized: final.neutralized ?? 0,
+  };
+}
+
+function droppedQualityOriginals(
+  substantiated: SubstantiationResult,
+  rankedOut: readonly EngineFinding[],
+): ReadonlySet<EngineFinding> {
+  return new Set([...substantiated.dropped, ...rankedOut]);
+}
+
+interface AuditedPlan {
+  readonly plan: PublicationPlan;
+  readonly survivors: readonly PlannedFinding[];
+  readonly qualityByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
+  readonly droppedOriginals: ReadonlySet<EngineFinding>;
+  readonly uncacheablePaths: ReadonlySet<string>;
+}
+
+/** Internal signal used only to stop publication after the final post-quality head recheck. */
+class StaleHeadBeforePublication extends Error {}
+
+function qualityPublicationPlan(
+  initialPlan: PublicationPlan,
+  finalPlan: PublicationPlan,
+  evidenceSuppressed: number,
+  rankedSuppressed: number,
+  verificationUndecided: number,
+): PublicationPlan {
+  return {
+    ...finalPlan,
+    counters: addPlanCounters(
+      initialPlan.counters,
+      finalPlan.counters,
+      evidenceSuppressed,
+      rankedSuppressed,
+      verificationUndecided,
+    ),
+  };
+}
+
+async function auditSubstantiatedFresh(
+  run: PipelineRun,
+  fresh: readonly PlannedFinding[],
+  substantiated: SubstantiationResult,
+): Promise<ReadonlyMap<EngineFinding, EngineFinding>> {
+  const survivors = fresh.filter((survivor) => !substantiated.dropped.has(survivor.finding));
+  return await auditEffectiveFreshSurvivors(run, survivors, substantiated.repaired);
+}
+
+/** The model-bearing middle of `planAndAudit`, split out without changing its cohort or order. */
+async function runPublicationQualityStages(
+  run: PipelineRun,
+  context: PublishContext,
+  batch: FindingBatch,
+  initialPlan: PublicationPlan,
+): Promise<{
+  readonly verification: ReturnType<typeof selectVerificationCandidates>;
+  readonly substantiated: SubstantiationResult;
+  readonly auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
+}> {
+  requireReviewTime(run.deadline);
+  const verification = selectVerificationCandidates(initialPlan.survivors, batch.verify);
+  const modelFindings = verification.kept.filter((survivor) => batch.verify.has(survivor.finding));
+  const substantiated = await substantiateModelSurvivors(run, context, modelFindings);
+  requireReviewTime(run.deadline);
+  const fresh = modelFindings.filter((survivor) => batch.fresh.has(survivor.finding));
+  const auditedByOriginal = await auditSubstantiatedFresh(run, fresh, substantiated);
+  requireReviewTime(run.deadline);
+  return { verification, substantiated, auditedByOriginal };
+}
+
+function replanSelectedFindings(
+  context: PublishContext,
+  selected: readonly PlannedFinding[],
+  diagnostics: Diagnostics,
+  prefetch: ExistingConversationsPrefetch,
+): Promise<PublicationPlan> {
+  return planPublication(
+    context,
+    selected.map((survivor) => survivor.finding),
+    diagnostics,
+    prefetch,
+  );
+}
+
+function finalizeAuditedPlan(
+  batch: FindingBatch,
+  initialPlan: PublicationPlan,
+  finalPlan: PublicationPlan,
+  verification: ReturnType<typeof selectVerificationCandidates>,
+  selected: ReturnType<typeof selectPrWideFindings>,
+  substantiated: SubstantiationResult,
+  combined: ReadonlyMap<EngineFinding, EngineFinding>,
+  originals: ReadonlyMap<EngineFinding, EngineFinding>,
+): AuditedPlan {
+  const rankedOut = [...verification.rankedOutOriginals, ...selected.rankedOutOriginals];
+  const uncacheablePaths = uncacheableModelPaths(
+    batch.verify,
+    initialPlan.survivors,
+    substantiated.dropped,
+    rankedOut,
+    originalsInPlan(selected.kept, originals),
+    originalsInPlan(finalPlan.survivors, originals),
+  );
+  return {
+    plan: qualityPublicationPlan(
+      initialPlan,
+      finalPlan,
+      substantiated.withheld + substantiated.undecided,
+      rankedOut.length,
+      substantiated.undecided,
+    ),
+    survivors: finalPlan.survivors,
+    qualityByOriginal: combined,
+    droppedOriginals: droppedQualityOriginals(substantiated, rankedOut),
+    uncacheablePaths,
+  };
 }
 
 /**
@@ -2528,38 +3214,40 @@ async function planAndAudit(
   context: PublishContext,
   batch: FindingBatch,
   prefetch?: ExistingConversationsPrefetch,
-): Promise<{
-  readonly plan: PublicationPlan;
-  readonly survivors: readonly PlannedFinding[];
-  readonly auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
-}> {
-  const plan = await planPublication(context, batch.findings, run.diagnostics, prefetch);
-  const fresh = plan.survivors.filter((survivor) => batch.fresh.has(survivor.finding));
+): Promise<AuditedPlan> {
+  requireReviewTime(run.deadline);
+  const initialPlan = await planPublication(context, batch.findings, run.diagnostics, prefetch);
   // Substantiation runs FIRST and the order is load-bearing: it can drop a survivor, and auditing a
   // finding this stage is about to remove spends 1-3 model calls on an opinion nobody will read.
-  const substantiated = await substantiateFreshSurvivors(run, fresh);
-  const survivingFresh = fresh.filter((survivor) => !substantiated.dropped.has(survivor.finding));
-  const auditedByOriginal = await auditFreshSurvivors(run, survivingFresh);
-
-  // Both maps key on the ORIGINAL finding and are merged before EITHER is applied, because
-  // `substituteAudited` looks a survivor up by the object it currently carries: substituting twice
-  // in sequence leaves the second lookup searching for an identity the first one already replaced,
-  // and the audit then silently fails to apply to any repaired finding. Repair changes the body,
-  // the audit changes the classification, and a finding that got both carries both.
-  const combined = new Map<EngineFinding, EngineFinding>(substantiated.repaired);
-  for (const [original, audited] of auditedByOriginal) {
-    const base = combined.get(original) ?? original;
-    combined.set(original, { ...base, category: audited.category, severity: audited.severity });
-  }
-
-  return {
-    plan,
-    survivors: substituteAudited(
-      plan.survivors.filter((survivor) => !substantiated.dropped.has(survivor.finding)),
-      combined,
-    ),
-    auditedByOriginal,
-  };
+  const { verification, substantiated, auditedByOriginal } = await runPublicationQualityStages(
+    run,
+    context,
+    batch,
+    initialPlan,
+  );
+  const combined = qualityReplacements(substantiated, auditedByOriginal);
+  const substantiatedSurvivors = verification.kept.filter(
+    (survivor) => !substantiated.dropped.has(survivor.finding),
+  );
+  const selected = selectPrWideFindings(substantiatedSurvivors, batch.verify, combined);
+  const originals = originalByEffectiveFinding(substantiatedSurvivors, combined);
+  const finalPlan = await replanSelectedFindings(
+    context,
+    selected.kept,
+    run.diagnostics,
+    initialPlan.prefetch,
+  );
+  requireReviewTime(run.deadline);
+  return finalizeAuditedPlan(
+    batch,
+    initialPlan,
+    finalPlan,
+    verification,
+    selected,
+    substantiated,
+    combined,
+    originals,
+  );
 }
 
 /**
@@ -2580,50 +3268,79 @@ async function publishAudited(
   batch: FindingBatch,
   prefetch?: ExistingConversationsPrefetch,
 ): Promise<AuditedPublication> {
-  const { plan, survivors, auditedByOriginal } = await planAndAudit(run, context, batch, prefetch);
+  const { plan, survivors, qualityByOriginal, droppedOriginals, uncacheablePaths } =
+    await planAndAudit(run, context, batch, prefetch);
+  // Truth, retrieval, falsification, and audit can take long enough for a push to land after the
+  // earlier staleness check. This check is intentionally AFTER all of them and immediately before
+  // the first write; stale quality work is discarded and never admitted to the cache.
+  requireReviewTime(run.deadline);
+  if (!(await headIsCurrent(run.request))) {
+    run.diagnostics.record("publish.abandoned_stale_head", { headSha: run.request.head });
+    throw new StaleHeadBeforePublication();
+  }
+  requireReviewTime(run.deadline);
   const outcome = await executePublication(context, { ...plan, survivors }, run.diagnostics);
-  return { outcome, auditedByOriginal };
+  return { outcome, qualityByOriginal, droppedOriginals, uncacheablePaths };
 }
 
 /**
- * The list `finalizeCacheStore` should persist for this run's fresh findings (v0.12.0): the audited
- * form for anything `publishAudited` actually ran through the audit, the original form for anything
- * it did not — suppressed during planning before ever reaching the audit, or never audited at all
- * (the anthropic protocol, no token, or the budget guard in `auditFreshSurvivors`).
+ * The list `finalizeCacheStore` should persist for this run's fresh findings (v0.12.0): the final
+ * quality-gated form for each survivor, excluding originals the quality stages withheld or ranked
+ * out. A separate path-level admission set prevents those omissions from becoming empty or partial
+ * per-file verdicts. Findings that require no replacement (the anthropic protocol, no token, or a
+ * skipped classification audit) retain their original form.
  *
  * A finding the execute-time marker re-check suppresses AFTER being audited (`publisher.ts`'s
  * `executeOne`, exercised end to end through `publishAudited`) still gets its AUDITED form stored,
  * not its pre-audit one: the suppression fired because the audited category's fingerprint matched an
  * existing, already-published thread, which is only possible if that thread was created under the
  * SAME category value — the fingerprint hashes the category, so a match proves equality, not mere
- * collision. Storing the pre-audit value instead would desync a future replay from that same thread:
- * a cache hit is never re-audited (see `auditFreshSurvivors`'s own doc comment), so whatever category
- * is stored here is what every later replay's own fingerprint check uses — a replay carrying the
- * pre-audit category would stop matching the thread it is supposed to keep suppressing, and publish
- * a duplicate instead of continuing to suppress it.
+ * collision. Storing the pre-audit value instead would desync a future replay from that same thread
+ * before the current-run verifier sees the cache hit: its first fingerprint check could stop
+ * matching the thread it is supposed to suppress and publish a duplicate.
  */
 function findingsForStorage(
   findings: readonly EngineFinding[],
-  auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>,
+  qualityByOriginal: ReadonlyMap<EngineFinding, EngineFinding>,
+  droppedOriginals: ReadonlySet<EngineFinding>,
 ): readonly EngineFinding[] {
-  if (auditedByOriginal.size === 0) return findings;
-  return findings.map((original) => auditedByOriginal.get(original) ?? original);
+  return findings
+    .filter((original) => !droppedOriginals.has(original))
+    .map((original) => qualityByOriginal.get(original) ?? original);
+}
+
+/** Removes cache entries whose replayed path failed this run's publication-quality decision. */
+function evictUncacheableHits(
+  store: CacheStore,
+  memo: MemoContext,
+  uncacheablePaths: ReadonlySet<string>,
+): CacheStore {
+  const keys = new Set<CacheEntry["key"]>();
+  for (const path of uncacheablePaths) {
+    const hit = memo.hits.get(path);
+    if (hit !== undefined) keys.add(hit.key);
+  }
+  return removeEntriesByKey(store, keys);
 }
 
 /**
- * Folds this run's newly-clean-or-found paths into the store to write back — never a hit's own
- * entry, which is already in the store unchanged, and never anything from an outcome other than
- * `complete`: this function is only reachable from `publishSettledFindings`, and that is the one
- * caller-enforced condition for cache admission. See `review-cache.ts`'s own doc comment for why an
- * incomplete run's findings would otherwise silently launder a transient failure into a permanent,
- * confidently-replayed answer.
+ * Folds this run's newly-clean-or-found paths into the store to write back. `uncacheablePaths`
+ * removes a whole path when this run cannot represent its verdict completely. A replayed hit in
+ * that set is physically evicted, never merely left old and untouched; otherwise the same refuted
+ * or ranked-out claim would recur on the next run. Surviving hits are promoted only after current-
+ * run verification. Admission is
+ * caller-controlled: a complete run, or a truncated run restricted to the exact paths whose
+ * verdicts survived incompleteness. See `review-cache.ts`'s own doc comment for why any broader
+ * admission would silently launder a transient failure into a permanent, confidently-replayed
+ * answer.
  */
 function finalizeCacheStore(
   request: PipelineRequest,
   inventory: Inventory,
   memo: MemoContext,
   engineFindings: readonly EngineFinding[],
-  restrictTo?: ReadonlySet<string>,
+  restrictTo: ReadonlySet<string> | undefined = undefined,
+  uncacheablePaths: ReadonlySet<string> = NO_UNCACHEABLE_PATHS,
 ): { store: CacheStore; appended: number } | undefined {
   if (request.cacheStore === undefined) return undefined;
   if (
@@ -2639,11 +3356,13 @@ function finalizeCacheStore(
   // never opened into the store would freeze them as "clean" forever — the precise laundering
   // review-cache.ts warns about, and worse than not memoizing at all. `restrictTo` is the engine's
   // own account of what it reached, so only those paths can be admitted.
-  const eligible =
-    restrictTo === undefined
-      ? memo.eligiblePaths
-      : new Set([...memo.eligiblePaths].filter((path) => restrictTo.has(path)));
+  const eligible = new Set(
+    [...memo.eligiblePaths].filter(
+      (path) => !uncacheablePaths.has(path) && (restrictTo === undefined || restrictTo.has(path)),
+    ),
+  );
 
+  const prunedStore = evictUncacheableHits(request.cacheStore, memo, uncacheablePaths);
   const newEntries = buildNewEntries({
     inventory,
     eligiblePaths: eligible,
@@ -2657,7 +3376,8 @@ function finalizeCacheStore(
     ...(memo.contextDigests === undefined ? {} : { contextDigests: memo.contextDigests }),
     config: request.config,
   });
-  // This run's own hits, carried alongside the freshly-built entries so `appendEntries`' existing
+  // This run's own surviving, freshly reverified hits, carried alongside the freshly-built entries
+  // so `appendEntries`' existing
   // key-match-and-promote logic (`review-cache.ts`) covers them too — a same-key entry is treated as
   // "freshly confirmed, move to newest" whether it arrived here as newly-reviewed or as a replay.
   // Without this, retention (`RETENTION.maxEntries`, oldest-evicted-first) is ordered by WRITE
@@ -2665,12 +3385,14 @@ function finalizeCacheStore(
   // evicted exactly as if it had never been touched again, while a file that happens to get a fresh
   // WRITE (any change, anywhere, invalidating its content key) keeps resetting its own clock. Genuine
   // USE recency is what retention is supposed to approximate.
-  const touched = [...memo.hits.values()];
+  const touched = [...memo.hits.entries()]
+    .filter(([path]) => !uncacheablePaths.has(path))
+    .map(([, entry]) => entry);
   if (newEntries.length === 0 && touched.length === 0) {
-    return { store: request.cacheStore, appended: 0 };
+    return { store: prunedStore, appended: 0 };
   }
   return {
-    store: appendEntries(request.cacheStore, [...newEntries, ...touched], RETENTION),
+    store: appendEntries(prunedStore, [...newEntries, ...touched], RETENTION),
     appended: newEntries.length,
   };
 }
@@ -2695,7 +3417,8 @@ function finalizeCacheStore(
  * had been quietly exempt from it.
  *
  * Reuses the identical happy-path call (`publishSettledFindings`'s own `finalizeCacheStore(...,
- * findingsForStorage(settlement.findings, auditedByOriginal))`) rather than threading anything
+ * findingsForStorage(settlement.findings, qualityByOriginal, droppedOriginals))`) rather than
+ * threading anything
  * through `settleIncomplete`'s own `covered`/`batch` machinery, which exists for the DIFFERENT
  * truncated-engine-run shape and would re-publish findings this function's caller already attempted.
  */
@@ -2705,7 +3428,9 @@ async function reportDegradedPublication(
   memo: MemoContext,
   publish: PublishOutcome,
   settlement: Extract<Settlement, { status: "complete" }>,
-  auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>,
+  qualityByOriginal: ReadonlyMap<EngineFinding, EngineFinding>,
+  droppedOriginals: ReadonlySet<EngineFinding>,
+  uncacheablePaths: ReadonlySet<string>,
 ): Promise<ReviewReport> {
   const report = await settleIncomplete(
     run,
@@ -2716,12 +3441,20 @@ async function reportDegradedPublication(
     },
     memo,
   );
-  const finalized = finalizeCacheStore(
-    run.request,
-    inventory,
-    memo,
-    findingsForStorage(settlement.findings, auditedByOriginal),
-  );
+  // An undecided verifier did not earn a durable clean/found verdict for the affected files, and
+  // the outcome does not identify them narrowly enough to cache the remainder safely. Delivery-only
+  // degradation may still retain the independently verified work.
+  const finalized =
+    (publish.verificationUndecided ?? 0) > 0
+      ? undefined
+      : finalizeCacheStore(
+          run.request,
+          inventory,
+          memo,
+          findingsForStorage(settlement.findings, qualityByOriginal, droppedOriginals),
+          undefined,
+          uncacheablePaths,
+        );
   return {
     ...report,
     publish,
@@ -2748,7 +3481,7 @@ async function abandonStalePublish(
   run: ReviewRun,
   inventory: Inventory,
   memo: MemoContext,
-  settlement: Extract<Settlement, { status: "complete" }>,
+  _settlement: Extract<Settlement, { status: "complete" }>,
 ): Promise<ReviewReport | undefined> {
   const stale = await abandonIfStale(run, inventory, memo);
   if (stale === undefined) return undefined;
@@ -2762,12 +3495,9 @@ async function abandonStalePublish(
   // deliberately: gate and change-pass findings derive from more than one file's content and must
   // never enter a store keyed for one, the same rule `publishSettledFindings`'s own caching later
   // in that function already follows for the happy path.
-  const finalized = finalizeCacheStore(run.request, inventory, memo, settlement.findings);
-  return {
-    ...stale,
-    cacheAppended: finalized?.appended ?? stale.cacheAppended,
-    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
-  };
+  // The engine findings have not passed the publication-quality gate yet. Persisting them under
+  // the current semantics marker would make a later cache hit bypass evidence verification.
+  return stale;
 }
 
 /**
@@ -2804,10 +3534,110 @@ function combineSettledFindings(
   memo: MemoContext,
   gate: readonly EngineFinding[],
   changePass: readonly EngineFinding[],
-): { readonly merged: readonly EngineFinding[]; readonly fresh: ReadonlySet<EngineFinding> } {
-  const merged = [...mergeHitFindings(settlement.findings, memo.hits), ...gate, ...changePass];
+): {
+  readonly merged: readonly EngineFinding[];
+  readonly verify: ReadonlySet<EngineFinding>;
+  readonly fresh: ReadonlySet<EngineFinding>;
+} {
+  const modelFindings = mergeHitFindings(settlement.findings, memo.hits);
+  const merged = [...modelFindings, ...gate, ...changePass];
+  const verify: ReadonlySet<EngineFinding> = new Set([...modelFindings, ...changePass]);
   const fresh: ReadonlySet<EngineFinding> = new Set([...settlement.findings, ...changePass]);
-  return { merged, fresh };
+  return { merged, verify, fresh };
+}
+
+/** Incomplete counterpart: cache and partial-engine findings are model claims; gates are not. */
+function combineIncompleteFindings(
+  settlement: Extract<Settlement, { status: "incomplete" }>,
+  memo: MemoContext,
+  gate: readonly EngineFinding[],
+): FindingBatch {
+  const modelFindings = mergeHitFindings(settlement.findings, memo.hits);
+  return {
+    findings: [...modelFindings, ...gate],
+    verify: new Set(modelFindings),
+    fresh: new Set(settlement.findings),
+  };
+}
+
+/** Finalizes the cache and report after publication itself completed without degradation. */
+function completedPublicationReport(
+  run: ReviewRun,
+  inventory: Inventory,
+  settlement: Extract<Settlement, { status: "complete" }>,
+  memo: MemoContext,
+  startedAt: number,
+  audited: AuditedPublication,
+): ReviewReport {
+  const { outcome: publish, qualityByOriginal, droppedOriginals, uncacheablePaths } = audited;
+  run.diagnostics.record("settlement.complete", {
+    headSha: run.request.head,
+    durationMs: Date.now() - startedAt,
+    counts: { published: publish.published, suppressed: publish.suppressed },
+  });
+  const finalized = finalizeCacheStore(
+    run.request,
+    inventory,
+    memo,
+    findingsForStorage(settlement.findings, qualityByOriginal, droppedOriginals),
+    undefined,
+    uncacheablePaths,
+  );
+  return {
+    outcome: "complete",
+    ...inventoryCounts(inventory),
+    publish,
+    cacheAppended: finalized?.appended ?? 0,
+    ...cacheCounts(memo),
+    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
+  };
+}
+
+type PublicationStage<T> = { readonly value: T } | { readonly report: ReviewReport };
+
+async function changePassBeforePublication(
+  run: ReviewRun,
+  inventory: Inventory,
+  memo: MemoContext,
+  blobCache: BlobTextCache,
+): Promise<PublicationStage<readonly EngineFinding[]>> {
+  try {
+    const value = await collectChangePassFindings(
+      run.request,
+      run.deadline,
+      inventory,
+      run.ledger,
+      run.diagnostics,
+      blobCache,
+    );
+    return { value };
+  } catch (error) {
+    if (error instanceof ReviewDeadlineExceeded) {
+      return { report: reviewDeadlineReport(run, inventory, memo) };
+    }
+    throw error;
+  }
+}
+
+async function auditedPublicationOrReport(
+  run: ReviewRun,
+  inventory: Inventory,
+  memo: MemoContext,
+  batch: FindingBatch,
+): Promise<PublicationStage<AuditedPublication>> {
+  try {
+    return {
+      value: await publishAudited(run, publishContextFor(run.request, inventory), batch),
+    };
+  } catch (error) {
+    if (error instanceof StaleHeadBeforePublication) {
+      return { report: abandonedReport(inventory, memo) };
+    }
+    if (error instanceof ReviewDeadlineExceeded) {
+      return { report: reviewDeadlineReport(run, inventory, memo) };
+    }
+    throw error;
+  }
 }
 
 async function publishSettledFindings(
@@ -2817,30 +3647,30 @@ async function publishSettledFindings(
   memo: MemoContext,
   startedAt: number,
 ): Promise<ReviewReport> {
+  if (reviewDeadlineExpired(run.deadline)) return reviewDeadlineReport(run, inventory, memo);
   // Shared across both collectors (#33) — see `BlobTextCache`'s own doc comment.
   const blobCache: BlobTextCache = new Map();
   const gate = await collectGateFindings(run.request, inventory, run.diagnostics, blobCache);
+  if (reviewDeadlineExpired(run.deadline)) return reviewDeadlineReport(run, inventory, memo);
 
   const staleBeforeSpend = await abandonStaleBeforeChangePass(run, inventory, memo, settlement);
   if (staleBeforeSpend !== undefined) return staleBeforeSpend;
 
-  const changePass = await collectChangePassFindings(
-    run.request,
-    inventory,
-    run.ledger,
-    run.diagnostics,
-    blobCache,
-  );
-  const combined = combineSettledFindings(settlement, memo, gate, changePass);
+  const changePass = await changePassBeforePublication(run, inventory, memo, blobCache);
+  if ("report" in changePass) return changePass.report;
+  const combined = combineSettledFindings(settlement, memo, gate, changePass.value);
 
   const stale = await abandonStalePublish(run, inventory, memo, settlement);
   if (stale !== undefined) return stale;
 
-  const { outcome: publish, auditedByOriginal } = await publishAudited(
-    run,
-    publishContextFor(run.request, inventory),
-    { findings: combined.merged, fresh: combined.fresh },
-  );
+  const publication = await auditedPublicationOrReport(run, inventory, memo, {
+    findings: combined.merged,
+    verify: combined.verify,
+    fresh: combined.fresh,
+  });
+  if ("report" in publication) return publication.report;
+  const audited = publication.value;
+  const { outcome: publish, qualityByOriginal, droppedOriginals, uncacheablePaths } = audited;
 
   // A finding the reviewer found but could not publish is a finding the consumer never saw. The
   // engine's own verdict was "complete", so this is the only place that fact can be recorded.
@@ -2851,28 +3681,19 @@ async function publishSettledFindings(
   // it means for their coverage rather than which internal step noticed. The diagnostic keeps its
   // name and its per-attempt breakdown; only the settlement reason moved family.
   if (publicationDegraded(publish)) {
-    return reportDegradedPublication(run, inventory, memo, publish, settlement, auditedByOriginal);
+    return reportDegradedPublication(
+      run,
+      inventory,
+      memo,
+      publish,
+      settlement,
+      qualityByOriginal,
+      droppedOriginals,
+      uncacheablePaths,
+    );
   }
 
-  run.diagnostics.record("settlement.complete", {
-    headSha: run.request.head,
-    durationMs: Date.now() - startedAt,
-    counts: { published: publish.published, suppressed: publish.suppressed },
-  });
-  const finalized = finalizeCacheStore(
-    run.request,
-    inventory,
-    memo,
-    findingsForStorage(settlement.findings, auditedByOriginal),
-  );
-  return {
-    outcome: "complete",
-    ...inventoryCounts(inventory),
-    publish,
-    cacheAppended: finalized?.appended ?? 0,
-    ...cacheCounts(memo),
-    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
-  };
+  return completedPublicationReport(run, inventory, settlement, memo, startedAt, audited);
 }
 
 /** The zero-reviewable-paths shortcut: nothing was ever eligible, so nothing was hit or missed. */
@@ -2920,6 +3741,26 @@ async function abandonIfStale(
 }
 
 /**
+ * A generation-free settlement when exact cache entries answer every reviewable path.
+ *
+ * The empty finding list is deliberate: cached findings are merged later from `memo.hits`, where
+ * they enter `FindingBatch.verify` and therefore still pay current Truth/Falsifier. This shortcut
+ * skips only engine acquisition/generation; it does not skip any publication-quality stage.
+ */
+function fullyMemoizedSettlement(
+  inventory: Inventory,
+  memo: MemoContext,
+): Extract<Settlement, { status: "complete" }> | undefined {
+  if (
+    inventory.reviewablePaths.size === 0 ||
+    [...inventory.reviewablePaths].some((path) => !memo.hitPaths.has(path))
+  ) {
+    return undefined;
+  }
+  return { status: "complete", mode: "memoized", findings: [] };
+}
+
+/**
  * Runs the engine and records the settlement mode, or reports the failure.
  *
  * Returns a `ReviewReport` when the engine itself could not be run — a spawn failure, a timeout, a
@@ -2931,9 +3772,15 @@ async function settleOrReport(
   inventory: Inventory,
   memo: MemoContext,
 ): Promise<Settlement | ReviewReport> {
+  const memoized = fullyMemoizedSettlement(inventory, memo);
+  if (memoized !== undefined) {
+    run.diagnostics.record("settlement.mode.memoized", { headSha: run.request.head });
+    return memoized;
+  }
   try {
     const settlement = await executeEngine(
       run.request,
+      run.deadline,
       inventory,
       memo,
       run.ledger,
@@ -2966,12 +3813,13 @@ export async function performReview(
   diagnostics: Diagnostics,
 ): Promise<ReviewReport> {
   const ledger: SpendLedger = { allotted: 0, engine: 0, classify: 0 };
+  const deadline = startReviewDeadline(request.config.reviewTimeoutSeconds);
   // Captured so the cleanup below can ask what this run settled as. A `finally` that only sees
   // the request cannot tell a completed run from an incomplete one, and the notice cleanup's
   // same-head rule turns on exactly that distinction.
   let report: ReviewReport | undefined;
   try {
-    report = await performReviewInner(request, diagnostics, ledger);
+    report = await performReviewInner(request, diagnostics, ledger, deadline);
     return report;
   } finally {
     // Only when the engine (or a classify call reached during publication) actually spent
@@ -3006,7 +3854,7 @@ export async function performReview(
     // the same fallback identity. Skipping the mutation entirely under a non-exclusive identity
     // costs exactly what every other failure mode of this feature already costs — one more stale
     // thread for the next push, or a human, to resolve by hand — never a wrong resolution.
-    if (request.identityExclusive) {
+    if (request.identityExclusive && !reviewDeadlineExpired(deadline)) {
       // `GitHubClient`'s own implementation never throws — every failure inside it, at either the
       // lookup or the mutation, is already caught and folded into a lower resolved count. This
       // `try` is defense in depth, not a hedge against a known gap: `ReviewCommentApi` is an
@@ -3062,9 +3910,10 @@ async function performReviewInner(
   request: ReviewRequest,
   diagnostics: Diagnostics,
   ledger: SpendLedger,
+  deadline: ReviewDeadline,
 ): Promise<ReviewReport> {
   const started = Date.now();
-  const run: ReviewRun = { request, ledger, diagnostics, credited: new Set() };
+  const run: ReviewRun = { request, ledger, diagnostics, deadline, credited: new Set() };
   diagnostics.record("run.started", { headSha: request.head });
 
   const ctx = gitContext(request);
@@ -3078,6 +3927,7 @@ async function performReviewInner(
     request.config.renameDetectionPercent,
     diagnostics,
   );
+  if (reviewDeadlineExpired(deadline)) return reviewDeadlineReport(run, inventory);
 
   // A path the consumer's profile does not describe is a gap in their coverage statement. Reviewing
   // the rest and reporting success would hide it behind an apparently clean run.
@@ -3092,7 +3942,8 @@ async function performReviewInner(
     return emptyReviewReport(inventory);
   }
 
-  const memo = prepareMemoization(request, inventory, diagnostics);
+  const memo = await prepareMemoization(request, inventory, diagnostics);
+  if (reviewDeadlineExpired(deadline)) return reviewDeadlineReport(run, inventory, memo);
 
   // Cheap insurance ahead of the expensive step: the engine run below is minutes long, and the head
   // can move before that spend even starts. This does not replace the post-run check further down,
@@ -3125,10 +3976,7 @@ async function performReviewInner(
       // and this call site was where those numbers silently fell out of the log line.
       { reason: settlement.reason, counts: settlement.counts },
       memo,
-      {
-        findings: [...mergeHitFindings(settlement.findings, memo.hits), ...gate],
-        fresh: new Set(settlement.findings),
-      },
+      combineIncompleteFindings(settlement, memo, gate),
       verdictsSurviveIncompleteness(settlement.reason) ? settlement.coveredPaths : undefined,
     );
   }
@@ -3183,6 +4031,7 @@ function localPublishContext(request: PipelineRequest, inventory: Inventory): Pu
   return {
     ref: LOCAL_REF,
     pullNumber: LOCAL_PULL_NUMBER,
+    baseSha: inventory.pair.mergeBase,
     headSha: request.head,
     identity: LOCAL_IDENTITY,
     items: itemIndex(inventory),
@@ -3225,12 +4074,46 @@ async function localFindings(
   batch: FindingBatch,
 ): Promise<{
   readonly findings: readonly LocalReviewFinding[];
-  readonly auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
+  readonly qualityByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
+  readonly droppedOriginals: ReadonlySet<EngineFinding>;
+  readonly uncacheablePaths: ReadonlySet<string>;
+  readonly evidenceWithheld: number;
+  readonly rankedOut: number;
+  readonly verificationUndecided: number;
 }> {
-  if (batch.findings.length === 0) return { findings: [], auditedByOriginal: NO_AUDITED };
+  if (batch.findings.length === 0) {
+    return {
+      findings: [],
+      qualityByOriginal: NO_AUDITED,
+      droppedOriginals: new Set(),
+      uncacheablePaths: NO_UNCACHEABLE_PATHS,
+      evidenceWithheld: 0,
+      rankedOut: 0,
+      verificationUndecided: 0,
+    };
+  }
   const context = localPublishContext(run.request, inventory);
-  const { survivors, auditedByOriginal } = await planAndAudit(run, context, batch, EMPTY_PREFETCH);
-  return { findings: survivors.map(toLocalFinding), auditedByOriginal };
+  const { plan, survivors, qualityByOriginal, droppedOriginals, uncacheablePaths } =
+    await planAndAudit(run, context, batch, EMPTY_PREFETCH);
+  return {
+    findings: survivors.map(toLocalFinding),
+    qualityByOriginal,
+    droppedOriginals,
+    uncacheablePaths,
+    evidenceWithheld: plan.counters.suppressedEvidence ?? 0,
+    rankedOut: plan.counters.suppressedRanked ?? 0,
+    verificationUndecided: plan.counters.verificationUndecided ?? 0,
+  };
+}
+
+type ReportedLocalFindings = Awaited<ReturnType<typeof localFindings>>;
+
+function localQuality(reported: ReportedLocalFindings): NonNullable<LocalReviewReport["quality"]> {
+  return {
+    evidenceWithheld: reported.evidenceWithheld,
+    rankedOut: reported.rankedOut,
+    verificationUndecided: reported.verificationUndecided,
+  };
 }
 
 /** The zero-reviewable-paths shortcut, mirroring `emptyReviewReport` above. */
@@ -3248,6 +4131,33 @@ function emptyLocalReport(
     engineVersion,
     cacheHits: 0,
     cacheMisses: 0,
+  };
+}
+
+/** Local fail-closed counterpart to `reviewDeadlineReport`, with no post-deadline planning calls. */
+function localReviewDeadlineReport(
+  run: LocalRun,
+  inventory: Inventory,
+  memo?: MemoContext,
+): LocalReviewReport {
+  run.diagnostics.record("engine.run.timeout", { headSha: run.request.head });
+  run.diagnostics.record("settlement.incomplete.engine_error", {
+    headSha: run.request.head,
+    counts: { review_timeout: 1 },
+  });
+  return {
+    outcome: "incomplete",
+    reason: "settlement.incomplete.engine_error",
+    findings: [],
+    spend: localSpend(run.ledger),
+    inventory: {
+      total: inventory.items.length,
+      reviewable: inventory.reviewablePaths.size,
+      reviewed: (memo?.hitPaths.size ?? 0) + run.credited.size,
+    },
+    ruleDigest: run.ruleDigest,
+    engineVersion: run.engineVersion,
+    ...(memo === undefined ? { cacheHits: 0, cacheMisses: 0 } : localCacheCounts(memo)),
   };
 }
 
@@ -3271,6 +4181,9 @@ async function localIncompleteReport(
   memo?: MemoContext,
   counts?: Readonly<Record<string, number>>,
 ): Promise<LocalReviewReport> {
+  if (reviewDeadlineExpired(run.deadline)) {
+    return localReviewDeadlineReport(run, inventory, memo);
+  }
   // The settlement's measured counts, same as the action path (2026-08-06): the CLI diagnostic
   // stream is the only log a local run has, and a bare reason there answered nothing.
   run.diagnostics.record(reason, {
@@ -3282,6 +4195,7 @@ async function localIncompleteReport(
     outcome: "incomplete",
     reason,
     findings: reported.findings,
+    quality: localQuality(reported),
     spend: localSpend(run.ledger),
     inventory: {
       total: inventory.items.length,
@@ -3308,9 +4222,15 @@ async function localSettleOrReport(
   inventory: Inventory,
   memo: MemoContext,
 ): Promise<Settlement | LocalReviewReport> {
+  const memoized = fullyMemoizedSettlement(inventory, memo);
+  if (memoized !== undefined) {
+    run.diagnostics.record("settlement.mode.memoized", { headSha: run.request.head });
+    return memoized;
+  }
   try {
     const settlement = await executeEngine(
       run.request,
+      run.deadline,
       inventory,
       memo,
       run.ledger,
@@ -3322,7 +4242,10 @@ async function localSettleOrReport(
       { headSha: run.request.head },
     );
     return settlement;
-  } catch {
+  } catch (error) {
+    if (error instanceof ReviewDeadlineExceeded || reviewDeadlineExpired(run.deadline)) {
+      return localReviewDeadlineReport(run, inventory, memo);
+    }
     return localIncompleteReport(
       run,
       inventory,
@@ -3332,6 +4255,70 @@ async function localSettleOrReport(
       memo,
     );
   }
+}
+
+function verificationIncompleteLocalReport(
+  run: LocalRun,
+  inventory: Inventory,
+  memo: MemoContext,
+  reported: ReportedLocalFindings,
+): LocalReviewReport {
+  const reason = "settlement.incomplete.publication_degraded";
+  run.diagnostics.record(reason, {
+    headSha: run.request.head,
+    counts: {
+      verification_undecided: reported.verificationUndecided,
+      suppressed_evidence: reported.evidenceWithheld,
+      suppressed_ranked: reported.rankedOut,
+    },
+  });
+  return {
+    outcome: "incomplete",
+    reason,
+    findings: reported.findings,
+    quality: localQuality(reported),
+    spend: localSpend(run.ledger),
+    inventory: {
+      total: inventory.items.length,
+      reviewable: inventory.reviewablePaths.size,
+      reviewed: inventory.reviewablePaths.size,
+    },
+    ruleDigest: run.ruleDigest,
+    engineVersion: run.engineVersion,
+    ...localCacheCounts(memo),
+  };
+}
+
+function verifiedCompleteLocalReport(
+  run: LocalRun,
+  inventory: Inventory,
+  settlement: Extract<Settlement, { status: "complete" }>,
+  memo: MemoContext,
+  reported: ReportedLocalFindings,
+): LocalReviewReport {
+  const finalized = finalizeCacheStore(
+    run.request,
+    inventory,
+    memo,
+    findingsForStorage(settlement.findings, reported.qualityByOriginal, reported.droppedOriginals),
+    undefined,
+    reported.uncacheablePaths,
+  );
+  return {
+    outcome: "complete",
+    findings: reported.findings,
+    quality: localQuality(reported),
+    spend: localSpend(run.ledger),
+    inventory: {
+      total: inventory.items.length,
+      reviewable: inventory.reviewablePaths.size,
+      reviewed: inventory.reviewablePaths.size,
+    },
+    ruleDigest: run.ruleDigest,
+    engineVersion: run.engineVersion,
+    ...localCacheCounts(memo),
+    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
+  };
 }
 
 /**
@@ -3346,47 +4333,50 @@ async function completeLocalReport(
   settlement: Extract<Settlement, { status: "complete" }>,
   memo: MemoContext,
 ): Promise<LocalReviewReport> {
+  if (reviewDeadlineExpired(run.deadline)) return localReviewDeadlineReport(run, inventory, memo);
   // Shared across both collectors (#33) — same reasoning as `publishSettledFindings`'s identical
   // pairing.
   const blobCache: BlobTextCache = new Map();
   const gate = await collectGateFindings(run.request, inventory, run.diagnostics, blobCache);
-  const changePass = await collectChangePassFindings(
-    run.request,
-    inventory,
-    run.ledger,
-    run.diagnostics,
-    blobCache,
-  );
+  let changePass: readonly EngineFinding[];
+  try {
+    changePass = await collectChangePassFindings(
+      run.request,
+      run.deadline,
+      inventory,
+      run.ledger,
+      run.diagnostics,
+      blobCache,
+    );
+  } catch (error) {
+    if (error instanceof ReviewDeadlineExceeded) {
+      return localReviewDeadlineReport(run, inventory, memo);
+    }
+    throw error;
+  }
   const combined = combineSettledFindings(settlement, memo, gate, changePass);
 
-  const reported = await localFindings(run, inventory, {
-    findings: combined.merged,
-    fresh: combined.fresh,
-  });
+  let reported: ReportedLocalFindings;
+  try {
+    reported = await localFindings(run, inventory, {
+      findings: combined.merged,
+      verify: combined.verify,
+      fresh: combined.fresh,
+    });
+  } catch (error) {
+    if (error instanceof ReviewDeadlineExceeded) {
+      return localReviewDeadlineReport(run, inventory, memo);
+    }
+    throw error;
+  }
+  if (reported.verificationUndecided > 0) {
+    return verificationIncompleteLocalReport(run, inventory, memo, reported);
+  }
   // Identical admission call to the action path's: only a complete outcome reaches this function,
   // and what is stored is the AUDITED form of the engine's own findings (never a gate or
   // change-pass finding — `finalizeCacheStore` receives the settlement's findings only, exactly as
   // `publishSettledFindings` passes them).
-  const finalized = finalizeCacheStore(
-    run.request,
-    inventory,
-    memo,
-    findingsForStorage(settlement.findings, reported.auditedByOriginal),
-  );
-  return {
-    outcome: "complete",
-    findings: reported.findings,
-    spend: localSpend(run.ledger),
-    inventory: {
-      total: inventory.items.length,
-      reviewable: inventory.reviewablePaths.size,
-      reviewed: inventory.reviewablePaths.size,
-    },
-    ruleDigest: run.ruleDigest,
-    engineVersion: run.engineVersion,
-    ...localCacheCounts(memo),
-    ...(finalized === undefined ? {} : { updatedCacheStore: finalized.store }),
-  };
+  return verifiedCompleteLocalReport(run, inventory, settlement, memo, reported);
 }
 
 /** The pre-engine short-circuits `performLocalReviewInner` shares with `performReviewInner`: an
@@ -3397,6 +4387,7 @@ async function localPreEngineReport(
   inventory: Inventory,
   started: number,
 ): Promise<LocalReviewReport | undefined> {
+  if (reviewDeadlineExpired(run.deadline)) return localReviewDeadlineReport(run, inventory);
   if (inventory.unclassified.length > 0) {
     return localIncompleteReport(run, inventory, "inventory.unclassified_path", EMPTY_BATCH, 0);
   }
@@ -3440,6 +4431,7 @@ async function localSettleReport(
   memo: MemoContext,
   started: number,
 ): Promise<LocalReviewReport> {
+  if (reviewDeadlineExpired(run.deadline)) return localReviewDeadlineReport(run, inventory, memo);
   if (settlement.status === "incomplete") {
     const reviewed = verdictsSurviveIncompleteness(settlement.reason)
       ? settlement.coveredPaths.size + memo.hitPaths.size + run.credited.size
@@ -3452,10 +4444,7 @@ async function localSettleReport(
       run,
       inventory,
       settlement.reason,
-      {
-        findings: [...mergeHitFindings(settlement.findings, memo.hits), ...gate],
-        fresh: new Set(settlement.findings),
-      },
+      combineIncompleteFindings(settlement, memo, gate),
       reviewed,
       memo,
       settlement.counts,
@@ -3477,7 +4466,8 @@ async function performLocalReviewInner(run: LocalRun): Promise<LocalReviewReport
   const preEngine = await localPreEngineReport(run, inventory, started);
   if (preEngine !== undefined) return preEngine;
 
-  const memo = prepareMemoization(run.request, inventory, run.diagnostics);
+  const memo = await prepareMemoization(run.request, inventory, run.diagnostics);
+  if (reviewDeadlineExpired(run.deadline)) return localReviewDeadlineReport(run, inventory, memo);
   const settlement = await localSettleOrReport(run, inventory, memo);
   if ("outcome" in settlement) return settlement;
 
@@ -3502,6 +4492,7 @@ export async function performLocalReview(
   diagnostics: Diagnostics,
 ): Promise<LocalReviewReport> {
   const ledger: SpendLedger = { allotted: 0, engine: 0, classify: 0 };
+  const deadline = startReviewDeadline(request.config.reviewTimeoutSeconds);
   const ruleDigest: string = promptIdentityDigest(request.profile, request.guidelines);
   const engineVersion: string = ENGINE_PIN.version;
   try {
@@ -3509,6 +4500,7 @@ export async function performLocalReview(
       request,
       ledger,
       diagnostics,
+      deadline,
       ruleDigest,
       engineVersion,
       credited: new Set(),
