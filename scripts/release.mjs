@@ -48,6 +48,27 @@ function run(command, args, options = {}) {
   });
 }
 
+/**
+ * The same call, but a failure is an answer rather than a stack trace.
+ *
+ * A release tool that dies with an uncaught `execFileSync` error tells its operator less than
+ * nothing: the message names a spawn, not the step that could not be completed. Every place this
+ * script reads something that might not be there uses this and then calls `fail` with what it was
+ * actually looking for. Three of the reviewer's own findings on this file were this shape.
+ */
+function tryRun(command, args) {
+  try {
+    return execFileSync(command, args, {
+      cwd: ROOT,
+      encoding: "utf8",
+      stdio: "pipe",
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 function argValue(name) {
   const index = process.argv.indexOf(name);
   return index === -1 ? undefined : process.argv[index + 1];
@@ -151,24 +172,38 @@ function phasePublish() {
   const sha = requireSha();
   const tag = tagFor(version);
   run("git", ["fetch", "origin", "main"]);
+
+  // Everything that can be checked is checked BEFORE the first write. A bad SHA used to reach
+  // `git tag` and abort there with a stack trace, which tells an operator about a spawn instead
+  // of about the argument they got wrong — and leaves the question of what was already written.
+  if (tryRun("git", ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]) === undefined) {
+    fail(`${sha} is not a commit this checkout can resolve — fetch it, or check the SHA`);
+  }
+  if (tryRun("git", ["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`]) !== undefined) {
+    fail(`${tag} already exists here — a released version is never re-tagged`);
+  }
+  const message = tryRun("git", ["log", "-1", "--format=%B", sha]);
+  if (message === undefined) fail(`could not read the commit message of ${sha}`);
+  const notes = notesFromCommitMessage(message);
+  if (notes.title === "") {
+    fail(`the commit message of ${sha} has no subject line to title the release with`);
+  }
+
   run("git", ["tag", "-s", tag, sha, "-m", `${tag} — see the release notes`]);
   run("git", ["push", "origin", tag]);
-
-  const message = run("git", ["log", "-1", "--format=%B", sha]);
-  const notes = notesFromCommitMessage(message);
   // The step nothing fails without, which is exactly why it is here and not in a checklist.
+  // `--flag=value` rather than `--flag value`: the joined form cannot be re-read as an option,
+  // whatever the commit subject starts with. `execFileSync` already keeps a shell out of it, so
+  // this is about gh's own argument parser, not about quoting.
   run("gh", [
     "release",
     "create",
     tag,
-    "--repo",
-    REPO,
+    `--repo=${REPO}`,
     "--verify-tag",
     "--latest",
-    "--title",
-    notes.title,
-    "--notes",
-    notes.body,
+    `--title=${notes.title}`,
+    `--notes=${notes.body}`,
   ]);
   phaseCheck();
   console.log(`${tag} tagged, released, and reconciled. Next: repin --sha ${sha}`);
@@ -207,17 +242,22 @@ function phaseCheck() {
         .filter((tag) => typeof tag === "string" && tag !== ""),
     ),
   ]);
-  const releases = run("gh", [
+  const releases = tryRun("gh", [
     "release",
     "list",
-    "--repo",
-    REPO,
-    "--limit",
-    "200",
-    "--json",
-    "tagName",
+    `--repo=${REPO}`,
+    "--limit=200",
+    "--json=tagName",
   ]);
-  const released = JSON.parse(releases).map((entry) => entry.tagName);
+  if (releases === undefined) {
+    fail("gh could not list this repository's releases — is gh authenticated for it?");
+  }
+  let released;
+  try {
+    released = JSON.parse(releases).map((entry) => entry.tagName);
+  } catch {
+    fail("gh returned something that is not a release list — refusing to guess what it meant");
+  }
   const result = reconcileTagsAndReleases(tags, released);
   if (result.releasesWithoutTag.length > 0) {
     fail(`these Releases name a tag that does not exist: ${result.releasesWithoutTag.join(", ")}`);
