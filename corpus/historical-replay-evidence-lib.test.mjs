@@ -15,6 +15,19 @@ test("accepts the production-shaped 92/66 replay with 62 bound and attempted cas
   assert.equal(evidence.plan.corroboratedCases, 66);
   assert.equal(evidence.plan.locallyBoundCases, 62);
   assert.equal(evidence.execution.attemptedCases, 62);
+  assert.deepEqual(evidence.execution.stageCounters, {
+    confirmed: 21,
+    truthRefuted: 30,
+    falsifierDefeated: 7,
+    droppedInsufficientEvidence: 4,
+    retrievalRequested: 10,
+    retrievalPerformed: 8,
+    retrievalExpanded: 6,
+    retrievalNoMatches: 2,
+    retrievalFailed: 0,
+    undecided: 0,
+    budgetBlocked: 0,
+  });
   assert.equal(evidence.score.all.before.eligible, 66);
   assert.equal(evidence.score.chronological.training.before.eligible, 24);
   assert.equal(evidence.score.chronological.holdout.before.eligible, 42);
@@ -80,6 +93,32 @@ test("rejects digest, aggregate arithmetic, population-floor, and extra-field ta
   assert.ok(
     validateHistoricalReplayEvidence(zeroAccountedTokens).failures.includes("execution_arithmetic"),
   );
+
+  const stageTerminal = productionHistoricalReplayEvidenceFixture();
+  stageTerminal.execution.stageCounters.truthRefuted -= 1;
+  assert.ok(
+    validateHistoricalReplayEvidence(stageTerminal).failures.includes("execution_stage_arithmetic"),
+  );
+
+  const stageRetrieval = productionHistoricalReplayEvidenceFixture();
+  stageRetrieval.execution.stageCounters.retrievalFailed += 1;
+  assert.ok(
+    validateHistoricalReplayEvidence(stageRetrieval).failures.includes(
+      "execution_stage_arithmetic",
+    ),
+  );
+
+  const stageExtra = productionHistoricalReplayEvidenceFixture();
+  stageExtra.execution.stageCounters.privateCaseIds = 1;
+  assert.ok(validateHistoricalReplayEvidence(stageExtra).failures.includes("execution_shape"));
+
+  const oldSchema = productionHistoricalReplayEvidenceFixture();
+  oldSchema.schemaVersion = 3;
+  assert.ok(validateHistoricalReplayEvidence(oldSchema).failures.includes("identity"));
+
+  const missingStages = productionHistoricalReplayEvidenceFixture();
+  delete missingStages.execution.stageCounters;
+  assert.ok(validateHistoricalReplayEvidence(missingStages).failures.includes("execution_shape"));
 
   const wrongBoundary = productionHistoricalReplayEvidenceFixture();
   wrongBoundary.holdoutFromPullRequest = 3038;

@@ -16,7 +16,11 @@ import {
   type RepositoryEvidenceEntry,
   type RepositoryEvidenceKind,
 } from "./evidence.js";
-import { searchAstGrepAtHead, type StructuralSearchRequest } from "./ast-grep-search.js";
+import {
+  normalizedStructuralTerms,
+  searchAstGrepAtHead,
+  type StructuralSearchRequest,
+} from "./ast-grep-search.js";
 
 export const MAX_REPOSITORY_INITIAL_TERMS = 6;
 export const MAX_REPOSITORY_FOLLOW_UP_TERMS = 3;
@@ -371,6 +375,7 @@ function takeUniqueMatches(
   candidates: readonly RankedGrepMatch[],
   maximum: number,
 ): readonly RankedGrepMatch[] {
+  if (maximum <= 0) return [];
   const selected: RankedGrepMatch[] = [];
   for (const match of candidates) {
     const key = `${match.path}\u0000${String(match.line)}`;
@@ -565,6 +570,7 @@ function boundedEvidenceEntries(
   structural: readonly RepositoryEvidenceEntry[],
   lexical: readonly RepositoryEvidenceEntry[],
   reviewPath: string,
+  termAnchorCount: number,
 ): readonly RepositoryEvidenceEntry[] {
   const eligible = (
     entries: readonly RepositoryEvidenceEntry[],
@@ -576,6 +582,12 @@ function boundedEvidenceEntries(
   const lexicalCandidates = eligible(lexical);
   const selected: RepositoryEvidenceEntry[] = [];
   const paths = new Set<string>();
+  // `searchAstGrepAtHead` places one hit for each requested term at the front. Preserve that front
+  // before kind/path diversity: the verifier consumes only the first three distinct paths, so a
+  // definition/test/callsite trio for term zero must not evict terms one and two downstream.
+  for (const entry of structuralCandidates.slice(0, Math.max(0, termAnchorCount))) {
+    addCodeEntry(selected, paths, entry);
+  }
   for (const kind of ["definition", "test", "callsite"] as const) {
     addCodeEntry(
       selected,
@@ -588,7 +600,8 @@ function boundedEvidenceEntries(
     if (reservedStructuralPaths.has(entry.path)) continue;
     if (addCodeEntry(selected, paths, entry)) reservedStructuralPaths.add(entry.path);
   }
-  for (const entry of structuralCandidates) addCodeEntry(selected, paths, entry);
+  // Lexical anchors remain independent evidence, not ballast. Reserve their available type
+  // diversity before structural context windows and repeated sightings consume the twelve slots.
   for (const kind of ["definition", "test", "callsite"] as const) {
     addCodeEntry(
       selected,
@@ -596,6 +609,7 @@ function boundedEvidenceEntries(
       lexicalCandidates.find((entry) => entry.kind === kind),
     );
   }
+  for (const entry of structuralCandidates) addCodeEntry(selected, paths, entry);
   for (const candidate of lexicalCandidates) {
     addCodeEntry(selected, paths, candidate);
     if (selected.length === MAX_CODE_ENTRIES) break;
@@ -787,26 +801,39 @@ export async function collectRepositoryContextFollowUp(
   );
   remainingRepositoryMs(request);
   const lexical = boundedCodeEntries(result.matches, request.reviewPath);
-  if (!result.truncated && !lexicalNeedsStructuralFallback(result.matches, lexical, terms)) {
+  const structuralRequired =
+    result.truncated || lexicalNeedsStructuralFallback(result.matches, lexical, terms);
+  if (result.matches.length === 0 && !result.truncated) {
     return { headCommit: request.head, entries: lexical };
   }
+  const structuralTerms = normalizedStructuralTerms(terms);
   try {
     const structural = await (dependencies.structuralSearch ?? searchAstGrepAtHead)({
       context,
       head: request.head,
       reviewPath: request.reviewPath,
       candidatePaths: result.candidatePaths,
-      terms,
+      terms: structuralTerms,
       ...(request.deadlineMs === undefined ? {} : { deadlineMs: request.deadlineMs }),
     });
     return {
       headCommit: request.head,
-      entries: boundedEvidenceEntries(structural, lexical, request.reviewPath),
+      entries: boundedEvidenceEntries(
+        structural,
+        lexical,
+        request.reviewPath,
+        structuralTerms.length,
+      ),
     };
   } catch (error) {
-    // The judge requested this fallback because lexical evidence was ambiguous. Returning those
-    // hits as if structure had verified them would turn an unavailable tool into false evidence.
-    throw new RepositoryContextRetrievalError(error);
+    if (structuralRequired) {
+      // The judge requested this fallback because lexical evidence was ambiguous. Returning those
+      // hits as if structure had verified them would turn an unavailable tool into false evidence.
+      throw new RepositoryContextRetrievalError(error);
+    }
+    // A clear lexical definition remains exact positive evidence. Structural body enrichment is
+    // useful but optional on this path, so tool acquisition or parsing failure must not erase it.
+    return { headCommit: request.head, entries: lexical };
   }
 }
 
@@ -816,5 +843,8 @@ export function mergeRepositoryEvidenceContexts(
   followUp: RepositoryEvidenceContext,
 ): RepositoryEvidenceContext {
   if (initial.headCommit !== followUp.headCommit) return initial;
-  return { headCommit: initial.headCommit, entries: [...initial.entries, ...followUp.entries] };
+  // The judge asked for the follow-up identifiers explicitly. Keep those facts ahead of automatic
+  // initial sightings so the later 24-entry/8-path renderer budget cannot discard the answer it
+  // requested merely because an alphabetically earlier initial path filled the budget first.
+  return { headCommit: initial.headCommit, entries: [...followUp.entries, ...initial.entries] };
 }

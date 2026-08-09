@@ -68,7 +68,7 @@ function reasonCounts(overrides = {}) {
   };
 }
 
-/** Production-shaped, aggregate-only v3 evidence over the calibrated 92/66 historical cohort. */
+/** Production-shaped, aggregate-only v4 evidence over the calibrated 92/66 historical cohort. */
 export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".repeat(40) } = {}) {
   const sourceRecords = calibratedRecords();
   const decisions = calibratedDecisions(sourceRecords);
@@ -116,6 +116,19 @@ export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".r
       configuredMaxTokens: CONFIGURED_MAX_TOKENS,
       populationDecisions: { keep: 21, drop: 41, unmeasured: 30 },
       corroboratedDecisions: { keep: 21, drop: 41, unmeasured: 4 },
+      stageCounters: {
+        confirmed: 21,
+        truthRefuted: 30,
+        falsifierDefeated: 7,
+        droppedInsufficientEvidence: 4,
+        retrievalRequested: 10,
+        retrievalPerformed: 8,
+        retrievalExpanded: 6,
+        retrievalNoMatches: 2,
+        retrievalFailed: 0,
+        undecided: 0,
+        budgetBlocked: 0,
+      },
       unmeasuredByReason: reasonCounts({
         outsideCorroboratedPopulation: 26,
         sourceUnavailable: 4,

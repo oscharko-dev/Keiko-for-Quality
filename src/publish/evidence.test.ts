@@ -497,6 +497,53 @@ describe("renderRepositoryEvidence", () => {
     expect(rendered).not.toContain("x".repeat(301));
   });
 
+  it("applies evidence priority before display sorting and the character ceiling", () => {
+    const priority = {
+      path: "src/z-requested-follow-up.ts",
+      line: 7,
+      content: "return requestedContract();",
+      kind: "callsite" as const,
+    };
+    const lowPriority = {
+      path: "src/a-automatic-ballast.ts",
+      line: 1,
+      content: `export const ballast = "${"x".repeat(240)}";`,
+      kind: "definition" as const,
+    };
+    const priorityOnly = renderRepositoryEvidence({ headCommit, entries: [priority] });
+    const rendered = renderRepositoryEvidence(
+      { headCommit, entries: [priority, lowPriority] },
+      priorityOnly.length,
+    );
+
+    expect(rendered).toContain(priority.content);
+    expect(rendered).not.toContain(lowPriority.content);
+  });
+
+  it("reserves the first eight ranked paths before alphabetically earlier ballast", () => {
+    const ranked = Array.from({ length: 8 }, (_value, index) => ({
+      path: `src/z-ranked-${String(index)}.ts`,
+      line: 1,
+      content: `rankedContract${String(index)}();`,
+      kind: "callsite" as const,
+    }));
+    const rendered = renderRepositoryEvidence({
+      headCommit,
+      entries: [
+        ...ranked,
+        {
+          path: "src/a-alphabetical-ballast.ts",
+          line: 1,
+          content: "alphabeticalBallast();",
+          kind: "callsite",
+        },
+      ],
+    });
+
+    expect(rendered).toContain("src/z-ranked-7.ts");
+    expect(rendered).not.toContain("src/a-alphabetical-ballast.ts");
+  });
+
   it("composes repository and change evidence under the one hard dossier ceiling", () => {
     const evidence = buildChangeEvidence(
       "const proposed = useContract();",

@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -502,12 +510,15 @@ test("the local dry-run plan reports binding failures and budget without a verif
 });
 
 function substantiationOutcome(findings, overrides = {}) {
+  const insufficient = (overrides.droppedInsufficientEvidence ?? 0) > 0;
+  const undecided = (overrides.undecided ?? 0) > 0;
+  const refuted = findings.length === 0 && !insufficient && !undecided;
   return {
     findings,
     confirmed: findings.length,
-    droppedRefuted: findings.length === 0 ? 1 : 0,
-    droppedInsufficientEvidence: 0,
-    truthRefuted: findings.length === 0 ? 1 : 0,
+    droppedRefuted: refuted ? 1 : 0,
+    droppedInsufficientEvidence: insufficient ? 1 : 0,
+    truthRefuted: refuted ? 1 : 0,
     falsifierDefeated: 0,
     retrievalRequested: 0,
     retrievalPerformed: 0,
@@ -515,8 +526,8 @@ function substantiationOutcome(findings, overrides = {}) {
     retrievalNoMatches: 0,
     retrievalFailed: 0,
     repaired: 0,
-    droppedVague: 0,
-    droppedUnsupported: findings.length === 0 ? 1 : 0,
+    droppedVague: insufficient ? 1 : 0,
+    droppedUnsupported: refuted ? 1 : 0,
     droppedNitpick: 0,
     undecided: 0,
     budgetBlocked: 0,
@@ -670,6 +681,19 @@ test("verification maps each paranoid outcome to keep/drop/unmeasured without se
   assert.equal(result.report.unmeasuredByReason.missingHistoricalBinding, 1);
   assert.equal(result.report.unmeasuredByReason.budget, 1);
   assert.equal(result.report.unmeasuredByReason.outsideCorroboratedPopulation, 1);
+  assert.deepEqual(result.report.stageCounters, {
+    confirmed: 1,
+    truthRefuted: 1,
+    falsifierDefeated: 0,
+    droppedInsufficientEvidence: 0,
+    retrievalRequested: 0,
+    retrievalPerformed: 0,
+    retrievalExpanded: 0,
+    retrievalNoMatches: 0,
+    retrievalFailed: 0,
+    undecided: 1,
+    budgetBlocked: 0,
+  });
 });
 
 test("verification uses the production diff, initial context, and one follow-up adapter boundary", async () => {
@@ -757,6 +781,81 @@ test("verification uses the production diff, initial context, and one follow-up 
   assert.equal(adapterInput.entries[0].path, "src/contract.ts");
   assert.deepEqual(result.decisions, [{ databaseId: 1, decision: "keep" }]);
   assert.equal(result.report.accountedTokens, 125);
+  assert.equal(result.report.stageCounters.retrievalRequested, 1);
+  assert.equal(result.report.stageCounters.retrievalPerformed, 1);
+  assert.equal(result.report.stageCounters.retrievalExpanded, 1);
+});
+
+test("verification publishes only aggregate counters for every validated workflow disposition", async () => {
+  const cases = Array.from({ length: 6 }, (_, index) =>
+    boundReplayCase(index + 1, `src/stage-${String(index + 1)}.ts`),
+  );
+  const outcomes = [
+    (findings) =>
+      substantiationOutcome(findings, {
+        retrievalRequested: 1,
+        retrievalPerformed: 1,
+        retrievalExpanded: 1,
+      }),
+    () => substantiationOutcome([]),
+    () =>
+      substantiationOutcome([], {
+        truthRefuted: 0,
+        falsifierDefeated: 1,
+      }),
+    () =>
+      substantiationOutcome([], {
+        droppedInsufficientEvidence: 1,
+        retrievalRequested: 2,
+        retrievalPerformed: 1,
+        retrievalExpanded: 1,
+      }),
+    () =>
+      substantiationOutcome([], {
+        undecided: 1,
+        retrievalRequested: 1,
+        retrievalPerformed: 1,
+        retrievalFailed: 1,
+      }),
+    () => substantiationOutcome([], { undecided: 1, budgetBlocked: 1 }),
+  ];
+  let call = 0;
+  const result = await runHistoricalReplayVerification({
+    databaseIds: cases.map(({ databaseId }) => databaseId),
+    cases,
+    maxTokens: 1_000,
+    ...replayVerificationDependencies(async (findings) => outcomes[call++](findings)),
+  });
+
+  assert.deepEqual(result.report.stageCounters, {
+    confirmed: 1,
+    truthRefuted: 1,
+    falsifierDefeated: 1,
+    droppedInsufficientEvidence: 1,
+    retrievalRequested: 4,
+    retrievalPerformed: 3,
+    retrievalExpanded: 2,
+    retrievalNoMatches: 0,
+    retrievalFailed: 1,
+    undecided: 2,
+    budgetBlocked: 1,
+  });
+  assert.deepEqual(result.report.corroboratedDecisions, { keep: 1, drop: 3, unmeasured: 2 });
+  assert.equal(result.report.unmeasuredByReason.verificationUndecided, 1);
+  assert.equal(result.report.unmeasuredByReason.budget, 1);
+  assert.deepEqual(Object.keys(result.report.stageCounters), [
+    "confirmed",
+    "truthRefuted",
+    "falsifierDefeated",
+    "droppedInsufficientEvidence",
+    "retrievalRequested",
+    "retrievalPerformed",
+    "retrievalExpanded",
+    "retrievalNoMatches",
+    "retrievalFailed",
+    "undecided",
+    "budgetBlocked",
+  ]);
 });
 
 test("a verifier budget block is budget-unmeasured and every call receives the true remainder", async () => {
@@ -803,6 +902,19 @@ test("invalid budget accounting exhausts the local ledger before another verifie
   assert.equal(result.report.accountedTokens, 200);
   assert.equal(result.report.unmeasuredByReason.verificationError, 1);
   assert.equal(result.report.unmeasuredByReason.budget, 1);
+  assert.deepEqual(result.report.stageCounters, {
+    confirmed: 0,
+    truthRefuted: 0,
+    falsifierDefeated: 0,
+    droppedInsufficientEvidence: 0,
+    retrievalRequested: 0,
+    retrievalPerformed: 0,
+    retrievalExpanded: 0,
+    retrievalNoMatches: 0,
+    retrievalFailed: 0,
+    undecided: 0,
+    budgetBlocked: 0,
+  });
 });
 
 test("an outcome claiming more tokens than its supplied remainder aborts the replay", async () => {
@@ -822,7 +934,9 @@ test("an outcome claiming more tokens than its supplied remainder aborts the rep
 test("a dry-run validates the split and local blobs but cannot load or call substantiation", async () => {
   const directory = temporaryDirectory();
   const harvestPath = join(directory, "raw.json");
+  const outputPath = join(directory, "existing-dry-run-report.json");
   writeFileSync(harvestPath, JSON.stringify(harvestDocument()));
+  writeFileSync(outputPath, "dry run must not touch this");
   let verifierLoads = 0;
   const result = await runHistoricalReplayCommand(
     [
@@ -835,6 +949,8 @@ test("a dry-run validates the split and local blobs but cannot load or call subs
       "20",
       "--max-tokens",
       String(4 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE),
+      "--out",
+      outputPath,
     ],
     { OCR_LLM_MODEL: QUALIFICATION_MODEL },
     {
@@ -851,6 +967,7 @@ test("a dry-run validates the split and local blobs but cannot load or call subs
   assert.equal(result.plan.estimatedMaximumEndpointRequests, 16);
   assert.equal(verifierLoads, 0);
   assert.match(result.lines.join("\n"), /no model call has run/);
+  assert.equal(readFileSync(outputPath, "utf8"), "dry run must not touch this");
 
   await assert.rejects(
     runHistoricalReplayCommand(
@@ -917,6 +1034,122 @@ test("execute refuses a mutable reviewer before loading model-facing dependencie
     /requires a clean reviewer worktree/,
   );
   assert.equal(verifierLoads, 0);
+});
+
+test("execute refuses an existing final output before loading model-facing dependencies", async () => {
+  const directory = temporaryDirectory();
+  const harvestPath = join(directory, "raw.json");
+  const outputPath = join(directory, "report.json");
+  writeFileSync(harvestPath, JSON.stringify(harvestDocument()));
+  writeFileSync(outputPath, "foreign report");
+  let verifierLoads = 0;
+
+  await assert.rejects(
+    runHistoricalReplayCommand(
+      [
+        "--execute",
+        "--harvest",
+        harvestPath,
+        "--repo",
+        "/consumer",
+        "--holdout-from-pr",
+        "20",
+        "--max-tokens",
+        String(4 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE),
+        "--out",
+        outputPath,
+      ],
+      {
+        OCR_LLM_MODEL: QUALIFICATION_MODEL,
+        OCR_LLM_URL: "https://model.example.test/v1",
+        OCR_LLM_TOKEN: "secret",
+      },
+      {
+        resolveRepo: () => "/consumer",
+        readChangeAtCommits: (_repo, replayCase) => stubHistoricalChange(replayCase),
+        implementation: {
+          reviewerTree: "c".repeat(40),
+          sourceSha256: {},
+        },
+        loadVerificationDependencies: async () => {
+          verifierLoads += 1;
+          throw new Error("must not load");
+        },
+      },
+    ),
+    /EEXIST|file already exists/u,
+  );
+  assert.equal(verifierLoads, 0);
+  assert.equal(readFileSync(outputPath, "utf8"), "foreign report");
+});
+
+test("a successful verification fails closed when another file replaces its reservation", async () => {
+  const directory = temporaryDirectory();
+  const harvestPath = join(directory, "raw.json");
+  const outputPath = join(directory, "report.json");
+  writeFileSync(harvestPath, JSON.stringify(harvestDocument()));
+  let sawReservation = false;
+  let verificationCalls = 0;
+
+  await assert.rejects(
+    runHistoricalReplayCommand(
+      [
+        "--execute",
+        "--harvest",
+        harvestPath,
+        "--repo",
+        "/consumer",
+        "--holdout-from-pr",
+        "20",
+        "--max-tokens",
+        String(4 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE),
+        "--out",
+        outputPath,
+      ],
+      {
+        OCR_LLM_MODEL: QUALIFICATION_MODEL,
+        OCR_LLM_URL: "https://model.example.test/v1",
+        OCR_LLM_TOKEN: "secret",
+      },
+      {
+        resolveRepo: () => "/consumer",
+        readChangeAtCommits: (_repo, replayCase) =>
+          stubHistoricalChange(replayCase, {
+            headSource: "header\nexact historical proposed source\nreturn true\n",
+            baseSource: "header\nexact historical base source\nreturn false\n",
+          }),
+        implementation: {
+          reviewerTree: "c".repeat(40),
+          sourceSha256: {},
+        },
+        loadVerificationDependencies: async () => {
+          sawReservation = readFileSync(outputPath, "utf8") === "";
+          rmSync(outputPath);
+          writeFileSync(outputPath, "foreign replacement");
+          return {
+            buildChangeEvidence: () => ({ text: "H:1| exact historical source" }),
+            collectInitialRepositoryContext: async (request) => ({
+              headCommit: request.head,
+              entries: [],
+            }),
+            collectRepositoryContextFollowUp: async (request) => ({
+              headCommit: request.head,
+              entries: [],
+            }),
+            toRetrievedEvidence: () => ({ chunks: [] }),
+            substantiate: async (findings) => {
+              verificationCalls += 1;
+              return substantiationOutcome(findings);
+            },
+          };
+        },
+      },
+    ),
+    /output reservation no longer owns --out/u,
+  );
+  assert.equal(sawReservation, true);
+  assert.equal(verificationCalls, 4);
+  assert.equal(readFileSync(outputPath, "utf8"), "foreign replacement");
 });
 
 function prohibitedReportKeys(value, found = []) {
@@ -1000,6 +1233,19 @@ test("durable evidence is aggregate-only and binds every implementation slice by
       configuredMaxTokens: 64_000,
       populationDecisions: { keep: 2, drop: 2, unmeasured: 0 },
       corroboratedDecisions: { keep: 2, drop: 2, unmeasured: 0 },
+      stageCounters: {
+        confirmed: 2,
+        truthRefuted: 2,
+        falsifierDefeated: 0,
+        droppedInsufficientEvidence: 0,
+        retrievalRequested: 0,
+        retrievalPerformed: 0,
+        retrievalExpanded: 0,
+        retrievalNoMatches: 0,
+        retrievalFailed: 0,
+        undecided: 0,
+        budgetBlocked: 0,
+      },
       unmeasuredByReason: {},
     },
     score,
@@ -1032,7 +1278,7 @@ test("durable evidence is aggregate-only and binds every implementation slice by
     classificationAndPrWideRanking: "not measured",
     endToEndRecall: "not measured",
   });
-  assert.equal(report.schemaVersion, 3);
+  assert.equal(report.schemaVersion, 4);
   assert.deepEqual(Object.keys(report.binding.sourceSha256), [
     "driver",
     "scorer",
@@ -1046,8 +1292,8 @@ test("durable evidence is aggregate-only and binds every implementation slice by
 test("execute joins fake verifier decisions, scores them, and writes only the redacted report", async () => {
   const directory = temporaryDirectory();
   const harvestPath = join(directory, "raw.json");
+  const outputPath = join(directory, "report.json");
   writeFileSync(harvestPath, JSON.stringify(harvestDocument()));
-  let written;
   let verificationCalls = 0;
   const result = await runHistoricalReplayCommand(
     [
@@ -1061,7 +1307,7 @@ test("execute joins fake verifier decisions, scores them, and writes only the re
       "--max-tokens",
       String(4 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE),
       "--out",
-      join(directory, "report.json"),
+      outputPath,
     ],
     {
       OCR_LLM_MODEL: QUALIFICATION_MODEL,
@@ -1105,18 +1351,17 @@ test("execute joins fake verifier decisions, scores them, and writes only the re
         },
       },
       now: () => new Date("2026-08-09T11:00:00.000Z"),
-      writeReport: (path, text) => {
-        written = { path, text };
-      },
     },
   );
+  const written = readFileSync(outputPath, "utf8");
   assert.equal(result.mode, "execute");
   assert.equal(verificationCalls, 4);
   assert.equal(result.report.score.all.after.metrics.precision, 1);
   assert.equal(result.report.score.all.after.metrics.fixedRetention, 1);
   assert.equal(result.report.score.all.after.metrics.falsePositiveRejection, 1);
   assert.equal(result.report.score.chronological.holdout.after.metrics.precision, 1);
-  assert.equal(JSON.parse(written.text).binding.model, QUALIFICATION_MODEL);
-  assert.deepEqual(prohibitedReportKeys(JSON.parse(written.text)), []);
-  assert.ok(!written.text.includes("REPLY_SENTINEL"));
+  assert.equal(JSON.parse(written).binding.model, QUALIFICATION_MODEL);
+  assert.deepEqual(prohibitedReportKeys(JSON.parse(written)), []);
+  assert.ok(!written.includes("REPLY_SENTINEL"));
+  assert.equal(statSync(outputPath).mode & 0o777, 0o600);
 });

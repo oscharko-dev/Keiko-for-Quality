@@ -77,6 +77,7 @@ const EXECUTION_KEYS = [
   "estimatedAttemptedTokens",
   "populationDecisions",
   "populationRecords",
+  "stageCounters",
   "unmeasuredByReason",
 ];
 const REASON_KEYS = [
@@ -91,6 +92,19 @@ const REASON_KEYS = [
   "verificationUndecided",
 ];
 const DECISION_KEYS = ["drop", "keep", "unmeasured"];
+const STAGE_COUNTER_KEYS = [
+  "budgetBlocked",
+  "confirmed",
+  "droppedInsufficientEvidence",
+  "falsifierDefeated",
+  "retrievalExpanded",
+  "retrievalFailed",
+  "retrievalNoMatches",
+  "retrievalPerformed",
+  "retrievalRequested",
+  "truthRefuted",
+  "undecided",
+];
 const SCORE_KEYS = ["all", "chronological", "holdoutFromPullRequest", "schemaVersion"];
 const COMPARISON_KEYS = ["after", "before"];
 const POPULATION_KEYS = [
@@ -279,16 +293,25 @@ function validateExecution(value, plan, failures) {
   const execution = exactRecord(value, EXECUTION_KEYS);
   const populationDecisions = decisionCounts(execution?.populationDecisions);
   const corroboratedDecisions = decisionCounts(execution?.corroboratedDecisions);
+  const stageCounters = exactRecord(execution?.stageCounters, STAGE_COUNTER_KEYS);
   const unmeasuredByReason = reasonCounts(execution?.unmeasuredByReason);
   const numericKeys = EXECUTION_KEYS.filter(
-    (key) => !["corroboratedDecisions", "populationDecisions", "unmeasuredByReason"].includes(key),
+    (key) =>
+      ![
+        "corroboratedDecisions",
+        "populationDecisions",
+        "stageCounters",
+        "unmeasuredByReason",
+      ].includes(key),
   );
   if (
     execution === undefined ||
     populationDecisions === undefined ||
     corroboratedDecisions === undefined ||
+    stageCounters === undefined ||
     unmeasuredByReason === undefined ||
     !allNatural(execution, numericKeys) ||
+    !allNatural(stageCounters, STAGE_COUNTER_KEYS) ||
     !positive(execution.configuredMaxTokens)
   ) {
     mark(failures, "execution_shape");
@@ -300,6 +323,13 @@ function validateExecution(value, plan, failures) {
     corroboratedDecisions.drop +
     unmeasuredByReason.verificationUndecided +
     unmeasuredByReason.verificationError;
+  const validatedOutcomes = execution.attemptedCases - unmeasuredByReason.verificationError;
+  const terminalStageOutcomes =
+    stageCounters.confirmed +
+    stageCounters.truthRefuted +
+    stageCounters.falsifierDefeated +
+    stageCounters.droppedInsufficientEvidence +
+    stageCounters.undecided;
   if (
     plan === undefined ||
     execution.populationRecords !== plan.populationRecords ||
@@ -325,10 +355,41 @@ function validateExecution(value, plan, failures) {
   ) {
     mark(failures, "execution_arithmetic");
   }
+  if (
+    validatedOutcomes < 0 ||
+    terminalStageOutcomes !== validatedOutcomes ||
+    stageCounters.confirmed !== corroboratedDecisions.keep ||
+    stageCounters.truthRefuted +
+      stageCounters.falsifierDefeated +
+      stageCounters.droppedInsufficientEvidence !==
+      corroboratedDecisions.drop ||
+    stageCounters.undecided !==
+      unmeasuredByReason.verificationUndecided + stageCounters.budgetBlocked ||
+    stageCounters.budgetBlocked > unmeasuredByReason.budget ||
+    stageCounters.retrievalRequested > 2 * validatedOutcomes ||
+    stageCounters.retrievalPerformed > validatedOutcomes ||
+    stageCounters.retrievalPerformed > stageCounters.retrievalRequested ||
+    stageCounters.retrievalExpanded +
+      stageCounters.retrievalNoMatches +
+      stageCounters.retrievalFailed !==
+      stageCounters.retrievalPerformed ||
+    stageCounters.retrievalFailed > stageCounters.undecided ||
+    stageCounters.retrievalNoMatches > stageCounters.droppedInsufficientEvidence ||
+    stageCounters.retrievalRequested - stageCounters.retrievalPerformed >
+      stageCounters.droppedInsufficientEvidence
+  ) {
+    mark(failures, "execution_stage_arithmetic");
+  }
   if (execution.attemptedCases < MINIMUM_ATTEMPTED_CASES) {
     mark(failures, "execution_population_floor");
   }
-  return { ...execution, populationDecisions, corroboratedDecisions, unmeasuredByReason };
+  return {
+    ...execution,
+    populationDecisions,
+    corroboratedDecisions,
+    stageCounters,
+    unmeasuredByReason,
+  };
 }
 
 function validatePopulation(value, failures) {
@@ -504,7 +565,7 @@ function validateScore(value, holdoutFromPullRequest, plan, execution, failures)
 }
 
 /**
- * Validates one release-grade schema-v3 historical replay artifact.
+ * Validates one release-grade schema-v4 historical replay artifact.
  *
  * The return shape mirrors the qualification evidence validator so release code can fail closed
  * without learning this schema's internals.
@@ -513,7 +574,7 @@ export function validateHistoricalReplayEvidence(report) {
   const failures = [];
   const root = exactRecord(report, ROOT_KEYS);
   if (root === undefined) return { valid: false, failures: ["root_shape"] };
-  if (root.schemaVersion !== 3 || root.artifact !== HISTORICAL_REPLAY_EVIDENCE_ARTIFACT) {
+  if (root.schemaVersion !== 4 || root.artifact !== HISTORICAL_REPLAY_EVIDENCE_ARTIFACT) {
     mark(failures, "identity");
   }
   if (

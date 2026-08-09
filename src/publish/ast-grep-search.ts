@@ -95,6 +95,7 @@ export interface StructuralSearchDependencies {
 interface SourceCandidate {
   readonly path: string;
   readonly source: string;
+  readonly lines: readonly string[];
   readonly bytes: Buffer;
   readonly spec: LanguageSpec;
 }
@@ -109,6 +110,38 @@ interface SourceRange {
   readonly start: SourcePosition;
   readonly end: SourcePosition;
 }
+
+interface OutlineNode {
+  readonly name: string;
+  readonly range: SourceRange;
+}
+
+type StructuralEvidenceKind = "definition" | "test" | "callsite";
+type StructuralEvidenceEntry = RepositoryEvidenceEntry & {
+  readonly kind: StructuralEvidenceKind;
+};
+
+interface StructuralHit {
+  readonly anchor: StructuralEvidenceEntry;
+  readonly source: SourceCandidate;
+  readonly ownerRange?: SourceRange;
+  readonly termRank: number;
+  readonly pathRank: number;
+}
+
+interface PrioritizedStructuralEntry {
+  readonly entry: StructuralEvidenceEntry;
+  readonly anchor: boolean;
+}
+
+const STRUCTURAL_KIND_ORDER = {
+  definition: 0,
+  test: 1,
+  callsite: 2,
+} as const;
+
+const DEFINITION_CONTEXT_OFFSETS = [1, 2, 3] as const;
+const OCCURRENCE_CONTEXT_OFFSETS = [-1, 1] as const;
 
 function asRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -143,11 +176,11 @@ function sourceRange(value: unknown, source: SourceCandidate): SourceRange {
       end: safeInteger(offsets.end, source.bytes.byteLength),
     },
     start: {
-      line: safeInteger(start.line, source.source.split("\n").length),
+      line: safeInteger(start.line, source.lines.length),
       column: safeInteger(start.column, MAX_STRUCTURAL_FILE_BYTES),
     },
     end: {
-      line: safeInteger(end.line, source.source.split("\n").length),
+      line: safeInteger(end.line, source.lines.length),
       column: safeInteger(end.column, MAX_STRUCTURAL_FILE_BYTES),
     },
   };
@@ -163,7 +196,8 @@ function sourceRange(value: unknown, source: SourceCandidate): SourceRange {
   return parsed;
 }
 
-function exactTerms(terms: readonly string[]): readonly string[] {
+/** Exact identifier tails consumed by ast-grep and by the collector's term-anchor reservation. */
+export function normalizedStructuralTerms(terms: readonly string[]): readonly string[] {
   const accepted: string[] = [];
   for (const term of terms.slice(0, MAX_STRUCTURAL_TERMS)) {
     const tail = term.split(".").at(-1) ?? term;
@@ -234,7 +268,7 @@ async function toolJson(
 }
 
 function sourceLine(source: SourceCandidate, line: number): string | undefined {
-  const content = source.source.split("\n")[line];
+  const content = source.lines[line];
   return content === undefined || content.length > MAX_ENTRY_LINE_CHARS ? undefined : content;
 }
 
@@ -245,11 +279,36 @@ function validMatchedText(record: Record<string, unknown>, terms: readonly strin
   return record.text;
 }
 
-function occurrenceEntry(
+function smallestContainingRange(
+  nodes: readonly OutlineNode[],
+  occurrence: SourceRange,
+): SourceRange | undefined {
+  let selected: SourceRange | undefined;
+  for (const node of nodes) {
+    if (
+      node.range.byteOffset.start > occurrence.byteOffset.start ||
+      node.range.byteOffset.end < occurrence.byteOffset.end
+    ) {
+      continue;
+    }
+    if (
+      selected === undefined ||
+      node.range.byteOffset.end - node.range.byteOffset.start <
+        selected.byteOffset.end - selected.byteOffset.start
+    ) {
+      selected = node.range;
+    }
+  }
+  return selected;
+}
+
+function occurrenceHit(
   value: unknown,
   source: SourceCandidate,
   terms: readonly string[],
-): RepositoryEvidenceEntry | undefined {
+  nodes: readonly OutlineNode[],
+  pathRank: number,
+): StructuralHit | undefined {
   const record = asRecord(value);
   if (record.file !== "STDIN" || record.language !== source.spec.language) {
     throw new AstGrepSearchError();
@@ -262,17 +321,24 @@ function occurrenceEntry(
     throw new AstGrepSearchError();
   }
   const content = sourceLine(source, range.start.line);
+  const ownerRange = smallestContainingRange(nodes, range);
   return content === undefined
     ? undefined
     : {
-        path: source.path,
-        line: range.start.line + 1,
-        content,
-        kind: /(?:(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$)/u.test(
-          source.path,
-        )
-          ? "test"
-          : "callsite",
+        anchor: {
+          path: source.path,
+          line: range.start.line + 1,
+          content,
+          kind: /(?:(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$)/u.test(
+            source.path,
+          )
+            ? "test"
+            : "callsite",
+        },
+        source,
+        ...(ownerRange === undefined ? {} : { ownerRange }),
+        termRank: terms.indexOf(text),
+        pathRank,
       };
 }
 
@@ -280,13 +346,15 @@ function parseOccurrences(
   value: unknown,
   source: SourceCandidate,
   terms: readonly string[],
-): readonly RepositoryEvidenceEntry[] {
+  nodes: readonly OutlineNode[],
+  pathRank: number,
+): readonly StructuralHit[] {
   if (!Array.isArray(value) || value.length > MAX_STRUCTURAL_MATCHES) {
     throw new AstGrepSearchError();
   }
   return value
-    .map((item) => occurrenceEntry(item, source, terms))
-    .filter((item): item is RepositoryEvidenceEntry => item !== undefined);
+    .map((item) => occurrenceHit(item, source, terms, nodes, pathRank))
+    .filter((item): item is StructuralHit => item !== undefined);
 }
 
 function identifierLine(
@@ -302,19 +370,25 @@ function identifierLine(
   return undefined;
 }
 
-function definitionEntry(
-  record: Record<string, unknown>,
+function definitionHit(
+  node: OutlineNode,
   source: SourceCandidate,
   terms: readonly string[],
-): RepositoryEvidenceEntry | undefined {
-  if (typeof record.name !== "string") throw new AstGrepSearchError();
-  const range = sourceRange(record.range, source);
-  if (!terms.includes(record.name)) return undefined;
-  const line = identifierLine(source, range, record.name);
+  pathRank: number,
+): StructuralHit | undefined {
+  const termRank = terms.indexOf(node.name);
+  if (termRank < 0) return undefined;
+  const line = identifierLine(source, node.range, node.name);
   const content = line === undefined ? undefined : sourceLine(source, line);
   return line === undefined || content === undefined
     ? undefined
-    : { path: source.path, line: line + 1, content, kind: "definition" };
+    : {
+        anchor: { path: source.path, line: line + 1, content, kind: "definition" },
+        source,
+        ownerRange: node.range,
+        termRank,
+        pathRank,
+      };
 }
 
 function outlineMembers(record: Record<string, unknown>): readonly unknown[] {
@@ -323,86 +397,81 @@ function outlineMembers(record: Record<string, unknown>): readonly unknown[] {
   return record.members as unknown[];
 }
 
-function outlineDefinitions(
-  items: unknown,
-  source: SourceCandidate,
-  terms: readonly string[],
-): readonly RepositoryEvidenceEntry[] {
+function outlineNodes(items: unknown, source: SourceCandidate): readonly OutlineNode[] {
   if (!Array.isArray(items)) throw new AstGrepSearchError();
-  const definitions: RepositoryEvidenceEntry[] = [];
+  const nodes: OutlineNode[] = [];
   const pending: unknown[] = [...(items as unknown[])];
   let visited = 0;
   while (pending.length > 0) {
     visited += 1;
     if (visited > MAX_STRUCTURAL_OUTLINE_NODES) throw new AstGrepSearchError();
     const record = asRecord(pending.shift());
-    const definition = definitionEntry(record, source, terms);
-    if (definition !== undefined) definitions.push(definition);
+    if (typeof record.name !== "string") throw new AstGrepSearchError();
+    nodes.push({ name: record.name, range: sourceRange(record.range, source) });
     pending.push(...outlineMembers(record));
   }
-  return definitions;
+  return nodes;
 }
 
-function parseOutline(
-  value: unknown,
-  source: SourceCandidate,
-  terms: readonly string[],
-): readonly RepositoryEvidenceEntry[] {
+function parseOutline(value: unknown, source: SourceCandidate): readonly OutlineNode[] {
   if (!Array.isArray(value) || value.length !== 1) throw new AstGrepSearchError();
   const file = asRecord(value[0]);
   if (file.path !== "STDIN" || file.language !== source.spec.language) {
     throw new AstGrepSearchError();
   }
-  return outlineDefinitions(file.items, source, terms);
+  return outlineNodes(file.items, source);
+}
+
+function scanArguments(source: SourceCandidate, terms: readonly string[]): readonly string[] {
+  return [
+    "scan",
+    "--stdin",
+    "--inline-rules",
+    inlineRule(source.spec, terms),
+    "--json=compact",
+    "--color",
+    "never",
+    "--threads",
+    "1",
+    "--max-results",
+    String(MAX_STRUCTURAL_MATCHES),
+  ];
+}
+
+function outlineArguments(source: SourceCandidate): readonly string[] {
+  return [
+    "outline",
+    "--stdin",
+    "--lang",
+    source.spec.language,
+    "--json=compact",
+    "--items",
+    "structure",
+    "--view",
+    "expanded",
+    "--color",
+    "never",
+    "--threads",
+    "1",
+  ];
 }
 
 async function inspectSource(
   binaryPath: string,
   source: SourceCandidate,
   terms: readonly string[],
+  pathRank: number,
   deadlineMs?: number,
-): Promise<readonly RepositoryEvidenceEntry[]> {
+): Promise<readonly StructuralHit[]> {
   const [matches, outline] = await Promise.all([
-    toolJson(
-      binaryPath,
-      [
-        "scan",
-        "--stdin",
-        "--inline-rules",
-        inlineRule(source.spec, terms),
-        "--json=compact",
-        "--color",
-        "never",
-        "--threads",
-        "1",
-        "--max-results",
-        String(MAX_STRUCTURAL_MATCHES),
-      ],
-      source,
-      deadlineMs,
-    ),
-    toolJson(
-      binaryPath,
-      [
-        "outline",
-        "--stdin",
-        "--lang",
-        source.spec.language,
-        "--json=compact",
-        "--items",
-        "structure",
-        "--view",
-        "expanded",
-        "--color",
-        "never",
-        "--threads",
-        "1",
-      ],
-      source,
-      deadlineMs,
-    ),
+    toolJson(binaryPath, scanArguments(source, terms), source, deadlineMs),
+    toolJson(binaryPath, outlineArguments(source), source, deadlineMs),
   ]);
-  return [...parseOutline(outline, source, terms), ...parseOccurrences(matches, source, terms)];
+  const nodes = parseOutline(outline, source);
+  const definitions = nodes
+    .map((node) => definitionHit(node, source, terms, pathRank))
+    .filter((hit): hit is StructuralHit => hit !== undefined);
+  return [...definitions, ...parseOccurrences(matches, source, terms, nodes, pathRank)];
 }
 
 async function sourceCandidates(
@@ -427,7 +496,7 @@ async function sourceCandidates(
       const bytes = Buffer.from(source, "utf8");
       return bytes.byteLength > MAX_STRUCTURAL_FILE_BYTES
         ? undefined
-        : { path, source, bytes, spec };
+        : { path, source, lines: source.split("\n"), bytes, spec };
     }),
   );
   const selected: SourceCandidate[] = [];
@@ -441,12 +510,149 @@ async function sourceCandidates(
   return selected;
 }
 
+function compareStructuralHits(left: StructuralHit, right: StructuralHit): number {
+  return (
+    left.termRank - right.termRank ||
+    left.pathRank - right.pathRank ||
+    STRUCTURAL_KIND_ORDER[left.anchor.kind] - STRUCTURAL_KIND_ORDER[right.anchor.kind] ||
+    left.anchor.line - right.anchor.line
+  );
+}
+
+function uniqueStructuralHits(hits: readonly StructuralHit[]): readonly StructuralHit[] {
+  const unique = new Map<string, StructuralHit>();
+  for (const hit of [...hits].sort(compareStructuralHits)) {
+    const key = `${hit.anchor.path}\u0000${String(hit.anchor.line)}`;
+    const existing = unique.get(key);
+    if (
+      existing === undefined ||
+      STRUCTURAL_KIND_ORDER[hit.anchor.kind] < STRUCTURAL_KIND_ORDER[existing.anchor.kind]
+    ) {
+      unique.set(key, hit);
+    }
+  }
+  return [...unique.values()].sort(compareStructuralHits);
+}
+
+function reserveFirstHit(
+  hits: readonly StructuralHit[],
+  reserved: StructuralHit[],
+  matches: (hit: StructuralHit) => boolean,
+): void {
+  const hit = hits.find(matches);
+  if (hit !== undefined && !reserved.includes(hit)) reserved.push(hit);
+}
+
+function reservedStructuralHits(
+  hits: readonly StructuralHit[],
+  termCount: number,
+  pathCount: number,
+): readonly StructuralHit[] {
+  const reserved: StructuralHit[] = [];
+  // This order is a cross-layer contract: the verifier accepts only three path chunks. One anchor
+  // for every requested term must therefore precede kind/path diversity, or several term-zero
+  // sightings can consume that later boundary before term one and term two ever reach it.
+  for (let termRank = 0; termRank < termCount; termRank += 1) {
+    reserveFirstHit(hits, reserved, (hit) => hit.termRank === termRank);
+  }
+  for (const kind of ["definition", "test", "callsite"] as const) {
+    reserveFirstHit(hits, reserved, (hit) => hit.anchor.kind === kind);
+  }
+  for (let pathRank = 0; pathRank < pathCount; pathRank += 1) {
+    reserveFirstHit(hits, reserved, (hit) => hit.pathRank === pathRank);
+  }
+  return reserved;
+}
+
+function inclusiveRangeEndLine(source: SourceCandidate, range: SourceRange): number {
+  // ast-grep ranges are half-open. Reading `range.end.line` as inclusive would admit the first
+  // line of the next sibling whenever a node ends at column zero; the final owned byte cannot.
+  if (range.byteOffset.end <= range.byteOffset.start) return range.start.line;
+  return lineAtByteOffset(source.bytes, range.byteOffset.end - 1);
+}
+
+function contextEntries(hit: StructuralHit): readonly StructuralEvidenceEntry[] {
+  const anchorLine = hit.anchor.line - 1;
+  const startLine = hit.ownerRange?.start.line ?? 0;
+  const endLine =
+    hit.ownerRange === undefined
+      ? Math.max(0, hit.source.lines.length - 1)
+      : inclusiveRangeEndLine(hit.source, hit.ownerRange);
+  const offsets =
+    hit.anchor.kind === "definition" ? DEFINITION_CONTEXT_OFFSETS : OCCURRENCE_CONTEXT_OFFSETS;
+  const entries: StructuralEvidenceEntry[] = [];
+  for (const offset of offsets) {
+    const line = anchorLine + offset;
+    if (line < startLine || line > endLine) continue;
+    const content = sourceLine(hit.source, line);
+    if (content === undefined || content.trim() === "") continue;
+    entries.push({
+      path: hit.anchor.path,
+      line: line + 1,
+      content,
+      kind: hit.anchor.kind,
+    });
+  }
+  return entries;
+}
+
+function interleaveContextEntries(
+  hits: readonly StructuralHit[],
+): readonly PrioritizedStructuralEntry[] {
+  const groups = hits.map(contextEntries);
+  const entries: PrioritizedStructuralEntry[] = [];
+  const maximumLength = Math.max(0, ...groups.map((group) => group.length));
+  for (let offset = 0; offset < maximumLength; offset += 1) {
+    for (const group of groups) {
+      const entry = group[offset];
+      if (entry !== undefined) entries.push({ entry, anchor: false });
+    }
+  }
+  return entries;
+}
+
+function boundedStructuralEntries(
+  hits: readonly StructuralHit[],
+  termCount: number,
+  pathCount: number,
+): readonly RepositoryEvidenceEntry[] {
+  // Anchors that establish requested-term, evidence-kind, and caller-ranked-path diversity are
+  // non-negotiable. Their AST-owned source windows come next; repeated identifier sightings are
+  // ballast and may use only what remains of the fixed structural result budget.
+  const ranked = uniqueStructuralHits(hits);
+  const reserved = reservedStructuralHits(ranked, termCount, pathCount);
+  const reservation = new Set(reserved);
+  const ballast = ranked.filter((hit) => !reservation.has(hit));
+  const prioritized: PrioritizedStructuralEntry[] = [
+    ...reserved.map((hit) => ({ entry: hit.anchor, anchor: true })),
+    ...interleaveContextEntries(reserved),
+    ...ballast.map((hit) => ({ entry: hit.anchor, anchor: true })),
+  ];
+  const unique = new Map<string, PrioritizedStructuralEntry>();
+  for (const candidate of prioritized) {
+    const key = `${candidate.entry.path}\u0000${String(candidate.entry.line)}`;
+    const existing = unique.get(key);
+    if (existing === undefined) {
+      if (unique.size < MAX_STRUCTURAL_MATCHES) unique.set(key, candidate);
+      continue;
+    }
+    if (
+      candidate.anchor &&
+      (!existing.anchor ||
+        STRUCTURAL_KIND_ORDER[candidate.entry.kind] < STRUCTURAL_KIND_ORDER[existing.entry.kind])
+    ) {
+      unique.set(key, candidate);
+    }
+  }
+  return [...unique.values()].map(({ entry }) => entry);
+}
+
 /** Structural fallback over exact immutable HEAD blobs, supplied to ast-grep only through stdin. */
 export async function searchAstGrepAtHead(
   request: StructuralSearchRequest,
   dependencies: StructuralSearchDependencies = {},
 ): Promise<readonly RepositoryEvidenceEntry[]> {
-  const terms = exactTerms(request.terms);
+  const terms = normalizedStructuralTerms(request.terms);
   if (terms.length === 0) return [];
   structuralTimeoutMs(request.deadlineMs, STRUCTURAL_PROCESS_TIMEOUT_MS);
   const sources = await sourceCandidates(request);
@@ -462,18 +668,12 @@ export async function searchAstGrepAtHead(
   } catch (error) {
     throw new AstGrepSearchError(error);
   }
-  const entries = (
+  const hits = (
     await Promise.all(
-      sources.map((source) => inspectSource(binaryPath, source, terms, request.deadlineMs)),
+      sources.map((source, pathRank) =>
+        inspectSource(binaryPath, source, terms, pathRank, request.deadlineMs),
+      ),
     )
   ).flat();
-  const unique = new Map<string, RepositoryEvidenceEntry>();
-  for (const entry of entries) {
-    const key = `${entry.path}\u0000${String(entry.line)}`;
-    const existing = unique.get(key);
-    if (existing === undefined || (entry.kind === "definition" && existing.kind !== "definition")) {
-      unique.set(key, entry);
-    }
-  }
-  return [...unique.values()].slice(0, MAX_STRUCTURAL_MATCHES);
+  return boundedStructuralEntries(hits, terms.length, sources.length);
 }

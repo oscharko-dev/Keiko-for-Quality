@@ -105,9 +105,11 @@ deterministic contract findings alone remain outside those slots. Missing eviden
 budget or malformed judge output withholds the affected finding and makes the run incomplete
 rather than clean.
 
-Repository lookup starts with exact-commit `git grep`. Only when those hits are structurally
-ambiguous does a digest-pinned ast-grep fallback parse bounded HEAD blobs received through stdin;
-it never scans a checkout or loads repository configuration.
+Repository lookup starts with exact-commit `git grep`. A digest-pinned ast-grep parses bounded HEAD
+blobs received through stdin when ambiguous hits require structural disambiguation, and may enrich
+clear lexical hits with tightly bounded owning-function context. Failure is fatal only when that
+structure is required; optional enrichment failure preserves the exact lexical evidence. Neither
+path scans a checkout or loads repository configuration.
 
 ## Getting started
 

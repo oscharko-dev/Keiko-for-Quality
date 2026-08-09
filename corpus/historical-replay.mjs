@@ -38,7 +38,18 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { TextDecoder } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -747,6 +758,24 @@ function nonnegativeIntegerField(outcome, field) {
   return Number.isSafeInteger(outcome[field]) && outcome[field] >= 0;
 }
 
+const STAGE_COUNTER_FIELDS = [
+  "confirmed",
+  "truthRefuted",
+  "falsifierDefeated",
+  "droppedInsufficientEvidence",
+  "retrievalRequested",
+  "retrievalPerformed",
+  "retrievalExpanded",
+  "retrievalNoMatches",
+  "retrievalFailed",
+  "undecided",
+  "budgetBlocked",
+];
+
+function emptyStageCounters() {
+  return Object.fromEntries(STAGE_COUNTER_FIELDS.map((field) => [field, 0]));
+}
+
 function validSubstantiationOutcome(outcome, finding) {
   const countFields = [
     "confirmed",
@@ -767,19 +796,50 @@ function validSubstantiationOutcome(outcome, finding) {
     "budgetBlocked",
     "tokens",
   ];
+  if (
+    !(
+      outcome !== null &&
+      typeof outcome === "object" &&
+      outcome.strictness === HISTORICAL_REPLAY_STRICTNESS &&
+      Array.isArray(outcome.findings) &&
+      outcome.findings.length <= 1 &&
+      (outcome.findings.length === 0 || outcome.findings[0] === finding) &&
+      countFields.every((field) => nonnegativeIntegerField(outcome, field)) &&
+      outcome.undecided <= 1 &&
+      outcome.budgetBlocked <= 1 &&
+      outcome.repaired === 0 &&
+      outcome.droppedNitpick === 0
+    )
+  ) {
+    return false;
+  }
+
+  const terminalDecisions =
+    outcome.confirmed +
+    outcome.truthRefuted +
+    outcome.falsifierDefeated +
+    outcome.droppedInsufficientEvidence +
+    outcome.undecided;
   return (
-    outcome !== null &&
-    typeof outcome === "object" &&
-    outcome.strictness === HISTORICAL_REPLAY_STRICTNESS &&
-    Array.isArray(outcome.findings) &&
-    outcome.findings.length <= 1 &&
-    (outcome.findings.length === 0 || outcome.findings[0] === finding) &&
-    countFields.every((field) => nonnegativeIntegerField(outcome, field)) &&
-    outcome.undecided <= 1 &&
-    outcome.budgetBlocked <= 1 &&
-    outcome.repaired === 0 &&
-    outcome.droppedNitpick === 0
+    terminalDecisions === 1 &&
+    outcome.confirmed === outcome.findings.length &&
+    outcome.droppedRefuted === outcome.truthRefuted + outcome.falsifierDefeated &&
+    outcome.droppedUnsupported === outcome.droppedRefuted &&
+    outcome.droppedVague === outcome.droppedInsufficientEvidence &&
+    outcome.budgetBlocked <= outcome.undecided &&
+    outcome.retrievalRequested <= 2 &&
+    outcome.retrievalPerformed <= 1 &&
+    outcome.retrievalPerformed <= outcome.retrievalRequested &&
+    outcome.retrievalExpanded + outcome.retrievalNoMatches + outcome.retrievalFailed ===
+      outcome.retrievalPerformed &&
+    outcome.retrievalFailed <= outcome.undecided &&
+    outcome.retrievalNoMatches <= outcome.droppedInsufficientEvidence &&
+    outcome.retrievalRequested - outcome.retrievalPerformed <= outcome.droppedInsufficientEvidence
   );
+}
+
+function tallyStageCounters(stageCounters, outcome) {
+  for (const field of STAGE_COUNTER_FIELDS) stageCounters[field] += outcome[field];
 }
 
 /**
@@ -814,6 +874,7 @@ export async function runHistoricalReplayVerification({
   const reasons = fixedReasonCounts();
   reasons.outsideCorroboratedPopulation = databaseIds.length - caseIds.size;
   const corroboratedDecisions = { keep: 0, drop: 0, unmeasured: 0 };
+  const stageCounters = emptyStageCounters();
   let attemptedCases = 0;
   let accountedTokens = 0;
 
@@ -924,6 +985,7 @@ export async function runHistoricalReplayVerification({
       throw new Error("substantiation exceeded the historical replay token allowance");
     }
     accountedTokens += outcome.tokens;
+    tallyStageCounters(stageCounters, outcome);
     if (outcome.budgetBlocked > 0) {
       reasons.budget += 1;
       corroboratedDecisions.unmeasured += 1;
@@ -956,6 +1018,7 @@ export async function runHistoricalReplayVerification({
       configuredMaxTokens: maxTokens,
       populationDecisions,
       corroboratedDecisions,
+      stageCounters,
       unmeasuredByReason: reasons,
     },
   };
@@ -979,7 +1042,7 @@ export function buildRedactedHistoricalReplayEvidence({
     throw new Error("reviewer tree binding is malformed");
   }
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     artifact: HISTORICAL_REPLAY_EVIDENCE_ARTIFACT,
     generatedAt,
     scope: {
@@ -1099,6 +1162,59 @@ function percentage(value) {
   return value === null ? "n/a" : `${(value * 100).toFixed(1)}%`;
 }
 
+/**
+ * Claims the final report path before a paid request can run, then writes through that exact open
+ * file rather than resolving the path again. A failed run deliberately leaves its private empty
+ * reservation behind: unlinking by path after closing the descriptor could delete a file another
+ * process placed there in the meantime.
+ */
+function reserveHistoricalReplayOutput(output) {
+  const descriptor = openSync(output, "wx", 0o600);
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    closeSync(descriptor);
+  };
+  const assertOwnsPath = () => {
+    let pathStats;
+    try {
+      pathStats = lstatSync(output);
+    } catch (error) {
+      throw new Error("historical replay output reservation no longer owns --out", {
+        cause: error,
+      });
+    }
+    const descriptorStats = fstatSync(descriptor);
+    if (pathStats.dev !== descriptorStats.dev || pathStats.ino !== descriptorStats.ino) {
+      throw new Error("historical replay output reservation no longer owns --out");
+    }
+  };
+  try {
+    // `mode` is filtered through the process umask at creation. Set the promised final mode on the
+    // already-open file, without reopening a pathname that another process could replace.
+    fchmodSync(descriptor, 0o600);
+  } catch (error) {
+    close();
+    throw error;
+  }
+  return {
+    write(text) {
+      if (closed) throw new Error("historical replay output reservation is already closed");
+      try {
+        assertOwnsPath();
+        writeFileSync(descriptor, text, { encoding: "utf8" });
+        fchmodSync(descriptor, 0o600);
+        fsyncSync(descriptor);
+        assertOwnsPath();
+      } finally {
+        close();
+      }
+    },
+    close,
+  };
+}
+
 /** Importable command entry point; dependencies are injectable so its dry path is hermetic. */
 export async function runHistoricalReplayCommand(argv, env = process.env, dependencies = {}) {
   const args = parseHistoricalReplayArgs(argv);
@@ -1145,49 +1261,54 @@ export async function runHistoricalReplayCommand(argv, env = process.env, depend
     throw new Error("historical replay requires a 40-hex clean reviewer tree binding");
   }
   const judgeEndpoint = historicalReplayJudgeEndpoint(env);
-  const loaded = await (
-    dependencies.loadVerificationDependencies ?? productionVerificationDependencies
-  )();
-  const verification = await runHistoricalReplayVerification({
-    databaseIds: dataset.records.map((record) => record.databaseId),
-    cases: dataset.cases,
-    repo,
-    maxTokens: args.maxTokens,
-    judgeEndpoint,
-    readChangeAtCommits,
-    buildChangeEvidence: loaded.buildChangeEvidence,
-    collectInitialRepositoryContext: loaded.collectInitialRepositoryContext,
-    collectRepositoryContextFollowUp: loaded.collectRepositoryContextFollowUp,
-    toRetrievedEvidence: loaded.toRetrievedEvidence,
-    substantiate: loaded.substantiate,
-  });
-  const score = buildHistoricalReplayReport({
-    records: dataset.records,
-    decisions: verification.decisions,
-    holdoutFromPullRequest: args.holdoutFromPullRequest,
-  });
-  const report = buildRedactedHistoricalReplayEvidence({
-    generatedAt: (dependencies.now ?? (() => new Date()))().toISOString(),
-    harvestSha256: harvest.sha256,
-    holdoutFromPullRequest: args.holdoutFromPullRequest,
-    endpoint: judgeEndpoint.endpoint,
-    implementation,
-    plan,
-    execution: verification.report,
-    score,
-  });
   const output = realLocation(resolve(args.outPath));
   if (output === harvest.location) throw new Error("--out must not overwrite the raw harvest");
-  (dependencies.writeReport ?? ((path, text) => writeFileSync(path, text, { flag: "wx" })))(
-    output,
-    `${JSON.stringify(report, null, 2)}\n`,
-  );
-  lines.push(`  redacted report: ${output}`);
-  lines.push(`  after precision: ${percentage(score.all.after.metrics.precision)}`);
-  lines.push(
-    `  holdout precision: ${percentage(score.chronological.holdout.after.metrics.precision)}`,
-  );
-  return { mode: "execute", plan, report, output, lines };
+  const reservation = reserveHistoricalReplayOutput(output);
+  try {
+    // The exact final path is now ours. Nothing model-facing is even imported before that atomic
+    // claim succeeds, so an existing artifact cannot consume endpoint requests and fail at write.
+    const loaded = await (
+      dependencies.loadVerificationDependencies ?? productionVerificationDependencies
+    )();
+    const verification = await runHistoricalReplayVerification({
+      databaseIds: dataset.records.map((record) => record.databaseId),
+      cases: dataset.cases,
+      repo,
+      maxTokens: args.maxTokens,
+      judgeEndpoint,
+      readChangeAtCommits,
+      buildChangeEvidence: loaded.buildChangeEvidence,
+      collectInitialRepositoryContext: loaded.collectInitialRepositoryContext,
+      collectRepositoryContextFollowUp: loaded.collectRepositoryContextFollowUp,
+      toRetrievedEvidence: loaded.toRetrievedEvidence,
+      substantiate: loaded.substantiate,
+    });
+    const score = buildHistoricalReplayReport({
+      records: dataset.records,
+      decisions: verification.decisions,
+      holdoutFromPullRequest: args.holdoutFromPullRequest,
+    });
+    const report = buildRedactedHistoricalReplayEvidence({
+      generatedAt: (dependencies.now ?? (() => new Date()))().toISOString(),
+      harvestSha256: harvest.sha256,
+      holdoutFromPullRequest: args.holdoutFromPullRequest,
+      endpoint: judgeEndpoint.endpoint,
+      implementation,
+      plan,
+      execution: verification.report,
+      score,
+    });
+    reservation.write(`${JSON.stringify(report, null, 2)}\n`);
+    lines.push(`  redacted report: ${output}`);
+    lines.push(`  after precision: ${percentage(score.all.after.metrics.precision)}`);
+    lines.push(
+      `  holdout precision: ${percentage(score.chronological.holdout.after.metrics.precision)}`,
+    );
+    return { mode: "execute", plan, report, output, lines };
+  } catch (error) {
+    reservation.close();
+    throw error;
+  }
 }
 
 async function main() {

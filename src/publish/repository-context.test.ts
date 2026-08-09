@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { commitSha } from "../core/brands.js";
 import type { RepositoryEvidenceEntry } from "./evidence.js";
+import { toRetrievedEvidence } from "./retrieved-evidence.js";
 import {
   MAX_REPOSITORY_FOLLOW_UP_TERMS,
   RepositoryContextRetrievalError,
@@ -147,7 +148,7 @@ describe("repository context collection", () => {
     const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
     await writeFile(
       join(wrapper, "git"),
-      `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "commonValue" ]; then exit 2; fi\ndone\nexec "${realGit}" "$@"\n`,
+      `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "commonValue" ]; then printf 'searched\\n' > "$PWD/noisy-term-searched"; exit 2; fi\ndone\nexec "${realGit}" "$@"\n`,
       "utf8",
     );
     await chmod(join(wrapper, "git"), 0o755);
@@ -165,6 +166,9 @@ describe("repository context collection", () => {
         (entry) => entry.kind === "definition" && entry.content.includes("secondaryContract"),
       ),
     ).toBe(true);
+    await expect(readFile(join(repository, "noisy-term-searched"), "utf8")).resolves.toBe(
+      "searched\n",
+    );
   });
 
   it("reserves matches for a later term when the first term saturates its share", async () => {
@@ -250,10 +254,11 @@ describe("repository context collection", () => {
   it("keeps the one follow-up separate and combines only the same exact commit", async () => {
     const { request } = await fixture();
     const initial = await collectInitialRepositoryContext(request);
-    const followUp = await collectRepositoryContextFollowUp(request, [
-      "secondaryContract",
-      "$(touch PWNED)",
-    ]);
+    const followUp = await collectRepositoryContextFollowUp(
+      request,
+      ["secondaryContract", "$(touch PWNED)"],
+      { structuralSearch: () => Promise.resolve([]) },
+    );
     const merged = mergeRepositoryEvidenceContexts(initial, followUp);
 
     expect(initial.entries.some((entry) => entry.content.includes("secondaryContract"))).toBe(
@@ -263,6 +268,7 @@ describe("repository context collection", () => {
       true,
     );
     expect(merged.entries.length).toBe(initial.entries.length + followUp.entries.length);
+    expect(merged.entries.slice(0, followUp.entries.length)).toEqual(followUp.entries);
 
     const otherHead = { ...followUp, headCommit: "a".repeat(40) };
     expect(mergeRepositoryEvidenceContexts(initial, otherHead)).toBe(initial);
@@ -387,6 +393,15 @@ describe("repository context collection", () => {
         kind: "callsite" as const,
       }),
     );
+    const structuralPaths: RepositoryEvidenceEntry[] = Array.from(
+      { length: 7 },
+      (_value, index) => ({
+        path: `src/structural-extra-${String(index)}.ts`,
+        line: 1,
+        content: `ambiguousContract(extra${String(index)});`,
+        kind: "callsite" as const,
+      }),
+    );
 
     const context = await collectRepositoryContextFollowUp(request, ["ambiguousContract"], {
       structuralSearch: () =>
@@ -404,16 +419,119 @@ describe("repository context collection", () => {
             content: "expect(ambiguousContract()).toBe(true);",
             kind: "test" as const,
           },
+          ...structuralPaths,
         ]),
     });
 
     expect(context.entries).toHaveLength(12);
+    expect(new Set(context.entries.map((entry) => entry.path)).size).toBe(5);
     expect(context.entries).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ path: "src/structural-b.ts", kind: "definition" }),
         expect.objectContaining({ path: "tests/structural-c.test.ts", kind: "test" }),
       ]),
     );
+  });
+
+  it("preserves three requested term anchors through the verifier's three-path boundary", async () => {
+    const { request } = await fixture();
+    const terms = ["secondaryContract", "ambiguousContract", "useCapability"];
+    const context = await collectRepositoryContextFollowUp(request, terms, {
+      structuralSearch: ({ terms: searched }) => {
+        expect(searched).toEqual(terms);
+        return Promise.resolve([
+          {
+            path: "src/term-zero-definition.ts",
+            line: 1,
+            content: "export function secondaryContract(): boolean { return true; }",
+            kind: "definition" as const,
+          },
+          {
+            path: "src/term-one-definition.ts",
+            line: 1,
+            content: "export function ambiguousContract(): boolean { return true; }",
+            kind: "definition" as const,
+          },
+          {
+            path: "src/term-two-definition.ts",
+            line: 1,
+            content: "export function useCapability(): boolean { return true; }",
+            kind: "definition" as const,
+          },
+          {
+            path: "tests/term-zero.test.ts",
+            line: 1,
+            content: "expect(secondaryContract()).toBe(true);",
+            kind: "test" as const,
+          },
+          {
+            path: "src/term-zero-caller.ts",
+            line: 1,
+            content: "return secondaryContract();",
+            kind: "callsite" as const,
+          },
+        ]);
+      },
+    });
+    const retrieved = toRetrievedEvidence(context);
+
+    expect(context.entries.length).toBeLessThanOrEqual(12);
+    expect(new Set(context.entries.map((entry) => entry.path)).size).toBeLessThanOrEqual(5);
+    expect(retrieved.chunks.map((chunk) => chunk.path)).toEqual([
+      "src/term-zero-definition.ts",
+      "src/term-one-definition.ts",
+      "src/term-two-definition.ts",
+    ]);
+    expect(retrieved.chunks.map((chunk) => chunk.lines[0]?.text)).toEqual([
+      expect.stringContaining("secondaryContract"),
+      expect.stringContaining("ambiguousContract"),
+      expect.stringContaining("useCapability"),
+    ]);
+  });
+
+  it("binds term-anchor reservations to normalized unique structural terms", async () => {
+    const { request } = await fixture();
+    const context = await collectRepositoryContextFollowUp(
+      request,
+      ["Namespace.secondaryContract", "secondaryContract", "useCapability"],
+      {
+        structuralSearch: ({ terms }) => {
+          expect(terms).toEqual(["secondaryContract", "useCapability"]);
+          return Promise.resolve([
+            {
+              path: "src/normalized-secondary.ts",
+              line: 1,
+              content: "export function secondaryContract(): boolean { return true; }",
+              kind: "definition" as const,
+            },
+            {
+              path: "src/normalized-capability.ts",
+              line: 1,
+              content: "export function useCapability(): boolean { return true; }",
+              kind: "definition" as const,
+            },
+            {
+              path: "src/secondary-ballast.ts",
+              line: 1,
+              content: "return secondaryContract();",
+              kind: "callsite" as const,
+            },
+            {
+              path: "tests/secondary.test.ts",
+              line: 1,
+              content: "expect(secondaryContract()).toBe(true);",
+              kind: "test" as const,
+            },
+          ]);
+        },
+      },
+    );
+
+    expect(toRetrievedEvidence(context).chunks.map((chunk) => chunk.path)).toEqual([
+      "src/normalized-secondary.ts",
+      "src/normalized-capability.ts",
+      "tests/secondary.test.ts",
+    ]);
   });
 
   it("enforces the whole-review deadline during a streaming follow-up", async () => {
@@ -440,7 +558,7 @@ describe("repository context collection", () => {
     ).rejects.toBeInstanceOf(RepositoryContextRetrievalError);
   });
 
-  it("runs structural retrieval only when lexical hits cannot identify a definition", async () => {
+  it("uses structural enrichment for clear hits and still requires it for ambiguous hits", async () => {
     const { request } = await fixture();
     let structuralCalls = 0;
     const dependencies = {
@@ -458,15 +576,35 @@ describe("repository context collection", () => {
     };
 
     await collectRepositoryContextFollowUp(request, ["secondaryContract"], dependencies);
-    expect(structuralCalls).toBe(0);
+    expect(structuralCalls).toBe(1);
 
     const ambiguous = await collectRepositoryContextFollowUp(
       request,
       ["ambiguousContract"],
       dependencies,
     );
-    expect(structuralCalls).toBe(1);
+    expect(structuralCalls).toBe(2);
     expect(ambiguous.entries.some((entry) => entry.kind === "definition")).toBe(true);
+  });
+
+  it("keeps clear lexical evidence when optional structural enrichment is unavailable", async () => {
+    const { request } = await fixture();
+    const context = await collectRepositoryContextFollowUp(request, ["secondaryContract"], {
+      structuralSearch: () => Promise.reject(new Error("unavailable")),
+    });
+
+    expect(context.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "definition",
+          content: expect.stringContaining("secondaryContract"),
+        }),
+        expect.objectContaining({
+          kind: "callsite",
+          content: expect.stringContaining("secondaryContract"),
+        }),
+      ]),
+    );
   });
 
   it("does not invoke structural retrieval when lexical search has no occurrence", async () => {

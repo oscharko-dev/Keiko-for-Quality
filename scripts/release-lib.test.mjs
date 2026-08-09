@@ -363,6 +363,13 @@ test("quality evidence must bind the RC and improve real-label precision without
     valid: true,
     failures: [],
   });
+  const oldHistoricalSchema = JSON.parse(JSON.stringify(historical));
+  oldHistoricalSchema.schemaVersion = 3;
+  assert.ok(
+    validateQualityEvidence(qualification, oldHistoricalSchema, expected).failures.includes(
+      "historical_schema_mismatch",
+    ),
+  );
   const rawSchema = { ...qualification };
   delete rawSchema.artifact;
   assert.ok(
