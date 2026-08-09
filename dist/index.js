@@ -3424,6 +3424,123 @@ function tallyOf(verdicts, asked) {
   return { asked, dropped: verdicts.filter((v) => v.contradicted).length };
 }
 
+// src/engine/whole-file-view.ts
+var MAX_REVIEW_FILE_CHARS = 8e4;
+var MAX_FILE_TO_DIFF_RATIO = 12;
+var WHOLE_FILE_FLOOR_CHARS = 12e3;
+var CHANGED_MARKER = "+";
+var CONTEXT_MARKER = " ";
+function changedNewFileLines(fileDiff) {
+  const changed = /* @__PURE__ */ new Set();
+  walkHunks(fileDiff, (kind, newLine) => {
+    if (kind === "added") changed.add(newLine);
+  });
+  return changed;
+}
+function walkHunks(fileDiff, visit) {
+  let newLine = 0;
+  for (const line of fileDiff.split("\n")) {
+    const header = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(line);
+    if (header?.[1] !== void 0) {
+      newLine = Number(header[1]);
+      continue;
+    }
+    if (newLine === 0) continue;
+    if (line.startsWith("+")) {
+      visit("added", newLine, line.slice(1));
+      newLine += 1;
+    } else if (line.startsWith("-")) {
+      visit("removed", newLine, line.slice(1));
+    } else if (line.startsWith("\\")) {
+      continue;
+    } else if (line.startsWith(" ") || line === "") {
+      visit("context", newLine, line.slice(1));
+      newLine += 1;
+    }
+  }
+}
+function deletedLineHints(fileDiff) {
+  const hints = [];
+  walkHunks(fileDiff, (kind, newLine, text3) => {
+    if (kind === "removed") hints.push(`at ${String(newLine)}: ${text3}`);
+  });
+  return hints;
+}
+var MAX_DELETED_HINTS = 60;
+var MAX_RENDERED_BLOCK_CHARS = MAX_REVIEW_FILE_CHARS * 1.5;
+function splitFileLines(fileText) {
+  const lines = fileText.split("\n");
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  return lines;
+}
+function renderWholeFile(fileText, changed) {
+  return splitFileLines(fileText).map((line, index) => {
+    const number = index + 1;
+    const marker = changed.has(number) ? CHANGED_MARKER : CONTEXT_MARKER;
+    return `${String(number)}${marker}${line}`;
+  }).join("\n");
+}
+function fitsWholeFile(fileText, fileDiff) {
+  if (fileText.length > MAX_REVIEW_FILE_CHARS) return false;
+  if (fileText.length <= WHOLE_FILE_FLOOR_CHARS) return true;
+  if (fileDiff.length === 0) return false;
+  return fileText.length <= fileDiff.length * MAX_FILE_TO_DIFF_RATIO;
+}
+function buildWholeFileBlock(fileText, fileDiff) {
+  if (!fitsWholeFile(fileText, fileDiff)) return void 0;
+  const changed = changedNewFileLines(fileDiff);
+  const deleted = deletedLineHints(fileDiff);
+  if (deleted.length > MAX_DELETED_HINTS) return void 0;
+  const shownHints = deleted;
+  const block = [
+    "<current_file>",
+    "The COMPLETE file at the reviewed head. Every line is numbered. The character right after",
+    `the number is \`${CHANGED_MARKER}\` for a line THIS pull request added or changed, and a space`,
+    "for a line that was already there.",
+    "",
+    renderWholeFile(fileText, changed),
+    "</current_file>",
+    ...shownHints.length === 0 ? [] : [
+      "",
+      "<removed_by_this_change>",
+      "Lines this pull request DELETED, with the line they were removed at. They are no longer",
+      "in the file above \u2014 consult these when judging whether the change dropped something.",
+      "",
+      ...shownHints,
+      "</removed_by_this_change>"
+    ]
+  ].join("\n");
+  if (block.length > MAX_RENDERED_BLOCK_CHARS) return void 0;
+  return { changedCount: changed.size, block };
+}
+var WHOLE_FILE_PROMPT = [
+  "You are shown the COMPLETE file, not an excerpt. Lines this pull request changed are marked with",
+  `\`${CHANGED_MARKER}\` directly after the line number; every other line is pre-existing context.`,
+  "",
+  "SCOPE \u2014 report only what THIS CHANGE is responsible for:",
+  "- a defect the marked lines introduce;",
+  "- a defect the marked lines leave behind because they changed something adjacent and missed this;",
+  "- something the change removed that the file still needs (see `<removed_by_this_change>`).",
+  "A pre-existing problem on an unmarked line is NOT a finding. The file is here so your claims can",
+  "be checked, not so it can be audited. If you cannot tie a finding to this change, drop it.",
+  "",
+  "EVIDENCE \u2014 because you can see the whole file, you are now expected to check before claiming:",
+  '- Before writing that something is missing, absent, unhandled, unvalidated, or "never" done,',
+  "  SEARCH THE FILE ABOVE for it.",
+  "- Finding it somewhere is not the end of the check: ask whether that code is REACHED BY the path",
+  "  this change touches. An existing endpoint validating a token says nothing about a newly added",
+  "  one beside it. Drop the finding only when the guard you found actually protects the changed",
+  "  path; if it does not, the finding stands and should say which path it covers instead.",
+  "- Before writing that a symbol behaves a certain way, find its definition or use in the file.",
+  "- A claim about code outside this file needs evidence that is IN this prompt. Where a",
+  "  `<companion_changes>` block is present, its hunks are exactly that evidence and the rules",
+  "  stated for it above still apply. Without such evidence, a claim about another file is a guess.",
+  "",
+  "`start_line`/`end_line` are the numbers in this file. Anchor every finding to a marked line, or \u2014",
+  "when the change only REMOVED code \u2014 to the line named in `<removed_by_this_change>`, which is",
+  "where the deletion happened. A deletion-only change has no marked line and still gets reviewed."
+].join("\n");
+
 // src/engine/run.ts
 import { createHash as createHash6 } from "node:crypto";
 import { mkdir as mkdir2, mkdtemp, rm as rm2, writeFile as writeFile2 } from "node:fs/promises";
@@ -3963,15 +4080,20 @@ function systemPrompt(rule) {
   return [
     "You are reviewing one file's change in a single reply. There are NO tools in this mode: you",
     "cannot search or read the repository, and everything you may consult is already in this",
-    "prompt \u2014 the numbered diff, and a `<repository_context>` block of precomputed lookups when",
-    "present. Where the review guidance below speaks of searching the repository or spending tool",
-    "calls, read it as: consult the provided context. Scope every claim to what the diff and that",
-    'context substantiate; state a negative ("no caller", "unreachable") only as far as the',
-    "provided context shows it, and say so.",
+    "prompt. Where the review guidance below speaks of searching the repository or spending tool",
+    "calls, read it as: consult the provided context.",
     "",
-    "Diff format: `__new hunk__` lines carry the ABSOLUTE line number in the new file, additions",
-    "marked `+`; `__old hunk__` shows removed lines. Cite `start_line`/`end_line` from the",
-    "numbered lines only.",
+    "You will be given ONE of two views of the file under review, and the user prompt says which:",
+    "a `<current_file>` block holding the COMPLETE file with its changed lines marked \u2014 the normal",
+    "case, and the one where absence claims are checkable \u2014 or, when the file was too large or",
+    "could not be read, a `<current_file_diff>` block holding only the changed hunks. In the hunk",
+    'view a claim about what the file does or does not do elsewhere is a guess: state a negative ("no',
+    'caller", "unreachable", "never validated") only as far as what you were shown proves it, and',
+    "say what you could not check.",
+    "",
+    "Line numbers mean the same thing in both views: the ABSOLUTE line in the new file. In the hunk",
+    "view, `__new hunk__` carries them with additions marked `+` and `__old hunk__` shows removed",
+    "lines. Cite `start_line`/`end_line` from the numbered lines only.",
     "",
     "A `<companion_changes>` block may follow the diff: the hunks of RELATED files changed in the",
     "SAME pull request (its package manifest, same-stem siblings, version files). Cross-file",
@@ -3992,18 +4114,17 @@ function systemPrompt(rule) {
   ].join("\n");
 }
 function userPrompt(dispatch, pack, totalChangedFiles) {
+  const whole = dispatch.wholeFileBlock;
   return [
     `This file is part of a change touching ${String(totalChangedFiles)} file(s) in total.`,
     "",
     `<current_file_path>${dispatch.path}</current_file_path>`,
     "",
-    "<current_file_diff>",
-    dispatch.renderedDiff,
-    "</current_file_diff>",
+    ...whole === void 0 ? ["<current_file_diff>", dispatch.renderedDiff, "</current_file_diff>"] : [whole, "", WHOLE_FILE_PROMPT],
     ...dispatch.companionBlock === void 0 ? [] : ["", dispatch.companionBlock],
     ...pack === void 0 ? [] : ["", pack],
     "",
-    "Review the change in <current_file_diff> now and reply with the JSON array."
+    whole === void 0 ? "Review the change in <current_file_diff> now and reply with the JSON array." : "Review this change now and reply with the JSON array."
   ].join("\n");
 }
 function positiveInt(value) {
@@ -4196,19 +4317,26 @@ async function prepareDispatches(options2) {
   if (diffText === void 0) throw new EngineRunError("engine.run.spawn_failed");
   const fragments = splitFileDiffs(diffText);
   const companions = companionsByPath([...fragments.keys()]);
-  return dispatchPaths(options2, [...fragments.keys()]).map((path) => {
-    const rendered = renderNumberedHunks(fragments.get(path) ?? "");
+  const paths = dispatchPaths(options2, [...fragments.keys()]);
+  const dispatches = [];
+  for (const path of paths) {
+    const fragment = fragments.get(path) ?? "";
+    const rendered = renderNumberedHunks(fragment);
     const bounded = rendered.length > MAX_DIFF_CHARS ? `${rendered.slice(0, MAX_DIFF_CHARS)}
 (truncated: diff exceeds the prompt budget)` : rendered;
     const companionBlock = companionBlockFor(companions.get(path) ?? [], fragments);
-    const changedLines = (fragments.get(path) ?? "").split("\n").filter((line) => /^[+-][^+-]/.test(line) || line === "+" || line === "-").length;
-    return {
+    const changedLines = fragment.split("\n").filter((line) => /^[+-][^+-]/.test(line) || line === "+" || line === "-").length;
+    const text3 = await headFileText(options2, path);
+    const whole = text3 === void 0 ? void 0 : buildWholeFileBlock(text3, fragment);
+    dispatches.push({
       path,
       renderedDiff: bounded,
       changedLines,
-      ...companionBlock === void 0 ? {} : { companionBlock }
-    };
-  });
+      ...companionBlock === void 0 ? {} : { companionBlock },
+      ...whole === void 0 ? {} : { wholeFileBlock: whole.block }
+    });
+  }
+  return dispatches;
 }
 function budgetStopped(state, dispatch) {
   if (!state.spendStopped && state.usage.prompt + state.usage.completion < state.options.allottedBudget) {
@@ -4281,6 +4409,7 @@ async function headFileText(options2, path) {
   }
 }
 async function verifyWholeFileClaims(state, dispatch, comments) {
+  if (dispatch.wholeFileBlock !== void 0) return comments;
   const needing = comments.filter((c) => needsWholeFileEvidence(c.content, dispatch.renderedDiff));
   const spent = state.usage.prompt + state.usage.completion;
   if (needing.length === 0 || state.spendStopped || spent >= state.options.allottedBudget) {
