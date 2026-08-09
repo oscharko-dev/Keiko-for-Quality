@@ -545,6 +545,17 @@ copies only fixed identifiers, digests, booleans and counts into a version-bound
 refuses both a raw report inside the checkout and an output outside `corpus/evidence/`. Release
 attestation rejects the raw schema even when its scores are green.
 
+For a small historical verifier experiment when no model credential is installed locally, run the
+manual **historical diagnostic** workflow on the exact reviewer commit. Its input is a bounded list
+of public review-comment database IDs, the expected digest and timestamp of the already inspected
+private snapshot, and a hard token ceiling. The workflow harvests and filters the unredacted records
+only under the ephemeral runner directory, refuses drift from that exact snapshot, checks the
+zero-token plan first, and prints only `historical-replay.mjs`'s aggregate redacted metrics. It runs
+only when the requested commit is the current `dev` tip and an explicit confirmation is supplied;
+the credential environment admits protected branches only. A targeted diagnostic is an iteration
+tool, never release evidence: promotion still requires the complete calibrated historical population
+on the final clean release candidate.
+
 `npm test` runs Vitest, which transpiles without type-checking — it will happily go green on code
 `tsc` rejects. Run `npm run verify`, not `npm test`, before believing a change is done.
 

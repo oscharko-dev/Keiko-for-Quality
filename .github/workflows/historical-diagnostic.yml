@@ -1,0 +1,289 @@
+name: historical diagnostic
+
+# A deliberately manual, aggregate-only precision diagnostic. The raw harvest and its filtered
+# finding bodies exist only in RUNNER_TEMP; only aggregate metrics from historical-replay.mjs are
+# printed. This is not release evidence: the calibrated full replay is a separate run over the
+# complete 92-record population.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_reviewer_sha:
+        description: "Exact 40-character dev commit to measure"
+        required: true
+        type: string
+      confirm:
+        description: "Type RUN_TARGETED_REPLAY to authorize the paid call"
+        required: true
+        type: string
+      finding_ids:
+        description: "Comma-separated GitHub review-comment database IDs (1-20 corroborated KfQ findings)"
+        required: true
+        type: string
+      max_tokens:
+        description: "Hard token ceiling (925000-2200000; unused allowance is not spent)"
+        required: true
+        default: "2200000"
+        type: string
+      snapshot_generated_at:
+        description: "generatedAt value of the reviewed private snapshot"
+        required: true
+        type: string
+      expected_sha256:
+        description: "Expected SHA-256 of the exact filtered private snapshot"
+        required: true
+        type: string
+
+run-name: Historical diagnostic on ${{ github.ref_name }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: historical-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    name: targeted replay
+    if: >-
+      github.ref == 'refs/heads/dev' &&
+      inputs.expected_reviewer_sha == github.sha &&
+      inputs.confirm == 'RUN_TARGETED_REPLAY'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    environment: self-review
+    env:
+      FINDING_IDS: ${{ inputs.finding_ids }}
+      MAX_TOKENS: ${{ inputs.max_tokens }}
+      SNAPSHOT_GENERATED_AT: ${{ inputs.snapshot_generated_at }}
+      EXPECTED_SHA256: ${{ inputs.expected_sha256 }}
+    steps:
+      - name: Establish private runner paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "HARVEST_PATH=${RUNNER_TEMP}/kfq-harvest.json"
+            echo "FILTERED_PATH=${RUNNER_TEMP}/kfq-filtered.json"
+            echo "REPORT_PATH=${RUNNER_TEMP}/kfq-report.json"
+            echo "CONSUMER_REPO=${RUNNER_TEMP}/keiko.git"
+          } >> "${GITHUB_ENV}"
+
+      - name: Check out the reviewer commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: reviewer
+          ref: ${{ inputs.expected_reviewer_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: reviewer/package-lock.json
+
+      - name: Install
+        working-directory: reviewer
+        run: npm ci --ignore-scripts
+
+      - name: Validate the request
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${FINDING_IDS}" =~ ^[1-9][0-9]*(,[1-9][0-9]*){0,19}$ ]] || {
+            echo "finding_ids must contain 1-20 comma-separated positive integers" >&2
+            exit 2
+          }
+          [[ "${MAX_TOKENS}" =~ ^[0-9]+$ ]] || {
+            echo "max_tokens must be an integer" >&2
+            exit 2
+          }
+          if (( MAX_TOKENS < 925000 || MAX_TOKENS > 2200000 )); then
+            echo "max_tokens must be between 925000 and 2200000" >&2
+            exit 2
+          fi
+          [[ "${SNAPSHOT_GENERATED_AT}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$ ]] || {
+            echo "snapshot_generated_at must be a millisecond UTC timestamp" >&2
+            exit 2
+          }
+          [[ "${EXPECTED_SHA256}" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "expected_sha256 must be 64 lowercase hexadecimal characters" >&2
+            exit 2
+          }
+
+      - name: Fetch immutable Keiko history without a checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init --quiet "${CONSUMER_REPO}"
+          git -C "${CONSUMER_REPO}" remote add origin https://github.com/oscharko-dev/Keiko.git
+          git -C "${CONSUMER_REPO}" fetch --no-tags origin \
+            +refs/heads/dev:refs/remotes/origin/dev \
+            +refs/pull/3003/head:refs/remotes/origin/replay-pr-3003 \
+            +refs/pull/3005/head:refs/remotes/origin/replay-pr-3005 \
+            +refs/pull/3006/head:refs/remotes/origin/replay-pr-3006 \
+            +refs/pull/3028/head:refs/remotes/origin/replay-pr-3028 \
+            +refs/pull/3031/head:refs/remotes/origin/replay-pr-3031 \
+            +refs/pull/3032/head:refs/remotes/origin/replay-pr-3032 \
+            +refs/pull/3037/head:refs/remotes/origin/replay-pr-3037 \
+            +refs/pull/3040/head:refs/remotes/origin/replay-pr-3040 \
+            +refs/pull/3041/head:refs/remotes/origin/replay-pr-3041
+
+      - name: Mint a read-only Keiko token
+        id: keiko-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.KFQ_REVIEW_APP_ID }}
+          private-key: ${{ secrets.KFQ_REVIEW_APP_PRIVATE_KEY }}
+          owner: oscharko-dev
+          repositories: Keiko
+          permission-contents: read
+          permission-pull-requests: read
+
+      - name: Harvest the fixed historical cohort
+        working-directory: reviewer
+        env:
+          GH_TOKEN: ${{ steps.keiko-token.outputs.token }}
+        run: >-
+          npm run corpus:harvest --
+          --repo oscharko-dev/Keiko
+          --prs 3003,3005,3006,3028,3031,3032,3037,3040,3041
+          --out "${HARVEST_PATH}"
+
+      - name: Build the private diagnostic subset
+        working-directory: reviewer
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          jq \
+            --arg generated_at "${SNAPSHOT_GENERATED_AT}" \
+            --argjson wanted "[${FINDING_IDS}]" \
+            '.generatedAt = $generated_at |
+             .pullRequests |= [
+               .[] |
+               .findings |= [
+                 .[] | select(.databaseId as $id | $wanted | index($id))
+               ] |
+               select(.findings | length > 0)
+             ]' \
+            "${HARVEST_PATH}" > "${FILTERED_PATH}"
+          chmod 600 "${FILTERED_PATH}"
+          actual_sha256=$(sha256sum "${FILTERED_PATH}")
+          actual_sha256=${actual_sha256%% *}
+          if [[ "${actual_sha256}" != "${EXPECTED_SHA256}" ]]; then
+            echo "the filtered snapshot does not match expected_sha256" >&2
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const requested = process.env.FINDING_IDS.split(",").map(Number);
+          if (new Set(requested).size !== requested.length) {
+            throw new Error("finding_ids contains a duplicate");
+          }
+          const wanted = new Set(requested);
+          const harvest = JSON.parse(readFileSync(process.env.FILTERED_PATH, "utf8"));
+          const seen = new Set();
+          const pullRequests = [];
+          for (const pullRequest of harvest.pullRequests ?? []) {
+            const findings = [];
+            for (const finding of pullRequest.findings ?? []) {
+              if (!wanted.has(finding.databaseId)) continue;
+              if (seen.has(finding.databaseId)) throw new Error("harvest contains a duplicate ID");
+              if (
+                finding.arenaId !== "kfq" ||
+                !["fixed_confirmed", "refuted_confirmed"].includes(finding.label)
+              ) {
+                throw new Error("every requested ID must be a corroborated KfQ finding");
+              }
+              seen.add(finding.databaseId);
+              findings.push(finding);
+            }
+            if (findings.length > 0) pullRequests.push({ ...pullRequest, findings });
+          }
+          const missing = requested.filter((id) => !seen.has(id));
+          if (missing.length > 0) throw new Error("one or more requested IDs were not harvested");
+          if (pullRequests.length !== harvest.pullRequests.length) {
+            throw new Error("the filtered snapshot contains an empty pull request");
+          }
+          if (seen.size !== requested.length) {
+            throw new Error("the filtered snapshot contains an unexpected finding");
+          }
+          console.log(`prepared ${String(seen.size)} private diagnostic records`);
+          NODE
+
+      - name: Prove the zero-token execution plan
+        working-directory: reviewer
+        env:
+          OCR_LLM_MODEL: gpt-oss-120b
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { runHistoricalReplayCommand } from "./corpus/historical-replay.mjs";
+
+          const result = await runHistoricalReplayCommand([
+            "--dry-run",
+            "--harvest", process.env.FILTERED_PATH,
+            "--repo", process.env.CONSUMER_REPO,
+            "--holdout-from-pr", "3037",
+            "--max-tokens", process.env.MAX_TOKENS,
+          ]);
+          const expected = {
+            populationRecords: 13,
+            corroboratedCases: 13,
+            locallyBoundCases: 12,
+            estimatedAffordableCases: 12,
+            estimatedCostExcessCases: 0,
+            estimatedMaximumEndpointRequests: 48,
+          };
+          for (const [key, value] of Object.entries(expected)) {
+            if (result.plan[key] !== value) {
+              throw new Error(`unexpected zero-token plan value for ${key}`);
+            }
+          }
+          for (const line of result.lines) console.log(line);
+          console.log("dry-run assertions passed: zero endpoint requests, zero model tokens spent");
+          NODE
+
+      - name: Execute the targeted replay
+        working-directory: reviewer
+        env:
+          OCR_LLM_MODEL: gpt-oss-120b
+          OCR_LLM_URL: ${{ secrets.KFQ_MODEL_ENDPOINT }}
+          OCR_LLM_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
+          OCR_USE_ANTHROPIC: "false"
+        run: >-
+          node corpus/historical-replay.mjs
+          --execute
+          --harvest "${FILTERED_PATH}"
+          --repo "${CONSUMER_REPO}"
+          --holdout-from-pr 3037
+          --max-tokens "${MAX_TOKENS}"
+          --out "${REPORT_PATH}"
+
+      - name: Print aggregate result
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const report = JSON.parse(readFileSync(process.env.REPORT_PATH, "utf8"));
+          console.log(JSON.stringify({
+            reviewerTree: report.binding.reviewerTree,
+            accountedTokens: report.execution.accountedTokens,
+            decisions: report.execution.corroboratedDecisions,
+            stageCounters: report.execution.stageCounters,
+            holdout: report.score.chronological.holdout.after,
+          }, null, 2));
+          NODE
+
+      - name: Remove private diagnostic data
+        if: always()
+        shell: bash
+        run: rm -f -- "${HARVEST_PATH}" "${FILTERED_PATH}" "${REPORT_PATH}"
