@@ -33,7 +33,7 @@ const MAX_MATCH_LINE_CHARS = 300;
 const GIT_TIMEOUT_MS = 15_000;
 const GIT_MAX_BUFFER = 512 * 1024;
 const RETRIEVAL_TERM = /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/u;
-const TEST_PATH = /(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$/u;
+const TEST_PATH = /(?:(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$)/u;
 const DECLARATION_HINT =
   /\b(?:class|const|def|enum|fn|func|function|interface|let|module|struct|trait|type|var)\b/u;
 const MANIFEST_HINT =

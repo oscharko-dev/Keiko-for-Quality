@@ -3661,8 +3661,8 @@ function parseArray(text) {
   return Array.isArray(parsed) ? parsed : void 0;
 }
 function exactKeys(record, expected) {
-  const actual = Object.keys(record).sort();
-  const wanted = [...expected].sort();
+  const actual = Object.keys(record).sort((left, right) => left.localeCompare(right, "en"));
+  const wanted = [...expected].sort((left, right) => left.localeCompare(right, "en"));
   return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
 }
 function recordOf(value) {
@@ -7565,7 +7565,7 @@ function occurrenceEntry(value, source, terms) {
     path: source.path,
     line: range.start.line + 1,
     content,
-    kind: /(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$/u.test(
+    kind: /(?:(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$)/u.test(
       source.path
     ) ? "test" : "callsite"
   };
@@ -7664,7 +7664,7 @@ async function inspectSource(binaryPath, source, terms, deadlineMs) {
   return [...parseOutline(outline, source, terms), ...parseOccurrences(matches, source, terms)];
 }
 async function sourceCandidates(request) {
-  const paths = [...new Set(request.candidatePaths.slice(0, 32))].filter((path) => path !== request.reviewPath && languageForPath(path) !== void 0).sort().slice(0, MAX_STRUCTURAL_FILES);
+  const paths = [...new Set(request.candidatePaths.slice(0, 32))].filter((path) => path !== request.reviewPath && languageForPath(path) !== void 0).sort((left, right) => left.localeCompare(right, "en")).slice(0, MAX_STRUCTURAL_FILES);
   const read = await Promise.all(
     paths.map(async (path) => {
       const spec = languageForPath(path);
@@ -7735,7 +7735,7 @@ var MAX_MATCH_LINE_CHARS = 300;
 var GIT_TIMEOUT_MS3 = 15e3;
 var GIT_MAX_BUFFER2 = 512 * 1024;
 var RETRIEVAL_TERM = /^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/u;
-var TEST_PATH = /(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$/u;
+var TEST_PATH = /(?:(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$)/u;
 var DECLARATION_HINT2 = /\b(?:class|const|def|enum|fn|func|function|interface|let|module|struct|trait|type|var)\b/u;
 var MANIFEST_HINT = /\b(?:dependencies|devDependencies|engines|go|jsx|module|node|peerDependencies|python|react|runtime|rust-version|target|typescript|version)\b/iu;
 var TERM_STOP_WORDS = /* @__PURE__ */ new Set([
@@ -8390,8 +8390,8 @@ function parseExactObject(text) {
   return parsed;
 }
 function exactKeys2(record, expected) {
-  const actual = Object.keys(record).sort();
-  const wanted = [...expected].sort();
+  const actual = Object.keys(record).sort((left, right) => left.localeCompare(right, "en"));
+  const wanted = [...expected].sort((left, right) => left.localeCompare(right, "en"));
   return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
 }
 function closedValue2(value, vocabulary) {

@@ -137,8 +137,8 @@ function record(value) {
 }
 
 function sameKeys(value, expected) {
-  const actual = Object.keys(value).sort();
-  const wanted = [...expected].sort();
+  const actual = Object.keys(value).sort((left, right) => left.localeCompare(right, "en"));
+  const wanted = [...expected].sort((left, right) => left.localeCompare(right, "en"));
   return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
 }
 

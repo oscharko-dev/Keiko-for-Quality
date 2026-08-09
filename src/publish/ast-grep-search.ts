@@ -268,7 +268,7 @@ function occurrenceEntry(
         path: source.path,
         line: range.start.line + 1,
         content,
-        kind: /(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$/u.test(
+        kind: /(?:(?:^|\/)(?:__tests__|test|tests)(?:\/|$)|(?:\.spec|\.test)\.[^/]+$)/u.test(
           source.path,
         )
           ? "test"
@@ -410,7 +410,7 @@ async function sourceCandidates(
 ): Promise<readonly SourceCandidate[]> {
   const paths = [...new Set(request.candidatePaths.slice(0, 32))]
     .filter((path) => path !== request.reviewPath && languageForPath(path) !== undefined)
-    .sort()
+    .sort((left, right) => left.localeCompare(right, "en"))
     .slice(0, MAX_STRUCTURAL_FILES);
   const read = await Promise.all(
     paths.map(async (path): Promise<SourceCandidate | undefined> => {

@@ -457,8 +457,8 @@ function exactKeys(
   record: Readonly<Record<string, unknown>>,
   expected: readonly string[],
 ): boolean {
-  const actual = Object.keys(record).sort();
-  const wanted = [...expected].sort();
+  const actual = Object.keys(record).sort((left, right) => left.localeCompare(right, "en"));
+  const wanted = [...expected].sort((left, right) => left.localeCompare(right, "en"));
   return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
 }
 

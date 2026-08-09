@@ -285,8 +285,10 @@ export function validatePrepEvidenceChanges(changes, version) {
 
 /** The committed delta from the measured RC must be the same four files selected for release. */
 export function validateCommittedEvidenceDelta(paths, selectedFileNames, version) {
-  const expected = selectedFileNames.map((name) => `corpus/evidence/${name}`).sort();
-  const actual = [...paths].sort();
+  const expected = selectedFileNames
+    .map((name) => `corpus/evidence/${name}`)
+    .sort((left, right) => left.localeCompare(right, "en"));
+  const actual = [...paths].sort((left, right) => left.localeCompare(right, "en"));
   const valid =
     expected.length === 4 &&
     new Set(expected).size === 4 &&

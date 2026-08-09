@@ -186,7 +186,7 @@ export function redactQualificationReport(rawReport) {
 }
 
 function sameKeys(value, expected) {
-  const actual = Object.keys(value).sort();
+  const actual = Object.keys(value).sort((left, right) => left.localeCompare(right, "en"));
   return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
