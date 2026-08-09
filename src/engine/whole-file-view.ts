@@ -236,8 +236,12 @@ export function buildWholeFileBlock(
   if (!fitsWholeFile(fileText, fileDiff)) return undefined;
   const changed = changedNewFileLines(fileDiff);
   const deleted = deletedLineHints(fileDiff);
-  const shownHints = deleted.slice(0, MAX_DELETED_HINTS);
-  const omitted = deleted.length - shownHints.length;
+  // More removals than the hint budget means the whole-file view cannot carry the change. It must
+  // fall back rather than show 60 of 200 deletions: the removed text IS part of what is under
+  // review, and — because the finding call has the file — the verification pass would not run to
+  // catch what the truncation hid. The engine would count the file as fully reviewed.
+  if (deleted.length > MAX_DELETED_HINTS) return undefined;
+  const shownHints = deleted;
   const block = [
     "<current_file>",
     "The COMPLETE file at the reviewed head. Every line is numbered. The character right after",
@@ -255,7 +259,6 @@ export function buildWholeFileBlock(
           "in the file above — consult these when judging whether the change dropped something.",
           "",
           ...shownHints,
-          ...(omitted > 0 ? [`(${String(omitted)} further removed line(s) not shown)`] : []),
           "</removed_by_this_change>",
         ]),
   ].join("\n");
@@ -290,14 +293,21 @@ export const WHOLE_FILE_PROMPT = [
   "- a defect the marked lines leave behind because they changed something adjacent and missed this;",
   "- something the change removed that the file still needs (see `<removed_by_this_change>`).",
   "A pre-existing problem on an unmarked line is NOT a finding. The file is here so your claims can",
-  "be checked, not so it can be audited. If you cannot tie a finding to the marked lines, drop it.",
+  "be checked, not so it can be audited. If you cannot tie a finding to this change, drop it.",
   "",
   "EVIDENCE — because you can see the whole file, you are now expected to check before claiming:",
   '- Before writing that something is missing, absent, unhandled, unvalidated, or "never" done,',
-  "  SEARCH THE FILE ABOVE for it. If the file already does it anywhere, there is no finding.",
+  "  SEARCH THE FILE ABOVE for it.",
+  "- Finding it somewhere is not the end of the check: ask whether that code is REACHED BY the path",
+  "  this change touches. An existing endpoint validating a token says nothing about a newly added",
+  "  one beside it. Drop the finding only when the guard you found actually protects the changed",
+  "  path; if it does not, the finding stands and should say which path it covers instead.",
   "- Before writing that a symbol behaves a certain way, find its definition or use in the file.",
-  "- A claim about code NOT in this file remains forbidden. You still cannot see the rest of the",
-  "  repository, and a guess about it is not a finding.",
+  "- A claim about code outside this file needs evidence that is IN this prompt. Where a",
+  "  `<companion_changes>` block is present, its hunks are exactly that evidence and the rules",
+  "  stated for it above still apply. Without such evidence, a claim about another file is a guess.",
   "",
-  "`start_line`/`end_line` are the numbers in this file. Anchor every finding to a MARKED line.",
+  "`start_line`/`end_line` are the numbers in this file. Anchor every finding to a marked line, or —",
+  "when the change only REMOVED code — to the line named in `<removed_by_this_change>`, which is",
+  "where the deletion happened. A deletion-only change has no marked line and still gets reviewed.",
 ].join("\n");

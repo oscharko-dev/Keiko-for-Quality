@@ -140,6 +140,21 @@ describe("buildWholeFileBlock", () => {
     expect(built?.block).toContain("at 4: const gone = 0;");
   });
 
+  /**
+   * More removals than the hint budget means this view cannot carry the change. Showing 60 of 200
+   * deletions would be worse than falling back: the removed text is part of what is reviewed, and
+   * because the finding call HAS the file, the verification pass does not run to catch what the
+   * truncation hid — the engine would count the file as fully reviewed.
+   */
+  it("falls back rather than showing part of what the change removed", () => {
+    const many = [
+      "@@ -1,200 +1,1 @@",
+      " keep",
+      ...Array.from({ length: 61 }, (_, i) => `-gone ${String(i)}`),
+    ].join("\n");
+    expect(buildWholeFileBlock(FILE, many)).toBeUndefined();
+  });
+
   it("omits the removed block entirely when the change removed nothing", () => {
     const built = buildWholeFileBlock(FILE, ["@@ -1,1 +1,2 @@", " const a = 1;", "+x"].join("\n"));
     expect(built?.block).not.toContain("<removed_by_this_change>");
@@ -222,7 +237,27 @@ describe("WHOLE_FILE_PROMPT", () => {
     expect(WHOLE_FILE_PROMPT).toContain("SEARCH THE FILE ABOVE");
   });
 
-  it("still forbids claims about code outside this file", () => {
-    expect(WHOLE_FILE_PROMPT).toContain("NOT in this file remains forbidden");
+  /**
+   * Three instructions the first version got wrong, each pinned so it cannot regress:
+   * a guard found ANYWHERE was treated as settling the claim, which suppresses a real defect on a
+   * newly added path beside an already-guarded one; cross-file claims were forbidden outright,
+   * contradicting the system prompt's explicit permission for companion-proven ones; and every
+   * finding had to anchor to a marked line, which leaves a deletion-only change unreportable.
+   */
+  it("requires the guard it found to actually cover the changed path", () => {
+    expect(WHOLE_FILE_PROMPT).toContain("REACHED BY");
+    expect(WHOLE_FILE_PROMPT).not.toContain(
+      "If the file already does it anywhere, there is no finding",
+    );
+  });
+
+  it("does not contradict the system prompt's companion-changes permission", () => {
+    expect(WHOLE_FILE_PROMPT).toContain("companion_changes");
+    expect(WHOLE_FILE_PROMPT).not.toContain("NOT in this file remains forbidden");
+  });
+
+  it("gives a deletion-only change something to anchor to", () => {
+    expect(WHOLE_FILE_PROMPT).toContain("removed_by_this_change");
+    expect(WHOLE_FILE_PROMPT).toContain("deletion-only change");
   });
 });
