@@ -453,12 +453,16 @@ test("reset-isolation cases distinguish fresh dynamic imports from removed and b
   assert.equal(removed.testFile.base, clean.testFile.head);
   assert.equal(removed.testFile.head.match(/vi\.resetModules\(\);/gu)?.length, 1);
   assert.equal(removed.testFile.head.match(/await import\("\.\/cache\.js"\)/gu)?.length, 2);
+  const retainedReset = removed.testFile.head.lastIndexOf("vi.resetModules();");
+  const firstImport = removed.testFile.head.indexOf('await import("./cache.js")');
+  const secondImport = removed.testFile.head.lastIndexOf('await import("./cache.js")');
   assert.ok(
-    removed.testFile.head.lastIndexOf("vi.resetModules();") <
-      removed.testFile.head.indexOf('await import("./cache.js")') &&
-      removed.testFile.head.indexOf('await import("./cache.js")') <
-        removed.testFile.head.lastIndexOf('await import("./cache.js")'),
-    "the second import must reuse the first test's module after its own reset is removed",
+    retainedReset < firstImport,
+    "the retained reset must still protect the first dynamic import",
+  );
+  assert.ok(
+    firstImport < secondImport,
+    "the second import must follow the first without another registry reset",
   );
 
   assert.equal(bypassed.testFile.base, clean.testFile.head);

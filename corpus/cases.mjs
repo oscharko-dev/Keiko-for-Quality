@@ -1353,7 +1353,10 @@ it("rejects a zero denominator", () => {
   {
     // The reviewer cannot verify that a SHA belongs to a tag, and the rule text forbids
     // speculating about code it cannot see. Asking the author to "double-check the pin" is exactly
-    // the plausible-sounding noise that erodes a reviewer's standing.
+    // the plausible-sounding noise that erodes a reviewer's standing. The 2026-08-10 staged-v6
+    // wave still published one finding here despite correct official SHA/tag pairs, so staged-v7
+    // makes this exact SHA-to-SHA/comment-only shape a terminal SILENT decision while retaining
+    // the mutable-reference and shown-desynchronization recall twins below.
     id: "clean-workflow-pin-update",
     defect: null,
     about: "an action pin advanced with its version comment in step",
@@ -1580,7 +1583,9 @@ export function schemaVersion(): string {
     // ("remove the redundant reset") got wrong. Layer three, forced by two more validation runs:
     // the original `beforeEach` reset sat outside the added hunk and repeated false positives
     // reasoned about module caching without accounting for it. An in-hunk author comment improved
-    // the rate but did not close it: the 2026-08-10 staged-v5 wave still published one finding.
+    // the rate but did not close it: both the 2026-08-10 staged-v5 and staged-v6 waves still
+    // published one finding. The latter did so despite the local executable shape below, proving
+    // the remaining fault was an examiner decision ambiguity rather than missing fixture evidence.
     // The final shape therefore makes the mechanism local and executable in both tests: each
     // `vi.resetModules()` is immediately followed by the dynamic import it protects. The two
     // seeded twins below retain the opposing mechanics — one removes the second reset, the other

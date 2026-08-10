@@ -56,7 +56,7 @@ function occurrenceCount(value: string, needle: string): number {
 
 describe("risk planner", () => {
   it("pins the manually bumped cache identity", () => {
-    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v6");
+    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v7");
   });
 
   it("sees the complete qualified rule but never receives the whole file", () => {
@@ -139,6 +139,10 @@ describe("focused examiners", () => {
       expect(prompt.system).toContain("private state actually exported or leaked");
       expect(prompt.system).toContain("caller-selected");
       expect(prompt.system).toContain("key shown reaching a prototype is evidence");
+      expect(prompt.system).toContain(
+        "A matching SILENT row below is terminal: discard any risk-map hypothesis",
+      );
+      expect(prompt.system).toContain("emit no claim or verification request for it");
       expect(occurrenceCount(prompt.system, EXAMINER_CLAIM_DECISION_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, TEST_ISOLATION_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, REFERENCE_TRANSITION_EVIDENCE_POLICY)).toBe(1);

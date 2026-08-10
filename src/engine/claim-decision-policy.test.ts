@@ -24,29 +24,28 @@ describe("shared claim-decision policy", () => {
 
   it("keeps clean reset and full-SHA transitions explicit beside their recall boundaries", () => {
     expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
-      "SILENT: a shown per-case `vi.resetModules()` in `beforeEach` or the test precedes every dynamic import",
+      "SILENT (emit no claim): each case executes `vi.resetModules()` immediately before its awaited dynamic import",
+    );
+    expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain("That sequence loads a fresh module instance");
+    expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
+      "never call its reset redundant or insufficient",
     );
     expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
-      "REPORT: the reset is missing, removed, late, or wrong",
+      "REPORT: the reset is shown missing, removed, late, or wrong",
     );
     expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
       "BYPASS (report): a static/top-level import or cached import promise was established before the reset",
     );
-    expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
-      "Never demand a module clear/reset helper; never invent one",
-    );
 
     expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain(
-      "one full 40-hex SHA to another remains immutable and is clean by itself",
+      "SILENT (emit no claim): at the same action/dependency coordinate, one full 40-hex SHA or digest changes to another",
     );
+    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("no shown local counterevidence exists");
+    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("never request remote tag verification");
     expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain(
-      "shown local counterevidence still applies",
+      "claim that the comment and immutable pin need alignment",
     );
-    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain(
-      "Version comments do not prove remote tag mapping",
-    );
-    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("Review changed coordinates");
-    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("report only SHA-to-tag/branch");
+    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("REPORT only SHA/digest-to-tag/branch");
     expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("repo-proven pin mismatch");
     expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("shown sync-contract desync");
     expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain(

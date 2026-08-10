@@ -5,18 +5,22 @@
  * so keeping it a leaf prevents a policy-sharing fix from creating an engine import cycle.
  */
 export const TEST_ISOLATION_EVIDENCE_POLICY = [
-  "Test-isolation table — SILENT: a shown per-case `vi.resetModules()` in `beforeEach` or the test",
-  "precedes every dynamic import. REPORT: the reset is missing, removed, late, or wrong after tracing",
-  "suite setup and shared state. BYPASS (report): a static/top-level import or cached import promise",
-  "was established before the reset. Never demand a module clear/reset helper; never invent one.",
+  "Test-isolation decision — SILENT (emit no claim): each case executes `vi.resetModules()`",
+  "immediately before its awaited dynamic import, whether directly in the test or through shown",
+  "per-case setup. That sequence loads a fresh module instance; never call its reset redundant or",
+  "insufficient, and never demand or invent a module clear/reset helper. REPORT: the reset is shown",
+  "missing, removed, late, or wrong after tracing suite setup and shared state. BYPASS (report): a",
+  "static/top-level import or cached import promise was established before the reset.",
 ].join(" ");
 
 export const REFERENCE_TRANSITION_EVIDENCE_POLICY = [
-  "At one action/dependency coordinate, one full 40-hex SHA to another remains immutable and is",
-  "clean by itself; shown local counterevidence still applies. Version comments do not prove remote",
-  "tag mapping. Review changed coordinates; report only SHA-to-tag/branch, repo-proven pin mismatch,",
-  "or shown sync-contract desync. Mutable references are `security`/`high`, including first-party",
-  "actions; never critical. Never invent remote mapping, validity, staleness, or cadence.",
+  "Reference-transition decision — SILENT (emit no claim): at the same action/dependency coordinate,",
+  "one full 40-hex SHA or digest changes to another and no shown local counterevidence exists. An",
+  "adjacent version comment does not change that decision: never request remote tag verification or",
+  "claim that the comment and immutable pin need alignment. REPORT only SHA/digest-to-tag/branch, a",
+  "repo-proven pin mismatch, or shown sync-contract desync. Mutable references are `security`/`high`,",
+  "including first-party actions; never critical. Never invent remote mapping, validity, staleness,",
+  "or cadence.",
 ].join(" ");
 
 export const BOUNDARY_OMISSION_EVIDENCE_POLICY = [
@@ -34,4 +38,4 @@ export const EXAMINER_CLAIM_DECISION_POLICY = [
 ].join("\n");
 
 /** Prevent a focused examiner fix from silently becoming another copy of the complete rule. */
-export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 1_250;
+export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 1_550;

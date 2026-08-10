@@ -2976,17 +2976,21 @@ import { createHash as createHash6 } from "node:crypto";
 
 // src/engine/claim-decision-policy.ts
 var TEST_ISOLATION_EVIDENCE_POLICY = [
-  "Test-isolation table \u2014 SILENT: a shown per-case `vi.resetModules()` in `beforeEach` or the test",
-  "precedes every dynamic import. REPORT: the reset is missing, removed, late, or wrong after tracing",
-  "suite setup and shared state. BYPASS (report): a static/top-level import or cached import promise",
-  "was established before the reset. Never demand a module clear/reset helper; never invent one."
+  "Test-isolation decision \u2014 SILENT (emit no claim): each case executes `vi.resetModules()`",
+  "immediately before its awaited dynamic import, whether directly in the test or through shown",
+  "per-case setup. That sequence loads a fresh module instance; never call its reset redundant or",
+  "insufficient, and never demand or invent a module clear/reset helper. REPORT: the reset is shown",
+  "missing, removed, late, or wrong after tracing suite setup and shared state. BYPASS (report): a",
+  "static/top-level import or cached import promise was established before the reset."
 ].join(" ");
 var REFERENCE_TRANSITION_EVIDENCE_POLICY = [
-  "At one action/dependency coordinate, one full 40-hex SHA to another remains immutable and is",
-  "clean by itself; shown local counterevidence still applies. Version comments do not prove remote",
-  "tag mapping. Review changed coordinates; report only SHA-to-tag/branch, repo-proven pin mismatch,",
-  "or shown sync-contract desync. Mutable references are `security`/`high`, including first-party",
-  "actions; never critical. Never invent remote mapping, validity, staleness, or cadence."
+  "Reference-transition decision \u2014 SILENT (emit no claim): at the same action/dependency coordinate,",
+  "one full 40-hex SHA or digest changes to another and no shown local counterevidence exists. An",
+  "adjacent version comment does not change that decision: never request remote tag verification or",
+  "claim that the comment and immutable pin need alignment. REPORT only SHA/digest-to-tag/branch, a",
+  "repo-proven pin mismatch, or shown sync-contract desync. Mutable references are `security`/`high`,",
+  "including first-party actions; never critical. Never invent remote mapping, validity, staleness,",
+  "or cadence."
 ].join(" ");
 var BOUNDARY_OMISSION_EVIDENCE_POLICY = [
   "Boundary/omission table \u2014 BOUNDS: compare empty, exact-boundary, and just-outside inputs after",
@@ -3622,7 +3626,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v6";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v7";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;
@@ -3726,6 +3730,8 @@ var EXAMINER_EVIDENCE_CONTRACT = [
   "state as their current contract unless shown evidence exposes a boundary that can violate it.",
   "A member actually added to a union, private state actually exported or leaked, or a caller-selected",
   "key shown reaching a prototype is evidence; a hypothetical future member or mutation is not.",
+  "A matching SILENT row below is terminal: discard any risk-map hypothesis about that shape and",
+  "emit no claim or verification request for it.",
   EXAMINER_CLAIM_DECISION_POLICY
 ].join("\n");
 function renderAnchorRanges(lines) {
