@@ -399,6 +399,9 @@ function validateQualificationQualityEvidence(qualificationRoot, expected, failu
   if (model.id !== "gpt-oss-120b" || model.protocol !== "openai") {
     failures.push("qualification_model_mismatch");
   }
+  if (binding.strictness !== "paranoid") {
+    failures.push("qualification_strictness_mismatch");
+  }
 }
 
 function validateHistoricalBinding(historicalRoot, expected, failures) {
