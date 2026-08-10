@@ -9,11 +9,12 @@
  *
  * Truth may request one bounded deterministic lookup and then receives a smaller terminal role.
  * A confirmation never flows straight to publication: a deterministic contract challenge chooses
- * one closed disproof axis, deterministic retrieval must expand the evidence, and only then may the
- * terminal Falsifier decide. Every surviving claim receives an independent Referee decision; a
- * semantically invalid Falsifier shape may use that same final round without exposing the rejected
- * response. The complete workflow remains capped structurally at four model calls and every role
- * spends from one whole-review hard budget.
+ * one closed disproof axis and searches for a counterexample or guard outside Truth's proof. A
+ * successful search with no novel evidence is itself the terminal no-defeater result; when it does
+ * expand the evidence, the terminal Falsifier decides and every surviving claim receives an
+ * independent Referee decision. A semantically invalid Falsifier shape may use that same final
+ * round without exposing the rejected response. The complete workflow remains capped structurally
+ * at four model calls and every role spends from one whole-review hard budget.
  */
 
 import { LIMITS as ENGINE_RESULT_LIMITS } from "../engine/result.js";
@@ -2335,7 +2336,13 @@ async function falsifyConfirmed<T extends JudgeableFinding>(
     });
   }
   if (context.kind === "insufficient") {
-    return decidedResult<T>(undefined, "insufficient_evidence", run.metrics, {
+    // Truth already proved the exact changed behavior and PR causality. The independent challenge
+    // then searched outside that proof and found no counterexample, guard, or competing contract.
+    // Treating that successful negative search as missing positive evidence discarded locally
+    // self-contained defects by construction: there is no second repository coordinate to find.
+    // This does not loosen Truth's own needs_context path, whose no-match remains insufficient.
+    run.metrics.confirmed += 1;
+    return decidedResult(run.finding, "kept", run.metrics, {
       stage: "challenge_retrieval",
       reasonCode: context.reasonCode,
     });
