@@ -22,9 +22,11 @@ const NEW_CODE_RATINGS = Object.freeze([
 ]);
 const GITHUB_COMMIT = /^[0-9a-f]{40}$/iu;
 const ZERO_COMMIT = /^0{40}$/u;
+const CANONICAL_NUMBER = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/u;
 
 export function finiteNumber(value) {
-  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string" || !CANONICAL_NUMBER.test(value)) return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
 }

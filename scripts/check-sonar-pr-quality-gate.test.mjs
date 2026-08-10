@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import {
   evaluateSonarPullRequest,
   executeSonarPullRequestGateCli,
+  finiteNumber,
   isAnalyzableChange,
   measuresFromPayload,
   runSonarPullRequestGate,
@@ -208,6 +209,55 @@ describe("SonarCloud pull-request evidence gate", () => {
       }),
       { invalid: undefined, period: 1, periods: 2, value: 3 },
     );
+  });
+
+  it("accepts only finite numbers and canonical numeric strings", () => {
+    for (const [value, expected] of [
+      [0, 0],
+      [1.25, 1.25],
+      ["0", 0],
+      ["-1.25", -1.25],
+      ["1.25e2", 125],
+    ]) {
+      assert.equal(finiteNumber(value), expected);
+    }
+    for (const value of [false, [], " ", "\t", "0x0", "+0", "00", Number.NaN, Infinity]) {
+      assert.equal(finiteNumber(value), undefined);
+    }
+  });
+
+  it("fails closed when PR issue or measure evidence is coercible but nonnumeric", async () => {
+    for (const malformed of [false, [], " \t"]) {
+      await assert.rejects(
+        runSonarPullRequestGate({
+          base: "b".repeat(40),
+          execute: () => "M\tsrc/review.ts\n",
+          headSha,
+          load: async (path) =>
+            path.includes("issues/search") ? { total: malformed } : passingLoad(path),
+          pullRequest: "42",
+        }),
+        /SonarCloud issue total is missing/u,
+      );
+      await assert.rejects(
+        runSonarPullRequestGate({
+          base: "b".repeat(40),
+          execute: () => "M\tsrc/review.ts\n",
+          headSha,
+          load: async (path) => {
+            if (!path.includes("metricKeys=new_coverage")) return passingLoad(path);
+            const payload = measurePayload(passingMeasures);
+            const measure = payload.component.measures.find(
+              (candidate) => candidate.metric === "new_violations",
+            );
+            measure.periods[0].value = malformed;
+            return payload;
+          },
+          pullRequest: "42",
+        }),
+        /New-code violation metric is missing/u,
+      );
+    }
   });
 
   it("loads the live-shaped API evidence and emits a commit-bound receipt", async () => {

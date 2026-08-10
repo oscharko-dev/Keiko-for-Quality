@@ -103,6 +103,34 @@ describe("SonarCloud dev evidence gate", () => {
     );
   });
 
+  it("fails closed when dev issue or measure evidence is coercible but nonnumeric", async () => {
+    for (const malformed of [false, [], " \t"]) {
+      await assert.rejects(
+        runSonarMainGate({
+          headSha,
+          load: async (path) =>
+            path.includes("issues/search") ? { total: malformed } : passingLoad(path),
+        }),
+        /SonarCloud issue total is missing/u,
+      );
+      await assert.rejects(
+        runSonarMainGate({
+          headSha,
+          load: async (path) => {
+            if (!path.includes("metricKeys=new_coverage")) return passingLoad(path);
+            const payload = measurePayload(newMeasures);
+            const measure = payload.component.measures.find(
+              (candidate) => candidate.metric === "new_violations",
+            );
+            measure.periods[0].value = malformed;
+            return payload;
+          },
+        }),
+        /New-code violation metric is missing/u,
+      );
+    }
+  });
+
   it("rejects a missing or non-A rating on dev", async () => {
     await assert.rejects(
       runSonarMainGate({
