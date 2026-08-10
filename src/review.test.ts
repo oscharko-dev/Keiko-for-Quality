@@ -4220,6 +4220,7 @@ describe("performReview: review-cache memoization end to end", () => {
       // the engine's original "bug".
       expect(callCount()).toBeGreaterThan(0);
       expect(created[0]?.body).toContain('/cat-security.svg" height="24" alt="Security">');
+      expect(created[0]?.body).toContain('/sev-critical.svg" height="24" alt="Critical">');
 
       const records = diagnostics.drain();
       expect(records.find((r) => r.code === "classify.skipped_budget")).toBeUndefined();
