@@ -4155,8 +4155,17 @@ function isMemberContract(body) {
   return MEMBER_NAME.test(member) && value !== "" && !value.startsWith("=");
 }
 function isStructuralContractLine(line) {
-  const body = /^\d+ [+-]\s*(.*)$/u.exec(line)?.[1];
-  return body !== void 0 && (isFunctionContract(body) || isMemberContract(body));
+  let offset = 0;
+  while (offset < line.length) {
+    const code = line.codePointAt(offset) ?? -1;
+    if (code < 48 || code > 57) break;
+    offset += 1;
+  }
+  if (offset === 0 || line[offset] !== " ") return false;
+  const marker = line[offset + 1];
+  if (marker !== "+" && marker !== "-") return false;
+  const body = line.slice(offset + 2).trimStart();
+  return isFunctionContract(body) || isMemberContract(body);
 }
 function hasStructuralContractSignal(renderedDiff) {
   return renderedDiff.split("\n").some(isStructuralContractLine);
@@ -10109,9 +10118,9 @@ function manifestCandidates(reviewPath, includeLockfiles) {
   ];
 }
 function boundedPreferredEntries(preferred, remaining) {
-  const leadingPaths = [...new Set(preferred.map((entry) => entry.path))].slice(0, 2);
-  const leading = preferred.filter((entry) => leadingPaths.includes(entry.path));
-  const deferred = preferred.filter((entry) => !leadingPaths.includes(entry.path));
+  const leadingPaths = new Set([...new Set(preferred.map((entry) => entry.path))].slice(0, 2));
+  const leading = preferred.filter((entry) => leadingPaths.has(entry.path));
+  const deferred = preferred.filter((entry) => !leadingPaths.has(entry.path));
   const selected = [];
   const paths = /* @__PURE__ */ new Set();
   for (const entry of [...leading, ...remaining, ...deferred]) {
@@ -10157,7 +10166,7 @@ function relevantManifestLines(path, text3, terms, termOnly = false) {
   return [...selected].slice(0, MAX_MANIFEST_LINES);
 }
 function manifestLineContainsTerm(line, term) {
-  const escaped = term.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
   return new RegExp(`(?:^|[^A-Za-z0-9_$])${escaped}(?:$|[^A-Za-z0-9_$])`, "u").test(line);
 }
 async function manifestEntriesAtPath(context, request, path, terms, termOnly, strict) {

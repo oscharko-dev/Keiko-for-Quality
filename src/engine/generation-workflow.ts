@@ -511,8 +511,17 @@ function isMemberContract(body: string): boolean {
 
 /** Function/type/member shapes, based on punctuation rather than one language's keywords. */
 function isStructuralContractLine(line: string): boolean {
-  const body = /^\d+ [+-]\s*(.*)$/u.exec(line)?.[1];
-  return body !== undefined && (isFunctionContract(body) || isMemberContract(body));
+  let offset = 0;
+  while (offset < line.length) {
+    const code = line.codePointAt(offset) ?? -1;
+    if (code < 48 || code > 57) break;
+    offset += 1;
+  }
+  if (offset === 0 || line[offset] !== " ") return false;
+  const marker = line[offset + 1];
+  if (marker !== "+" && marker !== "-") return false;
+  const body = line.slice(offset + 2).trimStart();
+  return isFunctionContract(body) || isMemberContract(body);
 }
 
 function hasStructuralContractSignal(renderedDiff: string): boolean {

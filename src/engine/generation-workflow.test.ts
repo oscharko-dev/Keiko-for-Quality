@@ -225,6 +225,18 @@ describe("focused examiners", () => {
     expect(
       shouldRunIntegrationExaminer({
         ...ISOLATED_CONTEXT,
+        renderedDiff: `__new hunk__\n8 +${" ".repeat(50_000)}vertrag: Ergebnis;`,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRunIntegrationExaminer({
+        ...ISOLATED_CONTEXT,
+        renderedDiff: "__new hunk__\n8x +vertrag: Ergebnis;",
+      }),
+    ).toBe(false);
+    expect(
+      shouldRunIntegrationExaminer({
+        ...ISOLATED_CONTEXT,
         renderedDiff: "__file metadata__\nold mode 100644\nnew mode 100755",
       }),
     ).toBe(true);

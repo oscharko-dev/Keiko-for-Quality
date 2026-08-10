@@ -1177,9 +1177,9 @@ function boundedPreferredEntries(
   preferred: readonly RepositoryEvidenceEntry[],
   remaining: readonly RepositoryEvidenceEntry[],
 ): readonly RepositoryEvidenceEntry[] {
-  const leadingPaths = [...new Set(preferred.map((entry) => entry.path))].slice(0, 2);
-  const leading = preferred.filter((entry) => leadingPaths.includes(entry.path));
-  const deferred = preferred.filter((entry) => !leadingPaths.includes(entry.path));
+  const leadingPaths = new Set([...new Set(preferred.map((entry) => entry.path))].slice(0, 2));
+  const leading = preferred.filter((entry) => leadingPaths.has(entry.path));
+  const deferred = preferred.filter((entry) => !leadingPaths.has(entry.path));
   const selected: RepositoryEvidenceEntry[] = [];
   const paths = new Set<string>();
   // Two exact configuration paths are reserved first, but the third verifier chunk remains
@@ -1247,7 +1247,7 @@ function relevantManifestLines(
 }
 
 function manifestLineContainsTerm(line: string, term: string): boolean {
-  const escaped = term.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
   return new RegExp(`(?:^|[^A-Za-z0-9_$])${escaped}(?:$|[^A-Za-z0-9_$])`, "u").test(line);
 }
 

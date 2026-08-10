@@ -13,7 +13,35 @@ const properties = readFileSync(
 );
 const readme = readFileSync(resolve(import.meta.dirname, "..", "README.md"), "utf8");
 
+function jobSection(jobName) {
+  const lines = workflow.split("\n");
+  const start = lines.indexOf(`  ${jobName}:`);
+  assert(start >= 0, `${jobName} job must exist`);
+  const nextJobOffset = lines.slice(start + 1).findIndex((line) => /^ {2}\S/u.test(line));
+  const end = nextJobOffset < 0 ? lines.length : start + 1 + nextJobOffset;
+  return lines.slice(start, end);
+}
+
 describe("required Sonar CI contract", () => {
+  it("grants only job-local minimum permissions", () => {
+    assert.equal(
+      workflow.split("\n").some((line) => line.startsWith("permissions:")),
+      false,
+    );
+    for (const jobName of [
+      "core_verify",
+      "engine-pin",
+      "action-smoke",
+      "sonar",
+      "main_provenance",
+    ]) {
+      const section = jobSection(jobName);
+      assert.equal(section.includes("    permissions:"), true, `${jobName} declares permissions`);
+      assert.equal(section.includes("      contents: read"), true, `${jobName} reads contents`);
+    }
+    assert.equal(jobSection("verify").includes("    permissions: {}"), true);
+  });
+
   it("keeps the protected verify context as an aggregate over core and Sonar", () => {
     assert.match(workflow, /\n {2}verify:\n {4}name: verify\n/u);
     assert.match(workflow, /needs: \[core_verify, main_provenance, sonar\]/u);
