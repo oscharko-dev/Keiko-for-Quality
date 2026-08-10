@@ -327,8 +327,15 @@ const LEGACY_CATEGORY_LABELS =
   "SECURITY|CORRECTNESS|PERFORMANCE|MAINTAINABILITY|TESTS|DOCUMENTATION|REVIEW";
 const LEGACY_SEVERITY_LABELS = "CRITICAL|MAJOR|MINOR|NIT";
 const LEGACY_CLASSIFICATION_TEXT = `(?:${LEGACY_CATEGORY_LABELS}) · (?:${LEGACY_SEVERITY_LABELS})`;
-const LEGACY_CODE_SPAN_HEADER = new RegExp(`^\`${LEGACY_CLASSIFICATION_TEXT}\`[ \\t]*\\n?`, "u");
-const LEGACY_BOLD_HEADER = new RegExp(`^\\*\\*${LEGACY_CLASSIFICATION_TEXT}\\*\\*[ \\t]*\\n?`, "u");
+const LEGACY_HEADER_END = String.raw`[ \t]*\n?`;
+const LEGACY_CODE_SPAN_HEADER = new RegExp(
+  ["^`", LEGACY_CLASSIFICATION_TEXT, "`", LEGACY_HEADER_END].join(""),
+  "u",
+);
+const LEGACY_BOLD_HEADER = new RegExp(
+  [String.raw`^\*\*`, LEGACY_CLASSIFICATION_TEXT, String.raw`\*\*`, LEGACY_HEADER_END].join(""),
+  "u",
+);
 
 function stripComposedArtifacts(body: string): string {
   return clip(body)

@@ -6446,8 +6446,15 @@ function tokenOverlap(a, b) {
 var LEGACY_CATEGORY_LABELS = "SECURITY|CORRECTNESS|PERFORMANCE|MAINTAINABILITY|TESTS|DOCUMENTATION|REVIEW";
 var LEGACY_SEVERITY_LABELS = "CRITICAL|MAJOR|MINOR|NIT";
 var LEGACY_CLASSIFICATION_TEXT = `(?:${LEGACY_CATEGORY_LABELS}) \xB7 (?:${LEGACY_SEVERITY_LABELS})`;
-var LEGACY_CODE_SPAN_HEADER = new RegExp(`^\`${LEGACY_CLASSIFICATION_TEXT}\`[ \\t]*\\n?`, "u");
-var LEGACY_BOLD_HEADER = new RegExp(`^\\*\\*${LEGACY_CLASSIFICATION_TEXT}\\*\\*[ \\t]*\\n?`, "u");
+var LEGACY_HEADER_END = String.raw`[ \t]*\n?`;
+var LEGACY_CODE_SPAN_HEADER = new RegExp(
+  ["^`", LEGACY_CLASSIFICATION_TEXT, "`", LEGACY_HEADER_END].join(""),
+  "u"
+);
+var LEGACY_BOLD_HEADER = new RegExp(
+  [String.raw`^\*\*`, LEGACY_CLASSIFICATION_TEXT, String.raw`\*\*`, LEGACY_HEADER_END].join(""),
+  "u"
+);
 function stripComposedArtifacts(body) {
   return clip2(body).replace(LEGACY_CODE_SPAN_HEADER, "").replace(LEGACY_BOLD_HEADER, "").replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<img[^>\n]*>/g, " ").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
 }
