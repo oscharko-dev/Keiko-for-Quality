@@ -601,6 +601,26 @@ describe("repository context collection", () => {
     expect(context.entries.some((entry) => entry.content.includes("useCapability"))).toBe(true);
   });
 
+  it("does not add a broad adjacent fallback when clear primary owner enrichment is unavailable", async () => {
+    const { request } = await fixture();
+    let searchedTerms: readonly string[] = [];
+
+    const context = await collectRepositoryContextFollowUp(request, ["secondaryContract"], {
+      anchorOwnerSearch: () => Promise.reject(new Error("owner unavailable")),
+      structuralSearch: ({ terms }) => {
+        searchedTerms = terms;
+        return Promise.resolve([]);
+      },
+    });
+
+    // `useCapability` is visible at the reviewed anchor and would be the deterministic fallback.
+    // A clear cross-file primary hit cannot activate that broader search merely because optional
+    // owner discovery failed.
+    expect(searchedTerms).toEqual(["secondaryContract"]);
+    expect(context.entries.some((entry) => entry.content.includes("secondaryContract"))).toBe(true);
+    expect(context.entries.every((entry) => !entry.content.includes("useCapability"))).toBe(true);
+  });
+
   it("reserves all four ambiguous primary blobs ahead of optional owner enrichment", async () => {
     const { repository, request } = await fixture();
     await write(repository, request.reviewPath, "return publicOwner(input);\n");
