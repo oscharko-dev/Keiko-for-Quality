@@ -19,7 +19,7 @@ import { EXAMINER_CLAIM_DECISION_POLICY } from "./claim-decision-policy.js";
 
 export const GENERATION_COMPLETION_LIMIT = 4_096;
 /** Bump whenever a stage prompt, parser, renderer, or routing rule changes review semantics. */
-export const GENERATION_WORKFLOW_IDENTITY = "staged-v4";
+export const GENERATION_WORKFLOW_IDENTITY = "staged-v5";
 const REQUEST_FRAMING_TOKENS = 512;
 const MAX_RISK_HYPOTHESES = 6;
 const MAX_CLAIMS_PER_EXAMINER = 4;
@@ -203,7 +203,7 @@ export const EXAMINER_EVIDENCE_CONTRACT = [
 ].join("\n");
 
 /** Keeps the universal evidence contract compact enough for both mandatory examiner calls. */
-export const EXAMINER_EVIDENCE_CONTRACT_MAX_BYTES = 1_450;
+export const EXAMINER_EVIDENCE_CONTRACT_MAX_BYTES = 1_900;
 
 /** Compact exact line-set rendering: `1,2,3,7` becomes `1-3,7`, without widening the set. */
 function renderAnchorRanges(lines: readonly number[]): string {

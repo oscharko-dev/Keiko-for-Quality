@@ -106,7 +106,14 @@ for (const testCase of CASES) {
     console.log(`     absent:    ${testCase.id} — no result in the report`);
   } else if (result.pass !== true) {
     const detail = isRedactedEvidence
-      ? "private diagnostic detail omitted from release evidence"
+      ? [
+          `kind=${String(result.kind)}`,
+          `findings=${String(result.findingCount)}`,
+          `tokens=${String(result.tokens)}`,
+          `rejected=${String(result.rejectedCount)}`,
+          `sanitizer=${String(result.rejectedSanitization)}`,
+          `suppressed=${String(result.suppressedIntraRun)}`,
+        ].join(", ")
       : String(result.detail);
     console.log(`     regressed: ${testCase.id} — ${detail}`);
   }

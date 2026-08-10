@@ -7,8 +7,9 @@ reading them will not surface in time to save you the cost of finding out the ha
 ## `npm run review`
 
 `src/cli.ts` is the local CLI entry point (epic #94, issue #96). Run `npm run review -- --help`
-for the full flag, environment-variable, and exit-code reference; see the README's "Local runs"
-section for prerequisites and trust posture. Do not restate either here.
+for the full flag, environment-variable, and exit-code reference; see
+[`docs/operations.md`](docs/operations.md#local-runs) for prerequisites and trust posture. Do not
+restate either here.
 
 Issue #95 landed `performLocalReview` in `src/review.ts`, so the CLI runs a real review end to
 end, through the same shared pipeline `performReview` runs — same digest-pinned engine, same rule

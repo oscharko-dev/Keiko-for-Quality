@@ -95,8 +95,10 @@ test("every recorded omission still describes a real case that still omits its m
 test("clean-added-test's module is context, not part of the change", () => {
   const testCase = CASES.find((entry) => entry.id === "clean-added-test");
   const moduleFile = testCase.files.find((file) => file.path === "src/ratio.ts");
+  const testFile = testCase.files.find((file) => file.path === "src/ratio.test.ts");
 
   assert.ok(moduleFile !== undefined, "the module under test must be committed with the case");
+  assert.ok(testFile !== undefined, "the test file must be committed with the case");
   assert.equal(
     moduleFile.base,
     moduleFile.head,
@@ -106,6 +108,14 @@ test("clean-added-test's module is context, not part of the change", () => {
     moduleFile.head,
     /throw new RangeError/u,
     "the module has to actually satisfy the added assertion — otherwise silence would be the wrong verdict",
+  );
+  const ratioImport = /^import \{ ratio \} from "\.\/ratio\.js";$/gmu;
+  assert.equal(testFile.base.match(ratioImport)?.length, 1, "base must import ratio exactly once");
+  assert.equal(testFile.head.match(ratioImport)?.length, 1, "head must import ratio exactly once");
+  assert.equal(
+    testFile.base.match(ratioImport)?.[0],
+    testFile.head.match(ratioImport)?.[0],
+    "the ratio import must be identical context, not part of the added test",
   );
 });
 
@@ -282,12 +292,12 @@ test("every case recorded as using opaque handles still has an undeclared type",
 });
 
 /**
- * The verdict-deciding half of the fix, pinned the same way the module fix is: the type must be
- * context rather than a second changed file, and it must be OPTIONAL — a required field would make
- * `return {}` a type error, which is a different and far shallower defect than the one this case
- * exists to seed.
+ * Both verdict-deciding halves of the fix are pinned: the type must be optional, and the unchanged
+ * receiver must distinguish an omitted field from an explicit empty array. Putting both in the
+ * changed file keeps them in the staged examiner's complete-file evidence without introducing a
+ * second changed path.
  */
-test("cleared-list-omitted-from-update declares its return type as optional context", () => {
+test("cleared-list-omitted-from-update shows how omission preserves stale state", () => {
   const testCase = CASES.find((entry) => entry.id === "cleared-list-omitted-from-update");
   const source = testCase.files.find((file) => file.path === "src/capabilities.ts");
 
@@ -298,10 +308,40 @@ test("cleared-list-omitted-from-update declares its return type as optional cont
     /workflowEligibleModelIds\?:/u,
     "the field has to be optional — otherwise `return {}` is a type error, not the seeded bug",
   );
+  const receiver = [
+    "export function applyEligibilityUpdate(",
+    "  current: readonly string[],",
+    "  update: EligibilityUpdate,",
+    "): readonly string[] {",
+    "  return update.workflowEligibleModelIds ?? current;",
+    "}",
+  ].join("\n");
+  assert.equal(source.base.match(/export function applyEligibilityUpdate\(/gu)?.length, 1);
+  assert.equal(source.head.match(/export function applyEligibilityUpdate\(/gu)?.length, 1);
+  assert.ok(source.base.includes(receiver), "the receiver must be readable at base");
+  assert.ok(source.head.includes(receiver), "the identical receiver must be readable at head");
+  const omittedEmpty = /if \(selected\.length === 0\) return \{\};/u;
+  assert.doesNotMatch(source.base, omittedEmpty, "base must transmit an explicit empty array");
+  assert.match(source.head, omittedEmpty, "head must turn an explicit empty array into omission");
   assert.equal(
     source.base.replace(/\n\s*if \(selected\.length === 0\) return \{\};/u, ""),
     source.head.replace(/\n\s*if \(selected\.length === 0\) return \{\};/u, ""),
-    "the declaration must be identical on both sides, so the graded diff stays the seeded change alone",
+    "the type and receiver must be identical on both sides, so the graded diff stays the seeded change alone",
+  );
+
+  const current = ["stale-model"];
+  const applyUpdate = (update) => update.workflowEligibleModelIds ?? current;
+  const before = { workflowEligibleModelIds: [] };
+  const after = {};
+  assert.deepEqual(
+    applyUpdate(after),
+    current,
+    "the head's omitted field must preserve the receiver's stale current list",
+  );
+  assert.deepEqual(
+    applyUpdate(before),
+    [],
+    "the base's explicit empty array must clear the receiver's current list",
   );
 });
 
@@ -332,6 +372,34 @@ test("qualification corpus keeps the 42-case seeded/clean population contract", 
   assert.equal(CASES.filter((entry) => entry.defect !== null).length, 31);
   assert.equal(CASES.filter((entry) => entry.defect === null).length, 11);
   assert.equal(changedFiles.length, 50);
+});
+
+test("off-by-one carries a visible contract and a concrete just-outside witness", () => {
+  const testCase = caseById("off-by-one");
+  const source = testCase.files.find((entry) => entry.path === "src/window.ts");
+  assert.ok(source !== undefined, "off-by-one must carry src/window.ts");
+
+  const contract =
+    "/** Return the last n items, or every available item when n exceeds the list length. */";
+  assert.equal(
+    source.base.split(contract).length - 1,
+    1,
+    "base must show the contract exactly once",
+  );
+  assert.equal(
+    source.head.split(contract).length - 1,
+    1,
+    "head must show the contract exactly once",
+  );
+  assert.match(source.base, /items\.slice\(Math\.max\(0, items\.length - n\)\)/u);
+  assert.match(source.head, /items\.slice\(items\.length - n\)/u);
+
+  const items = ["a", "b", "c"];
+  const n = 4;
+  const before = items.slice(Math.max(0, items.length - n));
+  const after = items.slice(items.length - n);
+  assert.deepEqual(before, items, "the clamped base must return every available item");
+  assert.deepEqual(after, ["c"], "the negative head index must wrap and truncate the result");
 });
 
 /**

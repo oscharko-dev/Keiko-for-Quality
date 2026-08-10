@@ -71,56 +71,11 @@ every run, so it is auditable rather than assumed.
 
 ## Usage
 
-```yaml
-name: keiko-for-quality
-
-on:
-  pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review, edited]
-
-permissions:
-  contents: read
-  pull-requests: write
-
-concurrency:
-  group: kfq-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
-
-jobs:
-  review:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      # Check out the TRUSTED BASE, never the candidate head. The head is fetched as Git objects
-      # only, so its content is readable but never materialized on the filesystem.
-      - uses: actions/checkout@<sha> # v7.0.0
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Fetch candidate head as objects
-        env:
-          PR: ${{ github.event.pull_request.number }}
-        run: git fetch --no-tags origin "pull/${PR}/head"
-
-      - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.20.1
-        env:
-          # The credential is passed by variable NAME, never as an input.
-          KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
-        with:
-          profile: .github/keiko-for-quality.json
-          model_endpoint: https://api.anthropic.com
-          model_id: claude-sonnet-5
-          model_protocol: anthropic
-          model_token_env: KFQ_MODEL_TOKEN
-          app_id: ${{ secrets.KFQ_APP_ID }}
-          app_private_key: ${{ secrets.KFQ_APP_PRIVATE_KEY }}
-          target_branches: dev
-```
-
-Reference the action at a **full 40-character commit SHA**. A tag is mutable, and the whole trust
-model rests on the executed code being immutable.
+Start with the canonical [trusted-base Quickstart](../README.md#quickstart). That single maintained
+workflow is safe for public, private, and GitHub Enterprise Server repositories: it checks out only
+the trusted base, authenticates the candidate-object fetch for that one process, and removes the
+credential boundary before the reviewer runs. Keep both actions pinned to full 40-character commit
+SHAs; tags are mutable references.
 
 ### The review profile
 
@@ -460,7 +415,12 @@ critical/high boundary is the least stable axis — the same defect class has co
 between runs — which is why classification is reported and not gated: severity is presentation here,
 and gates nothing. Every run records what produced it (engine digest, rule digest, corpus digest,
 adapter commit, model id), because recall is a property of a _pairing_, and the model is the input
-that can move without a commit.
+that can move without a commit. The classic engine digest covers the executable bytes; staged mode
+uses a canonical digest of the transitive local runtime-source closure rooted at its runner and the
+corpus Inventory/context-pack adapter, so a prompt-policy or staged-evidence change cannot retain an
+older engine identity merely because `src/engine/single-shot.ts` itself did not move. The scorer
+digest applies the same closure rule from `corpus/run.mjs`, binding its graders, classifiers,
+publisher and deterministic gates rather than only the facade script.
 
 ## Reviewer arena
 

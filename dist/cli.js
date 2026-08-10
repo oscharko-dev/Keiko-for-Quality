@@ -2976,9 +2976,10 @@ import { createHash as createHash6 } from "node:crypto";
 
 // src/engine/claim-decision-policy.ts
 var TEST_ISOLATION_EVIDENCE_POLICY = [
-  "Treat a dynamic import after a shown `beforeEach` module-registry reset as fresh; leave it silent.",
-  "Report only a missing, removed, late, wrong, or bypassed reset after tracing suite setup,",
-  "import timing, and shared state. Never invent an unshown reset helper."
+  "Test-isolation table \u2014 SILENT: a shown `beforeEach` module-registry reset precedes each dynamic",
+  "import. REPORT: the reset is missing, removed, late, or wrong after tracing suite setup and shared",
+  "state. BYPASS (report): a static/top-level import or cached import promise was established before",
+  "the reset. Never demand a module clear/reset helper; never invent one."
 ].join(" ");
 var REFERENCE_TRANSITION_EVIDENCE_POLICY = [
   "At one action/dependency coordinate, one full 40-hex SHA to another remains immutable and is",
@@ -2987,9 +2988,16 @@ var REFERENCE_TRANSITION_EVIDENCE_POLICY = [
   "or shown sync-contract desync. Mutable references are `security`/`high`, including first-party",
   "actions; never critical. Never invent remote mapping, validity, staleness, or cadence."
 ].join(" ");
+var BOUNDARY_OMISSION_EVIDENCE_POLICY = [
+  "Boundary/omission table \u2014 BOUNDS: compare empty, exact-boundary, and just-outside inputs after",
+  "runtime normalization against old behavior. CLEAR: report an explicit clear omitted from an optional",
+  "update only when shown consumer code preserves existing state on absence; without that consumer",
+  "evidence, leave silent."
+].join(" ");
 var EXAMINER_CLAIM_DECISION_POLICY = [
   `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
-  `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`
+  `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
+  `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`
 ].join("\n");
 
 // src/engine/rule-file.ts
@@ -3075,10 +3083,7 @@ var CATCH_ALL_RULE = [
   "  primary key or unique constraint on the compared columns already rules out the collision you",
   "  are worried about. A cursor cannot skip or repeat a row on a column that cannot repeat; do not",
   "  ask for a tie-breaker it does not need.",
-  "- **before concluding a changed loop bound, index calculation, or slice endpoint is correct** \u2014",
-  "  walk the edge concretely: run n=0, n=1, and the last index through the new expression and",
-  "  compare each against the old one. An off-by-one survives every skim and dies on one concrete",
-  "  walk; do the walk before concluding, not after a doubt.",
+  `- **boundary and omitted-state transitions** \u2014 ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
   "  or termination can recommend a fix that weakens correct code instead of improving it.",
@@ -3617,7 +3622,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v4";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v5";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;

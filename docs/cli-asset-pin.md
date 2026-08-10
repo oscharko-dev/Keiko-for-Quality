@@ -20,9 +20,9 @@ pins its review engine — digest first, fail closed:
    a different tag, never fall back to an unpinned copy. A mismatch means the bytes are not the
    reviewed bytes; nothing downstream can repair that.
 4. Execute as `node keiko-cli.js …`. The process contract (flags, environment, exit codes 0–5,
-   `--format json|sarif`) is documented in the README's "Local runs" section and
-   `docs/local-report-schema.md`; exit codes and the report schema are additive-stable within a
-   release line.
+   `--format json|sarif`) is documented in
+   [`docs/operations.md`](operations.md#local-runs) and `docs/local-report-schema.md`; exit codes
+   and the report schema are additive-stable within a release line.
 
 Verification needs nothing beyond a SHA-256 implementation and this file — reading this
 repository's source is not required (issue #98's acceptance bar).

@@ -5,9 +5,10 @@
  * so keeping it a leaf prevents a policy-sharing fix from creating an engine import cycle.
  */
 export const TEST_ISOLATION_EVIDENCE_POLICY = [
-  "Treat a dynamic import after a shown `beforeEach` module-registry reset as fresh; leave it silent.",
-  "Report only a missing, removed, late, wrong, or bypassed reset after tracing suite setup,",
-  "import timing, and shared state. Never invent an unshown reset helper.",
+  "Test-isolation table — SILENT: a shown `beforeEach` module-registry reset precedes each dynamic",
+  "import. REPORT: the reset is missing, removed, late, or wrong after tracing suite setup and shared",
+  "state. BYPASS (report): a static/top-level import or cached import promise was established before",
+  "the reset. Never demand a module clear/reset helper; never invent one.",
 ].join(" ");
 
 export const REFERENCE_TRANSITION_EVIDENCE_POLICY = [
@@ -18,11 +19,19 @@ export const REFERENCE_TRANSITION_EVIDENCE_POLICY = [
   "actions; never critical. Never invent remote mapping, validity, staleness, or cadence.",
 ].join(" ");
 
+export const BOUNDARY_OMISSION_EVIDENCE_POLICY = [
+  "Boundary/omission table — BOUNDS: compare empty, exact-boundary, and just-outside inputs after",
+  "runtime normalization against old behavior. CLEAR: report an explicit clear omitted from an optional",
+  "update only when shown consumer code preserves existing state on absence; without that consumer",
+  "evidence, leave silent.",
+].join(" ");
+
 /** The whole policy block injected into each mandatory examiner, assembled from canonical text. */
 export const EXAMINER_CLAIM_DECISION_POLICY = [
   `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
   `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
+  `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
 ].join("\n");
 
 /** Prevent a focused examiner fix from silently becoming another copy of the complete rule. */
-export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 800;
+export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 1_250;

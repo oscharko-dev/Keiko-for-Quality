@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
+  BOUNDARY_OMISSION_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
@@ -358,6 +359,10 @@ describe("buildRuleFile", () => {
         name: "distinguishes a fresh dynamic import from removed or bypassed reset setup",
         phrases: [TEST_ISOLATION_EVIDENCE_POLICY],
       },
+      {
+        name: "walks normalized boundaries and requires a shown preserve-state consumer",
+        phrases: [BOUNDARY_OMISSION_EVIDENCE_POLICY],
+      },
     ];
 
     // Rows are spread as positional tuples with a `%s` title, not as objects with `$name`: `$key`
@@ -375,10 +380,14 @@ describe("buildRuleFile", () => {
     );
   });
 
-  it("binds both canonical claim-decision policies exactly once in the serialized rule", () => {
+  it("binds all canonical claim-decision policies exactly once in the serialized rule", () => {
     const file = buildRuleFile(profileWith({}));
     const rule = file.rules[0]?.rule ?? "";
-    for (const policy of [TEST_ISOLATION_EVIDENCE_POLICY, REFERENCE_TRANSITION_EVIDENCE_POLICY]) {
+    for (const policy of [
+      TEST_ISOLATION_EVIDENCE_POLICY,
+      REFERENCE_TRANSITION_EVIDENCE_POLICY,
+      BOUNDARY_OMISSION_EVIDENCE_POLICY,
+    ]) {
       expect(rule.split(policy)).toHaveLength(2);
       expect(serializeRuleFile(file).split(policy)).toHaveLength(2);
     }

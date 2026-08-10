@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -142,6 +142,35 @@ test("the normal promotion checker reads redacted evidence without private diagn
     assert.match(output, /severeRecall\s+100\.0%/u);
     assert.match(output, /precision\s+100\.0%/u);
     assert.ok(!output.includes(SECRET));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the promotion checker explains a redacted regression with safe aggregate fields", () => {
+  const directory = mkdtempSync(join(tmpdir(), "kfq-qualification-evidence-test-"));
+  const path = join(directory, "qualification.json");
+  try {
+    const raw = rawReport();
+    const cleanIndex = CASES.findIndex((testCase) => testCase.defect === null);
+    assert.notEqual(cleanIndex, -1);
+    const cleanResult = raw.results[cleanIndex];
+    assert.ok(cleanResult !== undefined);
+    cleanResult.pass = false;
+    cleanResult.findings = [{ content: SECRET }];
+    writeFileSync(path, JSON.stringify(redactQualificationReport(raw)));
+
+    const checked = spawnSync(process.execPath, ["scripts/check-qualification.mjs", path], {
+      cwd: new URL("..", import.meta.url),
+      encoding: "utf8",
+    });
+    assert.equal(checked.status, 1);
+    assert.match(
+      checked.stdout,
+      /kind=precision, findings=1, tokens=\d+, rejected=0, sanitizer=0, suppressed=\d+/u,
+    );
+    assert.ok(!checked.stdout.includes(SECRET));
+    assert.ok(!checked.stderr.includes(SECRET));
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

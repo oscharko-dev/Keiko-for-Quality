@@ -27,7 +27,8 @@ import { generateRuleDocument, registerTsExtensionHooks } from "./rule-source.mj
 import {
   CORPUS_REVIEW_TIMEOUT_SECONDS,
   corpusReviewDeadlineMs,
-  qualificationEngineImplementation,
+  qualificationEngineIdentity,
+  singleShotCorpusContextOptions,
   singleShotCorpusDispatch,
 } from "./single-shot-invocation.mjs";
 
@@ -451,9 +452,9 @@ async function planCaseFindings(testCase, findings) {
  * The KFQ_SINGLE_SHOT=1 branch of `runEngine`: the one-call-per-file runner over the identical
  * fixture commit (HEAD~1..HEAD, exactly what `engineArguments` hands the binary), the identical
  * profile-derived rule (both paths route through the production `buildRuleFile`), the identical
- * sampling pin threaded as `samplingSeed`, and the identical harness around it — the caller's
- * retry/resume mirror sees the same stdout shape either way. Additive and env-gated: with the
- * flag unset, not one byte of the frozen measurement basis below changes.
+ * sampling pin threaded as `samplingSeed`, and production Inventory plus context-pack preparation.
+ * The caller's retry/resume mirror sees the same stdout shape either way. Additive and env-gated:
+ * with the flag unset, not one byte of the frozen classic-engine measurement basis below changes.
  *
  * Motivated the same day it was built (2026-08-07): the agentic loop spent 2.17M tokens against a
  * 1.27M allotment on this product's own pull request and settled coverage_gap twice, and the
@@ -476,6 +477,13 @@ async function runSingleShotForCorpus(dir, seed, budgetTokens) {
     pathValue: FIXED_PATH,
     renameDetectionPercent: 50,
     diagnostics: createSilentDiagnostics(),
+  });
+  const context = await singleShotCorpusContextOptions({
+    repositoryPath: dir,
+    pair,
+    pathValue: FIXED_PATH,
+    expectedReviewablePaths: dispatch.expectedReviewablePaths,
+    mechanicallyCleanPaths: dispatch.mechanicallyCleanPaths,
   });
   const output = await runSingleShotEngine(
     {
@@ -503,6 +511,7 @@ async function runSingleShotForCorpus(dir, seed, budgetTokens) {
       allottedBudget: allotted,
       expectedReviewablePaths: dispatch.expectedReviewablePaths,
       mechanicallyCleanPaths: dispatch.mechanicallyCleanPaths,
+      ...context,
       samplingSeed: seed,
     },
     createSilentDiagnostics(),
@@ -1042,11 +1051,11 @@ if (measured) {
 }
 
 const binding = buildBinding({
-  // In single-shot mode the "engine" is the shipped runner source, and hashing exactly that file
-  // is the same claim the binary digest makes on the classic path: this is the code whose
-  // judgement the numbers describe. The unused classic binary must not win merely because the
-  // scheduled workflow fetched it before selecting staged mode.
-  binary: qualificationEngineImplementation({
+  // Single-shot binds the explicit transitive source closure that assembles staged prompts and
+  // prepares their corpus-only production inputs. Classic mode still binds the spawned binary.
+  // The unused classic binary must not win merely because the workflow fetched it before mode
+  // selection.
+  engine: qualificationEngineIdentity({
     singleShot: process.env.KFQ_SINGLE_SHOT === "1",
     binary: BINARY,
     repositoryRoot: join(HERE, ".."),

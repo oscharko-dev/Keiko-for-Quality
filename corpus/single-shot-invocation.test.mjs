@@ -10,8 +10,10 @@ import { FIXED_PATH } from "./fixed-path.mjs";
 import { registerTsExtensionHooks } from "./rule-source.mjs";
 import {
   CORPUS_REVIEW_TIMEOUT_SECONDS,
+  STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS,
   corpusReviewDeadlineMs,
-  qualificationEngineImplementation,
+  qualificationEngineIdentity,
+  singleShotCorpusContextOptions,
   singleShotCorpusDispatch,
 } from "./single-shot-invocation.mjs";
 
@@ -84,27 +86,71 @@ function caseFixture(testCase, writeFixture = write) {
   }
 }
 
+function contextPackFixture() {
+  const repo = mkdtempSync(join(tmpdir(), "kfq-corpus-context-pack-"));
+  try {
+    git(repo, ["init", "-q"]);
+    write(repo, "src/helper.ts", "export function computeAllowance(value) { return value * 2; }\n");
+    for (const path of ["src/eligible.ts", "src/tiny.ts", "src/mechanical.ts"]) {
+      write(repo, path, "export const baseline = 1;\n");
+    }
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "base"]);
+    const base = git(repo, ["rev-parse", "HEAD"]);
+
+    const eligible = [
+      'import { computeAllowance } from "./helper.js";',
+      ...Array.from(
+        { length: 60 },
+        (_, index) => `export const eligible${String(index)} = computeAllowance(${String(index)});`,
+      ),
+      "",
+    ].join("\n");
+    write(repo, "src/eligible.ts", eligible);
+    write(
+      repo,
+      "src/tiny.ts",
+      'import { computeAllowance } from "./helper.js";\nexport const tiny = computeAllowance(1);\n',
+    );
+    write(repo, "src/mechanical.ts", eligible.replaceAll("eligible", "mechanical"));
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "head"]);
+    const head = git(repo, ["rev-parse", "HEAD"]);
+    return {
+      repo,
+      pair: { base: commitSha(base), head: commitSha(head), mergeBase: commitSha(base) },
+    };
+  } catch (error) {
+    rmSync(repo, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 test("the corpus deadline is one real absolute review boundary", () => {
   assert.equal(corpusReviewDeadlineMs(10_000), 10_000 + CORPUS_REVIEW_TIMEOUT_SECONDS * 1_000);
   assert.throws(() => corpusReviewDeadlineMs(Number.NaN), /clock/u);
 });
 
 test("staged binding ignores a fetched but unused classic engine", () => {
-  assert.equal(
-    qualificationEngineImplementation({
+  assert.deepEqual(
+    qualificationEngineIdentity({
       singleShot: true,
       binary: "/tmp/unused-ocr",
       repositoryRoot: "/repo",
     }),
-    "/repo/src/engine/single-shot.ts",
+    {
+      kind: "source-closure",
+      repositoryRoot: "/repo",
+      entrypoints: STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS,
+    },
   );
-  assert.equal(
-    qualificationEngineImplementation({
+  assert.deepEqual(
+    qualificationEngineIdentity({
       singleShot: false,
       binary: "/tmp/ocr",
       repositoryRoot: "/repo",
     }),
-    "/tmp/ocr",
+    { kind: "file", path: "/tmp/ocr" },
   );
 });
 
@@ -154,6 +200,34 @@ test("staged corpus dispatch uses production structural classification, not matc
     assert.equal(result.expectedReviewablePaths.includes("assets/image.bin"), false);
     assert.equal(result.expectedReviewablePaths.includes("vendor/dependency"), false);
     assert.deepEqual(result.mechanicallyCleanPaths, []);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("staged corpus forwards eligible production context packs without lowering the tiny-file threshold", async () => {
+  const { repo, pair } = contextPackFixture();
+  try {
+    const forwarded = await singleShotCorpusContextOptions({
+      repositoryPath: repo,
+      pair,
+      pathValue: FIXED_PATH,
+      expectedReviewablePaths: ["src/eligible.ts", "src/tiny.ts", "src/mechanical.ts"],
+      mechanicallyCleanPaths: ["src/mechanical.ts"],
+    });
+    assert.ok(forwarded.contextPacks instanceof Map);
+    assert.match(forwarded.contextPacks.get("src/eligible.ts") ?? "", /src\/helper\.ts:1:/u);
+    assert.equal(forwarded.contextPacks.has("src/tiny.ts"), false);
+    assert.equal(forwarded.contextPacks.has("src/mechanical.ts"), false);
+
+    const tinyOnly = await singleShotCorpusContextOptions({
+      repositoryPath: repo,
+      pair,
+      pathValue: FIXED_PATH,
+      expectedReviewablePaths: ["src/tiny.ts"],
+      mechanicallyCleanPaths: [],
+    });
+    assert.deepEqual(tinyOnly, {});
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

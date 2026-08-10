@@ -1,6 +1,7 @@
 import type { CompiledProfile, ContractPair, PathInstruction } from "../config/profile.js";
 import type { GuidelineIndex } from "../config/guidelines.js";
 import {
+  BOUNDARY_OMISSION_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
@@ -119,10 +120,7 @@ const CATCH_ALL_RULE = [
   "  primary key or unique constraint on the compared columns already rules out the collision you",
   "  are worried about. A cursor cannot skip or repeat a row on a column that cannot repeat; do not",
   "  ask for a tie-breaker it does not need.",
-  "- **before concluding a changed loop bound, index calculation, or slice endpoint is correct** —",
-  "  walk the edge concretely: run n=0, n=1, and the last index through the new expression and",
-  "  compare each against the old one. An off-by-one survives every skim and dies on one concrete",
-  "  walk; do the walk before concluding, not after a doubt.",
+  `- **boundary and omitted-state transitions** — ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
   "- **before stating how an encoding, format, or algorithm behaves** — verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
   "  or termination can recommend a fix that weakens correct code instead of improving it.",
