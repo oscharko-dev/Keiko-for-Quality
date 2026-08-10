@@ -15,6 +15,7 @@ import {
   EXAMINER_CLAIM_DECISION_POLICY,
   MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  SENSITIVE_OUTPUT_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
   TRIGGER_AND_GUARD_EVIDENCE_POLICY,
   WORKFLOW_TRUST_EVIDENCE_POLICY,
@@ -396,6 +397,7 @@ describe("runSingleShotEngine staged generation", () => {
         REFERENCE_TRANSITION_EVIDENCE_POLICY,
         BOUNDARY_OMISSION_EVIDENCE_POLICY,
         WORKFLOW_TRUST_EVIDENCE_POLICY,
+        SENSITIVE_OUTPUT_EVIDENCE_POLICY,
         DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
         TRIGGER_AND_GUARD_EVIDENCE_POLICY,
         MIRRORED_VALIDATOR_EVIDENCE_POLICY,
@@ -405,8 +407,6 @@ describe("runSingleShotEngine staged generation", () => {
       }
       if (role === "planner") {
         expect(system).not.toContain(EXAMINER_CLAIM_DECISION_POLICY);
-      } else {
-        expect(system.split(EXAMINER_CLAIM_DECISION_POLICY)).toHaveLength(2);
       }
     }
     const planner = seen.find((body) => stage(body.messages?.[0]?.content ?? "") === "planner");

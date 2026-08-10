@@ -47,6 +47,14 @@ export const DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY = [
   "the thrown error.",
 ].join(" ");
 
+export const SENSITIVE_OUTPUT_EVIDENCE_POLICY = [
+  "Sensitive-output decision — REPORT `security`/`critical`: changed code passes a raw token,",
+  "secret, password, credential, authorization value, or session identifier into a logger,",
+  "diagnostic, error, telemetry, or console sink. The shown direct flow is sufficient evidence;",
+  "do not require a separate runtime caller before reporting the disclosure. SILENT only when the",
+  "value is demonstrably redacted or hashed before the sink, or never reaches an output sink.",
+].join(" ");
+
 export const TRIGGER_AND_GUARD_EVIDENCE_POLICY = [
   "Trigger/guard decision — UNIT: when a changed value feeds a unit-sensitive API, trace every",
   "shown producer branch and state the exact branch whose units mismatch; a mixed-unit producer",
@@ -63,16 +71,86 @@ export const MIRRORED_VALIDATOR_EVIDENCE_POLICY = [
   "rejects; do not infer parity or drift without both implementations in evidence.",
 ].join(" ");
 
+interface ClaimDecisionPolicyRow {
+  readonly label: string;
+  readonly text: string;
+  readonly relevant: (visibleEvidence: string) => boolean;
+}
+
+const OUTPUT_SINK_SIGNAL = /\b(?:console|diagnostic|error|log(?:ger)?|telemetry)\b/iu;
+const SENSITIVE_VALUE_SIGNAL =
+  /\b(?:authorization|credential|password|secret|session(?:id|identifier)?|token)\b/iu;
+
+const POLICY_ROWS: readonly ClaimDecisionPolicyRow[] = [
+  {
+    label: "test-isolation",
+    text: TEST_ISOLATION_EVIDENCE_POLICY,
+    relevant: (evidence) =>
+      /(?:\b(?:beforeEach|describe|it|test)\s*\(|resetModules\b)/u.test(evidence),
+  },
+  {
+    label: "reference-transition",
+    text: REFERENCE_TRANSITION_EVIDENCE_POLICY,
+    relevant: (evidence) =>
+      /(?:\b(?:action|dependency|digest|image|pin)\b|uses:\s|@[0-9a-f]{40}\b)/iu.test(evidence),
+  },
+  {
+    label: "boundary-omission",
+    text: BOUNDARY_OMISSION_EVIDENCE_POLICY,
+    relevant: (evidence) =>
+      /(?:\b(?:boundary|clear(?:ed|ing|s)?|empty|index|offset|optional)\b|\?\?|\.slice\s*\()/iu.test(
+        evidence,
+      ),
+  },
+  {
+    label: "workflow-trust",
+    text: WORKFLOW_TRUST_EVIDENCE_POLICY,
+    relevant: (evidence) =>
+      /(?:\.github\/workflows|candidate head|pull_request_target|trusted base)/iu.test(evidence),
+  },
+  {
+    label: "sensitive-output",
+    text: SENSITIVE_OUTPUT_EVIDENCE_POLICY,
+    relevant: (evidence) =>
+      OUTPUT_SINK_SIGNAL.test(evidence) && SENSITIVE_VALUE_SIGNAL.test(evidence),
+  },
+  {
+    label: "diagnostic-context",
+    text: DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+    relevant: (evidence) =>
+      /\b(?:catch|console|diagnostic|error|log(?:ger)?|telemetry|throw)\b/iu.test(evidence),
+  },
+  {
+    label: "trigger-guard",
+    text: TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+    relevant: (evidence) =>
+      /(?:Retry-After|setTimeout|\b(?:caller|guard|increment|loop)\b|\bsize\s*<=)/iu.test(evidence),
+  },
+  {
+    label: "mirrored-validator",
+    text: MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+    relevant: (evidence) =>
+      /\b(?:audit|compatibility|preflight|validat(?:e|es|ed|ing|ion|or))\b/iu.test(evidence),
+  },
+];
+
+function renderPolicyRows(rows: readonly ClaimDecisionPolicyRow[]): string {
+  return rows.map((row) => `- ${row.label}: ${row.text}`).join("\n");
+}
+
+/**
+ * Keeps every canonical decision available while moving the rows proved relevant by the shown
+ * source to the top. This is deterministic routing, not model-selected policy: a missed signal can
+ * only leave the original complete capsule order in place, never remove a rule.
+ */
+export function renderExaminerClaimDecisionPolicy(visibleEvidence: string): string {
+  const relevant = POLICY_ROWS.filter((row) => row.relevant(visibleEvidence));
+  const remaining = POLICY_ROWS.filter((row) => !row.relevant(visibleEvidence));
+  return renderPolicyRows([...relevant, ...remaining]);
+}
+
 /** The whole policy block injected into each mandatory examiner, assembled from canonical text. */
-export const EXAMINER_CLAIM_DECISION_POLICY = [
-  `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
-  `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
-  `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
-  `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
-  `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
-  `- trigger-guard: ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
-  `- mirrored-validator: ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`,
-].join("\n");
+export const EXAMINER_CLAIM_DECISION_POLICY = renderExaminerClaimDecisionPolicy("");
 
 /** Prevent a focused examiner fix from silently becoming another copy of the complete rule. */
-export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 3_500;
+export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 4_200;

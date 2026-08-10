@@ -27,6 +27,7 @@ import {
   EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
   MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  SENSITIVE_OUTPUT_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
   TRIGGER_AND_GUARD_EVIDENCE_POLICY,
   WORKFLOW_TRUST_EVIDENCE_POLICY,
@@ -60,7 +61,7 @@ function occurrenceCount(value: string, needle: string): number {
 
 describe("risk planner", () => {
   it("pins the manually bumped cache identity", () => {
-    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v10");
+    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v11");
   });
 
   it("sees the complete qualified rule but never receives the whole file", () => {
@@ -76,6 +77,7 @@ describe("risk planner", () => {
     expect(prompt.system).not.toContain(BOUNDARY_OMISSION_EVIDENCE_POLICY);
     expect(prompt.system).not.toContain(WORKFLOW_TRUST_EVIDENCE_POLICY);
     expect(prompt.system).not.toContain(DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY);
+    expect(prompt.system).not.toContain(SENSITIVE_OUTPUT_EVIDENCE_POLICY);
     expect(prompt.system).not.toContain(TRIGGER_AND_GUARD_EVIDENCE_POLICY);
     expect(prompt.system).not.toContain(MIRRORED_VALIDATOR_EVIDENCE_POLICY);
     expect(prompt.system).not.toContain(EXAMINER_CLAIM_DECISION_POLICY);
@@ -151,16 +153,61 @@ describe("focused examiners", () => {
         "A matching SILENT row below is terminal: discard any risk-map hypothesis",
       );
       expect(prompt.system).toContain("emit no claim or verification request for it");
-      expect(occurrenceCount(prompt.system, EXAMINER_CLAIM_DECISION_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, TEST_ISOLATION_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, REFERENCE_TRANSITION_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, BOUNDARY_OMISSION_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, WORKFLOW_TRUST_EVIDENCE_POLICY)).toBe(1);
+      expect(occurrenceCount(prompt.system, SENSITIVE_OUTPUT_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, TRIGGER_AND_GUARD_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, MIRRORED_VALIDATOR_EVIDENCE_POLICY)).toBe(1);
       expect(prompt.system).not.toContain("## Workflow and pipeline files");
       expect(prompt.system).not.toContain("## Look before you claim");
+    }
+  });
+
+  it("moves the relevant canonical decision ahead of the complete unchanged policy set", () => {
+    const contexts = [
+      {
+        context: {
+          ...ISOLATED_CONTEXT,
+          renderedDiff: '__new hunk__\n8 +logger.info("auth", { token });',
+        },
+        first: SENSITIVE_OUTPUT_EVIDENCE_POLICY,
+      },
+      {
+        context: {
+          ...ISOLATED_CONTEXT,
+          path: "src/cache.test.ts",
+          renderedDiff: "__new hunk__\n8 -vi.resetModules();",
+        },
+        first: TEST_ISOLATION_EVIDENCE_POLICY,
+      },
+      {
+        context: {
+          ...ISOLATED_CONTEXT,
+          renderedDiff: "__new hunk__\n8 +setTimeout(resolve, delay);",
+        },
+        first: TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+      },
+    ];
+    for (const sample of contexts) {
+      const prompt = buildExaminerPrompt(CORE_ROLE, sample.context, [], { view: "evidence" });
+      const firstPolicy = prompt.system.indexOf(sample.first);
+      expect(firstPolicy).toBeGreaterThan(0);
+      for (const policy of [
+        TEST_ISOLATION_EVIDENCE_POLICY,
+        REFERENCE_TRANSITION_EVIDENCE_POLICY,
+        BOUNDARY_OMISSION_EVIDENCE_POLICY,
+        WORKFLOW_TRUST_EVIDENCE_POLICY,
+        SENSITIVE_OUTPUT_EVIDENCE_POLICY,
+        DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+        TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+        MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+      ]) {
+        expect(occurrenceCount(prompt.system, policy)).toBe(1);
+        expect(firstPolicy).toBeLessThanOrEqual(prompt.system.indexOf(policy));
+      }
     }
   });
 

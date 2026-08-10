@@ -15,11 +15,14 @@
  */
 
 import { renderChangeIntent } from "./model-proxy.js";
-import { EXAMINER_CLAIM_DECISION_POLICY } from "./claim-decision-policy.js";
+import {
+  EXAMINER_CLAIM_DECISION_POLICY,
+  renderExaminerClaimDecisionPolicy,
+} from "./claim-decision-policy.js";
 
 export const GENERATION_COMPLETION_LIMIT = 4_096;
 /** Bump whenever a stage prompt, parser, renderer, or routing rule changes review semantics. */
-export const GENERATION_WORKFLOW_IDENTITY = "staged-v10";
+export const GENERATION_WORKFLOW_IDENTITY = "staged-v11";
 const REQUEST_FRAMING_TOKENS = 512;
 const MAX_RISK_HYPOTHESES = 6;
 const MAX_CLAIMS_PER_EXAMINER = 4;
@@ -191,7 +194,7 @@ function roleContract(role: ExaminerRole): string {
  * provenance from a repository-local pin. Keeping the block common prevents the core and
  * integration passes from reaching opposite answers merely because only one remembered the rule.
  */
-export const EXAMINER_EVIDENCE_CONTRACT = [
+const EXAMINER_EVIDENCE_CONTRACT_PREFIX = [
   "Before emitting each claim, actively try to disprove it against the shown current source. Omit",
   "a claim that asks for a field, guard, import, fallback, or check already present, or whose",
   "consequence requires an unshown caller, mutation, input, or future contract change.",
@@ -201,11 +204,26 @@ export const EXAMINER_EVIDENCE_CONTRACT = [
   "key shown reaching a prototype is evidence; a hypothetical future member or mutation is not.",
   "A matching SILENT row below is terminal: discard any risk-map hypothesis about that shape and",
   "emit no claim or verification request for it.",
-  EXAMINER_CLAIM_DECISION_POLICY,
 ].join("\n");
 
+function examinerEvidenceContract(claimDecisionPolicy: string): string {
+  return [EXAMINER_EVIDENCE_CONTRACT_PREFIX, claimDecisionPolicy].join("\n");
+}
+
+export const EXAMINER_EVIDENCE_CONTRACT = examinerEvidenceContract(EXAMINER_CLAIM_DECISION_POLICY);
+
 /** Keeps the universal evidence contract compact enough for both mandatory examiner calls. */
-export const EXAMINER_EVIDENCE_CONTRACT_MAX_BYTES = 4_300;
+export const EXAMINER_EVIDENCE_CONTRACT_MAX_BYTES = 5_000;
+
+function visibleExaminerEvidence(context: GenerationContext, evidence: EvidenceView): string {
+  return [
+    context.path,
+    context.renderedDiff,
+    evidence.view,
+    context.companionBlock ?? "",
+    context.contextPack ?? "",
+  ].join("\n");
+}
 
 /** Compact exact line-set rendering: `1,2,3,7` becomes `1-3,7`, without widening the set. */
 function renderAnchorRanges(lines: readonly number[]): string {
@@ -270,7 +288,9 @@ export function buildExaminerPrompt(
     system: [
       roleContract(role),
       "",
-      EXAMINER_EVIDENCE_CONTRACT,
+      examinerEvidenceContract(
+        renderExaminerClaimDecisionPolicy(visibleExaminerEvidence(context, evidence)),
+      ),
       ...applicablePathRuleBlock(context),
       "",
       "A claim must state one concrete imperative action (at most 100 characters), a reachable",
