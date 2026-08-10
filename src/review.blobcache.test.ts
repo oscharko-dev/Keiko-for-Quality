@@ -281,7 +281,7 @@ describe("performReview: the gate and the change-level pass share one blob-text 
           content = '{"axis":"caller","evidence_refs":["H:1"],"lookup_terms":["challengeGuard"]}';
         } else if (prompt.startsWith("Adversarially falsify one AI-generated code-review claim")) {
           content =
-            '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"],"lookup_terms":[]}';
+            '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"]}';
         } else {
           content = '{"category":"bug","severity":"high"}';
         }

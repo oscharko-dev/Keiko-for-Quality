@@ -3175,13 +3175,11 @@ describe("performReview: review-cache memoization end to end", () => {
                               verdict: "defeated",
                               reason_code: "counterexample",
                               evidence_refs: [opts.falsifierEvidenceRef ?? "R4:H:1"],
-                              lookup_terms: [],
                             }
                           : {
                               verdict: "survives",
                               reason_code: "no_defeater_found",
                               evidence_refs: [opts.falsifierEvidenceRef ?? "R4:H:1"],
-                              lookup_terms: [],
                             },
                       ),
                     },

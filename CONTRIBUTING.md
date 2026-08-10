@@ -55,7 +55,9 @@ evidence the previous one produced.
 Structural repository retrieval uses a separately pinned ast-grep release when lexical
 exact-commit results are ambiguous and may use it to enrich clear hits with bounded owning-function
 context. An unavailable enrichment keeps the exact lexical evidence; an unavailable parser needed
-to disambiguate it fails closed. Update every archive and extracted-binary digest in
+to disambiguate code fails closed. Non-code manifests and lockfiles remain bounded lexical
+evidence instead of being routed into an unsupported parser. Update every archive and
+extracted-binary digest in
 `src/publish/ast-grep-pin.ts`, then run `npm run check:ast-grep-pin`. That explicit audit downloads
 and verifies every supported platform; ordinary `npm run verify` deliberately stays offline. The
 complete pin is folded into review-cache publication semantics automatically. Because structural

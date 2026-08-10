@@ -254,7 +254,6 @@ describe("performLocalReview (issue #95)", () => {
                   verdict: "survives",
                   reason_code: "no_defeater_found",
                   evidence_refs: ["R4:H:1"],
-                  lookup_terms: [],
                 })
               : JSON.stringify(pair);
         return Promise.resolve(
@@ -450,7 +449,7 @@ describe("performLocalReview (issue #95)", () => {
           : prompt.includes("Plan one independent contract trace")
             ? '{"axis":"caller","evidence_refs":["H:1"],"lookup_terms":["challengeGuard"]}'
             : prompt.includes("Adversarially falsify")
-              ? '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"],"lookup_terms":[]}'
+              ? '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"]}'
               : '{"category":"bug","severity":"medium"}';
         return Promise.resolve(
           new Response(

@@ -5,11 +5,14 @@ import {
   buildContractChallengePrompt,
   buildDossier,
   buildFalsifierPrompt,
+  buildRefereePrompt,
+  buildTerminalTruthPrompt,
   buildTruthPrompt,
   extractContractChallengeDecision,
   extractEvidenceVerdict,
   extractFalsifierDecision,
   extractReflectionDecision,
+  extractTerminalTruthDecision,
   extractTruthDecision,
   extractVerdict,
   needsJudging,
@@ -116,7 +119,7 @@ interface TruthEnvelope {
 }
 
 interface FalsifierEnvelope {
-  readonly verdict: "survives" | "defeated" | "needs_context";
+  readonly verdict: "survives" | "defeated" | "insufficient_evidence";
   readonly reason_code:
     | "no_defeater_found"
     | "counterexample"
@@ -129,7 +132,12 @@ interface FalsifierEnvelope {
     | "missing_runtime"
     | "missing_change_context";
   readonly evidence_refs: readonly string[];
-  readonly lookup_terms: readonly string[];
+}
+
+interface TerminalTruthEnvelope {
+  readonly verdict: "confirmed" | "refuted" | "insufficient_evidence";
+  readonly reason_code: TruthEnvelope["reason_code"];
+  readonly evidence_refs: readonly string[];
 }
 
 interface ChallengeEnvelope {
@@ -153,7 +161,15 @@ function falsifier(overrides: Partial<FalsifierEnvelope> = {}): string {
     verdict: "survives",
     reason_code: "no_defeater_found",
     evidence_refs: ["R4:H:9"],
-    lookup_terms: [],
+    ...overrides,
+  });
+}
+
+function terminalTruth(overrides: Partial<TerminalTruthEnvelope> = {}): string {
+  return JSON.stringify({
+    verdict: "confirmed",
+    reason_code: "direct_proof",
+    evidence_refs: ["D:H:3", "H:3"],
     ...overrides,
   });
 }
@@ -186,11 +202,10 @@ const NEEDS_CALLER = truth({
   evidence_refs: ["H:3"],
   lookup_terms: ["wait"],
 });
-const FALSIFIER_NEEDS_CALLER = falsifier({
-  verdict: "needs_context",
+const FALSIFIER_INSUFFICIENT = falsifier({
+  verdict: "insufficient_evidence",
   reason_code: "missing_caller",
-  evidence_refs: ["H:3"],
-  lookup_terms: ["wait"],
+  evidence_refs: ["R4:H:9"],
 });
 
 const FALSIFIER_CONTRACT = {
@@ -331,7 +346,9 @@ describe("role prompts", () => {
     const plannerPrompt = buildContractChallengePrompt(candidate, CHANGE_EVIDENCE);
     const planned = extractContractChallengeDecision(CHALLENGE, CHANGE_EVIDENCE);
     expect(planned).toBeDefined();
+    const terminalTruthPrompt = buildTerminalTruthPrompt(candidate, CHALLENGE_EVIDENCE);
     const falsifierPrompt = buildFalsifierPrompt(candidate, CHALLENGE_EVIDENCE, planned!);
+    const refereePrompt = buildRefereePrompt(candidate, CHALLENGE_EVIDENCE, planned!);
 
     expect(truthPrompt).toContain("A matching excerpt alone is not positive proof");
     expect(truthPrompt).toContain("D:H");
@@ -340,6 +357,9 @@ describe("role prompts", () => {
     expect(plannerPrompt).toContain("outside the finding");
     expect(falsifierPrompt).toContain("Adversarially falsify");
     expect(falsifierPrompt).toContain("existing guard");
+    expect(terminalTruthPrompt).not.toContain("lookup_terms");
+    expect(falsifierPrompt).not.toContain('lookup_terms":[]');
+    expect(refereePrompt).toContain("final independent referee");
     for (const prompt of [truthPrompt, plannerPrompt, falsifierPrompt]) {
       expect(prompt).toContain("Do not judge importance");
       expect(prompt).not.toContain("Rewrite one code-review finding");
@@ -349,6 +369,49 @@ describe("role prompts", () => {
       expect(independentPrompt).not.toContain('"verdict":"confirmed"');
       expect(independentPrompt).not.toContain('"reason_code":"direct_proof"');
       expect(independentPrompt).not.toContain("Truth already validated");
+    }
+  });
+});
+
+describe("strict terminal Truth envelope", () => {
+  it("removes lookup terms after retrieval while preserving proof and causality checks", () => {
+    expect(
+      extractTerminalTruthDecision(terminalTruth(), CHANGE_EVIDENCE, finding("claim"))?.verdict,
+    ).toBe("confirmed");
+    expect(
+      extractTerminalTruthDecision(
+        terminalTruth({
+          verdict: "insufficient_evidence",
+          reason_code: "missing_caller",
+          evidence_refs: ["H:3"],
+        }),
+        CHANGE_EVIDENCE,
+      )?.verdict,
+    ).toBe("insufficient_evidence");
+    expect(
+      extractTerminalTruthDecision(
+        terminalTruth({
+          verdict: "refuted",
+          reason_code: "not_introduced",
+          evidence_refs: ["H:3", "B:3"],
+        }),
+        CHANGE_EVIDENCE,
+      )?.verdict,
+    ).toBe("refuted");
+  });
+
+  it("rejects lookup keys, mismatched reasons, fabricated refs, and off-anchor proof", () => {
+    const invalid = [
+      JSON.stringify({ ...JSON.parse(terminalTruth()), lookup_terms: [] }),
+      '{"verdict":"refuted","\\u0076erdict":"confirmed","reason_code":"direct_proof","evidence_refs":["H:3"]}',
+      terminalTruth({ verdict: "confirmed", reason_code: "missing_caller" }),
+      terminalTruth({ evidence_refs: ["H:999"] }),
+      terminalTruth({ evidence_refs: ["H:2"] }),
+    ];
+    for (const response of invalid) {
+      expect(
+        extractTerminalTruthDecision(response, CHANGE_EVIDENCE, finding("claim")),
+      ).toBeUndefined();
     }
   });
 });
@@ -436,6 +499,7 @@ describe("strict truth envelope", () => {
       '{verdict:"confirmed"}',
       extra,
       CONFIRMED.replace('{"verdict":"confirmed",', '{"verdict":"refuted","verdict":"confirmed",'),
+      '{"verdict":"refuted","\\u0076erdict":"confirmed","reason_code":"direct_proof","evidence_refs":["H:3"],"lookup_terms":[]}',
       truth({ evidence_refs: ["D:H:999", "H:3"] }),
       truth({ evidence_refs: ["D:H:3", "D:H:3", "H:3"] }),
       truth({
@@ -502,6 +566,7 @@ describe("strict contract-challenge envelope", () => {
         '{"axis":"same_file_contract",',
         '{"axis":"caller","axis":"same_file_contract",',
       ),
+      '{"axis":"caller","\\u0061xis":"same_file_contract","evidence_refs":["H:3"],"lookup_terms":["wait"]}',
       challenge({ axis: "network" as ChallengeEnvelope["axis"] }),
       challenge({ evidence_refs: [] }),
       challenge({ lookup_terms: [] }),
@@ -558,6 +623,20 @@ describe("strict falsifier envelope", () => {
     expect(
       extractFalsifierDecision(
         falsifier({ verdict: "defeated", reason_code: "no_defeater_found" }),
+        CHALLENGE_EVIDENCE,
+        FALSIFIER_CONTRACT,
+      ),
+    ).toBeUndefined();
+    expect(
+      extractFalsifierDecision(
+        JSON.stringify({ ...JSON.parse(SURVIVES), lookup_terms: [] }),
+        CHALLENGE_EVIDENCE,
+        FALSIFIER_CONTRACT,
+      ),
+    ).toBeUndefined();
+    expect(
+      extractFalsifierDecision(
+        '{"verdict":"defeated","\\u0076erdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:9"]}',
         CHALLENGE_EVIDENCE,
         FALSIFIER_CONTRACT,
       ),
@@ -774,7 +853,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     const candidate = finding("When a caller passes seconds, the wait is 1000× short.");
     const endpoint = endpointReplying([
       NEEDS_CALLER,
-      truth({ evidence_refs: ["D:H:3", "H:3", "R1:H:9"] }),
+      terminalTruth({ evidence_refs: ["D:H:3", "H:3", "R1:H:9"] }),
       challenge({ evidence_refs: ["R1:H:9"] }),
       falsifier({ evidence_refs: ["R4:H:17"] }),
     ]);
@@ -815,7 +894,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
   it("filters a challenge line already visible under R1 instead of relabelling it R4", async () => {
     const endpoint = endpointReplying([
       NEEDS_CALLER,
-      truth({ evidence_refs: ["D:H:3", "H:3", "R1:H:9"] }),
+      terminalTruth({ evidence_refs: ["D:H:3", "H:3", "R1:H:9"] }),
       challenge({ evidence_refs: ["R1:H:9"] }),
       SURVIVES,
     ]);
@@ -836,8 +915,16 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     expect(endpoint.remaining()).toBe(1);
   });
 
-  it("turns a second context request into insufficient evidence without another lookup", async () => {
-    const endpoint = endpointReplying([NEEDS_CALLER, NEEDS_CALLER, SURVIVES]);
+  it("uses a terminal Truth contract after retrieval and cannot request another lookup", async () => {
+    const endpoint = endpointReplying([
+      NEEDS_CALLER,
+      terminalTruth({
+        verdict: "insufficient_evidence",
+        reason_code: "missing_caller",
+        evidence_refs: ["R1:H:9"],
+      }),
+      SURVIVES,
+    ]);
     let retrievalCalls = 0;
     const out = await substantiate(
       [finding("When an unseen caller passes seconds, the wait is short.")],
@@ -854,7 +941,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     expect(out.findings).toHaveLength(0);
     expect(out.droppedInsufficientEvidence).toBe(1);
     expect(out.droppedVague).toBe(1);
-    expect(out.retrievalRequested).toBe(2);
+    expect(out.retrievalRequested).toBe(1);
     expect(out.retrievalPerformed).toBe(1);
     expect(retrievalCalls).toBe(1);
     expect(endpoint.remaining()).toBe(1);
@@ -957,9 +1044,68 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     ]);
   });
 
-  it("turns a post-challenge needs-context reply into insufficient without another loop", async () => {
+  it("replaces a semantically invalid planner decision with trusted deterministic scope", async () => {
+    const requests: Parameters<EvidenceRetriever>[0][] = [];
+    const endpoint = endpointReplying([
+      CONFIRMED,
+      challenge({ lookup_terms: ["src/caller.ts"] }),
+      SURVIVES,
+    ]);
+    const candidate = finding("When numeric, `wait` uses the wrong unit.");
+    const out = await substantiate(
+      [candidate],
+      () => CHANGE_EVIDENCE,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      (request) => {
+        requests.push(request);
+        return retrievedCaller();
+      },
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      stage: "contract_challenge",
+      challengeAxis: "same_file_contract",
+    });
+    expect(requests[0]?.terms[0]).toBe("wait");
+    expect(endpoint.prompts()).toHaveLength(3);
+  });
+
+  it("does not send a BASE challenge into a file that the PR newly added", async () => {
+    const axes: (string | undefined)[] = [];
+    const candidate: JudgeableFinding = {
+      path: "src/timeout.ts",
+      content: "When `timeout` is invalid, parsing silently accepts it.",
+      startLine: 8,
+      endLine: 8,
+    };
+    const endpoint = endpointReplying([
+      truth({ evidence_refs: ["H:8"] }),
+      challenge({ axis: "base", evidence_refs: ["H:8"], lookup_terms: ["timeout"] }),
+      falsifier({ evidence_refs: ["R4:H:9"] }),
+    ]);
+    const out = await substantiate(
+      [candidate],
+      () => ADDED_EVIDENCE,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      (request) => {
+        axes.push(request.challengeAxis);
+        return retrievedCaller();
+      },
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(axes).toEqual(["same_file_contract"]);
+  });
+
+  it("turns a terminal post-challenge insufficient reply into a drop without another loop", async () => {
     let retrievalCalls = 0;
-    const endpoint = endpointReplying([CONFIRMED, CHALLENGE, FALSIFIER_NEEDS_CALLER, "unused"]);
+    const endpoint = endpointReplying([CONFIRMED, CHALLENGE, FALSIFIER_INSUFFICIENT, "unused"]);
     const out = await substantiate(
       [finding("When a caller passes seconds, the wait is short.")],
       () => CHANGE_EVIDENCE,
@@ -978,11 +1124,12 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     expect(endpoint.remaining()).toBe(1);
   });
 
-  it("rejects an anchor-only Falsifier reply after successful challenge retrieval", async () => {
+  it("uses one independent Referee after a semantically invalid Falsifier reply", async () => {
     const endpoint = endpointReplying([
       CONFIRMED,
       CHALLENGE,
       falsifier({ evidence_refs: ["D:H:3", "H:3"] }),
+      SURVIVES,
     ]);
     const traces: SubstantiationTerminalTrace[] = [];
     const out = await substantiate(
@@ -995,19 +1142,44 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
       (trace) => traces.push(trace),
     );
 
-    expect(out.findings).toHaveLength(0);
-    expect(out.confirmed).toBe(0);
+    expect(out.findings).toHaveLength(1);
+    expect(out.confirmed).toBe(1);
     expect(out.falsifierDefeated).toBe(0);
-    expect(out.undecided).toBe(1);
+    expect(out.undecided).toBe(0);
     expect(out.challengeExpanded).toBe(1);
+    expect(endpoint.prompts()).toHaveLength(4);
+    expect(endpoint.prompts()[3]).toContain("final independent referee");
+    expect(endpoint.prompts()[3]).not.toContain(falsifier({ evidence_refs: ["D:H:3", "H:3"] }));
     expect(traces).toEqual([
       {
         stage: "falsifier",
-        disposition: "undecided",
-        reasonCode: "semantic_shape_invalid",
-        usage: { callCount: 3, tokens: 300 },
+        disposition: "kept",
+        reasonCode: "no_defeater_found",
+        usage: { callCount: 4, tokens: 400 },
       },
     ]);
+  });
+
+  it("never starts a fifth call after Truth already used its retrieval round", async () => {
+    const endpoint = endpointReplying([
+      NEEDS_CALLER,
+      terminalTruth({ evidence_refs: ["H:3"] }),
+      CHALLENGE,
+      falsifier({ evidence_refs: ["H:3"] }),
+      SURVIVES,
+    ]);
+    const out = await substantiate(
+      [finding("When numeric, `wait` uses the wrong unit.")],
+      () => CHANGE_EVIDENCE,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      (request) => (request.stage === "truth" ? retrievedCaller() : retrievedGuard()),
+    );
+
+    expect(out.undecided).toBe(1);
+    expect(endpoint.prompts()).toHaveLength(4);
+    expect(endpoint.remaining()).toBe(1);
   });
 
   it("keeps Truth lookup counters separate from challenge counters", async () => {
@@ -1200,7 +1372,7 @@ describe("hard shared request budget", () => {
     const endpoint = endpointReplying([
       { text: NEEDS_CALLER, useRequestUpperBound: true },
       {
-        text: truth({ evidence_refs: ["D:H:3", "H:3", "R1:H:9"] }),
+        text: terminalTruth({ evidence_refs: ["D:H:3", "H:3", "R1:H:9"] }),
         useRequestUpperBound: true,
       },
       { text: challenge({ evidence_refs: ["R1:H:9"] }), useRequestUpperBound: true },
@@ -1251,6 +1423,33 @@ describe("hard shared request budget", () => {
     expect(out.tokens).toBe(0);
   });
 
+  it("admits the four-call Referee path from the same atomic boundary", async () => {
+    const candidate = finding("When numeric, `wait` uses the wrong unit.");
+    const bound = substantiationOnePathTokenUpperBound(candidate, CHANGE_EVIDENCE);
+    const endpoint = endpointReplying([
+      { text: CONFIRMED, useRequestUpperBound: true },
+      { text: CHALLENGE, useRequestUpperBound: true },
+      {
+        text: falsifier({ evidence_refs: ["H:3"] }),
+        useRequestUpperBound: true,
+      },
+      { text: SURVIVES, useRequestUpperBound: true },
+    ]);
+    const out = await substantiate(
+      [candidate],
+      () => CHANGE_EVIDENCE,
+      endpoint.deps,
+      "paranoid",
+      bound,
+      () => retrievedCaller(),
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(out.budgetBlocked).toBe(0);
+    expect(endpoint.completionLimits()).toEqual([4_096, 4_096, 4_096, 4_096]);
+    expect(out.tokens).toBeLessThanOrEqual(bound);
+  });
+
   it("prices all production caps with the ledger's UTF-8 byte accounting", () => {
     const threeByte = "\u0800";
     const candidate: JudgeableFinding = {
@@ -1267,7 +1466,7 @@ describe("hard shared request budget", () => {
     expect(substantiationOnePathTokenUpperBound(candidate, evidence)).toBe(
       MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
     );
-    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(924_620);
+    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(923_374);
   });
 
   it("shares the same hard ceiling across later findings", async () => {
