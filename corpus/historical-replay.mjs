@@ -29,12 +29,12 @@
 //
 //   OCR_LLM_MODEL=gpt-oss-120b node corpus/historical-replay.mjs --dry-run \
 //     --harvest ~/kfq-harvest.json --repo ~/src/Keiko --holdout-from-pr 3037 \
-//     --max-tokens 8000000
+//     --max-tokens 61000000
 //
 //   OCR_LLM_MODEL=gpt-oss-120b OCR_LLM_URL=https://gateway.example/v1 \
 //     OCR_LLM_TOKEN=... node corpus/historical-replay.mjs --execute \
 //     --harvest ~/kfq-harvest.json --repo ~/src/Keiko --holdout-from-pr 3037 \
-//     --max-tokens 8000000 --out corpus/evidence/historical-replay-2026-08-09-v0.23.0.json
+//     --max-tokens 61000000 --out corpus/evidence/historical-replay-2026-08-09-v0.23.0.json
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -103,6 +103,9 @@ const MAX_SOURCE_BYTES = 4 * 1024 * 1024;
 const MAX_TREE_OUTPUT_BYTES = 16 * 1024;
 const MAX_DIFF_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_ENDPOINT_REQUESTS_PER_CASE = 4;
+// Kept equal to evidence.ts's fail-closed line ceiling. A plan must not call an anchor locally
+// bound when the production verifier will refuse to render one of its complete source lines.
+const MAX_HISTORICAL_EVIDENCE_LINE_CHARS = 500;
 const GIT_TIMEOUT_MS = 30_000;
 
 export { HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE } from "./historical-replay-evidence-lib.mjs";
@@ -820,7 +823,16 @@ async function inspectCase(replayCase, repo, readChangeAtCommits) {
   if (structural !== undefined) return structural;
   try {
     const sources = await readChangeAtCommits(repo, replayCase);
-    return validHistoricalChangeBinding(replayCase, sources) ? undefined : "sourceUnavailable";
+    if (!validHistoricalChangeBinding(replayCase, sources)) return "sourceUnavailable";
+    const anchor = sourceLines(
+      sources.headSource ?? sources.baseSource,
+      replayCase.startLine,
+      replayCase.endLine,
+    );
+    return anchor === undefined ||
+      anchor.split("\n").some((line) => line.length > MAX_HISTORICAL_EVIDENCE_LINE_CHARS)
+      ? "evidenceUnavailable"
+      : undefined;
   } catch (error) {
     return error instanceof ReplayCaseError ? error.reason : "sourceUnavailable";
   }
@@ -1318,6 +1330,15 @@ async function attemptHistoricalVerification({
   }
 }
 
+function retireFailedVerificationAllowance(state, replayCase, remainingTokens) {
+  const retiredTokens = Math.min(remainingTokens, HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE);
+  state.accountedTokens += retiredTokens;
+  recordHistoricalUnmeasured(state, replayCase, "verificationError", {
+    callCount: 0,
+    tokens: retiredTokens,
+  });
+}
+
 function settleHistoricalOutcome({
   state,
   replayCase,
@@ -1325,14 +1346,9 @@ function settleHistoricalOutcome({
   outcome,
   candidateTrace,
   remainingTokens,
-  maxTokens,
 }) {
   if (!validSubstantiationOutcome(outcome, judgeable)) {
-    state.accountedTokens = maxTokens;
-    recordHistoricalUnmeasured(state, replayCase, "verificationError", {
-      callCount: 0,
-      tokens: remainingTokens,
-    });
+    retireFailedVerificationAllowance(state, replayCase, remainingTokens);
     return;
   }
   if (outcome.tokens > remainingTokens) {
@@ -1413,13 +1429,10 @@ async function processHistoricalReplayCase({
     repo,
   });
   if (attempted.failed === true) {
-    // A thrown verifier cannot report what it spent. It received the complete remaining hard
-    // allowance, so conservatively retire that allowance before considering another case.
-    state.accountedTokens = maxTokens;
-    recordHistoricalUnmeasured(state, replayCase, "verificationError", {
-      callCount: 0,
-      tokens: remainingTokens,
-    });
+    // A thrown verifier cannot report what it spent. Production's one-finding preflight bounds the
+    // complete four-call path below the conservative per-case reservation, so retire that amount
+    // rather than laundering the error or falsely consuming every later case's allowance.
+    retireFailedVerificationAllowance(state, replayCase, remainingTokens);
     return;
   }
   settleHistoricalOutcome({
@@ -1429,7 +1442,6 @@ async function processHistoricalReplayCase({
     outcome: attempted.outcome,
     candidateTrace: attempted.candidateTrace,
     remainingTokens,
-    maxTokens,
   });
 }
 

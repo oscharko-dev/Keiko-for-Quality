@@ -3,7 +3,7 @@ import { buildRedactedHistoricalReplayEvidence } from "./historical-replay.mjs";
 import { HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE } from "./historical-replay-evidence-lib.mjs";
 
 const HOLDOUT_FROM_PULL_REQUEST = 3037;
-const CONFIGURED_MAX_TOKENS = 8_000_000;
+const CONFIGURED_MAX_TOKENS = 61_000_000;
 
 function records(count, pullRequest, label, firstId) {
   return Array.from({ length: count }, (_, index) => ({
@@ -30,7 +30,7 @@ function calibratedRecords() {
 function calibratedDecisions(sourceRecords) {
   let trainingFalsePositives = 2;
   let holdoutFalsePositives = 2;
-  let holdoutUnmeasured = 4;
+  let holdoutUnmeasured = 5;
   return sourceRecords.map((record) => {
     let decision = "unmeasured";
     if (record.label === "fixed_confirmed") decision = "keep";
@@ -83,14 +83,14 @@ export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".r
   const plan = {
     populationRecords: 92,
     corroboratedCases: 66,
-    locallyBoundCases: 62,
-    structurallyUnmeasuredCases: 4,
+    locallyBoundCases: 61,
+    structurallyUnmeasuredCases: 5,
     estimatedAffordableCases,
-    estimatedCostExcessCases: 62 - estimatedAffordableCases,
-    estimatedStartWorkTokens: 62 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
+    estimatedCostExcessCases: 61 - estimatedAffordableCases,
+    estimatedStartWorkTokens: 61 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
     configuredMaxTokens: CONFIGURED_MAX_TOKENS,
     estimatedMaximumEndpointRequests: estimatedAffordableCases * 4,
-    localUnmeasured: reasonCounts({ sourceUnavailable: 4 }),
+    localUnmeasured: reasonCounts({ invalidHistoricalBinding: 4, evidenceUnavailable: 1 }),
   };
   return buildRedactedHistoricalReplayEvidence({
     generatedAt: "2026-08-09T10:00:00.000Z",
@@ -112,16 +112,16 @@ export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".r
     execution: {
       populationRecords: 92,
       corroboratedCases: 66,
-      attemptedCases: 62,
-      estimatedAttemptedTokens: 62 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
+      attemptedCases: 61,
+      estimatedAttemptedTokens: 61 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
       accountedTokens: 900_000,
       configuredMaxTokens: CONFIGURED_MAX_TOKENS,
-      populationDecisions: { keep: 21, drop: 41, unmeasured: 30 },
-      corroboratedDecisions: { keep: 21, drop: 41, unmeasured: 4 },
+      populationDecisions: { keep: 21, drop: 40, unmeasured: 31 },
+      corroboratedDecisions: { keep: 21, drop: 40, unmeasured: 5 },
       stageCounters: {
         confirmed: 21,
         truthRefuted: 30,
-        falsifierDefeated: 7,
+        falsifierDefeated: 6,
         droppedInsufficientEvidence: 4,
         retrievalRequested: 10,
         retrievalPerformed: 8,
@@ -138,7 +138,8 @@ export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".r
       },
       unmeasuredByReason: reasonCounts({
         outsideCorroboratedPopulation: 26,
-        sourceUnavailable: 4,
+        invalidHistoricalBinding: 4,
+        evidenceUnavailable: 1,
       }),
     },
     score,
