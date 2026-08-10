@@ -92,13 +92,14 @@ export const SUBSTANTIATION_STRICTNESS_LEVELS = [
 export type SubstantiationStrictness = (typeof SUBSTANTIATION_STRICTNESS_LEVELS)[number];
 
 const STRICTNESS_ENV_VAR = "KFQ_SUBSTANTIATION_STRICTNESS";
-const DEFAULT_STRICTNESS: SubstantiationStrictness = "default";
+const DEFAULT_STRICTNESS: SubstantiationStrictness = "paranoid";
+const POSITIVE_PROOF_LINE_TOLERANCE = 3;
 
 function isSubstantiationStrictness(value: string): value is SubstantiationStrictness {
   return (SUBSTANTIATION_STRICTNESS_LEVELS as readonly string[]).includes(value);
 }
 
-/** Invalid experimental values retain the ordinary default and never change a live review. */
+/** Invalid experimental values retain the fail-closed production point and never loosen a review. */
 export function resolveSubstantiationStrictness(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): SubstantiationStrictness {
@@ -373,8 +374,9 @@ export function buildTruthPrompt(
     '"evidence_refs" contains 1-4 exact refs visible below. "lookup_terms" contains 0-3',
     "repository identifiers (3-80 characters), never paths or prose.",
     "",
-    "confirmed — evidence positively proves the exact condition, faulty behavior, and consequence",
-    "            claimed, plus that this PR introduced or worsened it. Cite H:n or D:H:n for an",
+    "confirmed — evidence positively proves the exact triggering condition and faulty code behavior",
+    "            claimed, plus that this PR introduced or worsened it. Impact, severity language,",
+    "            and remediation prose are not part of this truth decision. Cite H:n or D:H:n for an",
     "            added/changed HEAD line inside the finding range, or B:n for a removed BASE line.",
     "            A mapped D:B:n@H:m row binds that old line to deletion anchor m. The verifier",
     "            binds the exact state/change counterpart from the evidence; do not repeat both",
@@ -425,7 +427,8 @@ export function buildTerminalTruthPrompt(finding: JudgeableFinding, evidence: st
     `"reason_code" must be one of: ${SUBSTANTIATION_REASON_CODES.join(", ")}.`,
     '"evidence_refs" contains 1-4 exact refs visible below.',
     "",
-    "confirmed — positive evidence proves the exact defect, consequence, and PR causality.",
+    "confirmed — positive evidence proves the exact triggering condition, faulty code behavior,",
+    "            and PR causality. Do not require proof of impact, severity, or remediation prose.",
     "refuted — evidence proves the claim false, already handled, or not introduced by this PR.",
     "insufficient_evidence — the bounded evidence still cannot prove or refute the exact claim.",
     "confirmed uses direct_proof. refuted uses contradicted, already_handled, or not_introduced.",
@@ -1134,7 +1137,11 @@ function lineFallsInsideFinding(
 ): boolean {
   if (finding === undefined) return true;
   const line = Number(lineText);
-  return Number.isSafeInteger(line) && line >= finding.startLine && line <= finding.endLine;
+  return (
+    Number.isSafeInteger(line) &&
+    line >= Math.max(1, finding.startLine - POSITIVE_PROOF_LINE_TOLERANCE) &&
+    line <= finding.endLine + POSITIVE_PROOF_LINE_TOLERANCE
+  );
 }
 
 interface PositiveProofBinding {

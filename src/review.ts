@@ -118,6 +118,7 @@ import type { ClosedRuntimeFact } from "./publish/runtime-fact-catalog.js";
 import { collectClosedRuntimeFactsAtCommit } from "./publish/runtime-facts.js";
 import {
   MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
+  resolveSubstantiationStrictness,
   substantiate,
   type ContractChallengeAxis,
   type EvidenceRetriever,
@@ -3069,9 +3070,9 @@ async function substantiateModelSurvivors(
     judgeable,
     (finding) => evidenceByJudgeable.get(finding) ?? "",
     deps,
-    // Production does not publish a candidate the verifier could not check. Unlike a silent drop,
-    // `outcome.undecided` is surfaced as incomplete by the caller below.
-    "paranoid",
+    // The same closed operating point is bound into qualification evidence. Production defaults
+    // fail-closed (`paranoid`); explicit sweep stages may vary it without creating a second path.
+    resolveSubstantiationStrictness(run.request.env),
     remaining,
     evidenceRetriever(evidence, run),
   );

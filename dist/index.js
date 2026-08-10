@@ -10643,7 +10643,8 @@ var SUBSTANTIATION_STRICTNESS_LEVELS = [
   "paranoid"
 ];
 var STRICTNESS_ENV_VAR = "KFQ_SUBSTANTIATION_STRICTNESS";
-var DEFAULT_STRICTNESS = "default";
+var DEFAULT_STRICTNESS = "paranoid";
+var POSITIVE_PROOF_LINE_TOLERANCE = 3;
 function isSubstantiationStrictness(value) {
   return SUBSTANTIATION_STRICTNESS_LEVELS.includes(value);
 }
@@ -10702,8 +10703,9 @@ function buildTruthPrompt(finding, evidence, dossier) {
     '"evidence_refs" contains 1-4 exact refs visible below. "lookup_terms" contains 0-3',
     "repository identifiers (3-80 characters), never paths or prose.",
     "",
-    "confirmed \u2014 evidence positively proves the exact condition, faulty behavior, and consequence",
-    "            claimed, plus that this PR introduced or worsened it. Cite H:n or D:H:n for an",
+    "confirmed \u2014 evidence positively proves the exact triggering condition and faulty code behavior",
+    "            claimed, plus that this PR introduced or worsened it. Impact, severity language,",
+    "            and remediation prose are not part of this truth decision. Cite H:n or D:H:n for an",
     "            added/changed HEAD line inside the finding range, or B:n for a removed BASE line.",
     "            A mapped D:B:n@H:m row binds that old line to deletion anchor m. The verifier",
     "            binds the exact state/change counterpart from the evidence; do not repeat both",
@@ -10743,7 +10745,8 @@ function buildTerminalTruthPrompt(finding, evidence) {
     `"reason_code" must be one of: ${SUBSTANTIATION_REASON_CODES.join(", ")}.`,
     '"evidence_refs" contains 1-4 exact refs visible below.',
     "",
-    "confirmed \u2014 positive evidence proves the exact defect, consequence, and PR causality.",
+    "confirmed \u2014 positive evidence proves the exact triggering condition, faulty code behavior,",
+    "            and PR causality. Do not require proof of impact, severity, or remediation prose.",
     "refuted \u2014 evidence proves the claim false, already handled, or not introduced by this PR.",
     "insufficient_evidence \u2014 the bounded evidence still cannot prove or refute the exact claim.",
     "confirmed uses direct_proof. refuted uses contradicted, already_handled, or not_introduced.",
@@ -11190,7 +11193,7 @@ function hasBaseStateRef(references) {
 function lineFallsInsideFinding(lineText, finding) {
   if (finding === void 0) return true;
   const line = Number(lineText);
-  return Number.isSafeInteger(line) && line >= finding.startLine && line <= finding.endLine;
+  return Number.isSafeInteger(line) && line >= Math.max(1, finding.startLine - POSITIVE_PROOF_LINE_TOLERANCE) && line <= finding.endLine + POSITIVE_PROOF_LINE_TOLERANCE;
 }
 function mappedBaseBindings(baseLine, visible) {
   const bindings = [];
@@ -13429,9 +13432,9 @@ async function substantiateModelSurvivors(run2, context, modelFindings) {
     judgeable,
     (finding) => evidenceByJudgeable.get(finding) ?? "",
     deps,
-    // Production does not publish a candidate the verifier could not check. Unlike a silent drop,
-    // `outcome.undecided` is surfaced as incomplete by the caller below.
-    "paranoid",
+    // The same closed operating point is bound into qualification evidence. Production defaults
+    // fail-closed (`paranoid`); explicit sweep stages may vary it without creating a second path.
+    resolveSubstantiationStrictness(run2.request.env),
     remaining,
     evidenceRetriever(evidence, run2)
   );
