@@ -26,33 +26,24 @@ import { CASES } from "./cases.mjs";
 import { generateRuleDocument, registerTsExtensionHooks } from "./rule-source.mjs";
 import {
   CORPUS_REVIEW_TIMEOUT_SECONDS,
-  corpusReviewDeadlineMs,
   qualificationEngineIdentity,
-  singleShotCorpusContextOptions,
-  singleShotCorpusDispatch,
+  qualificationOutcomeFromLocalReview,
 } from "./single-shot-invocation.mjs";
 
 registerTsExtensionHooks();
 const { repairClassification, auditClassification } = await import("../src/engine/classify.ts");
 const { startModelProxy } = await import("../src/engine/model-proxy.ts");
-// The deterministic contract gate (issue #80 technique D) the main loop below merges in, mirrored
-// from `collectGateFindings` / `compareAgainstCounterparts` in src/review.ts — the same import
-// mechanism as `planPublication` below, so the corpus measures the shipped comparison and the
-// shipped profile compiler, never a copy of either.
+// The classic runner retains the historical direct gate/publication harness below. The selected
+// staged runner now enters through `performLocalReview`, so its gate, quality verification, and
+// publisher are the shipped product path rather than parallel corpus wiring.
 const { compareDeclaredContracts, describeMismatch, findUncoveredUnionMembers, describeUnionGap } =
   await import("../src/contracts/shape-gate.ts");
 const { detectPinDesync, describePinDesync } = await import("../src/contracts/pin-desync.ts");
 const { loadReviewProfile } = await import("../src/config/profile.ts");
-// The single-shot runner (feat/single-shot-review): imported so the KFQ_SINGLE_SHOT=1 branch in
-// `runEngine` below can measure the one-call-per-file mode on the SAME fixtures, graders, and
-// resume harness as the pinned binary — same import mechanism as everything above, so the corpus
-// measures the shipped runner, never a restatement of it.
-const { runSingleShotEngine } = await import("../src/engine/single-shot.ts");
-// The publisher stage: everything the gate merge (below) produces — engine plus classification
-// plus the deterministic gate — is run through the real, shipped `planPublication` before scoring,
-// never a restatement of sanitization or deduplication. Same import mechanism as everything above.
-// See `planCaseFindings`'s own doc comment for the empty-prefetch argument and the synthetic
-// `PublishContext` it builds.
+const { parseRuntimeConfig } = await import("../src/config/runtime.ts");
+const { performLocalReview } = await import("../src/review.ts");
+// The classic runner's publisher stage. Staged qualification receives the equivalent already-
+// audited survivors from `performLocalReview` and never plans them a second time.
 const { planPublication } = await import("../src/publish/publisher.ts");
 const { commitSha, repoPath } = await import("../src/core/brands.ts");
 const { createSilentDiagnostics } = await import("../src/diagnostics/sink.ts");
@@ -75,11 +66,10 @@ const execFileAsync = promisify(execFile);
  * - **publishability** — every finding the production publisher would still consider survives its
  *   sanitizer.
  *
- * Publishability, `noise`, and the suppression counts below are all scored against the output of
- * the real, shipped `planPublication` (`src/publish/publisher.ts`) — never a copy of its rules, and
- * never the raw, pre-publisher findings. A corpus that restated those rules would keep passing
- * after the real ones moved, which is the exact failure mode the repository's fixture rule exists
- * to prevent (see `AGENTS.md`'s "The rule text and the sanitizer must move together").
+ * In the selected staged mode, every score is taken from `performLocalReview`: the same inventory,
+ * engine, Truth/Challenge/Falsifier quality verification, classification audit, deterministic
+ * gates, sanitization, and deduplication that the CLI and GitHub Action ship. The classic runner
+ * retains its historical direct `planPublication` measurement for old evidence comparisons.
  *
  * This closes a gap the same shape as the deterministic-gate one above it: before the publisher
  * stage existed here, the corpus measured the engine, classification, and the gate, but never the
@@ -87,11 +77,9 @@ const execFileAsync = promisify(execFile);
  * qualification number — measured, not hypothesized: one qualification run had a case emit the same
  * finding three times, and the corpus scored that as three units of noise, when production would
  * have collapsed the three into the one finding a pull request actually receives before ever
- * posting it. `planCaseFindings`, below, runs every case's engine-plus-gate findings through the
- * shipped plan with an EMPTY existing-conversation prefetch: a corpus case is always a first review
- * of a synthetic pull request, so cross-run dedup (marker, similarity, dispositioned) has nothing to
- * compare against, and only sanitization and intra-run clustering — the two stages this harness
- * could not see before — ever act. `suppressedIntraRun` and `rejectedSanitization`
+ * posting it. `planCaseFindings`, below, retains that exact plan for the classic runner; staged mode
+ * receives the same first-review plan through `performLocalReview` with an empty existing-thread
+ * set. `suppressedIntraRun` and `rejectedSanitization`
  * (`plan.counters`) are reported per case and in the scoreboard for the same reason tokens are: a
  * number that only ever appears summed hides which case moved it. A per-finding *neutralization*
  * count is deliberately NOT reported: `PublicationPlan`/`PlannedFinding`/`PlanCounters` never
@@ -108,8 +96,9 @@ const execFileAsync = promisify(execFile);
  * The rule document is built here from `corpus/profile.json` through the *production* builder, so a
  * measurement cannot silently be taken against rule text the product does not ship. That mattered:
  * earlier rounds passed the rule in by path, and the number then depended on which file happened to
- * be on disk. `OCR_RULE` still overrides it, which is what an experiment comparing two rule
- * variants needs — the binding records the digest either way.
+ * be on disk. `OCR_RULE` remains a classic-runner experiment input; staged production-local mode
+ * rejects it because `performLocalReview` compiles the profile and accepting an unconsumed override
+ * would bind evidence to rule bytes no model saw.
  *
  * The engine binary path comes from OCR_BINARY (`npm run fetch:engine` writes one).
  */
@@ -136,6 +125,10 @@ if (modelCheck.allowed) {
     `${DEVIATION_ENV}=1 — measuring against a model this project does not run.\n` +
       "  This run is a cross-model experiment, not a qualification.",
   );
+}
+if (process.env.KFQ_SINGLE_SHOT === "1" && process.env.OCR_RULE !== undefined) {
+  console.error("OCR_RULE is not supported by staged production-local qualification");
+  process.exit(2);
 }
 
 async function generateRuleFile() {
@@ -449,12 +442,11 @@ async function planCaseFindings(testCase, findings) {
 }
 
 /**
- * The KFQ_SINGLE_SHOT=1 branch of `runEngine`: the one-call-per-file runner over the identical
- * fixture commit (HEAD~1..HEAD, exactly what `engineArguments` hands the binary), the identical
- * profile-derived rule (both paths route through the production `buildRuleFile`), the identical
- * sampling pin threaded as `samplingSeed`, and production Inventory plus context-pack preparation.
- * The caller's retry/resume mirror sees the same stdout shape either way. Additive and env-gated:
- * with the flag unset, not one byte of the frozen classic-engine measurement basis below changes.
+ * The KFQ_SINGLE_SHOT=1 branch: one complete production-local review over the identical fixture
+ * commit (HEAD~1..HEAD). `performLocalReview` owns Inventory, context packs, engine budgeting and
+ * resume, classification, deterministic gates, independent finding verification, and publication
+ * planning. The adapter returns only the already-publication-quality shape the corpus scorer needs.
+ * With the flag unset, the frozen classic-engine measurement basis below remains unchanged.
  *
  * Motivated the same day it was built (2026-08-07): the agentic loop spent 2.17M tokens against a
  * 1.27M allotment on this product's own pull request and settled coverage_gap twice, and the
@@ -462,67 +454,47 @@ async function planCaseFindings(testCase, findings) {
  * branch is what lets the current corpus answer it with the same fixtures, graders, and publication
  * gates as every qualification before it.
  */
-async function runSingleShotForCorpus(dir, seed, budgetTokens) {
+async function runSingleShotForCorpus(dir, budgetTokens) {
   const git = (args) =>
     execFileSync("git", args, { cwd: dir, encoding: "utf8", env: { PATH: FIXED_PATH } }).trim();
   const head = git(["rev-parse", "HEAD"]);
   const base = git(["rev-parse", "HEAD~1"]);
   const profile = loadReviewProfile(readFileSync(join(HERE, "profile.json"), "utf8"));
-  const allotted = budgetTokens ?? 6_000_000;
-  const pair = { base: commitSha(base), head: commitSha(head), mergeBase: commitSha(base) };
-  const dispatch = await singleShotCorpusDispatch({
-    repositoryPath: dir,
-    pair,
-    profile,
-    pathValue: FIXED_PATH,
-    renameDetectionPercent: 50,
-    diagnostics: createSilentDiagnostics(),
-  });
-  const context = await singleShotCorpusContextOptions({
-    repositoryPath: dir,
-    pair,
-    pathValue: FIXED_PATH,
-    expectedReviewablePaths: dispatch.expectedReviewablePaths,
-    mechanicallyCleanPaths: dispatch.mechanicallyCleanPaths,
-  });
-  const output = await runSingleShotEngine(
+  const diagnostics = createSilentDiagnostics();
+  const config = parseRuntimeConfig(
     {
-      binaryPath: "/unused-in-single-shot",
+      protocol: "openai",
+      endpoint: process.env.OCR_LLM_URL ?? "",
+      model: process.env.OCR_LLM_MODEL ?? "",
+      tokenEnvName: "OCR_LLM_TOKEN",
+      language: "English",
+      concurrency: singleShotCorpusConcurrency(budgetTokens),
+      fileTimeoutSeconds: 180,
+      reviewTimeoutSeconds: CORPUS_REVIEW_TIMEOUT_SECONDS,
+      tokenBudget: budgetTokens ?? 6_000_000,
+      maxFindings: 50,
+      renameDetectionPercent: 50,
+      crossArtifactPass: false,
+    },
+    "corpus.config",
+  );
+  const report = await performLocalReview(
+    {
+      base: commitSha(base),
+      head: commitSha(head),
       repositoryPath: dir,
-      pair,
-      config: {
-        protocol: "openai",
-        endpoint: process.env.OCR_LLM_URL ?? "",
-        model: process.env.OCR_LLM_MODEL ?? "",
-        tokenEnvName: "OCR_LLM_TOKEN",
-        language: "English",
-        concurrency: singleShotCorpusConcurrency(budgetTokens),
-        fileTimeoutSeconds: 180,
-        reviewTimeoutSeconds: CORPUS_REVIEW_TIMEOUT_SECONDS,
-        tokenBudget: allotted,
-        maxFindings: 50,
-        renameDetectionPercent: 50,
-      },
+      config,
       profile,
       guidelines: { paths: [] },
-      env: process.env,
+      env: { ...process.env, KFQ_SINGLE_SHOT: "1" },
       pathValue: FIXED_PATH,
-      reviewDeadlineMs: corpusReviewDeadlineMs(),
-      allottedBudget: allotted,
-      expectedReviewablePaths: dispatch.expectedReviewablePaths,
-      mechanicallyCleanPaths: dispatch.mechanicallyCleanPaths,
-      ...context,
-      samplingSeed: seed,
     },
-    createSilentDiagnostics(),
+    diagnostics,
   );
-  return JSON.parse(output.stdout);
+  return qualificationOutcomeFromLocalReview(report, diagnostics.drain());
 }
 
 async function runEngine(dir, seed = 42, budgetTokens = undefined) {
-  if (process.env.KFQ_SINGLE_SHOT === "1") {
-    return await runSingleShotForCorpus(dir, seed, budgetTokens);
-  }
   const home = mkdtempSync(join(tmpdir(), "kfq-home-"));
   // The production sampling pin (src/engine/model-proxy.ts, temperature 0) — the corpus measures
   // the pipeline that ships, and the pin is precisely what makes "twice in a row" meaningful.
@@ -565,6 +537,9 @@ async function runEngine(dir, seed = 42, budgetTokens = undefined) {
  * two specific cases; a second failure scores as the error it is.
  */
 async function runEngineWithOneResume(dir, budgetTokens = undefined) {
+  if (process.env.KFQ_SINGLE_SHOT === "1") {
+    return await runSingleShotForCorpus(dir, budgetTokens);
+  }
   let result;
   try {
     result = await runEngine(dir, 42, budgetTokens);
@@ -573,13 +548,13 @@ async function runEngineWithOneResume(dir, budgetTokens = undefined) {
     // byte-for-byte, so the one retry varies exactly that one bit of entropy. The budget rides
     // along unchanged, as production's own thrown-first-attempt path keeps the full allotment —
     // a throw left nothing measured to subtract.
-    return await runEngine(dir, 43, budgetTokens);
+    return { result: await runEngine(dir, 43, budgetTokens) };
   }
   // Mirror of production's engine.resume_skipped_budget_exceeded (src/review.ts): a budget-stopped
   // attempt is never re-run — the retry below fires on any non-success status, which a budget stop
   // is, and without this guard a budgeted case would spend its budget twice and grade only the
   // second truncation. See skipRetryAfterBudgetStop for why it gates on the case being budgeted.
-  if (skipRetryAfterBudgetStop(result, budgetTokens)) return result;
+  if (skipRetryAfterBudgetStop(result, budgetTokens)) return { result };
   // Production's second trigger, mirrored: the engine reports a failed run as
   // {"status":"failed"} on EXIT CODE ZERO, which resolves here — without this check the corpus
   // measured one attempt where production makes two. (Corpus runs are deliberately unbudgeted —
@@ -587,8 +562,10 @@ async function runEngineWithOneResume(dir, budgetTokens = undefined) {
   // `budgetTokens` explicitly: the budget-pressure precision cases exist to reproduce the
   // condition production actually fails under, and for exactly those cases the budget half of the
   // shipped resume is mirrored too, by the skip above.)
-  if (result?.status !== "success") return await runEngine(dir, 43, budgetTokens);
-  return result;
+  if (result?.status !== "success") {
+    return { result: await runEngine(dir, 43, budgetTokens) };
+  }
+  return { result };
 }
 
 /**
@@ -840,20 +817,14 @@ for (const testCase of cases) {
     // in any of the four git calls, and a throw outside would abort the whole run and leak the
     // directory it had already created.
     dir = buildRepo(testCase);
-    result = await runEngineWithOneResume(dir, testCase.budgetTokens);
-    await repairFindings(result);
-    // Merged AFTER classification repair/audit, at the same point production's
-    // `publishSettledFindings` merges `collectGateFindings`'s output into what gets published — so a
-    // gate finding is graded exactly as production ships it: never audited or reclassified, because
-    // its category and severity are already certain (see `collectGateFindings`'s doc comment,
-    // src/review.ts). Without this the corpus measures only the engine's half of the product; with
-    // it, a case the gate alone closes shows up as a pass here too.
-    result.comments = [...(result.comments ?? []), ...computeGateFindings(dir, testCase)];
-    // The publisher stage (see this file's header comment): the same findings production would
-    // merge into one `planPublication` call are run through that real, shipped function here too,
-    // so `scoreOne` grades what a pull request would actually receive rather than the engine's raw
-    // output.
-    const plan = await planCaseFindings(testCase, result.comments);
+    const execution = await runEngineWithOneResume(dir, testCase.budgetTokens);
+    result = execution.result;
+    let plan = execution.plan;
+    if (plan === undefined) {
+      await repairFindings(result);
+      result.comments = [...(result.comments ?? []), ...computeGateFindings(dir, testCase)];
+      plan = await planCaseFindings(testCase, result.comments);
+    }
     const scored = scoreOne(testCase, result, plan);
     results.push(scored);
     const mark = scored.pass ? "PASS" : "FAIL";

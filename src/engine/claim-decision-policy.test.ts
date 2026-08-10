@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import {
   BOUNDARY_OMISSION_EVIDENCE_POLICY,
+  DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
+  WORKFLOW_TRUST_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
 
 describe("shared claim-decision policy", () => {
@@ -15,11 +17,28 @@ describe("shared claim-decision policy", () => {
         `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
         `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
         `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
+        `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
+        `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
       ].join("\n"),
     );
     expect(new TextEncoder().encode(EXAMINER_CLAIM_DECISION_POLICY).byteLength).toBeLessThanOrEqual(
       EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
     );
+  });
+
+  it("closes privileged checkout and harmless diagnostic-context decisions", () => {
+    expect(WORKFLOW_TRUST_EVIDENCE_POLICY).toContain(
+      "changes checkout from the trusted base SHA to the candidate head SHA",
+    );
+    expect(WORKFLOW_TRUST_EVIDENCE_POLICY).toContain("`security`/`critical`");
+    expect(WORKFLOW_TRUST_EVIDENCE_POLICY).toContain(
+      "only fetches candidate Git objects as review data",
+    );
+    expect(DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY).toContain(
+      "adds an already-available non-secret primitive field",
+    );
+    expect(DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY).toContain("rethrows the identical error");
+    expect(DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY).toContain("disclose a secret or payload");
   });
 
   it("keeps clean reset and full-SHA transitions explicit beside their recall boundaries", () => {

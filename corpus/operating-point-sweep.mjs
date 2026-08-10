@@ -18,36 +18,14 @@ import { CASES } from "./cases.mjs";
  * same qualification corpus, run once per strictness level, precision and recall read off each run
  * and set side by side.
  *
- * ## Read this before spending anything: what this harness can and cannot show
+ * ## Read this before spending anything
  *
- * `corpus/run.mjs` builds its findings through `planCaseFindings`, which calls `planPublication`
- * (`src/publish/publisher.ts`) DIRECTLY — never `planAndAudit` (`src/review.ts`), which is the only
- * function in this repository that calls `substantiateFreshSurvivors` and therefore the only path
- * that ever reaches `substantiate()`. `performReview` (the live action) and `performLocalReview`
- * (the CLI, and `corpus/real-diffs.mjs`) both go through `planAndAudit`; the seeded qualification
- * corpus this script drives does not, and that is documented as deliberate, not an oversight —
- * AGENTS.md's "`npm run review`" section calls `corpus/run.mjs`'s exclusion from that migration "a
- * deliberately separate, not-yet-scoped decision, left alone so the qualification that shipped each
- * release keeps the same measurement basis it was recorded under."
- *
- * The consequence, stated plainly because a cost warning that omitted it would be worse than no
- * warning at all: setting `KFQ_SUBSTANTIATION_STRICTNESS` around a `corpus/run.mjs` invocation
- * changes NOTHING about what that invocation measures. `judgeOne`/`weighConsequence`/`repairVague`
- * are simply never called on this path, at any strictness level. A sweep run through this script
- * against the DEFAULT `--stages` will, correctly, show near-identical recall/precision/publishable
- * numbers at every stage, bounded only by the serving variance the qualification evidence already
- * documents elsewhere (see "Serving variance" in `renderEvidenceMarkdown`, and
- * corpus/evidence/qualification-2026-08-06-v0.19.1.md's own rotating-case section for a real
- * example of the same run producing different results on nominally identical inputs). That flat
- * line is not a bug in this instrument — it is this instrument telling the truth about a harness
- * that was never wired to the thing being swept. What this script CAN still show, honestly: (a) that
- * the knob does not perturb the engine/classification/gate/publisher stages `corpus/run.mjs` DOES
- * measure — a regression check on the frozen qualification basis, not a Pareto curve — and (b) an
- * N-repeat measurement of serving variance itself, since N stages that provably do not differ in
- * what they measure are, mechanically, N independent re-runs of the identical configuration. A
- * strictness Pareto curve for `substantiate()` would need a harness on the `planAndAudit` side of
- * that split (`corpus/real-diffs.mjs`, or a purpose-built fixture) — out of scope here, and not
- * something this script attempts.
+ * Staged qualification now enters through `performLocalReview`, the same production-local
+ * pipeline as the CLI: generation, Truth/Challenge/Falsifier verification, classification audit,
+ * deterministic gates, sanitization, and deduplication. `KFQ_SUBSTANTIATION_STRICTNESS` therefore
+ * reaches the real verifier and each stage is a genuine operating-point sample. It is still only
+ * one nondeterministic sample per stage; differences smaller than ordinary serving variance need
+ * repeats before anyone treats them as a stable Pareto frontier.
  *
  * ## What this script does
  *
@@ -63,12 +41,12 @@ import { CASES } from "./cases.mjs";
  *
  * ## Cost, and the guardrails around it
  *
- * The latest staged release attempt used 584,237 tokens in 10m17s. This planner keeps a wider
- * 500,000-800,000-token / 20-minute envelope because serving variance remains real and the current
- * examiner evidence contract is longer, even though its call topology is unchanged. Four stages
- * are four times the money and four times the wait —
- * and, per the section above, the strictness axis is not even the thing that cost would be buying on
- * the default `--stages`. `estimateStageCost`/`buildPlan` compute and `renderDryRunPlan` prints an
+ * The final generation-only staged attempts used roughly 620k–660k tokens in about twelve minutes.
+ * Production quality verification adds bounded model calls for surviving findings, so until a
+ * complete production-path wave establishes a tighter observation this planner uses a conservative
+ * 1.5M–3.5M-token / 75-minute forecast. It is a forecast, not an aggregate hard cap. Four stages
+ * are four times the money and four times the wait. `estimateStageCost`/`buildPlan` compute and
+ * `renderDryRunPlan` prints an
  * explicit estimate before a single stage runs, `--dry-run` stops there and spends nothing, `--only`
  * narrows every stage to one case (the exact fraction is derived from `CASES.length`), and
  * `--stages` narrows which levels run at all. None of this is optional politeness: `npm run corpus`
@@ -119,9 +97,9 @@ export const SWEEP_RUNNER_ENV_VALUE = "1";
 // Planning bounds anchored to the complete staged attempt recorded above. They are deliberately
 // wider than that one observation to allow serving variance and the longer examiner contract; they
 // are a forecast, not an observed minimum/maximum and not a hard spending cap.
-export const FULL_CORPUS_TOKENS_LOW = 500_000;
-export const FULL_CORPUS_TOKENS_HIGH = 800_000;
-export const FULL_CORPUS_MINUTES = 20;
+export const FULL_CORPUS_TOKENS_LOW = 1_500_000;
+export const FULL_CORPUS_TOKENS_HIGH = 3_500_000;
+export const FULL_CORPUS_MINUTES = 75;
 
 // Derived from the only case registry rather than copied from a historical scoreboard. This count
 // changed twice while the old literal remained at 39, making every `--only` estimate understate its
@@ -231,21 +209,17 @@ function formatTokenRange(low, high) {
 
 /**
  * The plan and cost estimate — printed unconditionally at the start of every invocation, `--dry-run`
- * or not, and the ONLY thing `--dry-run` prints. Leads with the structural limitation (this file's
- * own header comment), not the price: a reader deciding whether to spend real money needs to know
- * FIRST that the default sweep cannot show the curve it sounds like it shows, and only second what
- * that non-answer costs.
+ * or not, and the ONLY thing `--dry-run` prints. Leads with the production-path scope and the
+ * serving-variance warning before the price.
  */
 export function renderDryRunPlan(plan) {
   const lines = [
     "OPERATING-POINT SWEEP — PLAN ONLY, NOTHING SPENT YET",
     "",
-    "READ THIS FIRST: corpus/run.mjs never calls src/publish/substantiate.ts (planCaseFindings",
-    "calls planPublication directly, never planAndAudit — see this script's own header comment for",
-    "the exact call chain). Sweeping KFQ_SUBSTANTIATION_STRICTNESS through corpus/run.mjs is",
-    "therefore expected to leave recall/precision/publishable UNCHANGED at every stage, modulo",
-    "serving variance. Treat a real run of this plan as a regression check plus a variance sample —",
-    "never as the substantiation Pareto curve.",
+    "READ THIS FIRST: staged corpus/run.mjs enters through performLocalReview, so every stage",
+    "measures the shipped Truth/Challenge/Falsifier verification path at the selected",
+    "KFQ_SUBSTANTIATION_STRICTNESS. Each stage is still one serving sample; repeat before reading",
+    "a small difference as a stable operating-point effect.",
     "",
     `stages (${String(plan.stages.length)}): ${plan.stages.join(" -> ")}`,
     plan.only !== undefined ? `only: ${plan.only}` : "only: (unset — full corpus per stage)",
@@ -270,9 +244,9 @@ export function renderDryRunPlan(plan) {
  * scoreboard computes from the SAME `results[]` array — never a restatement of its grading rules,
  * just the same arithmetic applied to the same field. `kept`/`dropped_vague`/`dropped_unsupported`/
  * `dropped_nitpick` are deliberately absent from the return value: `corpus/run.mjs`'s report has no
- * such fields (substantiate() never runs on this path — see this file's header comment), and
- * inventing them here would be exactly the fabricated measurement AGENTS.md and this script's own
- * task both forbid. `buildSweepRows` renders their absence as "n/a", not as zero.
+ * such fields: the public qualification report exposes post-verification survivors and aggregate
+ * suppression counters, not private per-finding judge dispositions. `buildSweepRows` renders their
+ * absence as "n/a", never as a fabricated zero.
  */
 /** Named apart from the template that uses it, so no template nests inside another (S4624). */
 function describeScope(only) {
@@ -369,9 +343,8 @@ export function renderSweepTable(rows) {
   ]);
   return (
     renderMarkdownTable(headers, body) +
-    "\n\n* not measured by this harness — corpus/run.mjs never calls src/publish/substantiate.ts, " +
-    "so this stage's KFQ_SUBSTANTIATION_STRICTNESS setting never reached a judge call. See this " +
-    "script's own header comment."
+    "\n\n* the production verifier runs, but the redacted qualification report does not expose " +
+    "private per-finding judge buckets; these cells are intentionally n/a rather than fabricated."
   );
 }
 
@@ -410,15 +383,10 @@ export function renderEvidenceMarkdown({ generatedAtIso, plan, stageOutcomes }) 
     "",
     "## What this sweep can and cannot show",
     "",
-    "corpus/run.mjs builds its findings through `planPublication` directly and never through",
-    "`planAndAudit` (src/review.ts), which is the only caller of `substantiate()`. Every stage below",
-    "therefore ran the SAME code path regardless of its KFQ_SUBSTANTIATION_STRICTNESS setting: the",
-    "differences in the table, if any, are serving variance and case rotation, not the strictness",
-    "axis. A real substantiation Pareto curve needs a harness on the planAndAudit side (e.g.",
-    "corpus/real-diffs.mjs) — out of scope for this script. What IS genuine evidence here: whether",
-    "the knob destabilizes the frozen qualification pipeline (it should not, and if any row below",
-    "disagrees with the others outside plausible serving variance, that is the finding), and an",
-    "N-stage repeated measurement of that pipeline's own run-to-run variance.",
+    "Staged corpus/run.mjs enters `performLocalReview`, which runs the same `planAndAudit` quality",
+    "verification path as the CLI and GitHub Action. Each row therefore measures its named",
+    "KFQ_SUBSTANTIATION_STRICTNESS setting. The table remains one serving sample per stage, so a",
+    "small spread is not a stable strictness effect without independent repeats.",
     "",
     "## Serving variance",
     "",

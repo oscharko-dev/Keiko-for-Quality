@@ -151,13 +151,13 @@ test("buildPlan on a narrowed --only + two stages costs a small fraction of the 
   assert.ok(narrow.totalTokensHigh < full.totalTokensHigh / 10);
 });
 
-test("renderDryRunPlan leads with the structural limitation, not the price", () => {
+test("renderDryRunPlan leads with production-path scope and variance, not the price", () => {
   const plan = buildPlan({ stages: STRICTNESS_LEVELS, only: undefined });
   const text = renderDryRunPlan(plan);
   assert.ok(text.startsWith("OPERATING-POINT SWEEP — PLAN ONLY, NOTHING SPENT YET"));
-  const limitationIndex = text.indexOf("corpus/run.mjs never calls src/publish/substantiate.ts");
+  const limitationIndex = text.indexOf("staged corpus/run.mjs enters through performLocalReview");
   const priceIndex = text.indexOf("per-stage estimate:");
-  assert.ok(limitationIndex > -1, "the structural limitation must be stated");
+  assert.ok(limitationIndex > -1, "the production-path scope must be stated");
   assert.ok(priceIndex > -1, "the cost estimate must be stated");
   assert.ok(limitationIndex < priceIndex, "the limitation must precede the price, not follow it");
   assert.ok(text.includes(`runner: ${SWEEP_RUNNER_MODE}`));
@@ -234,7 +234,7 @@ test("summarizeStageReport never throws on a missing or malformed report", () =>
   assert.equal(summarizeStageReport({}).reason, "report_unreadable");
 });
 
-test("buildSweepRows never fabricates the substantiation counts run.mjs cannot report", () => {
+test("buildSweepRows never fabricates private substantiation buckets", () => {
   const rows = buildSweepRows([
     { stage: "default", summary: summarizeStageReport(measuredReport()) },
   ]);
@@ -268,7 +268,7 @@ test("renderSweepTable is a GFM table with one row per stage and the n/a* footno
   assert.ok(table.startsWith("| stage |"));
   assert.ok(table.includes("| --- |"));
   assert.ok(table.includes("| default |"));
-  assert.ok(table.includes("never calls src/publish/substantiate.ts"));
+  assert.ok(table.includes("production verifier runs"));
 });
 
 test("renderEvidenceMarkdown titles itself a sweep, never a qualification, and says so explicitly", () => {

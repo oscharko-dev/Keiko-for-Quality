@@ -332,14 +332,12 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
    is why qualification re-runs on a schedule rather than being asserted once.
 5. **Findings are model output.** Precision is not perfect. Every finding is a claim to evaluate,
    not a verdict to obey.
-6. **The seeded qualification isolates candidate generation.** `corpus/run.mjs` measures the
-   release-selected generation workflow, classification, deterministic contract gates, and the
-   production publication planner. It deliberately does not execute the later
-   Truth/Challenge/Falsifier/Referee workflow. That makes its precision bar stricter — a false
-   candidate fails even when production would withhold it — but also means this corpus alone cannot
-   prove that post-generation verification retains true findings. The consumer seed and completion
-   gates exercise the full local-review pipeline; Historical Replay measures the verifier against
-   separately corroborated findings.
+6. **The seeded qualification is synthetic.** `corpus/run.mjs` now enters through
+   `performLocalReview`, so generation, Truth/Challenge/Falsifier verification, classification,
+   deterministic gates, sanitization, and deduplication match the shipped local product path. Its
+   42 small controlled changes still do not prove that a large real review can finish reliably;
+   the consumer seed and completion gates cover that separate product property, while Historical
+   Replay measures verifier decisions against independently corroborated findings.
 
 7. **The similarity dedup stage is a bag-of-words measure.** It compares content vocabulary, not
    meaning, so it can occasionally score "the same defect, reworded" and "a different defect
@@ -416,9 +414,9 @@ between runs — which is why classification is reported and not gated: severity
 and gates nothing. Every run records what produced it (engine digest, rule digest, corpus digest,
 adapter commit, model id), because recall is a property of a _pairing_, and the model is the input
 that can move without a commit. The classic engine digest covers the executable bytes; staged mode
-uses a canonical digest of the transitive local runtime-source closure rooted at its runner and the
-corpus Inventory/context-pack adapter, so a prompt-policy or staged-evidence change cannot retain an
-older engine identity merely because `src/engine/single-shot.ts` itself did not move. The scorer
+uses a canonical digest of the transitive local runtime-source closure rooted at the shared local
+review pipeline and its corpus adapter, so a prompt, verifier, or staged-evidence change cannot
+retain an older engine identity merely because `src/engine/single-shot.ts` itself did not move. The scorer
 digest applies the same closure rule from `corpus/run.mjs`, binding its graders, classifiers,
 publisher and deterministic gates rather than only the facade script.
 

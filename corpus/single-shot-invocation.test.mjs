@@ -13,6 +13,7 @@ import {
   STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS,
   corpusReviewDeadlineMs,
   qualificationEngineIdentity,
+  qualificationOutcomeFromLocalReview,
   singleShotCorpusContextOptions,
   singleShotCorpusDispatch,
 } from "./single-shot-invocation.mjs";
@@ -144,6 +145,11 @@ test("staged binding ignores a fetched but unused classic engine", () => {
       entrypoints: STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS,
     },
   );
+  assert.equal(STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS.includes("src/review.ts"), true);
+  assert.equal(
+    STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS.includes("src/engine/single-shot.ts"),
+    false,
+  );
   assert.deepEqual(
     qualificationEngineIdentity({
       singleShot: false,
@@ -152,6 +158,74 @@ test("staged binding ignores a fetched but unused classic engine", () => {
     }),
     { kind: "file", path: "/tmp/ocr" },
   );
+});
+
+test("publication-quality local results retain only scorer-compatible findings and counters", () => {
+  const { result, plan } = qualificationOutcomeFromLocalReview(
+    {
+      outcome: "complete",
+      findings: [
+        {
+          path: "src/a.ts",
+          startLine: 4,
+          endLine: 4,
+          category: "bug",
+          severity: "high",
+          body: "Fix the bound.\n\nWhen input is empty, the index is negative.",
+        },
+      ],
+      spend: { engine: 10, classify: 5, total: 15, allotted: 100 },
+      inventory: { total: 2, reviewable: 2, reviewed: 2 },
+      ruleDigest: "a".repeat(64),
+      engineVersion: "v1",
+      cacheHits: 0,
+      cacheMisses: 2,
+    },
+    [
+      { code: "publish.finding_suppressed_intra_run" },
+      { code: "publish.finding_rejected_sanitization" },
+    ],
+  );
+
+  assert.equal(result.status, "success");
+  assert.equal(result.summary.total_tokens, 15);
+  assert.equal(result.summary.files_reviewed, 2);
+  assert.equal(result.summary.budget_exceeded, false);
+  assert.equal(result.manifest.coverage.selected.length, 2);
+  assert.equal(result.manifest.coverage.completed.length, 2);
+  assert.deepEqual(result.comments, [
+    {
+      path: "src/a.ts",
+      startLine: 4,
+      endLine: 4,
+      category: "bug",
+      severity: "high",
+      content: "Fix the bound.\n\nWhen input is empty, the index is negative.",
+    },
+  ]);
+  assert.equal(plan.survivors[0]?.sanitizedBody, result.comments[0]?.content);
+  assert.deepEqual(plan.counters, { rejectedSanitization: 1, suppressedIntraRun: 1 });
+});
+
+test("an incomplete local budget stop remains an explicit budget-pressure result", () => {
+  const { result } = qualificationOutcomeFromLocalReview(
+    {
+      outcome: "incomplete",
+      reason: "settlement.incomplete.budget_exceeded",
+      findings: [],
+      spend: { engine: 25_000, classify: 0, total: 25_000, allotted: 25_000 },
+      inventory: { total: 5, reviewable: 5, reviewed: 2 },
+      ruleDigest: "b".repeat(64),
+      engineVersion: "v1",
+      cacheHits: 0,
+      cacheMisses: 5,
+    },
+    [],
+  );
+
+  assert.equal(result.status, "budget_exceeded");
+  assert.equal(result.summary.budget_exceeded, true);
+  assert.equal(result.summary.files_reviewed, 2);
 });
 
 test("a corpus case repository is removed when fixture construction fails", () => {

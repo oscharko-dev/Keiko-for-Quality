@@ -22,10 +22,12 @@ import {
 } from "./generation-workflow.js";
 import {
   BOUNDARY_OMISSION_EVIDENCE_POLICY,
+  DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
+  WORKFLOW_TRUST_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
 
 const CONTEXT: GenerationContext = {
@@ -56,7 +58,7 @@ function occurrenceCount(value: string, needle: string): number {
 
 describe("risk planner", () => {
   it("pins the manually bumped cache identity", () => {
-    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v8");
+    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v9");
   });
 
   it("sees the complete qualified rule but never receives the whole file", () => {
@@ -70,6 +72,8 @@ describe("risk planner", () => {
     expect(prompt.system).not.toContain(TEST_ISOLATION_EVIDENCE_POLICY);
     expect(prompt.system).not.toContain(REFERENCE_TRANSITION_EVIDENCE_POLICY);
     expect(prompt.system).not.toContain(BOUNDARY_OMISSION_EVIDENCE_POLICY);
+    expect(prompt.system).not.toContain(WORKFLOW_TRUST_EVIDENCE_POLICY);
+    expect(prompt.system).not.toContain(DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY);
     expect(prompt.system).not.toContain(EXAMINER_CLAIM_DECISION_POLICY);
   });
 
@@ -147,6 +151,8 @@ describe("focused examiners", () => {
       expect(occurrenceCount(prompt.system, TEST_ISOLATION_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, REFERENCE_TRANSITION_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, BOUNDARY_OMISSION_EVIDENCE_POLICY)).toBe(1);
+      expect(occurrenceCount(prompt.system, WORKFLOW_TRUST_EVIDENCE_POLICY)).toBe(1);
+      expect(occurrenceCount(prompt.system, DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY)).toBe(1);
       expect(prompt.system).not.toContain("## Workflow and pipeline files");
       expect(prompt.system).not.toContain("## Look before you claim");
     }

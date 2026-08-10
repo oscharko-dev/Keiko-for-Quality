@@ -31,12 +31,28 @@ export const BOUNDARY_OMISSION_EVIDENCE_POLICY = [
   "evidence, leave silent.",
 ].join(" ");
 
+export const WORKFLOW_TRUST_EVIDENCE_POLICY = [
+  "Privileged-workflow decision — REPORT `security`/`critical`: a `pull_request_target` or other",
+  "trusted-context workflow changes checkout from the trusted base SHA to the candidate head SHA",
+  "before install or execution, so candidate code runs with base-repository authority. SILENT: the",
+  "workflow keeps the trusted base checkout and only fetches candidate Git objects as review data.",
+].join(" ");
+
+export const DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY = [
+  "Diagnostic-context decision — SILENT: a catch block only adds an already-available non-secret",
+  "primitive field to structured log context and rethrows the identical error. REPORT only when",
+  "the added context can disclose a secret or payload, or the change replaces, wraps, or swallows",
+  "the thrown error.",
+].join(" ");
+
 /** The whole policy block injected into each mandatory examiner, assembled from canonical text. */
 export const EXAMINER_CLAIM_DECISION_POLICY = [
   `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
   `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
   `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
+  `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
+  `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
 ].join("\n");
 
 /** Prevent a focused examiner fix from silently becoming another copy of the complete rule. */
-export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 1_650;
+export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 2_350;

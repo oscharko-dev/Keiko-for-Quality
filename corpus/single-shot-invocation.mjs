@@ -13,9 +13,13 @@ export function corpusReviewDeadlineMs(nowMs = Date.now()) {
 
 /** Explicit roots for the staged review and its corpus-only production-input preparation. */
 export const STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS = Object.freeze([
-  "src/engine/single-shot.ts",
+  "src/review.ts",
   "corpus/single-shot-invocation.mjs",
 ]);
+
+const BUDGET_EXCEEDED_REASON = "settlement.incomplete.budget_exceeded";
+const REJECTED_SANITIZATION = "publish.finding_rejected_sanitization";
+const SUPPRESSED_INTRA_RUN = "publish.finding_suppressed_intra_run";
 
 /**
  * The implementation identity whose judgment the qualification report binds.
@@ -37,6 +41,65 @@ export function qualificationEngineIdentity({ singleShot, binary, repositoryRoot
     throw new TypeError("classic qualification requires an engine binary");
   }
   return { kind: "file", path: binary };
+}
+
+function occurrenceCount(records, code) {
+  return records.filter((record) => record.code === code).length;
+}
+
+function placeholderPaths(count) {
+  return Array.from({ length: count }, (_, index) => `reviewable-${String(index)}`);
+}
+
+function localReviewStatus(report, budgetExceeded) {
+  if (report.outcome === "complete") return "success";
+  if (budgetExceeded) return "budget_exceeded";
+  return "failed";
+}
+
+/**
+ * Adapts the publication-quality local review report to the corpus scorer's established shape.
+ *
+ * The findings are already sanitized, deduplicated, classified, and independently verified by
+ * `performLocalReview`; this adapter never re-plans them. Placeholder coverage paths preserve only
+ * the aggregate counts the redacted qualification schema admits, never repository content.
+ */
+export function qualificationOutcomeFromLocalReview(report, diagnosticRecords) {
+  const findings = report.findings.map((finding) => ({
+    path: finding.path,
+    startLine: finding.startLine,
+    endLine: finding.endLine,
+    ...(finding.category === undefined ? {} : { category: finding.category }),
+    ...(finding.severity === undefined ? {} : { severity: finding.severity }),
+    content: finding.body,
+  }));
+  const budgetExceeded = report.reason === BUDGET_EXCEEDED_REASON;
+  const result = {
+    status: localReviewStatus(report, budgetExceeded),
+    comments: findings,
+    summary: {
+      total_tokens: report.spend.total,
+      files_reviewed: report.inventory.reviewed,
+      budget_exceeded: budgetExceeded,
+    },
+    manifest: {
+      coverage: {
+        selected: placeholderPaths(report.inventory.reviewable),
+        completed: placeholderPaths(report.inventory.reviewed),
+        reused: [],
+        failed: [],
+        waived: [],
+      },
+    },
+  };
+  const plan = {
+    survivors: findings.map((finding) => ({ finding, sanitizedBody: finding.content })),
+    counters: {
+      rejectedSanitization: occurrenceCount(diagnosticRecords, REJECTED_SANITIZATION),
+      suppressedIntraRun: occurrenceCount(diagnosticRecords, SUPPRESSED_INTRA_RUN),
+    },
+  };
+  return { result, plan };
 }
 
 async function productionInventoryDependencies() {

@@ -2999,10 +2999,24 @@ var BOUNDARY_OMISSION_EVIDENCE_POLICY = [
   "update only when shown consumer code preserves existing state on absence; without that consumer",
   "evidence, leave silent."
 ].join(" ");
+var WORKFLOW_TRUST_EVIDENCE_POLICY = [
+  "Privileged-workflow decision \u2014 REPORT `security`/`critical`: a `pull_request_target` or other",
+  "trusted-context workflow changes checkout from the trusted base SHA to the candidate head SHA",
+  "before install or execution, so candidate code runs with base-repository authority. SILENT: the",
+  "workflow keeps the trusted base checkout and only fetches candidate Git objects as review data."
+].join(" ");
+var DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY = [
+  "Diagnostic-context decision \u2014 SILENT: a catch block only adds an already-available non-secret",
+  "primitive field to structured log context and rethrows the identical error. REPORT only when",
+  "the added context can disclose a secret or payload, or the change replaces, wraps, or swallows",
+  "the thrown error."
+].join(" ");
 var EXAMINER_CLAIM_DECISION_POLICY = [
   `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
   `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
-  `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`
+  `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
+  `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
+  `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`
 ].join("\n");
 
 // src/engine/rule-file.ts
@@ -3089,6 +3103,7 @@ var CATCH_ALL_RULE = [
   "  are worried about. A cursor cannot skip or repeat a row on a column that cannot repeat; do not",
   "  ask for a tie-breaker it does not need.",
   `- **boundary and omitted-state transitions** \u2014 ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
+  `- **diagnostic context in error paths** \u2014 ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
   "  or termination can recommend a fix that weakens correct code instead of improving it.",
@@ -3183,6 +3198,8 @@ var CATCH_ALL_RULE = [
   "- low \u2014 genuine but minor; when tempted, report nothing instead.",
   "",
   "## Workflow and pipeline files",
+  "",
+  WORKFLOW_TRUST_EVIDENCE_POLICY,
   "",
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   "",
@@ -3627,7 +3644,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v8";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v9";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;

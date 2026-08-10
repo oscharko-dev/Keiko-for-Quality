@@ -13,14 +13,12 @@ restate either here.
 
 Issue #95 landed `performLocalReview` in `src/review.ts`, so the CLI runs a real review end to
 end, through the same shared pipeline `performReview` runs — same digest-pinned engine, same rule
-text, same settlement semantics. Issue #99 landed the other end of that sharing:
-`corpus/real-diffs.mjs` now drives `performLocalReview` too, instead of hand-rolling its own engine
-invocation, so a change to the shared pipeline is proven by one measurement covering both the CLI
-and a real commit, not two separate ones. `corpus/run.mjs` (the seeded-defect qualification
-harness) still drives the engine through its own harness code — its own migration is a
-deliberately separate, not-yet-scoped decision, left alone so the qualification that shipped each
-release keeps the same measurement basis it was recorded under (see `corpus/run.mjs`'s own header
-comment).
+text, same settlement semantics. Issue #99 moved `corpus/real-diffs.mjs` onto that path. The v0.23
+qualification recut completed the staged side: `KFQ_SINGLE_SHOT=1 corpus/run.mjs` now drives
+`performLocalReview` too, so its precision score is based on the shipped Truth/Challenge/Falsifier
+verification and publication plan rather than raw generation. The classic binary mode retains its
+historical direct harness for comparison; evidence from before and after this recut is separated by
+the transitive engine/scorer binding.
 
 ## Four commands and one manual workflow spend real money
 
