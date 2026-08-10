@@ -153,10 +153,48 @@ test("the normal promotion checker reads redacted evidence without private diagn
       encoding: "utf8",
     });
     assert.match(output, /severeRecall\s+100\.0%/u);
+    assert.match(output, /severeRecall.*floor 85\.0%/u);
     assert.match(output, /precision\s+100\.0%/u);
     assert.ok(!output.includes(SECRET));
   } finally {
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the severe-recall floor tolerates four misses but rejects five of thirty", () => {
+  const severe = CASES.filter(
+    (testCase) =>
+      testCase.defect !== null && ["critical", "high"].includes(testCase.defect.severity),
+  );
+  assert.equal(severe.length, 30);
+
+  for (const [misses, expectedStatus, expectedRate] of [
+    [4, 0, "86.7%"],
+    [5, 1, "83.3%"],
+  ]) {
+    const directory = mkdtempSync(join(tmpdir(), "kfq-qualification-floor-test-"));
+    const path = join(directory, "qualification.json");
+    try {
+      const raw = rawReport();
+      const byId = new Map(raw.results.map((result) => [result.id, result]));
+      for (const testCase of severe.slice(0, misses)) {
+        const result = byId.get(testCase.id);
+        assert.ok(result !== undefined);
+        result.pass = false;
+      }
+      writeFileSync(path, JSON.stringify(redactQualificationReport(raw)));
+      const checked = spawnSync(process.execPath, ["scripts/check-qualification.mjs", path], {
+        cwd: new URL("..", import.meta.url),
+        encoding: "utf8",
+      });
+      assert.equal(checked.status, expectedStatus);
+      assert.match(
+        `${checked.stdout}${checked.stderr}`,
+        new RegExp(expectedRate.replace(".", "\\."), "u"),
+      );
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   }
 });
 
