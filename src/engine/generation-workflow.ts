@@ -580,18 +580,21 @@ function nonCodeSegmentEnd(body: string, start: number): number | undefined {
 /** One linear scan finds the close paired with the declaration's first open parenthesis. */
 function matchingCloseParenthesis(body: string, open: number): number {
   let depth = 0;
-  for (let index = open; index < body.length; index += 1) {
+  let index = open;
+  while (index < body.length) {
     const segmentEnd = nonCodeSegmentEnd(body, index);
     if (segmentEnd !== undefined) {
       if (segmentEnd < 0) return -1;
-      index = segmentEnd;
+      index = segmentEnd + 1;
       continue;
     }
     const character = body[index];
     if (character === "(") depth += 1;
-    if (character !== ")") continue;
-    depth -= 1;
-    if (depth === 0) return index;
+    if (character === ")") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+    index += 1;
   }
   return -1;
 }
@@ -660,14 +663,16 @@ function isTopLevelTypeSeparator(
 
 function hasTopLevelTypeSeparator(parameters: string): boolean {
   const state: TypeSeparatorScanState = { expectedClosers: [], ternaryDepth: 0 };
-  for (let index = 0; index < parameters.length; index += 1) {
+  let index = 0;
+  while (index < parameters.length) {
     const segmentEnd = nonCodeSegmentEnd(parameters, index);
     if (segmentEnd !== undefined) {
       if (segmentEnd < 0) return false;
-      index = segmentEnd;
+      index = segmentEnd + 1;
       continue;
     }
     if (isTopLevelTypeSeparator(parameters, index, state)) return true;
+    index += 1;
   }
   return false;
 }

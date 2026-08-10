@@ -4013,18 +4013,21 @@ function nonCodeSegmentEnd(body, start) {
 }
 function matchingCloseParenthesis(body, open2) {
   let depth = 0;
-  for (let index = open2; index < body.length; index += 1) {
+  let index = open2;
+  while (index < body.length) {
     const segmentEnd = nonCodeSegmentEnd(body, index);
     if (segmentEnd !== void 0) {
       if (segmentEnd < 0) return -1;
-      index = segmentEnd;
+      index = segmentEnd + 1;
       continue;
     }
     const character = body[index];
     if (character === "(") depth += 1;
-    if (character !== ")") continue;
-    depth -= 1;
-    if (depth === 0) return index;
+    if (character === ")") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+    index += 1;
   }
   return -1;
 }
@@ -4071,14 +4074,16 @@ function isTopLevelTypeSeparator(parameters, index, state) {
 }
 function hasTopLevelTypeSeparator(parameters) {
   const state = { expectedClosers: [], ternaryDepth: 0 };
-  for (let index = 0; index < parameters.length; index += 1) {
+  let index = 0;
+  while (index < parameters.length) {
     const segmentEnd = nonCodeSegmentEnd(parameters, index);
     if (segmentEnd !== void 0) {
       if (segmentEnd < 0) return false;
-      index = segmentEnd;
+      index = segmentEnd + 1;
       continue;
     }
     if (isTopLevelTypeSeparator(parameters, index, state)) return true;
+    index += 1;
   }
   return false;
 }

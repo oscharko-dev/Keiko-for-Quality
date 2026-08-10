@@ -127,16 +127,29 @@ describe("SonarCloud dev evidence gate", () => {
       new_security_rating: 1,
       new_violations: 0,
     };
+    const gitCalls = [];
+    const logs = [];
     await runSonarMainGate({
       base: "b".repeat(40),
-      execute: () => "M\tREADME.md\n",
+      execute: (...args) => {
+        gitCalls.push(args);
+        return "M\tREADME.md\n";
+      },
       headSha,
       load: async (path) =>
         path.includes("metricKeys=new_coverage")
           ? measurePayload(docsOnlyMeasures)
           : passingLoad(path),
-      log: () => undefined,
+      log: (message) => logs.push(message),
     });
+    assert.deepEqual(gitCalls, [
+      [
+        "/usr/bin/git",
+        ["diff", "--name-status", "--diff-filter=ACMR", `${"b".repeat(40)}...${headSha}`],
+        { cwd: process.cwd(), encoding: "utf8" },
+      ],
+    ]);
+    assert.deepEqual(logs, [`sonar-main-quality-gate: PASS - dev is clean at ${headSha}.`]);
   });
 
   it("keeps reported branch-period rates load-bearing on a docs-only push", async () => {
