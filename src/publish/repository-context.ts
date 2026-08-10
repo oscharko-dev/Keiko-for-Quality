@@ -30,6 +30,8 @@ export const MAX_REPOSITORY_FOLLOW_UP_TERMS = 3;
 const MAX_GREP_TERMS = 8;
 const MAX_RAW_MATCHES = 96;
 const MAX_STRUCTURAL_CANDIDATE_PATHS_PER_TERM = 4;
+const MAX_DETERMINISTIC_FALLBACK_TERMS = 3;
+const FALLBACK_DECLARATION_RADIUS = 32;
 const MAX_CODE_ENTRIES = 12;
 const MAX_CODE_PATHS = 5;
 const MAX_MANIFEST_FILES = 3;
@@ -226,6 +228,114 @@ function expandedSearchTerms(terms: readonly string[]): readonly string[] {
     }
   }
   return expanded;
+}
+
+function mergeFollowUpSearches(
+  primary: GrepSearchResult,
+  fallback: GrepSearchResult,
+  fallbackTermOffset: number,
+): GrepSearchResult {
+  return {
+    matches: [
+      ...primary.matches,
+      ...fallback.matches.map((match) => ({
+        ...match,
+        termRank: match.termRank + fallbackTermOffset,
+      })),
+    ],
+    candidatePaths: [...new Set([...primary.candidatePaths, ...fallback.candidatePaths])],
+    truncated: primary.truncated || fallback.truncated,
+  };
+}
+
+const DECLARED_IDENTIFIER =
+  /\b(?:class|const|enum|function|interface|let|type|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/gu;
+
+function declarationDistance(line: number, anchor: EvidenceLineRange): number {
+  if (line < anchor.startLine) return anchor.startLine - line;
+  if (line > anchor.endLine) return line - anchor.endLine;
+  return 0;
+}
+
+function declarationsNearAnchor(
+  request: RepositoryContextRequest,
+  source: string | undefined,
+): readonly string[] {
+  if (source === undefined) return [];
+  const lines = source.endsWith("\n") ? source.slice(0, -1).split("\n") : source.split("\n");
+  const first = Math.max(1, request.findingAnchor.startLine - FALLBACK_DECLARATION_RADIUS);
+  const last = Math.min(lines.length, request.findingAnchor.endLine + FALLBACK_DECLARATION_RADIUS);
+  const declarations: { readonly identifier: string; readonly line: number }[] = [];
+  for (let line = first; line <= last; line += 1) {
+    for (const match of (lines[line - 1] ?? "").matchAll(DECLARED_IDENTIFIER)) {
+      const identifier = match[1];
+      if (identifier !== undefined) declarations.push({ identifier, line });
+    }
+  }
+  declarations.sort(
+    (left, right) =>
+      declarationDistance(left.line, request.findingAnchor) -
+        declarationDistance(right.line, request.findingAnchor) ||
+      left.line - right.line ||
+      left.identifier.localeCompare(right.identifier),
+  );
+  return declarations.map(({ identifier }) => identifier);
+}
+
+function takeFallbackTerms(
+  candidates: readonly string[],
+  primary: readonly string[],
+): readonly string[] {
+  const excluded = new Set(primary);
+  const accepted: string[] = [];
+  for (const candidate of candidates) {
+    if (!validTerm(candidate) || excluded.has(candidate) || accepted.includes(candidate)) continue;
+    accepted.push(candidate);
+    if (accepted.length === MAX_DETERMINISTIC_FALLBACK_TERMS) break;
+  }
+  return accepted;
+}
+
+/**
+ * A planner can name only the private helper at the changed line. When every occurrence of that
+ * helper is already in the H/B evidence window, repeating the same lookup produces no independent
+ * challenge even though the adjacent public owner has callers and tests elsewhere. Derive at most
+ * three additional identifiers from a 32-line exact-commit neighbourhood, ordered by proximity,
+ * then fall back to the same bounded code-shaped vocabulary used by initial retrieval.
+ *
+ * These are search terms, not evidence: Git still has to find them in the immutable selected tree,
+ * and the ordinary structural/failure policy still decides whether any returned line is usable.
+ */
+function deterministicFallbackTerms(
+  request: RepositoryContextRequest,
+  source: string | undefined,
+  primary: readonly string[],
+): readonly string[] {
+  return takeFallbackTerms(
+    [
+      ...declarationsNearAnchor(request, source),
+      ...extractEvidenceIdentifiers({
+        findingContent: request.findingContent,
+        anchorText: request.anchorText,
+        ...(request.unifiedDiff === undefined ? {} : { unifiedDiff: request.unifiedDiff }),
+      }),
+    ],
+    primary,
+  );
+}
+
+function plannerTermsBelongToFinding(
+  request: RepositoryContextRequest,
+  primary: readonly string[],
+): boolean {
+  const visible = new Set(
+    extractEvidenceIdentifiers({
+      findingContent: request.findingContent,
+      anchorText: request.anchorText,
+      ...(request.unifiedDiff === undefined ? {} : { unifiedDiff: request.unifiedDiff }),
+    }).flatMap((term) => [term, term.split(".").at(-1) ?? term]),
+  );
+  return primary.some((term) => visible.has(term) || visible.has(term.split(".").at(-1) ?? term));
 }
 
 function safeRepositoryPath(path: string): boolean {
@@ -751,6 +861,13 @@ export interface RepositoryContextDependencies {
   ) => Promise<readonly RepositoryEvidenceEntry[]>;
 }
 
+interface FollowUpSearch {
+  readonly terms: readonly string[];
+  readonly expandedTerms: readonly string[];
+  readonly result: GrepSearchResult;
+  readonly usedFallback: boolean;
+}
+
 function followUpSourceRequest(
   request: RepositoryContextRequest,
   side: RepositoryEvidenceSide,
@@ -762,6 +879,73 @@ function followUpSourceRequest(
     reviewPath: request.baseReviewPath,
     // An unmappable HEAD anchor must not make the complete BASE-side reviewed file eligible.
     findingAnchor: request.baseFindingAnchor ?? { startLine: 0, endLine: 0 },
+  };
+}
+
+async function readFollowUpReviewSource(
+  context: GitContext,
+  request: RepositoryContextRequest,
+): Promise<string | undefined> {
+  try {
+    return await readTextAtCommit(
+      {
+        ...context,
+        timeoutMs: boundedRepositoryTimeout(request.deadlineMs, context.timeoutMs),
+      },
+      request.head,
+      request.reviewPath,
+    );
+  } catch (error) {
+    throw new RepositoryContextRetrievalError(error);
+  }
+}
+
+function mayUseAdjacentFallback(
+  request: RepositoryContextRequest,
+  primaryTerms: readonly string[],
+  result: GrepSearchResult,
+): boolean {
+  return (
+    result.matches.length === 0 &&
+    !result.truncated &&
+    (result.candidatePaths.length > 0 || plannerTermsBelongToFinding(request, primaryTerms))
+  );
+}
+
+async function collectFollowUpSearch(
+  context: GitContext,
+  request: RepositoryContextRequest,
+  retrieveTerms: readonly string[],
+): Promise<FollowUpSearch> {
+  const primaryTerms = validatedRetrieveTerms(retrieveTerms);
+  const primaryExpanded = expandedSearchTerms(primaryTerms);
+  const primary = await grepAtHead(context, request, primaryExpanded, true, true);
+  if (!mayUseAdjacentFallback(request, primaryTerms, primary)) {
+    return {
+      terms: primaryTerms,
+      expandedTerms: primaryExpanded,
+      result: primary,
+      usedFallback: false,
+    };
+  }
+  const source = await readFollowUpReviewSource(context, request);
+  const fallbackTerms = deterministicFallbackTerms(request, source, primaryTerms);
+  const remainingTermSlots = Math.max(0, MAX_GREP_TERMS - primaryExpanded.length);
+  const fallbackExpanded = expandedSearchTerms(fallbackTerms).slice(0, remainingTermSlots);
+  if (fallbackExpanded.length === 0) {
+    return {
+      terms: primaryTerms,
+      expandedTerms: primaryExpanded,
+      result: primary,
+      usedFallback: false,
+    };
+  }
+  const fallback = await grepAtHead(context, request, fallbackExpanded, true, true);
+  return {
+    terms: [...primaryTerms, ...fallbackTerms],
+    expandedTerms: [...primaryExpanded, ...fallbackExpanded],
+    result: mergeFollowUpSearches(primary, fallback, primaryExpanded.length),
+    usedFallback: true,
   };
 }
 
@@ -903,6 +1087,46 @@ export async function collectInitialRepositoryContext(
   return { headCommit: request.head, entries: [...code, ...manifests] };
 }
 
+async function collectStructuralFollowUp(
+  context: GitContext,
+  request: RepositoryContextRequest,
+  side: RepositoryEvidenceSide,
+  search: FollowUpSearch,
+  lexical: readonly RepositoryEvidenceEntry[],
+  dependencies: RepositoryContextDependencies,
+): Promise<RepositoryFollowUpContext> {
+  const structuralRequired = requiresStructuralFallback(search.result, lexical, search.terms);
+  // Prefer identifiers that produced eligible lexical evidence. A private anchor-only primary term
+  // must not consume all three AST term slots ahead of its adjacent public-owner fallback.
+  const matchedTerms = search.result.matches
+    .map((match) => search.expandedTerms[match.termRank])
+    .filter((term): term is string => term !== undefined);
+  const structuralTerms = normalizedStructuralTerms(
+    search.usedFallback ? [...matchedTerms, ...search.expandedTerms] : search.terms,
+  );
+  try {
+    const structural = await (dependencies.structuralSearch ?? searchAstGrepAtHead)({
+      context,
+      head: request.head,
+      reviewPath: request.reviewPath,
+      findingAnchor: request.findingAnchor,
+      candidatePaths: search.result.candidatePaths,
+      terms: structuralTerms,
+      ...(request.deadlineMs === undefined ? {} : { deadlineMs: request.deadlineMs }),
+    });
+    return {
+      sourceCommit: request.head,
+      side,
+      entries: boundedEvidenceEntries(structural, lexical, request, structuralTerms.length),
+    };
+  } catch (error) {
+    if (structuralRequired) throw new RepositoryContextRetrievalError(error);
+    // A clear lexical definition remains exact positive evidence. Structural body enrichment is
+    // optional on this path, so tool acquisition or parsing failure must not erase it.
+    return { sourceCommit: request.head, side, entries: lexical };
+  }
+}
+
 /** One caller-controlled follow-up stage. Invalid, prose, duplicate, and excess terms disappear. */
 export async function collectRepositoryContextFollowUp(
   request: RepositoryContextRequest,
@@ -913,40 +1137,23 @@ export async function collectRepositoryContextFollowUp(
   const sourceRequest = followUpSourceRequest(request, side);
   remainingRepositoryMs(sourceRequest);
   const context = await strictlyVerifiedContext(sourceRequest);
-  const terms = validatedRetrieveTerms(retrieveTerms);
-  const result = await grepAtHead(context, sourceRequest, expandedSearchTerms(terms), true, true);
+  const search = await collectFollowUpSearch(context, sourceRequest, retrieveTerms);
+  // Model scope remains capped at three identifiers. The optional second group is deterministic
+  // and equally capped; both searches feed one structural invocation over at most four immutable
+  // blobs, so this adds recall without adding another model or parser loop.
   remainingRepositoryMs(sourceRequest);
-  const lexical = boundedCodeEntries(result.matches, sourceRequest, true);
-  if (hasNoStructuralCandidate(result)) {
+  const lexical = boundedCodeEntries(search.result.matches, sourceRequest, true);
+  if (hasNoStructuralCandidate(search.result)) {
     return { sourceCommit: sourceRequest.head, side, entries: lexical };
   }
-  const structuralRequired = requiresStructuralFallback(result, lexical, terms);
-  const structuralTerms = normalizedStructuralTerms(terms);
-  try {
-    const structural = await (dependencies.structuralSearch ?? searchAstGrepAtHead)({
-      context,
-      head: sourceRequest.head,
-      reviewPath: sourceRequest.reviewPath,
-      findingAnchor: sourceRequest.findingAnchor,
-      candidatePaths: result.candidatePaths,
-      terms: structuralTerms,
-      ...(sourceRequest.deadlineMs === undefined ? {} : { deadlineMs: sourceRequest.deadlineMs }),
-    });
-    return {
-      sourceCommit: sourceRequest.head,
-      side,
-      entries: boundedEvidenceEntries(structural, lexical, sourceRequest, structuralTerms.length),
-    };
-  } catch (error) {
-    if (structuralRequired) {
-      // The judge requested this fallback because lexical evidence was ambiguous. Returning those
-      // hits as if structure had verified them would turn an unavailable tool into false evidence.
-      throw new RepositoryContextRetrievalError(error);
-    }
-    // A clear lexical definition remains exact positive evidence. Structural body enrichment is
-    // useful but optional on this path, so tool acquisition or parsing failure must not erase it.
-    return { sourceCommit: sourceRequest.head, side, entries: lexical };
-  }
+  return await collectStructuralFollowUp(
+    context,
+    sourceRequest,
+    side,
+    search,
+    lexical,
+    dependencies,
+  );
 }
 
 /** Pure combination after at most one follow-up; a commit mismatch is rejected, never repaired. */

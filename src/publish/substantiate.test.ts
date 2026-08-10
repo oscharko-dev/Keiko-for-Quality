@@ -21,6 +21,7 @@ import {
   type JudgeableFinding,
   type RetrievedEvidence,
   type RetrievedEvidenceChunk,
+  type SubstantiationTerminalTrace,
 } from "./substantiate.js";
 
 const CHANGE_EVIDENCE = [
@@ -613,6 +614,32 @@ describe("strict falsifier envelope", () => {
 });
 
 describe("truth then adversarial falsification", () => {
+  it("keeps the public outcome byte-for-byte equivalent when the historical sink is absent", async () => {
+    const candidate = finding("When the header is numeric, the wait is 1000× short.");
+    const withoutTrace = await substantiate(
+      [candidate],
+      () => CHANGE_EVIDENCE,
+      endpointReplying([CONFIRMED, CHALLENGE, SURVIVES]).deps,
+      "paranoid",
+      undefined,
+      () => retrievedCaller(),
+    );
+    const traces: SubstantiationTerminalTrace[] = [];
+    const withTrace = await substantiate(
+      [candidate],
+      () => CHANGE_EVIDENCE,
+      endpointReplying([CONFIRMED, CHALLENGE, SURVIVES]).deps,
+      "paranoid",
+      undefined,
+      () => retrievedCaller(),
+      (trace) => traces.push(trace),
+    );
+
+    expect(withTrace).toEqual(withoutTrace);
+    expect(Object.keys(withoutTrace)).not.toContain("trace");
+    expect(traces).toHaveLength(1);
+  });
+
   it("publishes the unchanged original only after planning, retrieval, and falsification", async () => {
     const candidate = finding("When the header is numeric, the wait is 1000× short.");
     const endpoint = endpointReplying([CONFIRMED, CHALLENGE, SURVIVES]);
@@ -850,6 +877,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
   });
 
   it("maps challenge no-match to insufficient and challenge failure to undecided", async () => {
+    const noMatchTraces: SubstantiationTerminalTrace[] = [];
     const noMatch = await substantiate(
       [finding("When an unseen caller passes seconds, the wait is short.")],
       () => CHANGE_EVIDENCE,
@@ -857,7 +885,9 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
       "paranoid",
       undefined,
       () => ({ chunks: [] }),
+      (trace) => noMatchTraces.push(trace),
     );
+    const failedTraces: SubstantiationTerminalTrace[] = [];
     const failed = await substantiate(
       [finding("When an unseen caller passes seconds, the wait is short.")],
       () => CHANGE_EVIDENCE,
@@ -867,6 +897,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
       () => {
         throw new Error("git unavailable");
       },
+      (trace) => failedTraces.push(trace),
     );
 
     expect(noMatch.droppedInsufficientEvidence).toBe(1);
@@ -883,10 +914,21 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     expect(failed.challengeRetrievalPerformed).toBe(1);
     expect(failed.challengeFailed).toBe(1);
     expect(failed.retrievalFailed).toBe(0);
+    expect(noMatchTraces[0]).toMatchObject({
+      stage: "challenge_retrieval",
+      disposition: "insufficient_evidence",
+      reasonCode: "retrieval_no_match",
+    });
+    expect(failedTraces[0]).toMatchObject({
+      stage: "challenge_retrieval",
+      disposition: "undecided",
+      reasonCode: "retrieval_error",
+    });
   });
 
   it("does not retrieve or increment planned when the planner envelope is malformed", async () => {
     let retrievalCalls = 0;
+    const traces: SubstantiationTerminalTrace[] = [];
     const out = await substantiate(
       [finding("When a caller passes seconds, the wait is short.")],
       () => CHANGE_EVIDENCE,
@@ -897,6 +939,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
         retrievalCalls += 1;
         return retrievedCaller();
       },
+      (trace) => traces.push(trace),
     );
 
     expect(out.undecided).toBe(1);
@@ -904,6 +947,14 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     expect(out.challengeRetrievalPerformed).toBe(0);
     expect(out.challengeFailed).toBe(0);
     expect(retrievalCalls).toBe(0);
+    expect(traces).toEqual([
+      {
+        stage: "challenge_planner",
+        disposition: "undecided",
+        reasonCode: "json_or_envelope_invalid",
+        usage: { callCount: 2, tokens: 200 },
+      },
+    ]);
   });
 
   it("turns a post-challenge needs-context reply into insufficient without another loop", async () => {
@@ -933,6 +984,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
       CHALLENGE,
       falsifier({ evidence_refs: ["D:H:3", "H:3"] }),
     ]);
+    const traces: SubstantiationTerminalTrace[] = [];
     const out = await substantiate(
       [finding("When a caller passes seconds, the wait is short.")],
       () => CHANGE_EVIDENCE,
@@ -940,6 +992,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
       "paranoid",
       undefined,
       () => retrievedCaller(),
+      (trace) => traces.push(trace),
     );
 
     expect(out.findings).toHaveLength(0);
@@ -947,6 +1000,14 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     expect(out.falsifierDefeated).toBe(0);
     expect(out.undecided).toBe(1);
     expect(out.challengeExpanded).toBe(1);
+    expect(traces).toEqual([
+      {
+        stage: "falsifier",
+        disposition: "undecided",
+        reasonCode: "semantic_shape_invalid",
+        usage: { callCount: 3, tokens: 300 },
+      },
+    ]);
   });
 
   it("keeps Truth lookup counters separate from challenge counters", async () => {
@@ -1078,17 +1139,29 @@ describe("strict failure policy", () => {
       () => CHANGE_EVIDENCE,
       endpointReplying([TRANSPORT_FAIL]).deps,
     );
+    const traces: SubstantiationTerminalTrace[] = [];
     const paranoid = await substantiate(
       [candidate],
       () => CHANGE_EVIDENCE,
       endpointReplying([TRANSPORT_FAIL]).deps,
       "paranoid",
+      undefined,
+      undefined,
+      (trace) => traces.push(trace),
     );
 
     expect(ordinary.findings).toEqual([candidate]);
     expect(ordinary.undecided).toBe(1);
     expect(paranoid.findings).toHaveLength(0);
     expect(paranoid.undecided).toBe(1);
+    expect(traces).toEqual([
+      {
+        stage: "truth_initial",
+        disposition: "undecided",
+        reasonCode: "request_transport_or_status",
+        usage: { callCount: 1, tokens: truthRequestUpperBound(candidate) },
+      },
+    ]);
   });
 
   it("rejects a syntactically complete envelope from a truncated endpoint completion", async () => {
@@ -1096,17 +1169,27 @@ describe("strict failure policy", () => {
       { text: CONFIRMED, totalTokens: 100, finishReason: "length" },
       SURVIVES,
     ]);
+    const traces: SubstantiationTerminalTrace[] = [];
     const out = await substantiate(
       [finding("When x is zero, compute throws.")],
       () => CHANGE_EVIDENCE,
       endpoint.deps,
       "paranoid",
+      undefined,
+      undefined,
+      (trace) => traces.push(trace),
     );
 
     expect(out.findings).toHaveLength(0);
     expect(out.undecided).toBe(1);
     expect(out.tokens).toBe(100);
     expect(endpoint.remaining()).toBe(1);
+    expect(traces[0]).toEqual({
+      stage: "truth_initial",
+      disposition: "undecided",
+      reasonCode: "finish_reason_nonstop",
+      usage: { callCount: 1, tokens: 100 },
+    });
   });
 });
 
@@ -1216,18 +1299,27 @@ describe("hard shared request budget", () => {
       { text: CONFIRMED, totalTokens: truthBound + 1 },
       { text: CONFIRMED, totalTokens: -1 },
     ] satisfies readonly ReplyWithUsage[]) {
+      const traces: SubstantiationTerminalTrace[] = [];
       const out = await substantiate(
         [candidate],
         () => CHANGE_EVIDENCE,
         endpointReplying([reply]).deps,
         "paranoid",
         admissionBound,
+        undefined,
+        (trace) => traces.push(trace),
       );
 
       expect(out.findings).toHaveLength(0);
       expect(out.undecided).toBe(1);
       expect(out.budgetBlocked).toBe(0);
       expect(out.tokens).toBe(truthBound);
+      expect(traces[0]).toEqual({
+        stage: "truth_initial",
+        disposition: "undecided",
+        reasonCode: "usage_invalid",
+        usage: { callCount: 1, tokens: truthBound },
+      });
     }
   });
 });

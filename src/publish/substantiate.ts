@@ -276,6 +276,63 @@ export interface SubstantiationOutcome<T extends JudgeableFinding> {
   readonly strictness: SubstantiationStrictness;
 }
 
+/**
+ * Text-free terminal trace used only by the explicit historical diagnostic harness.
+ *
+ * It intentionally cannot hold a finding, path, evidence reference, prompt, or model response.
+ * Live review callers never supply the optional sink that receives this value.
+ */
+export const SUBSTANTIATION_TRACE_STAGES = [
+  "preflight",
+  "truth_initial",
+  "truth_retrieval",
+  "truth_followup",
+  "challenge_planner",
+  "challenge_retrieval",
+  "falsifier",
+] as const;
+
+export type SubstantiationTraceStage = (typeof SUBSTANTIATION_TRACE_STAGES)[number];
+
+export const SUBSTANTIATION_TRACE_DISPOSITIONS = [
+  "kept",
+  "refuted",
+  "insufficient_evidence",
+  "undecided",
+] as const;
+
+export type SubstantiationTraceDisposition = (typeof SUBSTANTIATION_TRACE_DISPOSITIONS)[number];
+
+export const SUBSTANTIATION_TRACE_REASON_CODES = [
+  "diff_echo",
+  "unreadable_hunk",
+  "budget",
+  "request_transport_or_status",
+  "usage_invalid",
+  "finish_reason_nonstop",
+  "json_or_envelope_invalid",
+  "semantic_shape_invalid",
+  "retrieval_error",
+  "retrieval_no_match",
+  "context_limit",
+  ...SUBSTANTIATION_REASON_CODES,
+  ...FALSIFIER_REASON_CODES,
+] as const;
+
+export type SubstantiationTraceReasonCode = (typeof SUBSTANTIATION_TRACE_REASON_CODES)[number];
+
+export interface SubstantiationTerminalTrace {
+  readonly stage: SubstantiationTraceStage;
+  readonly disposition: SubstantiationTraceDisposition;
+  readonly reasonCode: SubstantiationTraceReasonCode;
+  readonly usage: {
+    readonly callCount: number;
+    readonly tokens: number;
+  };
+}
+
+export type SubstantiationTraceSink = (trace: SubstantiationTerminalTrace) => void;
+
 /** Focused truth role: proof and PR causality only, never importance or rewriting. */
 export function buildTruthPrompt(
   finding: JudgeableFinding,
@@ -446,11 +503,18 @@ const MAX_CONTRACT_CHALLENGE: ContractChallengeDecision = {
 interface CallBudget {
   readonly maximum: number | undefined;
   spent: number;
+  calls: number;
 }
+
+type RequestFailureReason =
+  | "budget"
+  | "request_transport_or_status"
+  | "usage_invalid"
+  | "finish_reason_nonstop";
 
 interface CallResult {
   readonly text: string | undefined;
-  readonly budgetBlocked: boolean;
+  readonly failure: RequestFailureReason | undefined;
 }
 
 function withoutTrailingSlashes(value: string): string {
@@ -573,17 +637,22 @@ interface EndpointBody {
   readonly usage?: { readonly total_tokens?: number };
 }
 
+interface FetchBodyResult {
+  readonly body: EndpointBody | undefined;
+  readonly attempted: boolean;
+}
+
 async function fetchBody(
   prompt: string,
   deps: JudgeEndpoint,
   seed: number,
   completionLimit: number,
-): Promise<EndpointBody | undefined> {
+): Promise<FetchBodyResult> {
   const remaining =
     deps.deadlineMs === undefined
       ? REQUEST_TIMEOUT_MS
       : Math.max(0, Math.trunc(deps.deadlineMs - Date.now()));
-  if (remaining === 0) return undefined;
+  if (remaining === 0) return { body: undefined, attempted: false };
   const doFetch = deps.fetchImpl ?? fetch;
   try {
     const response = await doFetch(`${withoutTrailingSlashes(deps.endpoint)}/chat/completions`, {
@@ -598,21 +667,17 @@ async function fetchBody(
       }),
       signal: AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS, remaining)),
     });
-    return response.ok ? ((await response.json()) as EndpointBody) : undefined;
+    return {
+      body: response.ok ? ((await response.json()) as EndpointBody) : undefined,
+      attempted: true,
+    };
   } catch {
-    return undefined;
+    return { body: undefined, attempted: true };
   }
 }
 
 function endpointUsage(body: EndpointBody | undefined): unknown {
   return body?.usage?.total_tokens;
-}
-
-function completedText(body: EndpointBody | undefined): string | undefined {
-  const choice = body?.choices?.[0];
-  if (choice?.finish_reason !== "stop") return undefined;
-  const content: unknown = choice.message?.content;
-  return typeof content === "string" ? content : undefined;
 }
 
 async function requestText(
@@ -623,18 +688,39 @@ async function requestText(
   completionLimit: number,
 ): Promise<CallResult> {
   const upperBound = requestTokenUpperBound(prompt, completionLimit);
-  if (!budgetAllows(budget, upperBound)) return { text: undefined, budgetBlocked: true };
+  if (!budgetAllows(budget, upperBound)) {
+    return { text: undefined, failure: "budget" };
+  }
 
-  const body = await fetchBody(prompt, deps, seed, completionLimit);
+  const fetched = await fetchBody(prompt, deps, seed, completionLimit);
+  if (fetched.attempted) budget.calls += 1;
+  const body = fetched.body;
+  if (body === undefined) {
+    // This is the same conservative charge the old `undefined` response path made through its
+    // invalid-usage branch. The trace adds attribution without weakening accounting.
+    budget.spent += upperBound;
+    return {
+      text: undefined,
+      failure: "request_transport_or_status",
+    };
+  }
   const reported = endpointUsage(body);
   if (!validReportedUsage(reported, upperBound)) {
     // Missing or dishonest metering invalidates the reply. Reserving the full preflight bound even
     // without a configured maximum keeps the caller's whole-review ledger conservative too.
     budget.spent += upperBound;
-    return { text: undefined, budgetBlocked: false };
+    return { text: undefined, failure: "usage_invalid" };
   }
   budget.spent += reported;
-  return { text: completedText(body), budgetBlocked: false };
+  const choice = body.choices?.[0];
+  if (choice?.finish_reason !== "stop") {
+    return { text: undefined, failure: "finish_reason_nonstop" };
+  }
+  const content: unknown = choice.message?.content;
+  return {
+    text: typeof content === "string" ? content : undefined,
+    failure: undefined,
+  };
 }
 
 function parseExactObject(text: string | undefined): Readonly<Record<string, unknown>> | undefined {
@@ -923,6 +1009,12 @@ interface DecisionFields<V extends string, R extends string> {
   readonly lookupTerms: readonly string[];
 }
 
+type RoleParseFailure = "json_or_envelope_invalid" | "semantic_shape_invalid";
+
+type RoleParseResult<T> =
+  | { readonly decision: T; readonly failure: undefined }
+  | { readonly decision: undefined; readonly failure: RoleParseFailure };
+
 const ENVELOPE_KEY = /"(verdict|reason_code|evidence_refs|lookup_terms)"\s*:/gu;
 
 function hasOneOfEachEnvelopeKey(text: string | undefined): boolean {
@@ -931,19 +1023,21 @@ function hasOneOfEachEnvelopeKey(text: string | undefined): boolean {
   return keys.length === 4 && new Set(keys).size === 4;
 }
 
-function parseDecisionFields<V extends string, R extends string>(
+function parseDecisionFieldsResult<V extends string, R extends string>(
   text: string | undefined,
   evidence: string,
   verdicts: readonly V[],
   reasons: readonly R[],
-): DecisionFields<V, R> | undefined {
-  if (!hasOneOfEachEnvelopeKey(text)) return undefined;
+): RoleParseResult<DecisionFields<V, R>> {
+  if (!hasOneOfEachEnvelopeKey(text)) {
+    return { decision: undefined, failure: "json_or_envelope_invalid" };
+  }
   const record = parseExactObject(text);
   if (
     record === undefined ||
     !exactKeys(record, ["verdict", "reason_code", "evidence_refs", "lookup_terms"])
   ) {
-    return undefined;
+    return { decision: undefined, failure: "json_or_envelope_invalid" };
   }
   const verdict = closedValue(record.verdict, verdicts);
   const reasonCode = closedValue(record.reason_code, reasons);
@@ -955,9 +1049,12 @@ function parseDecisionFields<V extends string, R extends string>(
     evidenceRefs === undefined ||
     lookupTerms === undefined
   ) {
-    return undefined;
+    return { decision: undefined, failure: "semantic_shape_invalid" };
   }
-  return { verdict, reasonCode, evidenceRefs, lookupTerms };
+  return {
+    decision: { verdict, reasonCode, evidenceRefs, lookupTerms },
+    failure: undefined,
+  };
 }
 
 function isTruthReason(
@@ -994,15 +1091,24 @@ export function extractTruthDecision(
   evidence: string,
   finding?: Pick<JudgeableFinding, "startLine" | "endLine">,
 ): TruthDecision | undefined {
-  const decision = parseDecisionFields(
+  return extractTruthDecisionResult(text, evidence, finding).decision;
+}
+
+function extractTruthDecisionResult(
+  text: string | undefined,
+  evidence: string,
+  finding?: Pick<JudgeableFinding, "startLine" | "endLine">,
+): RoleParseResult<TruthDecision> {
+  const parsed = parseDecisionFieldsResult(
     text,
     evidence,
     SUBSTANTIATION_VERDICTS,
     SUBSTANTIATION_REASON_CODES,
   );
-  return decision !== undefined && validTruthShape(decision, evidence, finding)
-    ? decision
-    : undefined;
+  if (parsed.decision === undefined) return parsed;
+  return validTruthShape(parsed.decision, evidence, finding)
+    ? { decision: parsed.decision, failure: undefined }
+    : { decision: undefined, failure: "semantic_shape_invalid" };
 }
 
 /** Compatibility name retained for the former one-pass parser. */
@@ -1033,10 +1139,19 @@ export function extractContractChallengeDecision(
   text: string | undefined,
   evidence: string,
 ): ContractChallengeDecision | undefined {
-  if (!hasOneOfEachChallengeEnvelopeKey(text)) return undefined;
+  return extractContractChallengeDecisionResult(text, evidence).decision;
+}
+
+function extractContractChallengeDecisionResult(
+  text: string | undefined,
+  evidence: string,
+): RoleParseResult<ContractChallengeDecision> {
+  if (!hasOneOfEachChallengeEnvelopeKey(text)) {
+    return { decision: undefined, failure: "json_or_envelope_invalid" };
+  }
   const record = parseExactObject(text);
   if (record === undefined || !exactKeys(record, ["axis", "evidence_refs", "lookup_terms"])) {
-    return undefined;
+    return { decision: undefined, failure: "json_or_envelope_invalid" };
   }
   const axis = closedValue(record.axis, CONTRACT_CHALLENGE_AXES);
   const evidenceRefs = parseEvidenceRefs(record.evidence_refs, evidence);
@@ -1048,9 +1163,9 @@ export function extractContractChallengeDecision(
     lookupTerms === undefined ||
     lookupTerms.length === 0
   ) {
-    return undefined;
+    return { decision: undefined, failure: "semantic_shape_invalid" };
   }
-  return { axis, evidenceRefs, lookupTerms };
+  return { decision: { axis, evidenceRefs, lookupTerms }, failure: undefined };
 }
 
 function isFalsifierReason(
@@ -1108,10 +1223,24 @@ export function extractFalsifierDecision(
   evidence: string,
   contract: FalsifierEvidenceContract,
 ): FalsifierDecision | undefined {
-  const decision = parseDecisionFields(text, evidence, FALSIFIER_VERDICTS, FALSIFIER_REASON_CODES);
-  return decision !== undefined && validFalsifierShape(decision, contract, evidence)
-    ? decision
-    : undefined;
+  return extractFalsifierDecisionResult(text, evidence, contract).decision;
+}
+
+function extractFalsifierDecisionResult(
+  text: string | undefined,
+  evidence: string,
+  contract: FalsifierEvidenceContract,
+): RoleParseResult<FalsifierDecision> {
+  const parsed = parseDecisionFieldsResult(
+    text,
+    evidence,
+    FALSIFIER_VERDICTS,
+    FALSIFIER_REASON_CODES,
+  );
+  if (parsed.decision === undefined) return parsed;
+  return validFalsifierShape(parsed.decision, contract, evidence)
+    ? { decision: parsed.decision, failure: undefined }
+    : { decision: undefined, failure: "semantic_shape_invalid" };
 }
 
 /** Tolerant compatibility reader; live publication uses the exact role parsers above. */
@@ -1261,6 +1390,11 @@ function dropsOnUnreadableHunk(strictness: SubstantiationStrictness): boolean {
 
 type Disposition = "kept" | "refuted" | "insufficient_evidence" | "undecided";
 
+interface TerminalDiagnostic {
+  readonly stage: SubstantiationTraceStage;
+  readonly reasonCode: SubstantiationTraceReasonCode;
+}
+
 interface CandidateMetrics {
   confirmed: number;
   truthRefuted: number;
@@ -1282,6 +1416,7 @@ interface JudgedOne<T extends JudgeableFinding> {
   readonly disposition: Disposition;
   readonly budgetBlocked: boolean;
   readonly metrics: CandidateMetrics;
+  readonly terminal: TerminalDiagnostic;
 }
 
 function emptyMetrics(): CandidateMetrics {
@@ -1306,8 +1441,9 @@ function decidedResult<T extends JudgeableFinding>(
   finding: T | undefined,
   disposition: Exclude<Disposition, "undecided">,
   metrics: CandidateMetrics,
+  terminal: TerminalDiagnostic,
 ): JudgedOne<T> {
-  return { finding, disposition, budgetBlocked: false, metrics };
+  return { finding, disposition, budgetBlocked: false, metrics, terminal };
 }
 
 function undecidedResult<T extends JudgeableFinding>(
@@ -1315,19 +1451,24 @@ function undecidedResult<T extends JudgeableFinding>(
   strictness: SubstantiationStrictness,
   metrics: CandidateMetrics,
   budgetBlocked: boolean,
+  terminal: TerminalDiagnostic,
 ): JudgedOne<T> {
   return {
     finding: dropsOnUndecidedJudge(strictness) ? undefined : finding,
     disposition: "undecided",
     budgetBlocked,
     metrics,
+    terminal,
   };
 }
 
 type RetrievalResolution =
   | { readonly kind: "expanded"; readonly evidence: string }
-  | { readonly kind: "insufficient" }
-  | { readonly kind: "undecided" };
+  | {
+      readonly kind: "insufficient";
+      readonly reasonCode: "retrieval_no_match" | "context_limit";
+    }
+  | { readonly kind: "undecided"; readonly reasonCode: "retrieval_error" };
 
 async function resolveTruthContext<T extends JudgeableFinding>(
   finding: T,
@@ -1338,7 +1479,8 @@ async function resolveTruthContext<T extends JudgeableFinding>(
   metrics: CandidateMetrics,
 ): Promise<RetrievalResolution> {
   metrics.retrievalRequested += 1;
-  if (truthRetrievalUsed || retriever === undefined) return { kind: "insufficient" };
+  if (truthRetrievalUsed) return { kind: "insufficient", reasonCode: "context_limit" };
+  if (retriever === undefined) return { kind: "insufficient", reasonCode: "context_limit" };
   metrics.retrievalPerformed += 1;
 
   let retrieved: unknown;
@@ -1355,17 +1497,17 @@ async function resolveTruthContext<T extends JudgeableFinding>(
     });
   } catch {
     metrics.retrievalFailed += 1;
-    return { kind: "undecided" };
+    return { kind: "undecided", reasonCode: "retrieval_error" };
   }
 
   const rendered = validateAndRenderRetrieval(retrieved, 1);
   if (rendered === undefined) {
     metrics.retrievalFailed += 1;
-    return { kind: "undecided" };
+    return { kind: "undecided", reasonCode: "retrieval_error" };
   }
   if (rendered === "") {
     metrics.retrievalNoMatches += 1;
-    return { kind: "insufficient" };
+    return { kind: "insufficient", reasonCode: "retrieval_no_match" };
   }
   metrics.retrievalExpanded += 1;
   return { kind: "expanded", evidence: `${evidence}\n\n${rendered}` };
@@ -1377,7 +1519,10 @@ async function callTruth(
   dossier: Dossier,
   deps: JudgeEndpoint,
   budget: CallBudget,
-): Promise<{ readonly decision: TruthDecision | undefined; readonly budgetBlocked: boolean }> {
+): Promise<{
+  readonly decision: TruthDecision | undefined;
+  readonly failure: RequestFailureReason | RoleParseFailure | undefined;
+}> {
   const call = await requestText(
     buildTruthPrompt(finding, evidence, dossier),
     deps,
@@ -1385,9 +1530,11 @@ async function callTruth(
     42,
     TRUTH_COMPLETION_LIMIT,
   );
+  if (call.failure !== undefined) return { decision: undefined, failure: call.failure };
+  const parsed = extractTruthDecisionResult(call.text, evidence, finding);
   return {
-    decision: extractTruthDecision(call.text, evidence, finding),
-    budgetBlocked: call.budgetBlocked,
+    decision: parsed.decision,
+    failure: parsed.failure,
   };
 }
 
@@ -1398,7 +1545,7 @@ async function callContractChallenge(
   budget: CallBudget,
 ): Promise<{
   readonly decision: ContractChallengeDecision | undefined;
-  readonly budgetBlocked: boolean;
+  readonly failure: RequestFailureReason | RoleParseFailure | undefined;
 }> {
   const call = await requestText(
     buildContractChallengePrompt(finding, evidence),
@@ -1407,9 +1554,11 @@ async function callContractChallenge(
     63,
     CHALLENGE_COMPLETION_LIMIT,
   );
+  if (call.failure !== undefined) return { decision: undefined, failure: call.failure };
+  const parsed = extractContractChallengeDecisionResult(call.text, evidence);
   return {
-    decision: extractContractChallengeDecision(call.text, evidence),
-    budgetBlocked: call.budgetBlocked,
+    decision: parsed.decision,
+    failure: parsed.failure,
   };
 }
 
@@ -1420,7 +1569,10 @@ async function callFalsifier(
   truth: TruthDecision,
   deps: JudgeEndpoint,
   budget: CallBudget,
-): Promise<{ readonly decision: FalsifierDecision | undefined; readonly budgetBlocked: boolean }> {
+): Promise<{
+  readonly decision: FalsifierDecision | undefined;
+  readonly failure: RequestFailureReason | RoleParseFailure | undefined;
+}> {
   const call = await requestText(
     buildFalsifierPrompt(finding, evidence, challenge),
     deps,
@@ -1428,14 +1580,16 @@ async function callFalsifier(
     84,
     FALSIFIER_COMPLETION_LIMIT,
   );
+  if (call.failure !== undefined) return { decision: undefined, failure: call.failure };
+  const parsed = extractFalsifierDecisionResult(call.text, evidence, {
+    proofRefs: truth.evidenceRefs,
+    findingPath: finding.path,
+    ...(finding.basePath === undefined ? {} : { basePath: finding.basePath }),
+    requireChallengeRetrievedRef: true,
+  });
   return {
-    decision: extractFalsifierDecision(call.text, evidence, {
-      proofRefs: truth.evidenceRefs,
-      findingPath: finding.path,
-      ...(finding.basePath === undefined ? {} : { basePath: finding.basePath }),
-      requireChallengeRetrievedRef: true,
-    }),
-    budgetBlocked: call.budgetBlocked,
+    decision: parsed.decision,
+    failure: parsed.failure,
   };
 }
 
@@ -1464,10 +1618,16 @@ async function continueTruthWithContext<T extends JudgeableFinding>(
     run.metrics,
   );
   if (context.kind === "undecided") {
-    return undecidedResult(run.finding, run.strictness, run.metrics, false);
+    return undecidedResult(run.finding, run.strictness, run.metrics, false, {
+      stage: "truth_retrieval",
+      reasonCode: context.reasonCode,
+    });
   }
   if (context.kind === "insufficient") {
-    return decidedResult<T>(undefined, "insufficient_evidence", run.metrics);
+    return decidedResult<T>(undefined, "insufficient_evidence", run.metrics, {
+      stage: "truth_retrieval",
+      reasonCode: context.reasonCode,
+    });
   }
   return await verifyEvidenceRound(run, context.evidence, true);
 }
@@ -1480,7 +1640,7 @@ async function resolveContractChallenge<T extends JudgeableFinding>(
   run.metrics.challengePlanned += 1;
   if (run.retriever === undefined) {
     run.metrics.challengeFailed += 1;
-    return { kind: "undecided" };
+    return { kind: "undecided", reasonCode: "retrieval_error" };
   }
   run.metrics.challengeRetrievalPerformed += 1;
 
@@ -1503,20 +1663,46 @@ async function resolveContractChallenge<T extends JudgeableFinding>(
     });
   } catch {
     run.metrics.challengeFailed += 1;
-    return { kind: "undecided" };
+    return { kind: "undecided", reasonCode: "retrieval_error" };
   }
 
   const rendered = validateAndRenderRetrieval(retrieved, 4, evidence, run.finding.path);
   if (rendered === undefined) {
     run.metrics.challengeFailed += 1;
-    return { kind: "undecided" };
+    return { kind: "undecided", reasonCode: "retrieval_error" };
   }
   if (rendered === "") {
     run.metrics.challengeNoMatches += 1;
-    return { kind: "insufficient" };
+    return { kind: "insufficient", reasonCode: "retrieval_no_match" };
   }
   run.metrics.challengeExpanded += 1;
   return { kind: "expanded", evidence: `${evidence}\n\n${rendered}` };
+}
+
+function applyFalsifierDecision<T extends JudgeableFinding>(
+  run: CandidateRun<T>,
+  decision: FalsifierDecision,
+): JudgedOne<T> {
+  if (decision.verdict === "defeated") {
+    run.metrics.falsifierDefeated += 1;
+    return decidedResult<T>(undefined, "refuted", run.metrics, {
+      stage: "falsifier",
+      reasonCode: decision.reasonCode,
+    });
+  }
+  if (decision.verdict === "survives") {
+    run.metrics.confirmed += 1;
+    return decidedResult(run.finding, "kept", run.metrics, {
+      stage: "falsifier",
+      reasonCode: decision.reasonCode,
+    });
+  }
+  // The mandatory challenge already consumed the only adversarial search. A request for still more
+  // evidence is honest but cannot start an unbounded loop.
+  return decidedResult<T>(undefined, "insufficient_evidence", run.metrics, {
+    stage: "falsifier",
+    reasonCode: decision.reasonCode,
+  });
 }
 
 async function falsifyConfirmed<T extends JudgeableFinding>(
@@ -1526,14 +1712,23 @@ async function falsifyConfirmed<T extends JudgeableFinding>(
 ): Promise<JudgedOne<T>> {
   const planned = await callContractChallenge(run.finding, evidence, run.deps, run.budget);
   if (planned.decision === undefined) {
-    return undecidedResult(run.finding, run.strictness, run.metrics, planned.budgetBlocked);
+    return undecidedResult(run.finding, run.strictness, run.metrics, planned.failure === "budget", {
+      stage: "challenge_planner",
+      reasonCode: planned.failure ?? "semantic_shape_invalid",
+    });
   }
   const context = await resolveContractChallenge(run, evidence, planned.decision);
   if (context.kind === "undecided") {
-    return undecidedResult(run.finding, run.strictness, run.metrics, false);
+    return undecidedResult(run.finding, run.strictness, run.metrics, false, {
+      stage: "challenge_retrieval",
+      reasonCode: context.reasonCode,
+    });
   }
   if (context.kind === "insufficient") {
-    return decidedResult<T>(undefined, "insufficient_evidence", run.metrics);
+    return decidedResult<T>(undefined, "insufficient_evidence", run.metrics, {
+      stage: "challenge_retrieval",
+      reasonCode: context.reasonCode,
+    });
   }
 
   const call = await callFalsifier(
@@ -1546,19 +1741,12 @@ async function falsifyConfirmed<T extends JudgeableFinding>(
   );
   const decision = call.decision;
   if (decision === undefined) {
-    return undecidedResult(run.finding, run.strictness, run.metrics, call.budgetBlocked);
+    return undecidedResult(run.finding, run.strictness, run.metrics, call.failure === "budget", {
+      stage: "falsifier",
+      reasonCode: call.failure ?? "semantic_shape_invalid",
+    });
   }
-  if (decision.verdict === "defeated") {
-    run.metrics.falsifierDefeated += 1;
-    return decidedResult<T>(undefined, "refuted", run.metrics);
-  }
-  if (decision.verdict === "survives") {
-    run.metrics.confirmed += 1;
-    return decidedResult(run.finding, "kept", run.metrics);
-  }
-  // The mandatory challenge already consumed the only adversarial search. A request for still more
-  // evidence is honest but cannot start an unbounded loop.
-  return decidedResult<T>(undefined, "insufficient_evidence", run.metrics);
+  return applyFalsifierDecision(run, decision);
 }
 
 async function applyTruthDecision<T extends JudgeableFinding>(
@@ -1569,7 +1757,10 @@ async function applyTruthDecision<T extends JudgeableFinding>(
 ): Promise<JudgedOne<T>> {
   if (decision.verdict === "refuted") {
     run.metrics.truthRefuted += 1;
-    return decidedResult<T>(undefined, "refuted", run.metrics);
+    return decidedResult<T>(undefined, "refuted", run.metrics, {
+      stage: truthRetrievalUsed ? "truth_followup" : "truth_initial",
+      reasonCode: decision.reasonCode,
+    });
   }
   if (decision.verdict === "needs_context") {
     return await continueTruthWithContext(run, evidence, decision, truthRetrievalUsed);
@@ -1584,7 +1775,10 @@ async function verifyEvidenceRound<T extends JudgeableFinding>(
 ): Promise<JudgedOne<T>> {
   const call = await callTruth(run.finding, evidence, run.dossier, run.deps, run.budget);
   if (call.decision === undefined) {
-    return undecidedResult(run.finding, run.strictness, run.metrics, call.budgetBlocked);
+    return undecidedResult(run.finding, run.strictness, run.metrics, call.failure === "budget", {
+      stage: truthRetrievalUsed ? "truth_followup" : "truth_initial",
+      reasonCode: call.failure ?? "semantic_shape_invalid",
+    });
   }
   return await applyTruthDecision(run, evidence, call.decision, truthRetrievalUsed);
 }
@@ -1600,7 +1794,10 @@ async function judgeOne<T extends JudgeableFinding>(
   const dossier = buildDossier(finding.content);
   const metrics = emptyMetrics();
   if (!needsJudging(dossier)) {
-    return decidedResult<T>(undefined, "insufficient_evidence", metrics);
+    return decidedResult<T>(undefined, "insufficient_evidence", metrics, {
+      stage: "preflight",
+      reasonCode: "diff_echo",
+    });
   }
   const evidence = readHunk(finding);
   if (evidence === "") {
@@ -1609,10 +1806,14 @@ async function judgeOne<T extends JudgeableFinding>(
       disposition: "undecided",
       budgetBlocked: false,
       metrics,
+      terminal: { stage: "preflight", reasonCode: "unreadable_hunk" },
     };
   }
   if (!budgetAllows(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
-    return undecidedResult(finding, strictness, metrics, true);
+    return undecidedResult(finding, strictness, metrics, true, {
+      stage: "preflight",
+      reasonCode: "budget",
+    });
   }
   return await verifyEvidenceRound(
     { finding, dossier, deps, strictness, budget, retriever, metrics },
@@ -1674,15 +1875,26 @@ export async function substantiate<T extends JudgeableFinding>(
   strictness: SubstantiationStrictness = resolveSubstantiationStrictness(),
   maxTokens?: number,
   retrieveEvidence?: EvidenceRetriever<T>,
+  historicalTraceSink?: SubstantiationTraceSink,
 ): Promise<SubstantiationOutcome<T>> {
   const kept: T[] = [];
   const counts = emptyCounts();
-  const budget: CallBudget = { maximum: hardMaximum(maxTokens), spent: 0 };
+  const budget: CallBudget = { maximum: hardMaximum(maxTokens), spent: 0, calls: 0 };
 
   for (const finding of findings) {
+    const tokensBefore = budget.spent;
+    const callsBefore = budget.calls;
     const judged = await judgeOne(finding, readHunk, deps, strictness, budget, retrieveEvidence);
     if (judged.finding !== undefined) kept.push(judged.finding);
     tallyJudgement(counts, judged);
+    historicalTraceSink?.({
+      ...judged.terminal,
+      disposition: judged.disposition,
+      usage: {
+        callCount: budget.calls - callsBefore,
+        tokens: budget.spent - tokensBefore,
+      },
+    });
   }
 
   return {

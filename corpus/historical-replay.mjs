@@ -56,6 +56,7 @@ import { fileURLToPath } from "node:url";
 
 import { FIXED_PATH } from "./fixed-path.mjs";
 import { escapesRepository, HARVEST_LABELS, realLocation } from "./harvest-lib.mjs";
+import { buildHistoricalReplayDiagnostic } from "./historical-replay-diagnostic-lib.mjs";
 import { HISTORICAL_REPLAY_EVIDENCE_ARTIFACT } from "./historical-replay-evidence-lib.mjs";
 import { buildHistoricalReplayReport } from "./historical-replay-lib.mjs";
 import { QUALIFICATION_MODEL } from "./qualification-model.mjs";
@@ -88,7 +89,8 @@ export const HISTORICAL_REPLAY_STRICTNESS = "paranoid";
 const USAGE =
   "usage: OCR_LLM_MODEL=gpt-oss-120b node corpus/historical-replay.mjs " +
   "(--dry-run | --execute) --harvest <outside-repo.json> --repo <local-consumer-git> " +
-  "--holdout-from-pr <n> --max-tokens <n> [--out <redacted-report.json>]";
+  "--holdout-from-pr <n> --max-tokens <n> [--out <redacted-report.json>] " +
+  "[--diagnostic-trace-out <outside-repo-private.json>]";
 
 function positiveInteger(raw, name) {
   if (typeof raw !== "string" || !/^[1-9]\d*$/u.test(raw)) {
@@ -104,7 +106,14 @@ export function parseHistoricalReplayArgs(argv) {
   if (!Array.isArray(argv)) throw new Error("historical replay arguments must be an array");
   const switches = new Set();
   const values = new Map();
-  const valueFlags = new Set(["--harvest", "--repo", "--holdout-from-pr", "--max-tokens", "--out"]);
+  const valueFlags = new Set([
+    "--harvest",
+    "--repo",
+    "--holdout-from-pr",
+    "--max-tokens",
+    "--out",
+    "--diagnostic-trace-out",
+  ]);
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === "--dry-run" || token === "--execute") {
@@ -132,8 +141,12 @@ export function parseHistoricalReplayArgs(argv) {
   }
   const mode = switches.has("--dry-run") ? "dry-run" : "execute";
   const outPath = values.get("--out");
+  const diagnosticTraceOutPath = values.get("--diagnostic-trace-out");
   if (mode === "execute" && outPath === undefined) {
     throw new Error("--out is required with --execute");
+  }
+  if (mode === "dry-run" && diagnosticTraceOutPath !== undefined) {
+    throw new Error("--diagnostic-trace-out is available only with --execute");
   }
   return {
     mode,
@@ -142,6 +155,7 @@ export function parseHistoricalReplayArgs(argv) {
     holdoutFromPullRequest: positiveInteger(values.get("--holdout-from-pr"), "--holdout-from-pr"),
     maxTokens: positiveInteger(values.get("--max-tokens"), "--max-tokens"),
     ...(outPath === undefined ? {} : { outPath }),
+    ...(diagnosticTraceOutPath === undefined ? {} : { diagnosticTraceOutPath }),
   };
 }
 
@@ -863,6 +877,39 @@ function tallyStageCounters(stageCounters, outcome) {
   for (const field of STAGE_COUNTER_FIELDS) stageCounters[field] += outcome[field];
 }
 
+function terminalDisposition(outcome) {
+  if (outcome.undecided === 1) return "undecided";
+  if (outcome.confirmed === 1) return "kept";
+  if (outcome.droppedRefuted === 1) return "refuted";
+  return "insufficient_evidence";
+}
+
+const HISTORICAL_TRACE_TERMINALS = {
+  outsideCorroboratedPopulation: {
+    stage: "population",
+    reasonCode: "outside_corroborated_population",
+  },
+  missingHistoricalBinding: { stage: "binding", reasonCode: "missing_historical_binding" },
+  invalidHistoricalBinding: { stage: "binding", reasonCode: "invalid_historical_binding" },
+  findingBodyUnavailable: { stage: "binding", reasonCode: "finding_body_unavailable" },
+  sourceUnavailable: { stage: "source", reasonCode: "source_unavailable" },
+  evidenceUnavailable: { stage: "evidence", reasonCode: "evidence_unavailable" },
+  budget: { stage: "budget", reasonCode: "budget" },
+  verificationError: { stage: "verification", reasonCode: "verification_error" },
+};
+
+function historicalTraceEntry(databaseId, reason, usage = { callCount: 0, tokens: 0 }) {
+  const terminal = HISTORICAL_TRACE_TERMINALS[reason];
+  if (terminal === undefined) throw new Error("unknown historical diagnostic terminal");
+  return {
+    databaseId,
+    stage: terminal.stage,
+    disposition: "unmeasured",
+    reasonCode: terminal.reasonCode,
+    usage: { callCount: usage.callCount, tokens: usage.tokens },
+  };
+}
+
 /**
  * Runs one finding per substantiation call so `undecided` can never be attributed to the wrong id.
  * The function itself receives no labels or replies. They cannot leak through an accidental spread
@@ -881,6 +928,7 @@ export async function runHistoricalReplayVerification({
   collectRepositoryContextFollowUp,
   toRetrievedEvidence,
   substantiate,
+  captureDiagnosticTrace = false,
 }) {
   const { caseIds } = assertDecisionInputs(databaseIds, cases);
   if (
@@ -898,6 +946,17 @@ export async function runHistoricalReplayVerification({
   reasons.outsideCorroboratedPopulation = databaseIds.length - caseIds.size;
   const corroboratedDecisions = { keep: 0, drop: 0, unmeasured: 0 };
   const stageCounters = emptyStageCounters();
+  const diagnosticById = new Map();
+  if (captureDiagnosticTrace) {
+    for (const databaseId of databaseIds) {
+      if (!caseIds.has(databaseId)) {
+        diagnosticById.set(
+          databaseId,
+          historicalTraceEntry(databaseId, "outsideCorroboratedPopulation"),
+        );
+      }
+    }
+  }
   let attemptedCases = 0;
   let accountedTokens = 0;
 
@@ -906,6 +965,12 @@ export async function runHistoricalReplayVerification({
     if (structural !== undefined) {
       reasons[structural] += 1;
       corroboratedDecisions.unmeasured += 1;
+      if (captureDiagnosticTrace) {
+        diagnosticById.set(
+          replayCase.databaseId,
+          historicalTraceEntry(replayCase.databaseId, structural),
+        );
+      }
       continue;
     }
     let sources;
@@ -915,11 +980,23 @@ export async function runHistoricalReplayVerification({
       const reason = error instanceof ReplayCaseError ? error.reason : "sourceUnavailable";
       reasons[reason] += 1;
       corroboratedDecisions.unmeasured += 1;
+      if (captureDiagnosticTrace) {
+        diagnosticById.set(
+          replayCase.databaseId,
+          historicalTraceEntry(replayCase.databaseId, reason),
+        );
+      }
       continue;
     }
     if (!validHistoricalChangeBinding(replayCase, sources)) {
       reasons.sourceUnavailable += 1;
       corroboratedDecisions.unmeasured += 1;
+      if (captureDiagnosticTrace) {
+        diagnosticById.set(
+          replayCase.databaseId,
+          historicalTraceEntry(replayCase.databaseId, "sourceUnavailable"),
+        );
+      }
       continue;
     }
     const judgeable = {
@@ -937,6 +1014,12 @@ export async function runHistoricalReplayVerification({
     if (anchorText === undefined) {
       reasons.evidenceUnavailable += 1;
       corroboratedDecisions.unmeasured += 1;
+      if (captureDiagnosticTrace) {
+        diagnosticById.set(
+          replayCase.databaseId,
+          historicalTraceEntry(replayCase.databaseId, "evidenceUnavailable"),
+        );
+      }
       continue;
     }
     const findingAnchor = { startLine: replayCase.startLine, endLine: replayCase.endLine };
@@ -963,6 +1046,12 @@ export async function runHistoricalReplayVerification({
     } catch {
       reasons.evidenceUnavailable += 1;
       corroboratedDecisions.unmeasured += 1;
+      if (captureDiagnosticTrace) {
+        diagnosticById.set(
+          replayCase.databaseId,
+          historicalTraceEntry(replayCase.databaseId, "evidenceUnavailable"),
+        );
+      }
       continue;
     }
     let evidence;
@@ -977,17 +1066,30 @@ export async function runHistoricalReplayVerification({
     if (typeof evidence !== "string" || evidence === "") {
       reasons.evidenceUnavailable += 1;
       corroboratedDecisions.unmeasured += 1;
+      if (captureDiagnosticTrace) {
+        diagnosticById.set(
+          replayCase.databaseId,
+          historicalTraceEntry(replayCase.databaseId, "evidenceUnavailable"),
+        );
+      }
       continue;
     }
     const remainingTokens = maxTokens - accountedTokens;
     if (remainingTokens <= 0) {
       reasons.budget += 1;
       corroboratedDecisions.unmeasured += 1;
+      if (captureDiagnosticTrace) {
+        diagnosticById.set(
+          replayCase.databaseId,
+          historicalTraceEntry(replayCase.databaseId, "budget"),
+        );
+      }
       continue;
     }
 
     attemptedCases += 1;
     let outcome;
+    let candidateTrace;
     try {
       outcome = await substantiate(
         [judgeable],
@@ -1006,6 +1108,23 @@ export async function runHistoricalReplayVerification({
           });
           return toRetrievedEvidence(followUp, knownProvenance);
         },
+        captureDiagnosticTrace
+          ? (trace) => {
+              if (candidateTrace !== undefined) {
+                throw new Error("historical diagnostic emitted more than one terminal trace");
+              }
+              candidateTrace = {
+                databaseId: replayCase.databaseId,
+                stage: trace.stage,
+                disposition: trace.disposition,
+                reasonCode: trace.reasonCode,
+                usage: {
+                  callCount: trace.usage?.callCount,
+                  tokens: trace.usage?.tokens,
+                },
+              };
+            }
+          : undefined,
       );
     } catch {
       // A thrown verifier cannot report what it spent. It received the complete remaining hard
@@ -1013,6 +1132,15 @@ export async function runHistoricalReplayVerification({
       accountedTokens = maxTokens;
       reasons.verificationError += 1;
       corroboratedDecisions.unmeasured += 1;
+      if (captureDiagnosticTrace) {
+        diagnosticById.set(
+          replayCase.databaseId,
+          historicalTraceEntry(replayCase.databaseId, "verificationError", {
+            callCount: 0,
+            tokens: remainingTokens,
+          }),
+        );
+      }
       continue;
     }
     if (!validSubstantiationOutcome(outcome, judgeable)) {
@@ -1021,12 +1149,32 @@ export async function runHistoricalReplayVerification({
       // The outcome cannot be trusted for accounting. The verifier was nevertheless capped at the
       // remaining allowance, so exhausting the local ledger prevents a second spend of it.
       accountedTokens = maxTokens;
+      if (captureDiagnosticTrace) {
+        diagnosticById.set(
+          replayCase.databaseId,
+          historicalTraceEntry(replayCase.databaseId, "verificationError", {
+            callCount: 0,
+            tokens: remainingTokens,
+          }),
+        );
+      }
       continue;
     }
     if (outcome.tokens > remainingTokens) {
       throw new Error("substantiation exceeded the historical replay token allowance");
     }
     accountedTokens += outcome.tokens;
+    if (captureDiagnosticTrace) {
+      if (
+        candidateTrace === undefined ||
+        candidateTrace.usage.tokens !== outcome.tokens ||
+        candidateTrace.disposition !== terminalDisposition(outcome) ||
+        diagnosticById.has(replayCase.databaseId)
+      ) {
+        throw new Error("historical diagnostic terminal trace is missing or inconsistent");
+      }
+      diagnosticById.set(replayCase.databaseId, candidateTrace);
+    }
     tallyStageCounters(stageCounters, outcome);
     if (outcome.budgetBlocked > 0) {
       reasons.budget += 1;
@@ -1051,6 +1199,9 @@ export async function runHistoricalReplayVerification({
   });
   return {
     decisions,
+    ...(captureDiagnosticTrace
+      ? { diagnosticCases: databaseIds.map((databaseId) => diagnosticById.get(databaseId)) }
+      : {}),
     report: {
       populationRecords: databaseIds.length,
       corroboratedCases: cases.length,
@@ -1211,7 +1362,7 @@ function percentage(value) {
  * reservation behind: unlinking by path after closing the descriptor could delete a file another
  * process placed there in the meantime.
  */
-function reserveHistoricalReplayOutput(output) {
+function reserveHistoricalReplayOutput(output, argumentName = "--out") {
   const descriptor = openSync(output, "wx", 0o600);
   let closed = false;
   const close = () => {
@@ -1224,13 +1375,13 @@ function reserveHistoricalReplayOutput(output) {
     try {
       pathStats = lstatSync(output);
     } catch (error) {
-      throw new Error("historical replay output reservation no longer owns --out", {
+      throw new Error(`historical replay output reservation no longer owns ${argumentName}`, {
         cause: error,
       });
     }
     const descriptorStats = fstatSync(descriptor);
     if (pathStats.dev !== descriptorStats.dev || pathStats.ino !== descriptorStats.ino) {
-      throw new Error("historical replay output reservation no longer owns --out");
+      throw new Error(`historical replay output reservation no longer owns ${argumentName}`);
     }
   };
   try {
@@ -1262,10 +1413,8 @@ function reserveHistoricalReplayOutput(output) {
 export async function runHistoricalReplayCommand(argv, env = process.env, dependencies = {}) {
   const args = parseHistoricalReplayArgs(argv);
   requireHistoricalReplayModel(env);
-  const harvest = readHistoricalHarvest(
-    args.harvestPath,
-    dependencies.repositoryRoot ?? REPOSITORY_ROOT,
-  );
+  const repositoryRoot = dependencies.repositoryRoot ?? REPOSITORY_ROOT;
+  const harvest = readHistoricalHarvest(args.harvestPath, repositoryRoot);
   const dataset = extractHistoricalReplayDataset(harvest.document);
   // Validate the chronological boundary before a paid dependency is imported. An empty holdout
   // discovered after verification would spend the whole budget to produce no transfer check.
@@ -1306,7 +1455,27 @@ export async function runHistoricalReplayCommand(argv, env = process.env, depend
   const judgeEndpoint = historicalReplayJudgeEndpoint(env);
   const output = realLocation(resolve(args.outPath));
   if (output === harvest.location) throw new Error("--out must not overwrite the raw harvest");
-  const reservation = reserveHistoricalReplayOutput(output);
+  let diagnosticOutput;
+  if (args.diagnosticTraceOutPath !== undefined) {
+    diagnosticOutput = realLocation(resolve(args.diagnosticTraceOutPath));
+    if (!escapesRepository(repositoryRoot, diagnosticOutput)) {
+      throw new Error("--diagnostic-trace-out must be outside this repository");
+    }
+    if (diagnosticOutput === harvest.location || diagnosticOutput === output) {
+      throw new Error("--diagnostic-trace-out must not overwrite another replay input or output");
+    }
+  }
+  const diagnosticReservation =
+    diagnosticOutput === undefined
+      ? undefined
+      : reserveHistoricalReplayOutput(diagnosticOutput, "--diagnostic-trace-out");
+  let reservation;
+  try {
+    reservation = reserveHistoricalReplayOutput(output);
+  } catch (error) {
+    diagnosticReservation?.close();
+    throw error;
+  }
   try {
     // The exact final path is now ours. Nothing model-facing is even imported before that atomic
     // claim succeeds, so an existing artifact cannot consume endpoint requests and fail at write.
@@ -1326,6 +1495,7 @@ export async function runHistoricalReplayCommand(argv, env = process.env, depend
       collectRepositoryContextFollowUp: loaded.collectRepositoryContextFollowUp,
       toRetrievedEvidence: loaded.toRetrievedEvidence,
       substantiate: loaded.substantiate,
+      captureDiagnosticTrace: diagnosticReservation !== undefined,
     });
     const score = buildHistoricalReplayReport({
       records: dataset.records,
@@ -1342,15 +1512,35 @@ export async function runHistoricalReplayCommand(argv, env = process.env, depend
       execution: verification.report,
       score,
     });
+    const diagnostic =
+      diagnosticReservation === undefined
+        ? undefined
+        : buildHistoricalReplayDiagnostic({
+            databaseIds: dataset.records.map((record) => record.databaseId),
+            cases: verification.diagnosticCases,
+            attemptedCases: verification.report.attemptedCases,
+            accountedTokens: verification.report.accountedTokens,
+          });
+    if (diagnostic !== undefined) {
+      diagnosticReservation.write(`${JSON.stringify(diagnostic, null, 2)}\n`);
+    }
     reservation.write(`${JSON.stringify(report, null, 2)}\n`);
     lines.push(`  redacted report: ${output}`);
     lines.push(`  after precision: ${percentage(score.all.after.metrics.precision)}`);
     lines.push(
       `  holdout precision: ${percentage(score.chronological.holdout.after.metrics.precision)}`,
     );
-    return { mode: "execute", plan, report, output, lines };
+    return {
+      mode: "execute",
+      plan,
+      report,
+      output,
+      lines,
+      ...(diagnostic === undefined ? {} : { diagnostic, diagnosticOutput }),
+    };
   } catch (error) {
     reservation.close();
+    diagnosticReservation?.close();
     throw error;
   }
 }
