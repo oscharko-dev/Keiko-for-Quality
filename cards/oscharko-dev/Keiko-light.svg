@@ -15,9 +15,9 @@
   <text x="75" y="32" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="650" letter-spacing="-0.14" fill="#1B211E">Reviewed by Keiko for Quality</text>
   <text x="75" y="45" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="10" fill="#6A746E">oscharko-dev/Keiko</text>
   <text x="75" y="57" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="8.5" fill="#6A746E">last run &lt;1 h ago</text>
-  <text x="20" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#1B211E">582</text>
+  <text x="20" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#1B211E">589</text>
   <text x="20" y="109" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#6A746E">runs · 30 d</text>
-  <text x="95.9" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#1B211E">870</text>
+  <text x="95.9" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#1B211E">873</text>
   <text x="95.9" y="109" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#6A746E">findings</text>
   <text x="157.10000000000002" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#2E8F63">97.7%</text>
   <text x="157.10000000000002" y="109" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#6A746E">resolved</text>
@@ -27,7 +27,7 @@
   <text x="70" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#6A746E">RUN SUCCESS</text>
   <text x="170" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#1B211E">20</text>
   <text x="170" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#6A746E">OPEN THREADS</text>
-  <text x="270" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#1B211E">43</text>
+  <text x="270" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#1B211E">44</text>
   <text x="270" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#6A746E">PRS W/ FINDINGS</text>
   <line x1="20" y1="203" x2="320" y2="203" stroke="#E3E8E4"/><text x="20" y="218" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="9.5" letter-spacing="0.7" fill="#6A746E">EX EXPERIENTIA DISCO</text><text x="320" y="218" text-anchor="end" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="9.5" fill="#2E8F63">quality.keiko.dev →</text>
   </g>
