@@ -3013,6 +3013,13 @@ var DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY = [
   "the added context can disclose a secret or payload, or the change replaces, wraps, or swallows",
   "the thrown error."
 ].join(" ");
+var SENSITIVE_OUTPUT_EVIDENCE_POLICY = [
+  "Sensitive-output decision \u2014 REPORT `security`/`critical`: changed code passes a raw token,",
+  "secret, password, credential, authorization value, or session identifier into a logger,",
+  "diagnostic, error, telemetry, or console sink. The shown direct flow is sufficient evidence;",
+  "do not require a separate runtime caller before reporting the disclosure. SILENT only when the",
+  "value is demonstrably redacted or hashed before the sink, or never reaches an output sink."
+].join(" ");
 var TRIGGER_AND_GUARD_EVIDENCE_POLICY = [
   "Trigger/guard decision \u2014 UNIT: when a changed value feeds a unit-sensitive API, trace every",
   "shown producer branch and state the exact branch whose units mismatch; a mixed-unit producer",
@@ -3027,15 +3034,61 @@ var MIRRORED_VALIDATOR_EVIDENCE_POLICY = [
   "a loosened mirror that omits shown required fields and therefore accepts objects production",
   "rejects; do not infer parity or drift without both implementations in evidence."
 ].join(" ");
-var EXAMINER_CLAIM_DECISION_POLICY = [
-  `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
-  `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
-  `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
-  `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
-  `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
-  `- trigger-guard: ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
-  `- mirrored-validator: ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`
-].join("\n");
+var OUTPUT_SINK_SIGNAL = /\b(?:console|diagnostic|error|log(?:ger)?|telemetry)\b/iu;
+var SENSITIVE_VALUE_SIGNAL = /\b(?:authorization|credential|password|secret|session(?:id|identifier)?|token)\b/iu;
+var POLICY_ROWS = [
+  {
+    label: "test-isolation",
+    text: TEST_ISOLATION_EVIDENCE_POLICY,
+    relevant: (evidence) => /(?:\b(?:beforeEach|describe|it|test)\s*\(|resetModules\b)/u.test(evidence)
+  },
+  {
+    label: "reference-transition",
+    text: REFERENCE_TRANSITION_EVIDENCE_POLICY,
+    relevant: (evidence) => /(?:\b(?:action|dependency|digest|image|pin)\b|uses:\s|@[0-9a-f]{40}\b)/iu.test(evidence)
+  },
+  {
+    label: "boundary-omission",
+    text: BOUNDARY_OMISSION_EVIDENCE_POLICY,
+    relevant: (evidence) => /(?:\b(?:boundary|clear(?:ed|ing|s)?|empty|index|offset|optional)\b|\?\?|\.slice\s*\()/iu.test(
+      evidence
+    )
+  },
+  {
+    label: "workflow-trust",
+    text: WORKFLOW_TRUST_EVIDENCE_POLICY,
+    relevant: (evidence) => /(?:\.github\/workflows|candidate head|pull_request_target|trusted base)/iu.test(evidence)
+  },
+  {
+    label: "sensitive-output",
+    text: SENSITIVE_OUTPUT_EVIDENCE_POLICY,
+    relevant: (evidence) => OUTPUT_SINK_SIGNAL.test(evidence) && SENSITIVE_VALUE_SIGNAL.test(evidence)
+  },
+  {
+    label: "diagnostic-context",
+    text: DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+    relevant: (evidence) => /\b(?:catch|console|diagnostic|error|log(?:ger)?|telemetry|throw)\b/iu.test(evidence)
+  },
+  {
+    label: "trigger-guard",
+    text: TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+    relevant: (evidence) => /(?:Retry-After|setTimeout|\b(?:caller|guard|increment|loop)\b|\bsize\s*<=)/iu.test(evidence)
+  },
+  {
+    label: "mirrored-validator",
+    text: MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+    relevant: (evidence) => /\b(?:audit|compatibility|preflight|validat(?:e|es|ed|ing|ion|or))\b/iu.test(evidence)
+  }
+];
+function renderPolicyRows(rows) {
+  return rows.map((row) => `- ${row.label}: ${row.text}`).join("\n");
+}
+function renderExaminerClaimDecisionPolicy(visibleEvidence) {
+  const relevant = POLICY_ROWS.filter((row) => row.relevant(visibleEvidence));
+  const remaining = POLICY_ROWS.filter((row) => !row.relevant(visibleEvidence));
+  return renderPolicyRows([...relevant, ...remaining]);
+}
+var EXAMINER_CLAIM_DECISION_POLICY = renderExaminerClaimDecisionPolicy("");
 
 // src/engine/rule-file.ts
 var CATCH_ALL_RULE = [
@@ -3123,6 +3176,7 @@ var CATCH_ALL_RULE = [
   `- **boundary and omitted-state transitions** \u2014 ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
   `- **unit-sensitive consumers and removed guards** \u2014 ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
   `- **mirrored validators** \u2014 ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`,
+  `- **sensitive values reaching output sinks** \u2014 ${SENSITIVE_OUTPUT_EVIDENCE_POLICY}`,
   `- **diagnostic context in error paths** \u2014 ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
@@ -3664,7 +3718,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v10";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v11";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;
@@ -3760,7 +3814,7 @@ function roleContract(role) {
     "housekeeping, coverage wishes, or a pre-existing issue unrelated to the change."
   ].join("\n");
 }
-var EXAMINER_EVIDENCE_CONTRACT = [
+var EXAMINER_EVIDENCE_CONTRACT_PREFIX = [
   "Before emitting each claim, actively try to disprove it against the shown current source. Omit",
   "a claim that asks for a field, guard, import, fallback, or check already present, or whose",
   "consequence requires an unshown caller, mutation, input, or future contract change.",
@@ -3769,9 +3823,21 @@ var EXAMINER_EVIDENCE_CONTRACT = [
   "A member actually added to a union, private state actually exported or leaked, or a caller-selected",
   "key shown reaching a prototype is evidence; a hypothetical future member or mutation is not.",
   "A matching SILENT row below is terminal: discard any risk-map hypothesis about that shape and",
-  "emit no claim or verification request for it.",
-  EXAMINER_CLAIM_DECISION_POLICY
+  "emit no claim or verification request for it."
 ].join("\n");
+function examinerEvidenceContract(claimDecisionPolicy) {
+  return [EXAMINER_EVIDENCE_CONTRACT_PREFIX, claimDecisionPolicy].join("\n");
+}
+var EXAMINER_EVIDENCE_CONTRACT = examinerEvidenceContract(EXAMINER_CLAIM_DECISION_POLICY);
+function visibleExaminerEvidence(context, evidence) {
+  return [
+    context.path,
+    context.renderedDiff,
+    evidence.view,
+    context.companionBlock ?? "",
+    context.contextPack ?? ""
+  ].join("\n");
+}
 function renderAnchorRanges(lines) {
   const sorted = [...new Set(lines)].sort((left, right) => left - right);
   const first = sorted[0];
@@ -3816,7 +3882,9 @@ function buildExaminerPrompt(role, context, risks, evidence) {
     system: [
       roleContract(role),
       "",
-      EXAMINER_EVIDENCE_CONTRACT,
+      examinerEvidenceContract(
+        renderExaminerClaimDecisionPolicy(visibleExaminerEvidence(context, evidence))
+      ),
       ...applicablePathRuleBlock(context),
       "",
       "A claim must state one concrete imperative action (at most 100 characters), a reachable",

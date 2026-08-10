@@ -7,6 +7,7 @@ import {
   DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  SENSITIVE_OUTPUT_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
   TRIGGER_AND_GUARD_EVIDENCE_POLICY,
   WORKFLOW_TRUST_EVIDENCE_POLICY,
@@ -378,6 +379,10 @@ describe("buildRuleFile", () => {
         phrases: [WORKFLOW_TRUST_EVIDENCE_POLICY],
       },
       {
+        name: "treats a raw credential passed to an output sink as direct disclosure",
+        phrases: [SENSITIVE_OUTPUT_EVIDENCE_POLICY],
+      },
+      {
         name: "keeps harmless primitive log context separate from secrets and changed errors",
         phrases: [DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY],
       },
@@ -414,6 +419,7 @@ describe("buildRuleFile", () => {
       REFERENCE_TRANSITION_EVIDENCE_POLICY,
       BOUNDARY_OMISSION_EVIDENCE_POLICY,
       WORKFLOW_TRUST_EVIDENCE_POLICY,
+      SENSITIVE_OUTPUT_EVIDENCE_POLICY,
       DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
       TRIGGER_AND_GUARD_EVIDENCE_POLICY,
       MIRRORED_VALIDATOR_EVIDENCE_POLICY,

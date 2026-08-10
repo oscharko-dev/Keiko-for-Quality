@@ -7,19 +7,22 @@ import {
   EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
   MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  SENSITIVE_OUTPUT_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
   TRIGGER_AND_GUARD_EVIDENCE_POLICY,
   WORKFLOW_TRUST_EVIDENCE_POLICY,
+  renderExaminerClaimDecisionPolicy,
 } from "./claim-decision-policy.js";
 
 describe("shared claim-decision policy", () => {
-  it("derives one compact examiner capsule from the three canonical policies", () => {
+  it("derives one compact examiner capsule from every canonical policy", () => {
     expect(EXAMINER_CLAIM_DECISION_POLICY).toBe(
       [
         `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
         `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
         `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
         `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
+        `- sensitive-output: ${SENSITIVE_OUTPUT_EVIDENCE_POLICY}`,
         `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
         `- trigger-guard: ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
         `- mirrored-validator: ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`,
@@ -28,6 +31,43 @@ describe("shared claim-decision policy", () => {
     expect(new TextEncoder().encode(EXAMINER_CLAIM_DECISION_POLICY).byteLength).toBeLessThanOrEqual(
       EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
     );
+  });
+
+  it("prioritizes relevant decisions without removing any canonical policy", () => {
+    const samples = [
+      {
+        evidence: 'logger.info("auth", { token });',
+        first: SENSITIVE_OUTPUT_EVIDENCE_POLICY,
+      },
+      {
+        evidence: 'catch (error) { logger.error("push", { attempt }); throw error; }',
+        first: DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+      },
+      {
+        evidence: 'vi.resetModules(); const cache = await import("./cache.js");',
+        first: TEST_ISOLATION_EVIDENCE_POLICY,
+      },
+      {
+        evidence: "setTimeout(resolve, parseRetryAfter(header));",
+        first: TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+      },
+    ];
+    for (const sample of samples) {
+      const rendered = renderExaminerClaimDecisionPolicy(sample.evidence);
+      expect(rendered.split("\n")[0]).toContain(sample.first);
+      for (const policy of [
+        TEST_ISOLATION_EVIDENCE_POLICY,
+        REFERENCE_TRANSITION_EVIDENCE_POLICY,
+        BOUNDARY_OMISSION_EVIDENCE_POLICY,
+        WORKFLOW_TRUST_EVIDENCE_POLICY,
+        SENSITIVE_OUTPUT_EVIDENCE_POLICY,
+        DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+        TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+        MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+      ]) {
+        expect(rendered.split(policy)).toHaveLength(2);
+      }
+    }
   });
 
   it("closes privileged checkout and harmless diagnostic-context decisions", () => {
@@ -43,6 +83,10 @@ describe("shared claim-decision policy", () => {
     );
     expect(DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY).toContain("rethrows the identical error");
     expect(DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY).toContain("disclose a secret or payload");
+    expect(SENSITIVE_OUTPUT_EVIDENCE_POLICY).toContain("`security`/`critical`");
+    expect(SENSITIVE_OUTPUT_EVIDENCE_POLICY).toContain("raw token");
+    expect(SENSITIVE_OUTPUT_EVIDENCE_POLICY).toContain("do not require a separate runtime caller");
+    expect(SENSITIVE_OUTPUT_EVIDENCE_POLICY).toContain("redacted or hashed before the sink");
   });
 
   it("keeps clean reset and full-SHA transitions explicit beside their recall boundaries", () => {
