@@ -124,7 +124,8 @@ if (binding !== undefined) {
   console.log(
     `     measured with adapter ${String(binding.adapter.version)} @ ${String(binding.adapter.commit).slice(0, 12)}, ` +
       `engine ${String(binding.engine.sha256).slice(0, 12)}, rule ${String(binding.rule.sha256).slice(0, 12)}, ` +
-      `model ${String(binding.model.id)} (${String(binding.model.protocol)})`,
+      `model ${String(binding.model.id)} (${String(binding.model.protocol)}), ` +
+      `strictness ${String(binding.strictness)}`,
   );
 }
 

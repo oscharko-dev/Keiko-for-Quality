@@ -42,6 +42,7 @@ const { detectPinDesync, describePinDesync } = await import("../src/contracts/pi
 const { loadReviewProfile } = await import("../src/config/profile.ts");
 const { parseRuntimeConfig } = await import("../src/config/runtime.ts");
 const { performLocalReview } = await import("../src/review.ts");
+const { resolveSubstantiationStrictness } = await import("../src/publish/substantiate.ts");
 // The classic runner's publisher stage. Staged qualification receives the equivalent already-
 // audited survivors from `performLocalReview` and never plans them a second time.
 const { planPublication } = await import("../src/publish/publisher.ts");
@@ -1035,12 +1036,13 @@ const binding = buildBinding({
   model: process.env.OCR_LLM_MODEL ?? "",
   protocol: process.env.OCR_USE_ANTHROPIC === "true" ? "anthropic" : "openai",
   endpoint: process.env.OCR_LLM_URL ?? "",
+  strictness: resolveSubstantiationStrictness(process.env),
   measuredAt: new Date().toISOString(),
 });
 console.log(
   `binding        engine ${binding.engine.sha256.slice(0, 12)} · rule ${binding.rule.sha256.slice(0, 12)}` +
     ` · cases ${binding.corpus.cases.slice(0, 12)} · scorer ${binding.corpus.scorer.slice(0, 12)}` +
-    ` · model ${binding.model.id}`,
+    ` · model ${binding.model.id} · strictness ${binding.strictness}`,
 );
 
 // The binding above is printed for every run, measured or not: it is pure, free, and the evidence

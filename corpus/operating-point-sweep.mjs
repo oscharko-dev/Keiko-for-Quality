@@ -353,7 +353,7 @@ function bindingLine(binding) {
   return (
     `engine ${String(binding.engine?.sha256).slice(0, 12)} · rule ${String(binding.rule?.sha256).slice(0, 12)} · ` +
     `cases ${String(binding.corpus?.cases).slice(0, 12)} · scorer ${String(binding.corpus?.scorer).slice(0, 12)} · ` +
-    `model ${String(binding.model?.id)}`
+    `model ${String(binding.model?.id)} · strictness ${String(binding.strictness)}`
   );
 }
 

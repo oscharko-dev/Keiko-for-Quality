@@ -17,7 +17,6 @@ import {
   isIdentifier,
   isImportDeclaration,
   isImportEqualsDeclaration,
-  isNamedImports,
   isStringLiteralLike,
 } from "typescript";
 
@@ -92,13 +91,10 @@ function runtimeImport(declaration) {
 }
 
 function runtimeExport(declaration) {
-  if (declaration.isTypeOnly) return false;
-  const clause = declaration.exportClause;
-  return (
-    clause === undefined ||
-    !isNamedImports(clause) ||
-    clause.elements.some((element) => !element.isTypeOnly)
-  );
+  // Like imports above, only a declaration-level `export type` is guaranteed to erase the
+  // runtime edge. Ordinary `export {}` and `export { type T }` declarations still evaluate their
+  // module under verbatim module syntax, so their dependency must remain inside the closure.
+  return !declaration.isTypeOnly;
 }
 
 function stringSpecifier(node) {
@@ -297,13 +293,14 @@ function adapterCommit() {
 
 /**
  * @param {{ engine: object, rule: string | undefined, model: string, protocol: string,
- *           endpoint: string, measuredAt: string }} inputs
+ *           endpoint: string, strictness: string, measuredAt: string }} inputs
  */
 export function buildBinding(inputs) {
   const repositoryRoot = join(HERE, "..");
   const manifest = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
   return {
     measuredAt: inputs.measuredAt,
+    strictness: inputs.strictness,
     adapter: { version: manifest.version, commit: adapterCommit() },
     engine: { sha256: qualificationEngineDigest(inputs.engine) },
     rule: { sha256: sha256File(inputs.rule) },

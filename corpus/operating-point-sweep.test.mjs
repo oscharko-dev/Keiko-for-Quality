@@ -176,6 +176,7 @@ function measuredReport(overrides = {}) {
   return {
     measured: true,
     binding: {
+      strictness: "default",
       engine: { sha256: "1".repeat(64) },
       rule: { sha256: "2".repeat(64) },
       corpus: { cases: "3".repeat(64), scorer: "4".repeat(64) },
@@ -308,6 +309,7 @@ test("renderEvidenceMarkdown carries one binding line per stage and a spend tota
   });
   assert.ok(doc.includes("- lenient: engine 111111111111"));
   assert.ok(doc.includes("- default: engine 111111111111"));
+  assert.ok(doc.includes("strictness default"));
   assert.ok(doc.includes("Total across 2 stage(s): 3,000 tokens."));
 });
 

@@ -84,6 +84,25 @@ function assertImportBindsDependency(importDeclaration, before, after) {
   }
 }
 
+function assertExportBindsDependency(exportDeclaration, before, after) {
+  const root = mkdtempSync(join(tmpdir(), "kfq-export-binding-"));
+  try {
+    write(root, "src/entry.ts", `${exportDeclaration}\nexport const entry = true;\n`);
+    write(root, "src/dependency.ts", before);
+    const identity = sourceIdentity(root, ["src/entry.ts"]);
+    const initial = qualificationSourceClosureDigest(identity);
+    assert.deepEqual(
+      qualificationSourceClosureManifest(identity).sources.map(({ path }) => path),
+      ["src/dependency.ts", "src/entry.ts"],
+    );
+
+    write(root, "src/dependency.ts", after);
+    assert.notEqual(qualificationSourceClosureDigest(identity), initial);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 test("an ordinary empty named import remains a causal runtime binding edge", () => {
   assertImportBindsDependency(
     'import {} from "./dependency.js";',
@@ -95,6 +114,22 @@ test("an ordinary empty named import remains a causal runtime binding edge", () 
 test("an inline type-only named import remains a causal runtime binding edge", () => {
   assertImportBindsDependency(
     'import { type DependencyShape } from "./dependency.js";',
+    "export interface DependencyShape { readonly before: string }\n",
+    "export interface DependencyShape { readonly after: string }\n",
+  );
+});
+
+test("an ordinary empty named re-export remains a causal runtime binding edge", () => {
+  assertExportBindsDependency(
+    'export {} from "./dependency.js";',
+    "export const sideEffectVersion = 1;\n",
+    "export const sideEffectVersion = 2;\n",
+  );
+});
+
+test("an inline type-only named re-export remains a causal runtime binding edge", () => {
+  assertExportBindsDependency(
+    'export { type DependencyShape } from "./dependency.js";',
     "export interface DependencyShape { readonly before: string }\n",
     "export interface DependencyShape { readonly after: string }\n",
   );
@@ -288,6 +323,7 @@ test("the report binding preserves its schema while using both closure digests",
       model: "gpt-oss-120b",
       protocol: "openai",
       endpoint: "https://model.example.test/v1",
+      strictness: "paranoid",
       measuredAt: "2026-08-10T00:00:00.000Z",
     });
     assert.deepEqual(Object.keys(report.engine), ["sha256"]);
@@ -302,6 +338,7 @@ test("the report binding preserves its schema while using both closure digests",
       }),
     );
     assert.equal(report.model.id, "gpt-oss-120b");
+    assert.equal(report.strictness, "paranoid");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -17,6 +17,7 @@ const SECRET = "PRIVATE_FINDING_BODY_must_never_cross_the_boundary";
 function binding(overrides = {}) {
   return {
     measuredAt: "2026-08-09T09:00:00.000Z",
+    strictness: "default",
     adapter: { version: "0.23.0", commit: "a".repeat(40) },
     engine: { sha256: "b".repeat(64) },
     rule: { sha256: "c".repeat(64) },
@@ -128,6 +129,18 @@ test("the public schema fails closed for invalid result identities, kinds and co
     assert.equal(validation.valid, false);
     assert.ok(validation.failures.includes("result_value"));
   }
+});
+
+test("the public binding distinguishes substantiation operating points", () => {
+  const evidence = redactQualificationReport(rawReport());
+  assert.equal(evidence.binding.strictness, "default");
+  assert.equal(
+    validateQualificationEvidence({
+      ...evidence,
+      binding: { ...evidence.binding, strictness: "unknown" },
+    }).valid,
+    false,
+  );
 });
 
 test("the normal promotion checker reads redacted evidence without private diagnostics", () => {

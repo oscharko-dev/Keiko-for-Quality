@@ -412,8 +412,9 @@ Read that as one measurement of a nondeterministic system, not a constant. Sever
 critical/high boundary is the least stable axis — the same defect class has come back a step apart
 between runs — which is why classification is reported and not gated: severity is presentation here,
 and gates nothing. Every run records what produced it (engine digest, rule digest, corpus digest,
-adapter commit, model id), because recall is a property of a _pairing_, and the model is the input
-that can move without a commit. The classic engine digest covers the executable bytes; staged mode
+adapter commit, model id, and verification strictness), because recall is a property of a
+_pairing_, and the model or operating point can move without a commit. The classic engine digest
+covers the executable bytes; staged mode
 uses a canonical digest of the transitive local runtime-source closure rooted at the shared local
 review pipeline and its corpus adapter, so a prompt, verifier, or staged-evidence change cannot
 retain an older engine identity merely because `src/engine/single-shot.ts` itself did not move. The scorer

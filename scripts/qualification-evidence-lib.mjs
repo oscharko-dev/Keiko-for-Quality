@@ -9,7 +9,7 @@ import { CASES } from "../corpus/cases.mjs";
  * `OCR_REPORT` a release-gate failure rather than a documentation mistake.
  */
 export const QUALIFICATION_EVIDENCE_ARTIFACT = "keiko-for-quality/qualification-evidence";
-export const QUALIFICATION_EVIDENCE_SCHEMA_VERSION = 1;
+export const QUALIFICATION_EVIDENCE_SCHEMA_VERSION = 2;
 
 const VERSION = /^\d+\.\d+\.\d+$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
@@ -18,6 +18,7 @@ const SAFE_MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/u;
 const RESULT_KINDS = new Set(["recall", "precision", "publishability", "error"]);
 const REASONS = new Set(["measured", "no_cases", "model_unreached"]);
 const PROTOCOLS = new Set(["openai", "anthropic"]);
+const STRICTNESS_LEVELS = new Set(["lenient", "default", "strict", "paranoid"]);
 const CASE_BY_ID = new Map(CASES.map((testCase) => [testCase.id, testCase]));
 
 function record(value) {
@@ -68,8 +69,13 @@ function bindingFrom(rawBinding) {
   if (!PROTOCOLS.has(protocol)) {
     throw new TypeError("qualification evidence: binding.model.protocol is invalid");
   }
+  const strictness = binding?.strictness;
+  if (!STRICTNESS_LEVELS.has(strictness)) {
+    throw new TypeError("qualification evidence: binding.strictness is invalid");
+  }
   return {
     measuredAt: new Date(measuredAt).toISOString(),
+    strictness,
     adapter: {
       version: exactString(adapter?.version, VERSION, "binding.adapter.version"),
       commit: exactString(adapter?.commit, COMMIT, "binding.adapter.commit"),
@@ -201,7 +207,7 @@ const ROOT_KEYS = [
   "schemaVersion",
   "tokens",
 ];
-const BINDING_KEYS = ["adapter", "corpus", "engine", "measuredAt", "model", "rule"];
+const BINDING_KEYS = ["adapter", "corpus", "engine", "measuredAt", "model", "rule", "strictness"];
 const RESULT_KEYS = [
   "classified",
   "findingCount",

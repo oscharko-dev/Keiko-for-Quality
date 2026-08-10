@@ -372,6 +372,7 @@ test("quality evidence must bind the RC and improve real-label precision without
     measured: true,
     binding: {
       measuredAt: "2026-08-09T09:00:00.000Z",
+      strictness: "default",
       adapter: { version: expected.version, commit: expected.head },
       engine: { sha256: "c".repeat(64) },
       rule: { sha256: "d".repeat(64) },
