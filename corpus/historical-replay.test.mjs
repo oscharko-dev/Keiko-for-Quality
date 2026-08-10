@@ -195,6 +195,10 @@ test("CLI requires an explicit dry or execute mode and a visible token ceiling",
   );
 });
 
+test("the dry-run estimate reserves every possible substantiation request for one case", () => {
+  assert.equal(HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE, 4 * 32_000);
+});
+
 test("the replay model pin has no deviation escape hatch", () => {
   assert.equal(
     requireHistoricalReplayModel({ OCR_LLM_MODEL: QUALIFICATION_MODEL }),
