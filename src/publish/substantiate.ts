@@ -93,7 +93,6 @@ export type SubstantiationStrictness = (typeof SUBSTANTIATION_STRICTNESS_LEVELS)
 
 const STRICTNESS_ENV_VAR = "KFQ_SUBSTANTIATION_STRICTNESS";
 const DEFAULT_STRICTNESS: SubstantiationStrictness = "paranoid";
-const POSITIVE_PROOF_LINE_TOLERANCE = 3;
 
 function isSubstantiationStrictness(value: string): value is SubstantiationStrictness {
   return (SUBSTANTIATION_STRICTNESS_LEVELS as readonly string[]).includes(value);
@@ -1137,11 +1136,7 @@ function lineFallsInsideFinding(
 ): boolean {
   if (finding === undefined) return true;
   const line = Number(lineText);
-  return (
-    Number.isSafeInteger(line) &&
-    line >= Math.max(1, finding.startLine - POSITIVE_PROOF_LINE_TOLERANCE) &&
-    line <= finding.endLine + POSITIVE_PROOF_LINE_TOLERANCE
-  );
+  return Number.isSafeInteger(line) && line >= finding.startLine && line <= finding.endLine;
 }
 
 interface PositiveProofBinding {

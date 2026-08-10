@@ -10644,7 +10644,6 @@ var SUBSTANTIATION_STRICTNESS_LEVELS = [
 ];
 var STRICTNESS_ENV_VAR = "KFQ_SUBSTANTIATION_STRICTNESS";
 var DEFAULT_STRICTNESS = "paranoid";
-var POSITIVE_PROOF_LINE_TOLERANCE = 3;
 function isSubstantiationStrictness(value) {
   return SUBSTANTIATION_STRICTNESS_LEVELS.includes(value);
 }
@@ -11193,7 +11192,7 @@ function hasBaseStateRef(references) {
 function lineFallsInsideFinding(lineText, finding) {
   if (finding === void 0) return true;
   const line = Number(lineText);
-  return Number.isSafeInteger(line) && line >= Math.max(1, finding.startLine - POSITIVE_PROOF_LINE_TOLERANCE) && line <= finding.endLine + POSITIVE_PROOF_LINE_TOLERANCE;
+  return Number.isSafeInteger(line) && line >= finding.startLine && line <= finding.endLine;
 }
 function mappedBaseBindings(baseLine, visible) {
   const bindings = [];

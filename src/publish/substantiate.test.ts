@@ -504,21 +504,11 @@ describe("strict truth envelope", () => {
     expect(extractTruthDecision(CONFIRMED, prefixed)).toBeUndefined();
   });
 
-  it("accepts placement-tolerant nearby proof but rejects an unrelated distant changed line", () => {
-    const broadEvidence = [
-      CHANGE_EVIDENCE,
-      "H:6| nearby();",
-      "D:H:6| +nearby();",
-      "H:8| unrelated();",
-      "D:H:8| +unrelated();",
-    ].join("\n");
+  it("requires the proved changed line to fall inside the finding anchor", () => {
+    const broadEvidence = [CHANGE_EVIDENCE, "H:8| unrelated();", "D:H:8| +unrelated();"].join("\n");
     expect(
       extractTruthDecision(truth({ evidence_refs: ["H:8"] }), broadEvidence, finding("claim")),
     ).toBeUndefined();
-    expect(
-      extractTruthDecision(truth({ evidence_refs: ["H:6"] }), broadEvidence, finding("claim"))
-        ?.verdict,
-    ).toBe("confirmed");
     expect(
       extractTruthDecision(truth({ evidence_refs: ["H:3"] }), broadEvidence, finding("claim"))
         ?.verdict,
