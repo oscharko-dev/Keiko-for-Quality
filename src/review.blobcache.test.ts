@@ -36,7 +36,26 @@ vi.mock("./engine/run.js", async (importOriginal) => ({
 vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
   ...(await importOriginal()),
   findAstAnchorOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
-  searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
+  findAstCallerOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
+  searchAstGrepAtHead: (request: {
+    readonly candidatePaths: readonly string[];
+    readonly terms: readonly string[];
+  }): Promise<
+    readonly [{ path: string; line: number; content: string; kind: "definition" }] | []
+  > =>
+    Promise.resolve(
+      request.candidatePaths.includes("src/challenge.ts") &&
+        request.terms.includes("challengeGuard")
+        ? [
+            {
+              path: "src/challenge.ts",
+              line: 2,
+              content: "  return true;",
+              kind: "definition",
+            },
+          ]
+        : [],
+    ),
 }));
 
 /**
@@ -226,7 +245,7 @@ describe("performReview: the gate and the change-level pass share one blob-text 
       await writeFile(join(divergentRepo, "src/a.ts"), 'export const marker = "merge-base";\n');
       await writeFile(
         join(divergentRepo, "src/challenge.ts"),
-        "export const challengeGuard = true;\n",
+        "export function challengeGuard() {\n  return true;\n}\n",
       );
       divergentGit(["add", "-A"]);
       divergentGit(["commit", "-q", "-m", "fork", "--no-gpg-sign"]);
@@ -244,7 +263,9 @@ describe("performReview: the gate and the change-level pass share one blob-text 
       divergentGit(["commit", "-q", "-m", "target", "--no-gpg-sign"]);
       const eventBase = divergentGit(["rev-parse", "HEAD"]).trim();
 
-      const body = "When this module loads, `marker` now selects the proposed branch.";
+      const body =
+        "When this module loads, `marker` now selects the proposed branch. " +
+        "The independent `challengeGuard` contract must also hold.";
       const engineDigest = "d".repeat(64);
       acquireEngineMock.mockReset();
       runEngineMock.mockReset();
@@ -282,7 +303,9 @@ describe("performReview: the gate and the change-level pass share one blob-text 
           content = '{"axis":"caller","evidence_refs":["H:1"],"lookup_terms":["challengeGuard"]}';
         } else if (prompt.startsWith("Adversarially falsify one AI-generated code-review claim")) {
           content =
-            '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"]}';
+            '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:2"]}';
+        } else if (prompt.startsWith("Act as the final independent referee")) {
+          content = '{"verdict":"survives","evidence_refs":["R4:H:2"]}';
         } else {
           content = '{"category":"bug","severity":"high"}';
         }

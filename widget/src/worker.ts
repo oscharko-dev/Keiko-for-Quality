@@ -14,14 +14,16 @@
  *   falling back to the GitHub App pair `KQ_APP_ID`/`KQ_APP_PRIVATE_KEY`. With neither, or on
  *   any collection failure, the card renders with em dashes — the service degrades to honest
  *   ignorance, never to a 500 in a README.
- * - Responses carry `s-maxage=600`: GitHub's image proxy (camo) honours it, so one card costs
- *   at most a handful of API calls per ten minutes regardless of README traffic.
+ * - Responses carry `s-maxage=600`: GitHub's image proxy (camo) honours it, so one cache miss costs
+ *   at most 50 API calls, including App authentication, regardless of README traffic.
  */
 
 import { renderCard } from "./card.js";
 import type { CardData, CardTheme } from "./card.js";
 import { collectCardData } from "./collect.js";
 import { installationToken } from "./github-app.js";
+import { createGitHubRequestBudget } from "./request-budget.js";
+import type { GitHubRequestBudget } from "./request-budget.js";
 
 export interface Env {
   readonly KQ_GITHUB_TOKEN?: string;
@@ -61,7 +63,7 @@ async function resolveToken(
   env: Env,
   owner: string,
   repo: string,
-  fetchImpl: typeof fetch,
+  requests: GitHubRequestBudget,
   nowMs: number,
 ): Promise<string | undefined> {
   if (env.KQ_GITHUB_TOKEN !== undefined && env.KQ_GITHUB_TOKEN !== "") return env.KQ_GITHUB_TOKEN;
@@ -71,7 +73,7 @@ async function resolveToken(
     env.KQ_APP_PRIVATE_KEY,
     owner,
     repo,
-    fetchImpl,
+    requests,
     Math.floor(nowMs / 1000),
   );
 }
@@ -88,10 +90,12 @@ function svgResponse(svg: string): Response {
 
 async function renderWidget(env: Env, url: URL, path: WidgetPath): Promise<Response> {
   const theme: CardTheme = url.searchParams.get("theme") === "light" ? "light" : "dark";
-  const token = await resolveToken(env, path.owner, path.repo, fetch, Date.now());
+  const nowMs = Date.now();
+  const requests = createGitHubRequestBudget(fetch);
+  const token = await resolveToken(env, path.owner, path.repo, requests, nowMs);
   let data: CardData = { owner: path.owner, repo: path.repo };
   if (token !== undefined) {
-    data = await collectCardData(path.owner, path.repo, token, fetch, Date.now());
+    data = await collectCardData(path.owner, path.repo, token, requests, nowMs);
   }
   return svgResponse(renderCard(data, theme));
 }

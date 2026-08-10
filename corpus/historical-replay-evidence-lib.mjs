@@ -18,16 +18,17 @@ const ROOT_KEYS = [
   "score",
 ];
 const SCOPE = {
-  measuredStage: "post-generation-truth-contract-challenge-falsifier-workflow",
+  measuredStage:
+    "post-generation-truth-deterministic-contract-challenge-falsifier-referee-closed-runtime-fact-workflow",
   historicalHeadSource: "immutable GitHub originalCommit for the review comment",
   historicalBaseSource:
     "unique merge-base of harvested current target ref and original review commit",
   historicalDiffSource:
     "exact single-change unified diff from derived merge-base to immutable originalCommit",
   repositoryContextSource:
-    "bounded exact originalCommit and derived-merge-base trees with optional truth retrieval and mandatory contract challenge retrieval",
+    "bounded exact originalCommit and derived-merge-base trees with optional truth retrieval, mandatory deterministic contract challenge retrieval, and closed catalog runtime facts from exact anchored syntax in bounded immutable blobs",
   verificationWorkflow:
-    "truth judge, optional truth retrieval and rerun, mandatory independent contract challenge, adversarial falsifier",
+    "truth judge, optional truth retrieval and rerun, mandatory deterministic independent contract challenge, adversarial falsifier, reduced independent referee, optional closed runtime fact detector",
   pullRequestEventBase: "not available in harvest; not measured",
   candidateGeneration: "not measured",
   classificationAndPrWideRanking: "not measured",

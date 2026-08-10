@@ -45,7 +45,26 @@ vi.mock("./engine/single-shot.js", async (importOriginal) => ({
 vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
   ...(await importOriginal()),
   findAstAnchorOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
-  searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
+  findAstCallerOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
+  searchAstGrepAtHead: (request: {
+    readonly candidatePaths: readonly string[];
+    readonly terms: readonly string[];
+  }): Promise<
+    readonly [{ path: string; line: number; content: string; kind: "definition" }] | []
+  > =>
+    Promise.resolve(
+      request.candidatePaths.includes("src/challenge.ts") &&
+        request.terms.includes("challengeGuard")
+        ? [
+            {
+              path: "src/challenge.ts",
+              line: 2,
+              content: "  return true;",
+              kind: "definition",
+            },
+          ]
+        : [],
+    ),
 }));
 
 const { performLocalReview } = await import("./review.js");
@@ -109,7 +128,10 @@ describe("performLocalReview (issue #95)", () => {
     await writeFile(join(repo, "src/a.ts"), "export const a = 1;\n");
     // Unchanged repository context for the mandatory contract-challenge retrieval. Truth may
     // prove the changed line, but the falsifier must cite independently retrieved R4-R6 evidence.
-    await writeFile(join(repo, "src/challenge.ts"), "export const challengeGuard = true;\n");
+    await writeFile(
+      join(repo, "src/challenge.ts"),
+      "export function challengeGuard() {\n  return true;\n}\n",
+    );
     git(["add", "-A"]);
     git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
     baseSha = git(["rev-parse", "HEAD"]).trim();
@@ -254,9 +276,11 @@ describe("performLocalReview (issue #95)", () => {
               ? JSON.stringify({
                   verdict: "survives",
                   reason_code: "no_defeater_found",
-                  evidence_refs: ["R4:H:1"],
+                  evidence_refs: ["R4:H:2"],
                 })
-              : JSON.stringify(pair);
+              : prompt.includes("final independent referee")
+                ? JSON.stringify({ verdict: "survives", evidence_refs: ["R4:H:2"] })
+                : JSON.stringify(pair);
         return Promise.resolve(
           new Response(
             JSON.stringify({
@@ -273,7 +297,8 @@ describe("performLocalReview (issue #95)", () => {
       const engineDigest = "b".repeat(64);
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       const BODY =
-        "This retry loop never resets its attempt counter, so it spins forever after one failure.";
+        "This retry loop never resets its attempt counter, so it spins forever after one failure. " +
+        "The independent `challengeGuard` contract must also hold.";
       const withFinding = JSON.stringify({
         status: "success",
         summary: { files_reviewed: 1, total_tokens: 100, budget_exceeded: false },
@@ -299,7 +324,6 @@ describe("performLocalReview (issue #95)", () => {
         baseRequest({ config: AUDIT_CONFIG, env: { MODEL_TOKEN: "fake-token" } }),
         diagnostics,
       );
-
       expect(report.outcome).toBe("complete");
       expect(report.findings).toHaveLength(1);
       const [finding] = report.findings;
@@ -450,8 +474,10 @@ describe("performLocalReview (issue #95)", () => {
           : prompt.includes("Plan one independent contract trace")
             ? '{"axis":"caller","evidence_refs":["H:1"],"lookup_terms":["challengeGuard"]}'
             : prompt.includes("Adversarially falsify")
-              ? '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"]}'
-              : '{"category":"bug","severity":"medium"}';
+              ? '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:2"]}'
+              : prompt.includes("final independent referee")
+                ? '{"verdict":"survives","evidence_refs":["R4:H:2"]}'
+                : '{"category":"bug","severity":"medium"}';
         return Promise.resolve(
           new Response(
             JSON.stringify({
@@ -471,7 +497,9 @@ describe("performLocalReview (issue #95)", () => {
         comments: [
           {
             path: "src/a.ts",
-            content: "This branch never checks the return value before dereferencing it.",
+            content:
+              "This branch never checks the return value before dereferencing it. " +
+              "The independent `challengeGuard` contract must also hold.",
             start_line: 1,
             end_line: 1,
           },

@@ -110,12 +110,16 @@ import {
 import {
   collectInitialRepositoryContext,
   collectRepositoryContextFollowUp,
+  type RepositoryFollowUpContext,
   type RepositoryContextRequest,
 } from "./publish/repository-context.js";
-import { toRetrievedEvidence } from "./publish/retrieved-evidence.js";
+import { requestsClosedRuntimeFacts, toRetrievedEvidence } from "./publish/retrieved-evidence.js";
+import type { ClosedRuntimeFact } from "./publish/runtime-fact-catalog.js";
+import { collectClosedRuntimeFactsAtCommit } from "./publish/runtime-facts.js";
 import {
   MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
   substantiate,
+  type ContractChallengeAxis,
   type EvidenceRetriever,
   type JudgeableFinding,
   type SubstantiationOutcome,
@@ -1233,17 +1237,23 @@ function bookPropagatedEngineFailure(error: unknown, ledger: SpendLedger): void 
   if (error instanceof EngineRunError) ledger.engine += error.wireTokens ?? 0;
 }
 
+interface EngineInvocationPreparation {
+  readonly binaryPath: string;
+  readonly allottedBudget: number;
+  readonly excluded: readonly string[];
+  readonly preparedContextPacks: ReadonlyMap<string, string>;
+  readonly guidelineContext: GuidelineContextResult | undefined;
+}
+
 /** The invocation options `executeEngine` hands `runEngineWithOneResume`. */
 function engineInvocationOptions(
   request: PipelineRequest,
   deadline: ReviewDeadline,
   inventory: Inventory,
-  binaryPath: string,
-  allottedBudget: number,
-  excluded: readonly string[],
-  preparedContextPacks: ReadonlyMap<string, string>,
-  guidelineContext: GuidelineContextResult | undefined,
+  preparation: EngineInvocationPreparation,
 ): EngineRunOptions {
+  const { binaryPath, allottedBudget, excluded, preparedContextPacks, guidelineContext } =
+    preparation;
   const excludedSet = new Set(excluded);
   const contextPacks = new Map(
     [...preparedContextPacks].filter(([path]) => !excludedSet.has(path)),
@@ -1349,16 +1359,13 @@ function preparedInvocation(
 ): EngineRunOptions {
   const { excluded, allottedBudget } = computeEngineBudget(request, inventory, memo);
   ledger.allotted = allottedBudget;
-  return engineInvocationOptions(
-    request,
-    deadline,
-    inventory,
+  return engineInvocationOptions(request, deadline, inventory, {
     binaryPath,
     allottedBudget,
     excluded,
-    memo.contextPacks,
-    memo.guidelineContext,
-  );
+    preparedContextPacks: memo.contextPacks,
+    guidelineContext: memo.guidelineContext,
+  });
 }
 
 function recordRejectedEngineFindings(
@@ -2872,10 +2879,10 @@ function sourceLines(
 
 function evidenceRetriever(
   evidence: ReadonlyMap<EngineFinding, PreparedFindingEvidence>,
-  deadline: ReviewDeadline,
+  run: PipelineRun,
 ): EvidenceRetriever<JudgeableOriginal> {
-  return async ({ finding, terms, challengeAxis, knownProvenance }) => {
-    requireReviewTime(deadline);
+  return async ({ finding, terms, stage, challengeAxis, knownProvenance }) => {
+    requireReviewTime(run.deadline);
     const prepared = evidence.get(finding.original);
     if (prepared === undefined) throw new Error("finding evidence is unavailable");
     const sourceSide =
@@ -2883,11 +2890,87 @@ function evidenceRetriever(
       (challengeAxis === "same_file_contract" && prepared.headText === undefined)
         ? "B"
         : "H";
+    const runtimeFacts = await closedRuntimeFactsForChallenge(
+      run,
+      prepared,
+      finding,
+      stage,
+      challengeAxis,
+      sourceSide,
+    );
+    const followUp = await challengeFollowUpOrFactOnly(
+      run,
+      prepared,
+      terms,
+      challengeAxis,
+      sourceSide,
+      runtimeFacts,
+    );
+    return toRetrievedEvidence(followUp, knownProvenance, runtimeFacts);
+  };
+}
+
+async function challengeFollowUpOrFactOnly(
+  run: PipelineRun,
+  prepared: PreparedFindingEvidence,
+  terms: readonly string[],
+  challengeAxis: ContractChallengeAxis | undefined,
+  sourceSide: "H" | "B",
+  runtimeFacts: readonly ClosedRuntimeFact[],
+): Promise<RepositoryFollowUpContext> {
+  try {
     const followUp = await collectRepositoryContextFollowUp(prepared.repositoryRequest, terms, {
       sourceSide,
+      ...(challengeAxis === "configuration" ? { preferManifests: true } : {}),
     });
-    return toRetrievedEvidence(followUp, knownProvenance);
-  };
+    requireReviewTime(run.deadline);
+    return followUp;
+  } catch (error) {
+    requireReviewTime(run.deadline);
+    if (runtimeFacts.length === 0) throw error;
+    return {
+      sourceCommit:
+        sourceSide === "H" ? prepared.repositoryRequest.head : prepared.repositoryRequest.base,
+      side: sourceSide,
+      entries: [],
+    };
+  }
+}
+
+function selectedRuntimeFactAnchor(
+  prepared: PreparedFindingEvidence,
+  sourceSide: "H" | "B",
+): RepositoryContextRequest["findingAnchor"] | undefined {
+  if (sourceSide === "H") return prepared.repositoryRequest.findingAnchor;
+  return prepared.repositoryRequest.baseFindingAnchor;
+}
+
+async function closedRuntimeFactsForChallenge(
+  run: PipelineRun,
+  prepared: PreparedFindingEvidence,
+  finding: JudgeableOriginal,
+  stage: "truth" | "contract_challenge",
+  challengeAxis: ContractChallengeAxis | undefined,
+  sourceSide: "H" | "B",
+): Promise<readonly ClosedRuntimeFact[]> {
+  if (stage !== "contract_challenge") return [];
+  if (!requestsClosedRuntimeFacts(finding.content, challengeAxis)) return [];
+  const findingAnchor = selectedRuntimeFactAnchor(prepared, sourceSide);
+  // A pure insertion can expose useful cross-file BASE contracts without mapping the finding's
+  // exact syntax to BASE. Keep that repository follow-up, but never substitute a HEAD coordinate
+  // to license a BASE runtime fact.
+  if (findingAnchor === undefined) return [];
+  return await collectClosedRuntimeFactsAtCommit({
+    context: gitContext(run.request),
+    commit: sourceSide === "H" ? prepared.repositoryRequest.head : prepared.repositoryRequest.base,
+    path:
+      sourceSide === "H"
+        ? prepared.repositoryRequest.reviewPath
+        : prepared.repositoryRequest.baseReviewPath,
+    side: sourceSide,
+    findingAnchor,
+    deadlineMs: run.deadline.expiresAtMs,
+  });
 }
 
 function recordSubstantiation(
@@ -2932,8 +3015,8 @@ function recordSubstantiation(
  * retrieval, and verifier behavior can change independently of the per-file generation digest, so
  * replay never saves this stage. Truth may request one deterministic lookup and then must make a
  * terminal decision. Every confirmed claim receives a separate contract challenge whose terms are
- * retrieved before the terminal adversarial Falsifier; a fourth-call Referee is available only on
- * the shorter no-Truth-retrieval path after a rejected Falsifier shape.
+ * retrieved before the terminal adversarial Falsifier. A surviving or malformed Falsifier reaches
+ * the independent Referee on both the direct and Truth-retrieval paths, within the four-call cap.
  * Wording is never repaired here: an unproven hypothesis leaves the cohort unchanged only in the
  * sense that no replacement is invented — under production's paranoid policy it is withheld.
  *
@@ -2990,7 +3073,7 @@ async function substantiateModelSurvivors(
     // `outcome.undecided` is surfaced as incomplete by the caller below.
     "paranoid",
     remaining,
-    evidenceRetriever(evidence, run.deadline),
+    evidenceRetriever(evidence, run),
   );
   recordSubstantiation(run, outcome);
   requireReviewTime(run.deadline);
@@ -3212,16 +3295,28 @@ function replanSelectedFindings(
   );
 }
 
-function finalizeAuditedPlan(
-  batch: FindingBatch,
-  initialPlan: PublicationPlan,
-  finalPlan: PublicationPlan,
-  verification: ReturnType<typeof selectVerificationCandidates>,
-  selected: ReturnType<typeof selectPrWideFindings>,
-  substantiated: SubstantiationResult,
-  combined: ReadonlyMap<EngineFinding, EngineFinding>,
-  originals: ReadonlyMap<EngineFinding, EngineFinding>,
-): AuditedPlan {
+interface FinalizeAuditedPlanInputs {
+  readonly batch: FindingBatch;
+  readonly initialPlan: PublicationPlan;
+  readonly finalPlan: PublicationPlan;
+  readonly verification: ReturnType<typeof selectVerificationCandidates>;
+  readonly selected: ReturnType<typeof selectPrWideFindings>;
+  readonly substantiated: SubstantiationResult;
+  readonly combined: ReadonlyMap<EngineFinding, EngineFinding>;
+  readonly originals: ReadonlyMap<EngineFinding, EngineFinding>;
+}
+
+function finalizeAuditedPlan(inputs: FinalizeAuditedPlanInputs): AuditedPlan {
+  const {
+    batch,
+    initialPlan,
+    finalPlan,
+    verification,
+    selected,
+    substantiated,
+    combined,
+    originals,
+  } = inputs;
   const rankedOut = [...verification.rankedOutOriginals, ...selected.rankedOutOriginals];
   const uncacheablePaths = uncacheableModelPaths(
     batch.verify,
@@ -3287,7 +3382,7 @@ async function planAndAudit(
     initialPlan.prefetch,
   );
   requireReviewTime(run.deadline);
-  return finalizeAuditedPlan(
+  return finalizeAuditedPlan({
     batch,
     initialPlan,
     finalPlan,
@@ -3296,7 +3391,7 @@ async function planAndAudit(
     substantiated,
     combined,
     originals,
-  );
+  });
 }
 
 /**
@@ -3471,16 +3566,28 @@ function finalizeCacheStore(
  * through `settleIncomplete`'s own `covered`/`batch` machinery, which exists for the DIFFERENT
  * truncated-engine-run shape and would re-publish findings this function's caller already attempted.
  */
-async function reportDegradedPublication(
-  run: ReviewRun,
-  inventory: Inventory,
-  memo: MemoContext,
-  publish: PublishOutcome,
-  settlement: Extract<Settlement, { status: "complete" }>,
-  qualityByOriginal: ReadonlyMap<EngineFinding, EngineFinding>,
-  droppedOriginals: ReadonlySet<EngineFinding>,
-  uncacheablePaths: ReadonlySet<string>,
-): Promise<ReviewReport> {
+interface DegradedPublicationInputs {
+  readonly run: ReviewRun;
+  readonly inventory: Inventory;
+  readonly memo: MemoContext;
+  readonly publish: PublishOutcome;
+  readonly settlement: Extract<Settlement, { status: "complete" }>;
+  readonly qualityByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
+  readonly droppedOriginals: ReadonlySet<EngineFinding>;
+  readonly uncacheablePaths: ReadonlySet<string>;
+}
+
+async function reportDegradedPublication(inputs: DegradedPublicationInputs): Promise<ReviewReport> {
+  const {
+    run,
+    inventory,
+    memo,
+    publish,
+    settlement,
+    qualityByOriginal,
+    droppedOriginals,
+    uncacheablePaths,
+  } = inputs;
   const report = await settleIncomplete(
     run,
     inventory,
@@ -3730,7 +3837,7 @@ async function publishSettledFindings(
   // it means for their coverage rather than which internal step noticed. The diagnostic keeps its
   // name and its per-attempt breakdown; only the settlement reason moved family.
   if (publicationDegraded(publish)) {
-    return reportDegradedPublication(
+    return reportDegradedPublication({
       run,
       inventory,
       memo,
@@ -3739,7 +3846,7 @@ async function publishSettledFindings(
       qualityByOriginal,
       droppedOriginals,
       uncacheablePaths,
-    );
+    });
   }
 
   return completedPublicationReport(run, inventory, settlement, memo, startedAt, audited);

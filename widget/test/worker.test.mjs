@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { generateKeyPairSync } from "node:crypto";
 
 /**
  * The adapter's security surface: method gate, path validation, the owner allowlist, and the
@@ -22,6 +23,8 @@ const { default: worker } = await import("../src/worker.ts");
 
 const ENV = { KQ_ALLOWED_OWNERS: "oscharko-dev" };
 const ctx = { waitUntil: () => {} };
+const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const APP_PRIVATE_KEY = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 
 function get(path, env = ENV) {
   return worker.fetch(new Request(`https://quality.keiko.dev${path}`), env, ctx);
@@ -63,7 +66,7 @@ test("without a credential the card renders with em dashes and caches", async ()
   assert.match(response.headers.get("cache-control"), /s-maxage=600/);
   const svg = await response.text();
   assert.match(svg, /oscharko-dev\/Keiko/);
-  assert.ok((svg.match(/>—</g) ?? []).length === 3);
+  assert.ok((svg.match(/>—</g) ?? []).length === 6);
 });
 
 test("theme=light switches the palette", async () => {
@@ -82,7 +85,7 @@ test("a configured PAT drives collection through the real pipeline", async () =>
   assert.equal(response.status, 200);
   assert.ok(calls.length >= 2);
   const svg = await response.text();
-  assert.ok((svg.match(/>—</g) ?? []).length === 3);
+  assert.ok((svg.match(/>—</g) ?? []).length === 6);
 });
 
 test("App credentials that cannot sign degrade to the em-dash card, not a 500", async () => {
@@ -97,6 +100,55 @@ test("App credentials that cannot sign degrade to the em-dash card, not a 500", 
   });
   assert.equal(response.status, 200);
   assert.match(await response.text(), />—</);
+});
+
+test("App authentication and concurrent collection share one fifty-request ceiling", async () => {
+  let executed = 0;
+  globalThis.fetch = async (url) => {
+    executed += 1;
+    const requestUrl = String(url);
+    if (requestUrl.endsWith("/repos/oscharko-dev/BudgetRepo/installation")) {
+      return Response.json({ id: 77 });
+    }
+    if (requestUrl.endsWith("/app/installations/77/access_tokens")) {
+      return Response.json({ token: "ghs_budget" });
+    }
+    if (requestUrl.includes("/actions/workflows?")) {
+      const page = Number(new URL(requestUrl).searchParams.get("page"));
+      const offset = (page - 1) * 100;
+      return Response.json({
+        total_count: 1_000,
+        workflows: Array.from({ length: 100 }, (_, index) => ({
+          id: offset + index + 1,
+          path: `.github/workflows/keiko-for-quality-${String(offset + index + 1)}.yml`,
+        })),
+      });
+    }
+    if (requestUrl.includes("/actions/workflows/") && requestUrl.includes("/runs?")) {
+      return Response.json({ total_count: 0, workflow_runs: [] });
+    }
+    if (requestUrl.endsWith("/graphql")) {
+      return Response.json({
+        data: {
+          search: {
+            issueCount: 0,
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: [],
+          },
+        },
+      });
+    }
+    return new Response("no", { status: 404 });
+  };
+  cacheStore.clear();
+  const response = await get("/widget/oscharko-dev/BudgetRepo.svg", {
+    ...ENV,
+    KQ_APP_ID: "1",
+    KQ_APP_PRIVATE_KEY: APP_PRIVATE_KEY,
+  });
+  assert.equal(response.status, 200);
+  assert.equal(executed, 50);
+  assert.equal(((await response.text()).match(/>—</g) ?? []).length, 6);
 });
 
 test("a second identical request is served from the cache", async () => {

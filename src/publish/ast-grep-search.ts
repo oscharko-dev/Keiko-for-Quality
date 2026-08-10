@@ -24,54 +24,87 @@ const MAX_ENTRY_LINE_CHARS = 300;
 interface LanguageSpec {
   readonly language: string;
   readonly identifierKinds: string;
+  readonly callKind: string;
 }
 
 const JAVASCRIPT: LanguageSpec = {
   language: "JavaScript",
   identifierKinds: "identifier,property_identifier,shorthand_property_identifier",
+  callKind: "call_expression",
 };
 const TYPESCRIPT: LanguageSpec = {
   language: "TypeScript",
   identifierKinds: "identifier,property_identifier,shorthand_property_identifier",
+  callKind: "call_expression",
 };
 const LANGUAGE_BY_EXTENSION: Readonly<Record<string, LanguageSpec>> = {
-  ".c": { language: "C", identifierKinds: "identifier,field_identifier,type_identifier" },
+  ".c": {
+    language: "C",
+    identifierKinds: "identifier,field_identifier,type_identifier",
+    callKind: "call_expression",
+  },
   ".cc": {
     language: "Cpp",
     identifierKinds: "identifier,field_identifier,type_identifier,namespace_identifier",
+    callKind: "call_expression",
   },
   ".cpp": {
     language: "Cpp",
     identifierKinds: "identifier,field_identifier,type_identifier,namespace_identifier",
+    callKind: "call_expression",
   },
-  ".cs": { language: "CSharp", identifierKinds: "identifier" },
+  ".cs": {
+    language: "CSharp",
+    identifierKinds: "identifier",
+    callKind: "invocation_expression",
+  },
   ".cts": TYPESCRIPT,
   ".cxx": {
     language: "Cpp",
     identifierKinds: "identifier,field_identifier,type_identifier,namespace_identifier",
+    callKind: "call_expression",
   },
-  ".go": { language: "Go", identifierKinds: "identifier,field_identifier,type_identifier" },
-  ".h": { language: "C", identifierKinds: "identifier,field_identifier,type_identifier" },
+  ".go": {
+    language: "Go",
+    identifierKinds: "identifier,field_identifier,type_identifier",
+    callKind: "call_expression",
+  },
+  ".h": {
+    language: "C",
+    identifierKinds: "identifier,field_identifier,type_identifier",
+    callKind: "call_expression",
+  },
   ".hh": {
     language: "Cpp",
     identifierKinds: "identifier,field_identifier,type_identifier,namespace_identifier",
+    callKind: "call_expression",
   },
   ".hpp": {
     language: "Cpp",
     identifierKinds: "identifier,field_identifier,type_identifier,namespace_identifier",
+    callKind: "call_expression",
   },
-  ".java": { language: "Java", identifierKinds: "identifier" },
+  ".java": {
+    language: "Java",
+    identifierKinds: "identifier",
+    callKind: "method_invocation",
+  },
   ".js": JAVASCRIPT,
   ".jsx": JAVASCRIPT,
   ".mjs": JAVASCRIPT,
   ".mts": TYPESCRIPT,
-  ".py": { language: "Python", identifierKinds: "identifier" },
-  ".pyi": { language: "Python", identifierKinds: "identifier" },
-  ".rs": { language: "Rust", identifierKinds: "identifier,field_identifier,type_identifier" },
+  ".py": { language: "Python", identifierKinds: "identifier", callKind: "call" },
+  ".pyi": { language: "Python", identifierKinds: "identifier", callKind: "call" },
+  ".rs": {
+    language: "Rust",
+    identifierKinds: "identifier,field_identifier,type_identifier",
+    callKind: "call_expression",
+  },
   ".ts": TYPESCRIPT,
   ".tsx": {
     language: "Tsx",
     identifierKinds: "identifier,property_identifier,shorthand_property_identifier",
+    callKind: "call_expression",
   },
 };
 
@@ -105,6 +138,11 @@ export interface AnchorOwnerSearchRequest {
   readonly findingAnchor: EvidenceLineRange;
   /** Absolute whole-review boundary. Absent only for standalone callers. */
   readonly deadlineMs?: number;
+}
+
+/** One exact direct-call lookup used for the optional depth-one caller-owner hop. */
+export interface CallerOwnerSearchRequest extends AnchorOwnerSearchRequest {
+  readonly ownerName: string;
 }
 
 export interface AnchorOwner {
@@ -238,7 +276,7 @@ export function isStructurallySearchablePath(path: string): boolean {
 }
 
 function regexEscape(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
 }
 
 function inlineRule(spec: LanguageSpec, terms: readonly string[]): string {
@@ -252,6 +290,22 @@ function inlineRule(spec: LanguageSpec, terms: readonly string[]): string {
     "  all:",
     `    - kind: ${spec.identifierKinds}`,
     `    - regex: '^(?:${regex})$'`,
+  ].join("\n");
+}
+
+function callerInlineRule(spec: LanguageSpec, ownerName: string): string {
+  return [
+    "id: kfq-direct-owner-call",
+    `language: ${spec.language}`,
+    "severity: hint",
+    "message: bounded direct owner call",
+    "rule:",
+    "  all:",
+    `    - kind: ${spec.callKind}`,
+    "    - has:",
+    "        all:",
+    "          - kind: identifier",
+    `          - regex: '^${regexEscape(ownerName)}$'`,
   ].join("\n");
 }
 
@@ -467,6 +521,22 @@ function scanArguments(source: SourceCandidate, terms: readonly string[]): reado
   ];
 }
 
+function callerScanArguments(source: SourceCandidate, ownerName: string): readonly string[] {
+  return [
+    "scan",
+    "--stdin",
+    "--inline-rules",
+    callerInlineRule(source.spec, ownerName),
+    "--json=compact",
+    "--color",
+    "never",
+    "--threads",
+    "1",
+    "--max-results",
+    String(MAX_STRUCTURAL_MATCHES),
+  ];
+}
+
 function outlineArguments(source: SourceCandidate): readonly string[] {
   return [
     "outline",
@@ -608,12 +678,12 @@ function inclusiveRangeEndLine(source: SourceCandidate, range: SourceRange): num
 }
 
 function validAnchorRange(anchor: EvidenceLineRange): boolean {
-  return !Number.isSafeInteger(anchor.startLine) ||
-    !Number.isSafeInteger(anchor.endLine) ||
-    anchor.startLine < 1 ||
-    anchor.endLine < anchor.startLine
-    ? false
-    : true;
+  return (
+    Number.isSafeInteger(anchor.startLine) &&
+    Number.isSafeInteger(anchor.endLine) &&
+    anchor.startLine >= 1 &&
+    anchor.endLine >= anchor.startLine
+  );
 }
 
 function ownsCompleteAnchor(
@@ -664,6 +734,79 @@ function anchorOwner(
           kind: "definition",
         },
       };
+}
+
+function smallestContainingOwner(
+  nodes: readonly OutlineNode[],
+  occurrence: SourceRange,
+): OutlineNode | undefined {
+  let selected: OutlineNode | undefined;
+  for (const node of nodes) {
+    if (
+      !validOwnerName(node.name) ||
+      node.range.byteOffset.start > occurrence.byteOffset.start ||
+      node.range.byteOffset.end < occurrence.byteOffset.end
+    ) {
+      continue;
+    }
+    if (narrowerOwner(node, selected)) selected = node;
+  }
+  return selected;
+}
+
+function ownerFromNode(node: OutlineNode, source: SourceCandidate): AnchorOwner | undefined {
+  const line = identifierLine(source, node.range, node.name);
+  const content = line === undefined ? undefined : sourceLine(source, line);
+  return line === undefined || content === undefined
+    ? undefined
+    : {
+        name: node.name,
+        definition: { path: source.path, line: line + 1, content, kind: "definition" },
+      };
+}
+
+function directCallRange(
+  candidate: unknown,
+  source: SourceCandidate,
+  ownerName: string,
+  findingAnchor: EvidenceLineRange,
+): SourceRange | undefined {
+  const record = asRecord(candidate);
+  if (
+    record.file !== "STDIN" ||
+    record.language !== source.spec.language ||
+    typeof record.text !== "string"
+  ) {
+    throw new AstGrepSearchError();
+  }
+  const range = sourceRange(record.range, source);
+  const exact = source.bytes
+    .subarray(range.byteOffset.start, range.byteOffset.end)
+    .toString("utf8");
+  if (exact !== record.text) throw new AstGrepSearchError();
+  // The AST rule admits call nodes with an exact identifier child. Requiring the call itself to
+  // begin with that identifier excludes method/property calls such as `api.ownerName()` and any
+  // identifier which appears only in an argument. Comments, strings and imports are not call
+  // nodes and therefore never reach this boundary in the first place.
+  if (!exact.startsWith(ownerName) || !/^\s*\(/u.test(exact.slice(ownerName.length))) {
+    return undefined;
+  }
+  return isOutsideAnchorContext(range.start.line + 1, findingAnchor) ? range : undefined;
+}
+
+function directCallRanges(
+  value: unknown,
+  source: SourceCandidate,
+  ownerName: string,
+  findingAnchor: EvidenceLineRange,
+): readonly SourceRange[] {
+  if (!Array.isArray(value) || value.length > MAX_STRUCTURAL_MATCHES) {
+    throw new AstGrepSearchError();
+  }
+  return value
+    .map((candidate) => directCallRange(candidate, source, ownerName, findingAnchor))
+    .filter((range): range is SourceRange => range !== undefined)
+    .sort((left, right) => left.byteOffset.start - right.byteOffset.start);
 }
 
 function contextEntries(hit: StructuralHit): readonly StructuralEvidenceEntry[] {
@@ -773,13 +916,13 @@ export async function searchAstGrepAtHead(
   } catch (error) {
     throw new AstGrepSearchError(error);
   }
-  const hits = (
-    await Promise.all(
-      sources.map((source, pathRank) =>
-        inspectSource(binaryPath, source, terms, pathRank, request.deadlineMs),
-      ),
-    )
-  ).flat();
+  const hits: StructuralHit[] = [];
+  // Keep the process fan-out bounded to one blob at a time. `inspectSource` deliberately runs that
+  // blob's scan and outline together, so structural retrieval starts at most two parser processes
+  // concurrently even when all four source slots are populated.
+  for (const [pathRank, source] of sources.entries()) {
+    hits.push(...(await inspectSource(binaryPath, source, terms, pathRank, request.deadlineMs)));
+  }
   return boundedStructuralEntries(hits, terms.length, sources.length, request);
 }
 
@@ -815,4 +958,62 @@ export async function findAstAnchorOwnerAtHead(
   }
   const outline = await toolJson(binaryPath, outlineArguments(source), source, request.deadlineMs);
   return anchorOwner(parseOutline(outline, source), source, request.findingAnchor);
+}
+
+/**
+ * Find the owner of one distant direct call to `ownerName` in the reviewed immutable blob.
+ *
+ * This is deliberately not a general caller graph. The pinned parser proves one exact direct-call
+ * identifier, the occurrence must lie outside the already-rendered anchor window, and only the
+ * smallest named structure which owns the first eligible occurrence may be returned. A recursive
+ * call is terminal (`undefined`) rather than walking outward to another ancestor.
+ */
+export async function findAstCallerOwnerAtHead(
+  request: CallerOwnerSearchRequest,
+  dependencies: StructuralSearchDependencies = {},
+): Promise<AnchorOwner | undefined> {
+  if (!validAnchorRange(request.findingAnchor) || !validOwnerName(request.ownerName)) {
+    return undefined;
+  }
+  structuralTimeoutMs(request.deadlineMs, STRUCTURAL_PROCESS_TIMEOUT_MS);
+  const sourceRequest: StructuralSearchRequest = {
+    ...request,
+    candidatePaths: [request.reviewPath],
+    terms: [],
+  };
+  const source = (await sourceCandidates(sourceRequest))[0];
+  if (source === undefined) return undefined;
+  let binaryPath: string;
+  try {
+    binaryPath =
+      dependencies.acquireBinary === undefined
+        ? await acquireDefaultAstGrep(request.deadlineMs)
+        : await dependencies.acquireBinary();
+    structuralTimeoutMs(request.deadlineMs, STRUCTURAL_PROCESS_TIMEOUT_MS);
+  } catch (error) {
+    throw new AstGrepSearchError(error);
+  }
+  const [calls, outline] = await Promise.all([
+    toolJson(
+      binaryPath,
+      callerScanArguments(source, request.ownerName),
+      source,
+      request.deadlineMs,
+    ),
+    toolJson(binaryPath, outlineArguments(source), source, request.deadlineMs),
+  ]);
+  const nodes = parseOutline(outline, source);
+  for (const occurrence of directCallRanges(
+    calls,
+    source,
+    request.ownerName,
+    request.findingAnchor,
+  )) {
+    const caller = smallestContainingOwner(nodes, occurrence);
+    if (caller === undefined) continue;
+    // Do not turn recursion into a second hop by skipping the real owner and selecting an ancestor.
+    if (caller.name === request.ownerName) return undefined;
+    return ownerFromNode(caller, source);
+  }
+  return undefined;
 }

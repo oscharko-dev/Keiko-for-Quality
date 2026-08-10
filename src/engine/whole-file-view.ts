@@ -184,7 +184,7 @@ const MAX_RENDERED_BLOCK_CHARS = MAX_REVIEW_FILE_CHARS * 1.5;
  */
 function splitFileLines(fileText: string): readonly string[] {
   const lines = fileText.split("\n");
-  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  if (lines.length > 1 && lines.at(-1) === "") lines.pop();
   return lines;
 }
 

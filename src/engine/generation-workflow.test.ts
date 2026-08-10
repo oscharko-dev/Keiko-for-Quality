@@ -225,9 +225,60 @@ describe("focused examiners", () => {
     expect(
       shouldRunIntegrationExaminer({
         ...ISOLATED_CONTEXT,
+        renderedDiff: `__new hunk__\n8 +${" ".repeat(50_000)}vertrag: Ergebnis;`,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRunIntegrationExaminer({
+        ...ISOLATED_CONTEXT,
+        renderedDiff: "__new hunk__\n8x +vertrag: Ergebnis;",
+      }),
+    ).toBe(false);
+    expect(
+      shouldRunIntegrationExaminer({
+        ...ISOLATED_CONTEXT,
         renderedDiff: "__file metadata__\nold mode 100644\nnew mode 100755",
       }),
     ).toBe(true);
+  });
+
+  it("recognizes declarations without mistaking calls or control flow for contracts", () => {
+    for (const renderedDiff of [
+      "__new hunk__\n8 +console.log(value);",
+      "__new hunk__\n8 +const result = foo(bar);",
+      "__new hunk__\n8 +register(value => use(value));",
+      "__new hunk__\n8 +register((value: string) => use(value));",
+      "__new hunk__\n8 +emit({ key: value });",
+      '__new hunk__\n8 +schedule({ url: "https://example.test" });',
+      "__new hunk__\n8 +consume(/https?:\\/\\/example[.]test/);",
+      "__new hunk__\n8 +choose(condition ? left : right);",
+      "__new hunk__\n8 +if (ready) {",
+      "__new hunk__\n8 +else if (ready) {",
+      "__new hunk__\n8 +} else if (ready) {",
+      "__new hunk__\n8 +foo-bar: Result;",
+      "__new hunk__\n8 +foo-bar(): void;",
+    ]) {
+      expect(
+        shouldRunIntegrationExaminer({ ...ISOLATED_CONTEXT, renderedDiff }),
+        renderedDiff,
+      ).toBe(false);
+    }
+
+    for (const renderedDiff of [
+      "__new hunk__\n8 +abonnieren(rückruf: (wert: Wert) => void): Ergebnis;",
+      "__new hunk__\n8 +prüfen(eingabe: Wert): Ergebnis;",
+      "__new hunk__\n8 +foo?(): void;",
+      "__new hunk__\n8 +export function authenticate(callback: (value: string) => void) {}",
+      "__new hunk__\n8 +'foo-bar': Result;",
+      '__new hunk__\n8 +"foo-bar": Result;',
+      "__new hunk__\n8 +'foo-bar'(): void;",
+      '__new hunk__\n8 +"foo-bar"(): void;',
+    ]) {
+      expect(
+        shouldRunIntegrationExaminer({ ...ISOLATED_CONTEXT, renderedDiff }),
+        renderedDiff,
+      ).toBe(true);
+    }
   });
 });
 

@@ -279,7 +279,8 @@ export function extractEvidenceIdentifiers(input: EvidenceIdentifierInput): read
     .sort(([left, leftScore], [right, rightScore]) => {
       if (leftScore !== rightScore) return rightScore - leftScore;
       if (left.length !== right.length) return right.length - left.length;
-      return left < right ? -1 : left > right ? 1 : 0;
+      if (left < right) return -1;
+      return left > right ? 1 : 0;
     })
     .slice(0, MAX_IDENTIFIERS)
     .map(([identifier]) => identifier);
@@ -290,10 +291,7 @@ function escapeRegExp(value: string): string {
 }
 
 function identifierPattern(identifier: string): RegExp {
-  return new RegExp(
-    String.raw`(?<![A-Za-z0-9_$])${escapeRegExp(identifier)}(?![A-Za-z0-9_$])`,
-    "u",
-  );
+  return new RegExp(`(?<![A-Za-z0-9_$])${escapeRegExp(identifier)}(?![A-Za-z0-9_$])`, "u");
 }
 
 function addWindow(lines: Set<number>, centre: number, radius: number, lineCount: number): void {
@@ -560,12 +558,16 @@ function rowsAfterHunkHeader(
 function hunkSlices(unifiedDiff: string): readonly { header: DiffHunkHeader; rows: string[] }[] {
   const lines = unifiedDiff.split("\n");
   const hunks: { header: DiffHunkHeader; rows: string[] }[] = [];
-  for (let index = 0; index < lines.length; index += 1) {
+  let index = 0;
+  while (index < lines.length) {
     const header = parseHunkHeader(lines[index] ?? "");
-    if (header === undefined) continue;
+    if (header === undefined) {
+      index += 1;
+      continue;
+    }
     const sliced = rowsAfterHunkHeader(lines, index);
     hunks.push({ header, rows: sliced.rows });
-    index = sliced.lastIndex;
+    index = sliced.lastIndex + 1;
   }
   return hunks;
 }
@@ -859,10 +861,10 @@ function compareRepositoryEntries(
   left: RepositoryEvidenceEntry,
   right: RepositoryEvidenceEntry,
 ): number {
-  return (
-    CONTEXT_KIND_ORDER[left.kind] - CONTEXT_KIND_ORDER[right.kind] ||
-    (left.path < right.path ? -1 : left.path > right.path ? 1 : left.line - right.line)
-  );
+  const kindOrder = CONTEXT_KIND_ORDER[left.kind] - CONTEXT_KIND_ORDER[right.kind];
+  if (kindOrder !== 0) return kindOrder;
+  if (left.path < right.path) return -1;
+  return left.path > right.path ? 1 : left.line - right.line;
 }
 
 function safeRepositoryEntry(entry: RepositoryEvidenceEntry): boolean {

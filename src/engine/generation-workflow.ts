@@ -203,7 +203,9 @@ function renderAnchorRanges(lines: readonly number[]): string {
 
 /** Planner output is untrusted model data; escaping angle brackets keeps it inside its frame. */
 function renderUntrustedRiskMap(risks: readonly RiskHypothesis[]): string {
-  return JSON.stringify(risks).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
+  return JSON.stringify(risks)
+    .replaceAll("<", String.raw`\u003c`)
+    .replaceAll(">", String.raw`\u003e`);
 }
 
 /**
@@ -336,7 +338,7 @@ export function parseRiskMap(
   const array = parseArray(text);
   if (array === undefined || array.length > MAX_RISK_HYPOTHESES) return undefined;
   const risks = array.map(parseRisk);
-  if (risks.some((risk) => risk === undefined)) return undefined;
+  if (risks.includes(undefined)) return undefined;
   const parsed = risks as RiskHypothesis[];
   return parsed.every((risk) => allowedEndAnchors.has(risk.end)) ? parsed : undefined;
 }
@@ -431,16 +433,16 @@ export function parseStructuredClaims(
   const array = parseArray(text);
   if (array === undefined || array.length > MAX_CLAIMS_PER_EXAMINER) return undefined;
   const claims = array.map(parseClaim);
-  if (claims.some((claim) => claim === undefined)) return undefined;
+  if (claims.includes(undefined)) return undefined;
   const parsed = claims as StructuredClaim[];
   return parsed.every((claim) => allowedEndAnchors.has(claim.end)) ? parsed : undefined;
 }
 
 function proseFragment(value: string): string {
-  return value
-    .replace(/\s+/gu, " ")
-    .trim()
-    .replace(/[.!?]+$/u, "");
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  let end = normalized.length;
+  while (end > 0 && ".!?".includes(normalized[end - 1] ?? "")) end -= 1;
+  return normalized.slice(0, end);
 }
 
 function conditionFragment(value: string): string {
@@ -484,9 +486,246 @@ const INTEGRATION_SIGNAL =
   /(?:^|\n)\d+ \+[\s\S]{0,160}\b(?:export|public|interface|schema|config|workflow|action|version|protocol|contract|assert|expect)\b/iu;
 const DELETION_SIGNAL = /(?:^|\n)\d+ -/u;
 const FILE_METADATA_SIGNAL = /(?:^|\n)__file metadata__(?:\n|$)/u;
+const MEMBER_NAME =
+  /^(?:[\p{L}_$][\p{L}\p{N}_$]*|"[\p{L}_$][\p{L}\p{N}_$-]*"|'[\p{L}_$][\p{L}\p{N}_$-]*')\??$/u;
+const NON_DECLARATION_HEADS: ReadonlySet<string> = new Set([
+  "await",
+  "case",
+  "catch",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "finally",
+  "for",
+  "if",
+  "lock",
+  "new",
+  "return",
+  "switch",
+  "throw",
+  "try",
+  "typeof",
+  "using",
+  "when",
+  "while",
+  "with",
+  "yield",
+]);
+const STRING_DELIMITERS: ReadonlySet<string> = new Set(["'", '"', "`"]);
+const NESTED_DELIMITERS: Readonly<Record<string, string>> = Object.freeze({
+  "(": ")",
+  "[": "]",
+  "{": "}",
+});
+const CLOSING_DELIMITERS: ReadonlySet<string> = new Set(Object.values(NESTED_DELIMITERS));
+
+function quotedSegmentEnd(body: string, start: number): number {
+  const quote = body[start];
+  for (let index = start + 1; index < body.length; index += 1) {
+    if (body[index] === "\\") {
+      index += 1;
+    } else if (body[index] === quote) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function previousNonWhitespace(body: string, start: number): string | undefined {
+  for (let index = start - 1; index >= 0; index -= 1) {
+    if (!/\s/u.test(body[index] ?? "")) return body[index];
+  }
+  return undefined;
+}
+
+function regexSegmentEnd(body: string, start: number): number {
+  let inCharacterClass = false;
+  for (let index = start + 1; index < body.length; index += 1) {
+    const character = body[index];
+    if (character === "\\") {
+      index += 1;
+    } else if (character === "[") {
+      inCharacterClass = true;
+    } else if (character === "]") {
+      inCharacterClass = false;
+    } else if (character === "/" && !inCharacterClass) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function startsRegexLiteral(body: string, start: number): boolean {
+  if (body[start] !== "/") return false;
+  const previous = previousNonWhitespace(body, start);
+  return previous === undefined || "([,{=!:;&|?".includes(previous);
+}
+
+/** Returns the last index of a quoted/comment segment, or undefined for code at `start`. */
+function nonCodeSegmentEnd(body: string, start: number): number | undefined {
+  const character = body[start];
+  if (character !== undefined && STRING_DELIMITERS.has(character)) {
+    return quotedSegmentEnd(body, start);
+  }
+  if (body.startsWith("/*", start)) {
+    const close = body.indexOf("*/", start + 2);
+    return close < 0 ? -1 : close + 1;
+  }
+  if (body.startsWith("//", start)) return body.length;
+  if (startsRegexLiteral(body, start)) return regexSegmentEnd(body, start);
+  return undefined;
+}
+
+/** One linear scan finds the close paired with the declaration's first open parenthesis. */
+function matchingCloseParenthesis(body: string, open: number): number {
+  let depth = 0;
+  let index = open;
+  while (index < body.length) {
+    const segmentEnd = nonCodeSegmentEnd(body, index);
+    if (segmentEnd !== undefined) {
+      if (segmentEnd < 0) return -1;
+      index = segmentEnd + 1;
+      continue;
+    }
+    const character = body[index];
+    if (character === "(") depth += 1;
+    if (character === ")") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+    index += 1;
+  }
+  return -1;
+}
+
+function declarationHeadTokens(head: string): readonly string[] | undefined {
+  if (head.includes(".") || head.includes("=") || head.includes("{") || head.includes("}")) {
+    return undefined;
+  }
+  const tokens = head.split(/\s+/u);
+  const name = tokens.at(-1);
+  const first = tokens[0]?.toLowerCase();
+  if (
+    name === undefined ||
+    !MEMBER_NAME.test(name) ||
+    first === undefined ||
+    NON_DECLARATION_HEADS.has(first)
+  ) {
+    return undefined;
+  }
+  return tokens;
+}
+
+function nextNonWhitespace(body: string, start: number): string | undefined {
+  for (let index = start; index < body.length; index += 1) {
+    if (!/\s/u.test(body[index] ?? "")) return body[index];
+  }
+  return undefined;
+}
+
+function consumeNestedDelimiter(character: string | undefined, expectedClosers: string[]): boolean {
+  const closer = character === undefined ? undefined : NESTED_DELIMITERS[character];
+  if (closer !== undefined) {
+    expectedClosers.push(closer);
+    return true;
+  }
+  if (character === undefined || !CLOSING_DELIMITERS.has(character)) return false;
+  // A mismatched delimiter makes every later colon ineligible without adding another branch to
+  // the caller's hot loop. The malformed line then deterministically returns false.
+  if (expectedClosers.pop() !== character) expectedClosers.push("invalid");
+  return true;
+}
+
+interface TypeSeparatorScanState {
+  readonly expectedClosers: string[];
+  ternaryDepth: number;
+}
+
+/** A declaration type colon must be in the outer parameter list, not nested code or a ternary. */
+function isTopLevelTypeSeparator(
+  parameters: string,
+  index: number,
+  state: TypeSeparatorScanState,
+): boolean {
+  const character = parameters[index];
+  if (consumeNestedDelimiter(character, state.expectedClosers)) return false;
+  if (state.expectedClosers.length > 0) return false;
+  if (character === "?") {
+    if (nextNonWhitespace(parameters, index + 1) !== ":") state.ternaryDepth += 1;
+    return false;
+  }
+  if (character !== ":") return false;
+  if (state.ternaryDepth === 0) return true;
+  state.ternaryDepth -= 1;
+  return false;
+}
+
+function hasTopLevelTypeSeparator(parameters: string): boolean {
+  const state: TypeSeparatorScanState = { expectedClosers: [], ternaryDepth: 0 };
+  let index = 0;
+  while (index < parameters.length) {
+    const segmentEnd = nonCodeSegmentEnd(parameters, index);
+    if (segmentEnd !== undefined) {
+      if (segmentEnd < 0) return false;
+      index = segmentEnd + 1;
+      continue;
+    }
+    if (isTopLevelTypeSeparator(parameters, index, state)) return true;
+    index += 1;
+  }
+  return false;
+}
+
+function hasDeclarationSuffix(
+  suffix: string,
+  headTokens: readonly string[],
+  parameters: string,
+): boolean {
+  if (suffix.startsWith("->") || suffix.startsWith(":") || suffix.startsWith("{")) return true;
+  if (!suffix.startsWith(";")) return false;
+  // A bare `name(value);` is indistinguishable from an ordinary call. A declaration prefix or
+  // top-level parameter type is the minimum extra cue before a semicolon counts as a contract.
+  return headTokens.length > 1 || hasTopLevelTypeSeparator(parameters);
+}
+
+function isFunctionContract(body: string): boolean {
+  const open = body.indexOf("(");
+  const close = open < 0 ? -1 : matchingCloseParenthesis(body, open);
+  if (open < 1 || close <= open) return false;
+  const headTokens = declarationHeadTokens(body.slice(0, open).trim());
+  if (headTokens === undefined) return false;
+  const parameters = body.slice(open + 1, close);
+  const suffix = body.slice(close + 1).trimStart();
+  return hasDeclarationSuffix(suffix, headTokens, parameters);
+}
+
+function isMemberContract(body: string): boolean {
+  const colon = body.indexOf(":");
+  if (colon < 1) return false;
+  const member = body.slice(0, colon).trim();
+  const value = body.slice(colon + 1).trimStart();
+  return MEMBER_NAME.test(member) && value !== "" && !value.startsWith("=");
+}
+
 /** Function/type/member shapes, based on punctuation rather than one language's keywords. */
-const STRUCTURAL_CONTRACT_SIGNAL =
-  /(?:^|\n)\d+ [+-]\s*(?:(?:[^\s(]+\s+)*[^\s(]+\s*\([^\n)]*\)\s*(?:->|:|\{|;)|["']?[\p{L}_$][\p{L}\p{N}_$-]*["']?\??\s*:\s*[^=\n])/u;
+function isStructuralContractLine(line: string): boolean {
+  let offset = 0;
+  while (offset < line.length) {
+    const code = line.codePointAt(offset) ?? -1;
+    if (code < 48 || code > 57) break;
+    offset += 1;
+  }
+  if (offset === 0 || line[offset] !== " ") return false;
+  const marker = line[offset + 1];
+  if (marker !== "+" && marker !== "-") return false;
+  const body = line.slice(offset + 2).trimStart();
+  return isFunctionContract(body) || isMemberContract(body);
+}
+
+function hasStructuralContractSignal(renderedDiff: string): boolean {
+  return renderedDiff.split("\n").some(isStructuralContractLine);
+}
 
 /** A model can recommend a lens but can never authorize its own extra paid call. */
 export function shouldRunIntegrationExaminer(context: GenerationContext): boolean {
@@ -497,7 +736,7 @@ export function shouldRunIntegrationExaminer(context: GenerationContext): boolea
     INTEGRATION_SIGNAL.test(context.renderedDiff) ||
     DELETION_SIGNAL.test(context.renderedDiff) ||
     FILE_METADATA_SIGNAL.test(context.renderedDiff) ||
-    STRUCTURAL_CONTRACT_SIGNAL.test(context.renderedDiff)
+    hasStructuralContractSignal(context.renderedDiff)
   );
 }
 

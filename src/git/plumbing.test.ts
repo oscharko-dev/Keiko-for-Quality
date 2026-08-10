@@ -64,6 +64,10 @@ beforeAll(async () => {
   await writeFile(join(repo, "src/remove.ts"), "export const gone = 1;\n");
   await writeFile(join(repo, "script.sh"), "#!/bin/sh\necho hi\n");
   await writeFile(join(repo, "image.bin"), Buffer.from([0, 1, 2, 0, 255, 3]));
+  await writeFile(
+    join(repo, "invalid-utf8.ts"),
+    Buffer.from([0x65, 0x78, 0x70, 0x6f, 0x72, 0x74, 0xff]),
+  );
   // Committed at base and never touched again, on purpose: "reports every changed path exactly
   // once" below asserts an exact seven-path list, and a file that also changed at head would join
   // it. Added-in-base-only keeps this blob readable at a commit while staying out of base..head.
@@ -234,6 +238,10 @@ describe("readTextAtCommit", () => {
 
   it("refuses binary content rather than hand it to a text-parsing caller", async () => {
     expect(await readTextAtCommit(ctx, commitSha(baseSha), "image.bin")).toBeUndefined();
+  });
+
+  it("refuses malformed UTF-8 instead of parsing normalized bytes under the original blob id", async () => {
+    expect(await readTextAtCommit(ctx, commitSha(baseSha), "invalid-utf8.ts")).toBeUndefined();
   });
 
   it("refuses a blob past MAX_TEXT_BLOB_BYTES rather than return a truncated prefix", async () => {

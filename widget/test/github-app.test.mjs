@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { generateKeyPairSync, createVerify } from "node:crypto";
 
 import { appJwt, installationToken } from "../src/github-app.ts";
+import { createGitHubRequestBudget } from "../src/request-budget.ts";
 
 /**
  * The JWT here is verified with Node's own crypto against a freshly generated key pair — the
@@ -38,7 +39,7 @@ test("installationToken walks installation lookup then token mint", async () => 
     PEM,
     "o",
     "r",
-    async (url, init) => {
+    createGitHubRequestBudget(async (url, init) => {
       seen.push({ url: String(url), method: init?.method ?? "GET" });
       if (String(url).endsWith("/repos/o/r/installation")) {
         return Response.json({ id: 77 });
@@ -47,7 +48,7 @@ test("installationToken walks installation lookup then token mint", async () => 
         return Response.json({ token: "ghs_abc" });
       }
       return new Response("no", { status: 404 });
-    },
+    }),
     1_754_600_000,
   );
   assert.equal(token, "ghs_abc");
@@ -59,11 +60,25 @@ test("installationToken walks installation lookup then token mint", async () => 
 
 test("installationToken degrades to undefined on any failure", async () => {
   assert.equal(
-    await installationToken("1", PEM, "o", "r", async () => new Response("no", { status: 404 }), 0),
+    await installationToken(
+      "1",
+      PEM,
+      "o",
+      "r",
+      createGitHubRequestBudget(async () => new Response("no", { status: 404 })),
+      0,
+    ),
     undefined,
   );
   assert.equal(
-    await installationToken("1", "not a key", "o", "r", async () => Response.json({}), 0),
+    await installationToken(
+      "1",
+      "not a key",
+      "o",
+      "r",
+      createGitHubRequestBudget(async () => Response.json({})),
+      0,
+    ),
     undefined,
   );
 });

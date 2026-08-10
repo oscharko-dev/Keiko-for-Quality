@@ -11,9 +11,11 @@ import {
   gateEvidenceIdentity,
   isVersionedReleaseEvidencePath,
   notesFromCommitMessage,
+  parseReleaseDevBinding,
   parseVersion,
   planReleaseTag,
   reconcileTagsAndReleases,
+  releaseDevBindingMessage,
   sortVersionTags,
   tagFor,
   validateCommittedEvidenceDelta,
@@ -36,6 +38,27 @@ test("accepts X.Y.Z and nothing else", () => {
   for (const bad of ["v0.21.3", "0.21", "0.21.3-rc1", "", undefined, 1]) {
     assert.equal(parseVersion(bad), undefined, String(bad));
   }
+});
+
+test("round-trips one strict immutable dev binding and rejects ambiguous free text", () => {
+  const binding = { commit: "a".repeat(40), tree: "b".repeat(40) };
+  const message = releaseDevBindingMessage(binding);
+  assert.deepEqual(parseReleaseDevBinding(`release: v0.23.0\n\n${message}`), {
+    binding,
+    failures: [],
+    valid: true,
+  });
+  assert.deepEqual(parseReleaseDevBinding(`${message}\n${message}`), {
+    binding: undefined,
+    failures: ["release_dev_commit_binding_invalid", "release_dev_tree_binding_invalid"],
+    valid: false,
+  });
+  assert.equal(parseReleaseDevBinding("release: v0.23.0").valid, false);
+  assert.equal(parseReleaseDevBinding(undefined).valid, false);
+  assert.throws(
+    () => releaseDevBindingMessage({ commit: "not-a-commit", tree: binding.tree }),
+    /full lowercase Git ids/u,
+  );
 });
 
 test("rewrites the README quickstart pin comment and reports how many it touched", () => {
@@ -172,6 +195,19 @@ test("release gate reports must be clean, pinned, and green inside the files", (
     validateGateEvidence(seed, completion.replace("100.0%** (3/3", "66.7%** (2/3"), expected)
       .failures,
     ["completion_below_threshold"],
+  );
+  assert.deepEqual(
+    validateGateEvidence(seed, completion.replace("100.0%** (3/3", "133.3%** (4/3"), expected)
+      .failures,
+    ["completion_rate_inconsistent"],
+  );
+  assert.deepEqual(
+    validateGateEvidence(
+      seed,
+      completion.replace("(clean)", "(DIRTY — not release evidence)"),
+      expected,
+    ).failures,
+    ["completion_reviewer_not_clean", "completion_disqualified"],
   );
 });
 
