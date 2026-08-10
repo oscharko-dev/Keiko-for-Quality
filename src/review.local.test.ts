@@ -824,7 +824,9 @@ describe("performLocalReview: review-cache memoization end to end", () => {
     let truthCalls = 0;
     globalThis.fetch = ((_url: string | URL, init?: RequestInit) => {
       const prompt = parseChatRequestBody(init).messages?.[0]?.content ?? "";
-      if (!prompt.includes("Verify the truth of one AI-generated")) {
+      const initialTruth = prompt.includes("Verify the truth of one AI-generated");
+      const terminalTruth = prompt.includes("Make the final truth decision");
+      if (!initialTruth && !terminalTruth) {
         throw new Error("a refuted replay must not reach falsification or classification audit");
       }
       truthCalls += 1;
@@ -839,7 +841,7 @@ describe("performLocalReview: review-cache memoization end to end", () => {
                     verdict: "refuted",
                     reason_code: "contradicted",
                     evidence_refs: ["H:1"],
-                    lookup_terms: [],
+                    ...(terminalTruth ? {} : { lookup_terms: [] }),
                   }),
                 },
               },
@@ -865,7 +867,7 @@ describe("performLocalReview: review-cache memoization end to end", () => {
     expect(first.cacheHits).toBe(2);
     expect(acquireEngineMock).not.toHaveBeenCalled();
     expect(runEngineMock).not.toHaveBeenCalled();
-    expect(truthCalls).toBe(1);
+    expect(truthCalls).toBe(2);
     expect(first.updatedCacheStore?.entries.some((entry) => entry.key === key)).toBe(false);
     if (first.updatedCacheStore === undefined)
       throw new Error("expected cache eviction write-back");
@@ -884,7 +886,7 @@ describe("performLocalReview: review-cache memoization end to end", () => {
     };
     expect(secondInvocation.mechanicallyCleanPaths).toContain("src/b.ts");
     expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/a.ts");
-    expect(truthCalls).toBe(1);
+    expect(truthCalls).toBe(2);
   });
 
   it("does not cache a local path whose ninth finding was ranked out", async () => {
