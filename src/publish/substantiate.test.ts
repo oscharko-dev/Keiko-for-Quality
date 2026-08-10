@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { EXAMINER_CLAIM_DECISION_POLICY } from "../engine/claim-decision-policy.js";
 import {
   CLOSED_RUNTIME_FACT_CATALOG,
   CLOSED_RUNTIME_FACT_CATALOG_VERSION,
@@ -7,6 +8,7 @@ import {
 } from "./runtime-fact-catalog.js";
 import {
   MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
+  VERIFICATION_CLAIM_DECISION_POLICY,
   buildContractChallengePrompt,
   buildDossier,
   buildFalsifierPrompt,
@@ -386,6 +388,18 @@ describe("role prompts", () => {
     const terminalTruthPrompt = buildTerminalTruthPrompt(candidate, CHALLENGE_EVIDENCE);
     const falsifierPrompt = buildFalsifierPrompt(candidate, CHALLENGE_EVIDENCE, planned!);
     const refereePrompt = buildRefereePrompt(candidate, CHALLENGE_EVIDENCE, planned!);
+
+    for (const prompt of [
+      truthPrompt,
+      terminalTruthPrompt,
+      plannerPrompt,
+      falsifierPrompt,
+      refereePrompt,
+    ]) {
+      expect(prompt.split(VERIFICATION_CLAIM_DECISION_POLICY)).toHaveLength(2);
+      expect(prompt.split(EXAMINER_CLAIM_DECISION_POLICY)).toHaveLength(2);
+      expect(prompt).toContain("It is not a verdict");
+    }
 
     expect(truthPrompt).toContain("A matching excerpt alone is not positive proof");
     expect(truthPrompt).toContain("Impact, severity language");
@@ -1756,7 +1770,7 @@ describe("hard shared request budget", () => {
     expect(substantiationOnePathTokenUpperBound(candidate, evidence)).toBe(
       MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
     );
-    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(956_079);
+    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(970_551);
   });
 
   it("shares the same hard ceiling across later findings", async () => {
