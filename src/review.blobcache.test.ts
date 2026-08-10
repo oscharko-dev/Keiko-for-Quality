@@ -35,6 +35,7 @@ vi.mock("./engine/run.js", async (importOriginal) => ({
 // hermetic so a clean runner never needs a downloaded binary or a warm global tool cache.
 vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
   ...(await importOriginal()),
+  findAstAnchorOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
   searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
 }));
 

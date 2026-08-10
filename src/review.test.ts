@@ -44,6 +44,7 @@ vi.mock("./engine/run.js", async (importOriginal) => ({
 // model endpoint's global fetch mock and makes the test depend on a pre-existing tool cache.
 vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
   ...(await importOriginal()),
+  findAstAnchorOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
   searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
 }));
 

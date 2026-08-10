@@ -44,6 +44,7 @@ vi.mock("./engine/single-shot.js", async (importOriginal) => ({
 // runner has no ast-grep cache, and the model fetch mock must never become the tool downloader.
 vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
   ...(await importOriginal()),
+  findAstAnchorOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
   searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
 }));
 
