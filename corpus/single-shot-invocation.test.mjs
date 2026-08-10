@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -64,19 +64,24 @@ function fixture() {
   return { repo, base, head };
 }
 
-function caseFixture(testCase) {
+function caseFixture(testCase, writeFixture = write) {
   const repo = mkdtempSync(join(tmpdir(), `kfq-corpus-case-${testCase.id}-`));
-  git(repo, ["init", "-q"]);
-  for (const file of testCase.files) write(repo, file.path, file.base);
-  git(repo, ["add", "."]);
-  git(repo, ["commit", "-qm", "base"]);
-  const base = git(repo, ["rev-parse", "HEAD"]);
+  try {
+    git(repo, ["init", "-q"]);
+    for (const file of testCase.files) writeFixture(repo, file.path, file.base);
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "base"]);
+    const base = git(repo, ["rev-parse", "HEAD"]);
 
-  for (const file of testCase.files) write(repo, file.path, file.head);
-  git(repo, ["add", "."]);
-  git(repo, ["commit", "-qm", "head"]);
-  const head = git(repo, ["rev-parse", "HEAD"]);
-  return { repo, base, head };
+    for (const file of testCase.files) writeFixture(repo, file.path, file.head);
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "head"]);
+    const head = git(repo, ["rev-parse", "HEAD"]);
+    return { repo, base, head };
+  } catch (error) {
+    rmSync(repo, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 test("the corpus deadline is one real absolute review boundary", () => {
@@ -101,6 +106,23 @@ test("staged binding ignores a fetched but unused classic engine", () => {
     }),
     "/tmp/ocr",
   );
+});
+
+test("a corpus case repository is removed when fixture construction fails", () => {
+  let createdRepo;
+  assert.throws(
+    () =>
+      caseFixture(
+        { id: "cleanup-failure", files: [{ path: "src/a.ts", base: "old\n", head: "new\n" }] },
+        (repo) => {
+          createdRepo = repo;
+          throw new Error("fixture write failed");
+        },
+      ),
+    /fixture write failed/u,
+  );
+  assert.notEqual(createdRepo, undefined);
+  assert.equal(existsSync(createdRepo), false);
 });
 
 test("staged corpus dispatch uses production structural classification, not matching globs", async () => {
