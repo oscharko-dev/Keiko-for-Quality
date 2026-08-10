@@ -138,8 +138,12 @@ const METRIC_KEYS = ["decisionCoverage", "falsePositiveRejection", "fixedRetenti
 
 const SHA256 = /^[0-9a-f]{64}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
-const TOKENS_PER_CASE = 32_000;
 const MAX_ENDPOINT_REQUESTS_PER_CASE = 4;
+/**
+ * Worst-case ledger reservation for one historical case. Substantiation can make four sequential
+ * model calls, so budgeting only one 32k request per case makes dry-run affordability misleading.
+ */
+export const HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE = 32_000 * MAX_ENDPOINT_REQUESTS_PER_CASE;
 const CALIBRATED_POPULATION_RECORDS = 92;
 const CALIBRATED_CORROBORATED_CASES = 66;
 const MINIMUM_LOCALLY_BOUND_CASES = 62;
@@ -266,19 +270,20 @@ function validatePlanAndBudget(planValue, budgetValue, failures) {
 
   const expectedAffordable = Math.min(
     plan.locallyBoundCases,
-    Math.floor(plan.configuredMaxTokens / TOKENS_PER_CASE),
+    Math.floor(plan.configuredMaxTokens / HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE),
   );
   if (
     plan.populationRecords < plan.corroboratedCases ||
     plan.corroboratedCases !== plan.locallyBoundCases + plan.structurallyUnmeasuredCases ||
     plan.estimatedAffordableCases !== expectedAffordable ||
     plan.estimatedCostExcessCases !== plan.locallyBoundCases - expectedAffordable ||
-    plan.estimatedStartWorkTokens !== plan.locallyBoundCases * TOKENS_PER_CASE ||
+    plan.estimatedStartWorkTokens !==
+      plan.locallyBoundCases * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE ||
     plan.estimatedMaximumEndpointRequests !==
       plan.estimatedAffordableCases * MAX_ENDPOINT_REQUESTS_PER_CASE ||
     sum(localUnmeasured, REASON_KEYS) !== plan.structurallyUnmeasuredCases ||
     localUnmeasured.outsideCorroboratedPopulation !== 0 ||
-    budget.estimatedTokensPerCase !== TOKENS_PER_CASE ||
+    budget.estimatedTokensPerCase !== HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE ||
     budget.configuredMaxTokens !== plan.configuredMaxTokens ||
     budget.estimatedStartWorkTokens !== plan.estimatedStartWorkTokens ||
     budget.estimatedMaximumEndpointRequests !== plan.estimatedMaximumEndpointRequests
@@ -342,7 +347,8 @@ function validateExecution(value, plan, failures) {
     execution.corroboratedCases !== plan.corroboratedCases ||
     execution.configuredMaxTokens !== plan.configuredMaxTokens ||
     execution.attemptedCases > plan.locallyBoundCases ||
-    execution.estimatedAttemptedTokens !== execution.attemptedCases * TOKENS_PER_CASE ||
+    execution.estimatedAttemptedTokens !==
+      execution.attemptedCases * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE ||
     execution.accountedTokens > execution.configuredMaxTokens ||
     (execution.attemptedCases > 0 && execution.accountedTokens === 0) ||
     sum(populationDecisions, DECISION_KEYS) !== execution.populationRecords ||

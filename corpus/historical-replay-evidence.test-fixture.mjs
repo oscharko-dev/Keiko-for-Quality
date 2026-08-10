@@ -1,9 +1,9 @@
 import { buildHistoricalReplayReport } from "./historical-replay-lib.mjs";
 import { buildRedactedHistoricalReplayEvidence } from "./historical-replay.mjs";
+import { HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE } from "./historical-replay-evidence-lib.mjs";
 
 const HOLDOUT_FROM_PULL_REQUEST = 3037;
-const CONFIGURED_MAX_TOKENS = 1_100_000;
-const TOKENS_PER_CASE = 32_000;
+const CONFIGURED_MAX_TOKENS = 8_000_000;
 
 function records(count, pullRequest, label, firstId) {
   return Array.from({ length: count }, (_, index) => ({
@@ -77,7 +77,9 @@ export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".r
     decisions,
     holdoutFromPullRequest: HOLDOUT_FROM_PULL_REQUEST,
   });
-  const estimatedAffordableCases = Math.floor(CONFIGURED_MAX_TOKENS / TOKENS_PER_CASE);
+  const estimatedAffordableCases = Math.floor(
+    CONFIGURED_MAX_TOKENS / HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
+  );
   const plan = {
     populationRecords: 92,
     corroboratedCases: 66,
@@ -85,7 +87,7 @@ export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".r
     structurallyUnmeasuredCases: 4,
     estimatedAffordableCases,
     estimatedCostExcessCases: 62 - estimatedAffordableCases,
-    estimatedStartWorkTokens: 62 * TOKENS_PER_CASE,
+    estimatedStartWorkTokens: 62 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
     configuredMaxTokens: CONFIGURED_MAX_TOKENS,
     estimatedMaximumEndpointRequests: estimatedAffordableCases * 4,
     localUnmeasured: reasonCounts({ sourceUnavailable: 4 }),
@@ -111,7 +113,7 @@ export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".r
       populationRecords: 92,
       corroboratedCases: 66,
       attemptedCases: 62,
-      estimatedAttemptedTokens: 62 * TOKENS_PER_CASE,
+      estimatedAttemptedTokens: 62 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
       accountedTokens: 900_000,
       configuredMaxTokens: CONFIGURED_MAX_TOKENS,
       populationDecisions: { keep: 21, drop: 41, unmeasured: 30 },

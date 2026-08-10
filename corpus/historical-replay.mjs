@@ -29,12 +29,12 @@
 //
 //   OCR_LLM_MODEL=gpt-oss-120b node corpus/historical-replay.mjs --dry-run \
 //     --harvest ~/kfq-harvest.json --repo ~/src/Keiko --holdout-from-pr 3037 \
-//     --max-tokens 1100000
+//     --max-tokens 8000000
 //
 //   OCR_LLM_MODEL=gpt-oss-120b OCR_LLM_URL=https://gateway.example/v1 \
 //     OCR_LLM_TOKEN=... node corpus/historical-replay.mjs --execute \
 //     --harvest ~/kfq-harvest.json --repo ~/src/Keiko --holdout-from-pr 3037 \
-//     --max-tokens 1100000 --out corpus/evidence/historical-replay-2026-08-09-v0.23.0.json
+//     --max-tokens 8000000 --out corpus/evidence/historical-replay-2026-08-09-v0.23.0.json
 
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -57,7 +57,10 @@ import { fileURLToPath } from "node:url";
 import { FIXED_PATH } from "./fixed-path.mjs";
 import { escapesRepository, HARVEST_LABELS, realLocation } from "./harvest-lib.mjs";
 import { buildHistoricalReplayDiagnostic } from "./historical-replay-diagnostic-lib.mjs";
-import { HISTORICAL_REPLAY_EVIDENCE_ARTIFACT } from "./historical-replay-evidence-lib.mjs";
+import {
+  HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
+  HISTORICAL_REPLAY_EVIDENCE_ARTIFACT,
+} from "./historical-replay-evidence-lib.mjs";
 import { buildHistoricalReplayReport } from "./historical-replay-lib.mjs";
 import { QUALIFICATION_MODEL } from "./qualification-model.mjs";
 import { registerTsExtensionHooks } from "./rule-source.mjs";
@@ -102,8 +105,7 @@ const MAX_DIFF_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_ENDPOINT_REQUESTS_PER_CASE = 4;
 const GIT_TIMEOUT_MS = 30_000;
 
-/** Dry-run cost estimate only. The execute path enforces `--max-tokens` from actual accounting. */
-export const HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE = 32_000;
+export { HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE } from "./historical-replay-evidence-lib.mjs";
 export const HISTORICAL_REPLAY_STRICTNESS = "paranoid";
 
 const USAGE =

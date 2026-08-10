@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
   HISTORICAL_REPLAY_EVIDENCE_ARTIFACT,
   validateHistoricalReplayEvidence,
 } from "./historical-replay-evidence-lib.mjs";
@@ -79,14 +80,15 @@ test("rejects digest, aggregate arithmetic, population-floor, and extra-field ta
   const planFloor = productionHistoricalReplayEvidenceFixture();
   planFloor.plan.locallyBoundCases = 61;
   planFloor.plan.structurallyUnmeasuredCases = 5;
-  planFloor.plan.estimatedStartWorkTokens = 61 * 32_000;
+  planFloor.plan.estimatedStartWorkTokens = 61 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE;
   planFloor.plan.localUnmeasured.sourceUnavailable = 5;
-  planFloor.budget.estimatedStartWorkTokens = 61 * 32_000;
+  planFloor.budget.estimatedStartWorkTokens = 61 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE;
   assert.ok(validateHistoricalReplayEvidence(planFloor).failures.includes("plan_population_floor"));
 
   const executionFloor = productionHistoricalReplayEvidenceFixture();
   executionFloor.execution.attemptedCases = 61;
-  executionFloor.execution.estimatedAttemptedTokens = 61 * 32_000;
+  executionFloor.execution.estimatedAttemptedTokens =
+    61 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE;
   assert.ok(
     validateHistoricalReplayEvidence(executionFloor).failures.includes(
       "execution_population_floor",
