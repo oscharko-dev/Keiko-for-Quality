@@ -25,8 +25,10 @@ import {
   DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
+  MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
+  TRIGGER_AND_GUARD_EVIDENCE_POLICY,
   WORKFLOW_TRUST_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
 
@@ -58,7 +60,7 @@ function occurrenceCount(value: string, needle: string): number {
 
 describe("risk planner", () => {
   it("pins the manually bumped cache identity", () => {
-    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v9");
+    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v10");
   });
 
   it("sees the complete qualified rule but never receives the whole file", () => {
@@ -74,6 +76,8 @@ describe("risk planner", () => {
     expect(prompt.system).not.toContain(BOUNDARY_OMISSION_EVIDENCE_POLICY);
     expect(prompt.system).not.toContain(WORKFLOW_TRUST_EVIDENCE_POLICY);
     expect(prompt.system).not.toContain(DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY);
+    expect(prompt.system).not.toContain(TRIGGER_AND_GUARD_EVIDENCE_POLICY);
+    expect(prompt.system).not.toContain(MIRRORED_VALIDATOR_EVIDENCE_POLICY);
     expect(prompt.system).not.toContain(EXAMINER_CLAIM_DECISION_POLICY);
   });
 
@@ -153,6 +157,8 @@ describe("focused examiners", () => {
       expect(occurrenceCount(prompt.system, BOUNDARY_OMISSION_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, WORKFLOW_TRUST_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY)).toBe(1);
+      expect(occurrenceCount(prompt.system, TRIGGER_AND_GUARD_EVIDENCE_POLICY)).toBe(1);
+      expect(occurrenceCount(prompt.system, MIRRORED_VALIDATOR_EVIDENCE_POLICY)).toBe(1);
       expect(prompt.system).not.toContain("## Workflow and pipeline files");
       expect(prompt.system).not.toContain("## Look before you claim");
     }

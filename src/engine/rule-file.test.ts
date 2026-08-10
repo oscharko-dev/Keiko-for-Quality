@@ -5,8 +5,10 @@ import { describe, expect, it } from "vitest";
 import {
   BOUNDARY_OMISSION_EVIDENCE_POLICY,
   DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+  MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
+  TRIGGER_AND_GUARD_EVIDENCE_POLICY,
   WORKFLOW_TRUST_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
 import { buildRuleFile, deriveRepoConventions, serializeRuleFile } from "./rule-file.js";
@@ -160,6 +162,9 @@ describe("buildRuleFile", () => {
       "Keep the explicit empty-list update.\n\nWhen `workflowEligibleModelIds` is empty, omitting it makes the shown `?? current` consumer preserve stale eligibility instead of clearing it.",
       "Keep the privileged checkout on the base SHA.\n\nWhen `pull_request_target` checks out the candidate head before install, candidate code runs with base-repository authority.",
       "Remove the token from diagnostic context.\n\nWhen authentication fails, adding the raw token to the structured log discloses the credential.",
+      "Restore the numeric Retry-After conversion.\n\nWhen the header is numeric, `parseRetryAfter` returns seconds, so passing it directly to `setTimeout` retries one thousand times too early.",
+      "Restore the positive batch-size guard.\n\nWhen the shown digest caller supplies its zero fallback, the loop increment stays zero and never terminates.",
+      "Keep the audit validator aligned with production.\n\nWhen metadata lacks `schemaVersion` or `provider`, the loosened audit accepts an object the shown production validator rejects.",
     ];
     for (const example of examples) {
       expect(sanitizeFindingBody(example).ok).toBe(true);
@@ -376,6 +381,14 @@ describe("buildRuleFile", () => {
         name: "keeps harmless primitive log context separate from secrets and changed errors",
         phrases: [DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY],
       },
+      {
+        name: "traces mixed units and removed guards to an exact shown trigger",
+        phrases: [TRIGGER_AND_GUARD_EVIDENCE_POLICY],
+      },
+      {
+        name: "compares a declared mirror against every shown production predicate",
+        phrases: [MIRRORED_VALIDATOR_EVIDENCE_POLICY],
+      },
     ];
 
     // Rows are spread as positional tuples with a `%s` title, not as objects with `$name`: `$key`
@@ -402,6 +415,8 @@ describe("buildRuleFile", () => {
       BOUNDARY_OMISSION_EVIDENCE_POLICY,
       WORKFLOW_TRUST_EVIDENCE_POLICY,
       DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+      TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+      MIRRORED_VALIDATOR_EVIDENCE_POLICY,
     ]) {
       expect(rule.split(policy)).toHaveLength(2);
       expect(serializeRuleFile(file).split(policy)).toHaveLength(2);

@@ -13,8 +13,10 @@ import {
   BOUNDARY_OMISSION_EVIDENCE_POLICY,
   DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY,
+  MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
+  TRIGGER_AND_GUARD_EVIDENCE_POLICY,
   WORKFLOW_TRUST_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
 import { GENERATION_COMPLETION_LIMIT, generationRequestUpperBound } from "./generation-workflow.js";
@@ -395,6 +397,8 @@ describe("runSingleShotEngine staged generation", () => {
         BOUNDARY_OMISSION_EVIDENCE_POLICY,
         WORKFLOW_TRUST_EVIDENCE_POLICY,
         DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+        TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+        MIRRORED_VALIDATOR_EVIDENCE_POLICY,
       ]) {
         expect(system.split(policy)).toHaveLength(2);
         expect(user).not.toContain(policy);

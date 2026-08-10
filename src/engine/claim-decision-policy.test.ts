@@ -5,8 +5,10 @@ import {
   DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
+  MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
+  TRIGGER_AND_GUARD_EVIDENCE_POLICY,
   WORKFLOW_TRUST_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
 
@@ -19,6 +21,8 @@ describe("shared claim-decision policy", () => {
         `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
         `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
         `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
+        `- trigger-guard: ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
+        `- mirrored-validator: ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`,
       ].join("\n"),
     );
     expect(new TextEncoder().encode(EXAMINER_CLAIM_DECISION_POLICY).byteLength).toBeLessThanOrEqual(
@@ -84,6 +88,23 @@ describe("shared claim-decision policy", () => {
     );
     expect(BOUNDARY_OMISSION_EVIDENCE_POLICY).toContain(
       "without that consumer evidence, leave silent",
+    );
+  });
+
+  it("requires exact unit triggers, shown callers, and shown validator parity", () => {
+    expect(TRIGGER_AND_GUARD_EVIDENCE_POLICY).toContain(
+      "trace every shown producer branch and state the exact branch whose units mismatch",
+    );
+    expect(TRIGGER_AND_GUARD_EVIDENCE_POLICY).toContain("check every shown caller");
+    expect(TRIGGER_AND_GUARD_EVIDENCE_POLICY).toContain(
+      "naming that trigger and the resulting wrong behavior",
+    );
+    expect(MIRRORED_VALIDATOR_EVIDENCE_POLICY).toContain(
+      "compare every required predicate in both",
+    );
+    expect(MIRRORED_VALIDATOR_EVIDENCE_POLICY).toContain("accepts objects production rejects");
+    expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
+      "A removed per-case reset before a later dynamic import is reportable",
     );
   });
 });
