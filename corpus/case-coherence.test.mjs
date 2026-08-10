@@ -356,7 +356,9 @@ test("reset-isolation cases distinguish fresh dynamic imports from removed and b
   const clean = fixtures[0];
   const removed = fixtures[1];
   const bypassed = fixtures[2];
-  assert.ok(clean !== undefined && removed !== undefined && bypassed !== undefined);
+  assert.ok(clean !== undefined);
+  assert.ok(removed !== undefined);
+  assert.ok(bypassed !== undefined);
 
   assert.match(clean.testFile.head, /beforeEach\(\(\) => \{\s+vi\.resetModules\(\);/u);
   assert.ok(
