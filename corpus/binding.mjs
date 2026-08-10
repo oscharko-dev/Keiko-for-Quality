@@ -54,12 +54,26 @@ function sha256Bytes(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function isFile(path) {
-  try {
-    const stat = lstatSync(path);
-    if (stat.isSymbolicLink()) {
-      throw new TypeError("qualification source must not be a symbolic link");
+function assertNoSymbolicLinkInRepositoryPath(repositoryRoot, path) {
+  const repositoryPath = repositoryRelativePath(repositoryRoot, path);
+  let current = repositoryRoot;
+  for (const segment of repositoryPath.split("/")) {
+    current = join(current, segment);
+    try {
+      if (lstatSync(current).isSymbolicLink()) {
+        throw new TypeError("qualification source must not traverse a symbolic link");
+      }
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
     }
+  }
+}
+
+function isFile(repositoryRoot, path) {
+  try {
+    assertNoSymbolicLinkInRepositoryPath(repositoryRoot, path);
+    const stat = lstatSync(path);
     return stat.isFile();
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
@@ -192,7 +206,7 @@ function repositoryRelativePath(repositoryRoot, path) {
 function resolveLocalSource(repositoryRoot, importer, specifier) {
   for (const candidate of sourceCandidates(importer, specifier)) {
     repositoryRelativePath(repositoryRoot, candidate);
-    if (isFile(candidate)) return candidate;
+    if (isFile(repositoryRoot, candidate)) return candidate;
   }
   throw new TypeError(`qualification source import cannot be resolved: ${specifier}`);
 }
@@ -207,7 +221,7 @@ function resolveEntrypoint(repositoryRoot, entrypoint) {
   }
   const path = resolve(repositoryRoot, entrypoint);
   repositoryRelativePath(repositoryRoot, path);
-  if (!isFile(path)) {
+  if (!isFile(repositoryRoot, path)) {
     throw new TypeError(`qualification source entry point is missing: ${entrypoint}`);
   }
   return path;

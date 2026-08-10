@@ -185,7 +185,29 @@ test("staged engine manifest refuses a source symlink before reading outside the
 
     assert.throws(
       () => qualificationEngineDigest(sourceIdentity(root)),
-      /qualification source must not be a symbolic link/u,
+      /qualification source must not traverse a symbolic link/u,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("staged engine manifest refuses a source path whose ancestor is a symlink", () => {
+  const root = fixture();
+  const outside = mkdtempSync(join(tmpdir(), "kfq-engine-binding-outside-directory-"));
+  try {
+    write(outside, "policy.ts", 'export const policy = "outside";\n');
+    write(
+      root,
+      "src/prompt.ts",
+      'import { policy } from "./linked/policy.js";\nexport const prompt = policy;\n',
+    );
+    symlinkSync(outside, join(root, "src/linked"), "dir");
+
+    assert.throws(
+      () => qualificationEngineDigest(sourceIdentity(root)),
+      /qualification source must not traverse a symbolic link/u,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
