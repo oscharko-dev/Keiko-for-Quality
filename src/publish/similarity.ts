@@ -303,10 +303,10 @@ function tokenOverlap(
  * `classifySuppression` builds `SimilarityCandidate.body` straight from `sanitized.body` — the
  * model's raw sanitized prose for the finding under consideration right now, never composed — while
  * `toExistingConversation` reads `comment.body` straight off a comment that `publishComposedFinding`
- * (`publisher.ts`) already posted through `composeFindingBody`: a `**CATEGORY · SEVERITY**` header
- * line (comments published before the design-system grammar carry the older
- * `_<category>_ | _<severity>_` shape, and both are stripped — an existing conversation outlives
- * the release that composed it), the finding's own prose, a collapsed `<details>` repair-prompt
+ * (`publisher.ts`) already posted through `composeFindingBody`: a product-authored badge header
+ * (older comments carry code-span, bold, or italic label lines, and all shapes are stripped — an
+ * existing conversation outlives the release that composed it), the finding's own prose, a
+ * collapsed `<details>` repair-prompt
  * block, and a hidden marker comment (see `presentation.ts`). Three of those four parts are fixed product vocabulary
  * stamped on every single finding this reviewer ever publishes, never model content — the label
  * words, "details"/"summary"/"prompt"/"agents", the entire fixed repair-prompt template ("verify",
@@ -323,12 +323,26 @@ function tokenOverlap(
  * that composition breaks a test here instead of silently letting composition noise back into the
  * score.
  */
+const LEGACY_CATEGORY_LABELS =
+  "SECURITY|CORRECTNESS|PERFORMANCE|MAINTAINABILITY|TESTS|DOCUMENTATION|REVIEW";
+const LEGACY_SEVERITY_LABELS = "CRITICAL|MAJOR|MINOR|NIT";
+const LEGACY_CLASSIFICATION_TEXT = `(?:${LEGACY_CATEGORY_LABELS}) · (?:${LEGACY_SEVERITY_LABELS})`;
+const LEGACY_HEADER_END = String.raw`[ \t]*\n?`;
+const LEGACY_CODE_SPAN_HEADER = new RegExp(
+  ["^`", LEGACY_CLASSIFICATION_TEXT, "`", LEGACY_HEADER_END].join(""),
+  "u",
+);
+const LEGACY_BOLD_HEADER = new RegExp(
+  [String.raw`^\*\*`, LEGACY_CLASSIFICATION_TEXT, String.raw`\*\*`, LEGACY_HEADER_END].join(""),
+  "u",
+);
+
 function stripComposedArtifacts(body: string): string {
   return clip(body)
-    .replace(/^`[A-Z]+ · [A-Z]+`[ \t]*\n?/, "") // the code-span header line (the current grammar)
-    .replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "") // the bold header line (v0.21.0 comments)
+    .replace(LEGACY_CODE_SPAN_HEADER, "") // the code-span header line (v0.23.0 comments)
+    .replace(LEGACY_BOLD_HEADER, "") // the bold header line (v0.21.0 comments)
     .replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "") // the pre-design-system label line
-    .replace(/<img[^>\n]*>/g, " ") // product-composed asset chips (summary/notice surfaces)
+    .replace(/<img[^>\n]*>/g, " ") // product-composed asset chips (finding/summary/notice surfaces)
     .replace(/<details>[\s\S]*?<\/details>/g, " ") // the collapsed repair-prompt block
     .replace(/<!--[\s\S]*?-->/g, " "); // the hidden marker comment
 }

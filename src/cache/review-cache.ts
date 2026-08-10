@@ -119,7 +119,7 @@ export const SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
  * whether a stored claim can publish, and a retired catalog must be visible in serialized entries.
  */
 export const PUBLICATION_SEMANTICS =
-  `v0.23.0-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}` as const;
+  `v0.23.0-finding-badges-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}` as const;
 
 declare const cacheBrand: unique symbol;
 type CacheBrand<T, B extends string> = T & { readonly [cacheBrand]: B };

@@ -36,6 +36,17 @@ import { QUALIFICATION_MODEL } from "./qualification-model.mjs";
 
 const temporaryDirectories = [];
 const MARKER = "a".repeat(32);
+const ASSET_BASE =
+  "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/6b59f533afef15820991b3a0470ddc22c6c6d436/.github/assets/kq";
+
+function badgeHeader(
+  categoryAsset = "cat-correctness",
+  category = "Correctness",
+  severityAsset = "sev-major",
+  severity = "Major",
+) {
+  return `<img src="${ASSET_BASE}/${categoryAsset}.svg" height="24" alt="${category}"> <img src="${ASSET_BASE}/${severityAsset}.svg" height="24" alt="${severity}">`;
+}
 
 afterEach(() => {
   while (temporaryDirectories.length > 0) {
@@ -52,7 +63,7 @@ function temporaryDirectory() {
 function composedFinding(
   title = "Keep the existing guard.",
   argument = "When `parseInput` receives an empty value, this path bypasses validation.",
-  header = "`CORRECTNESS · HIGH`",
+  header = badgeHeader(),
 ) {
   return [
     header,
@@ -241,6 +252,12 @@ test("published prose is reconstructed while product wrapper instructions are di
   );
   assert.equal(
     extractPublishedFindingContent(
+      composedFinding("Fix it.", "Because it fails.", "`BUG · MAJOR`"),
+    ),
+    "Fix it.\n\nBecause it fails.",
+  );
+  assert.equal(
+    extractPublishedFindingContent(
       composedFinding("Fix it.", "Because it fails.", "**BUG · MAJOR**"),
     ),
     "Fix it.\n\nBecause it fails.",
@@ -280,6 +297,28 @@ test("published prose is reconstructed while product wrapper instructions are di
       composedFinding("Fix it.", "Text <details>must not consume the product wrapper."),
     ),
     undefined,
+  );
+  assert.equal(
+    extractPublishedFindingContent(
+      composedFinding(
+        "Fix it.",
+        "Because it fails.",
+        badgeHeader("cat-security", "Correctness", "sev-major", "Major"),
+      ),
+    ),
+    undefined,
+    "the badge filename and alt text must be the same product-controlled classification",
+  );
+  assert.equal(
+    extractPublishedFindingContent(
+      composedFinding(
+        "Fix it.",
+        "Because it fails.",
+        badgeHeader("cat-correctness", "Correctness", "sev-critical", "Catastrophic"),
+      ),
+    ),
+    undefined,
+    "unknown severity labels fail closed",
   );
   assert.equal(extractPublishedFindingContent("plain model prose"), undefined);
   assert.equal(

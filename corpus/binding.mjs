@@ -1,9 +1,24 @@
 import { createHash } from "node:crypto";
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+
+import {
+  ScriptTarget,
+  SyntaxKind,
+  createSourceFile,
+  forEachChild,
+  getScriptKindFromFileName,
+  isCallExpression,
+  isExternalModuleReference,
+  isExportDeclaration,
+  isIdentifier,
+  isImportDeclaration,
+  isImportEqualsDeclaration,
+  isStringLiteralLike,
+} from "typescript";
 
 import { FIXED_PATH } from "./fixed-path.mjs";
 
@@ -22,6 +37,9 @@ import { FIXED_PATH } from "./fixed-path.mjs";
  */
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const SOURCE_CLOSURE_FORMAT = "keiko-for-quality/qualification-source-closure-v1";
+const SOURCE_EXTENSIONS = new Set([".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"]);
+export const QUALIFICATION_SCORER_ENTRYPOINTS = Object.freeze(["corpus/run.mjs"]);
 
 function sha256File(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -29,6 +47,234 @@ function sha256File(path) {
 
 function sha256Text(text) {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function sha256Bytes(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function assertNoSymbolicLinkInRepositoryPath(repositoryRoot, path) {
+  const repositoryPath = repositoryRelativePath(repositoryRoot, path);
+  let current = repositoryRoot;
+  for (const segment of repositoryPath.split("/")) {
+    current = join(current, segment);
+    try {
+      if (lstatSync(current).isSymbolicLink()) {
+        throw new TypeError("qualification source must not traverse a symbolic link");
+      }
+    } catch (error) {
+      if (error?.code === "ENOENT") return;
+      throw error;
+    }
+  }
+}
+
+function isFile(repositoryRoot, path) {
+  try {
+    assertNoSymbolicLinkInRepositoryPath(repositoryRoot, path);
+    const stat = lstatSync(path);
+    return stat.isFile();
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    return false;
+  }
+}
+
+function runtimeImport(declaration) {
+  const clause = declaration.importClause;
+  // Only a declaration-level `import type` promises that the module has no runtime edge. An
+  // ordinary empty import and `import { type T }` are still value-import declarations: with
+  // verbatim module syntax they emit an empty import and therefore still execute module effects.
+  // The binding must conservatively follow both rather than let an emit-policy change leave the
+  // qualification digest blind to runtime source.
+  return clause === undefined || !clause.isTypeOnly;
+}
+
+function runtimeExport(declaration) {
+  // Like imports above, only a declaration-level `export type` is guaranteed to erase the
+  // runtime edge. Ordinary `export {}` and `export { type T }` declarations still evaluate their
+  // module under verbatim module syntax, so their dependency must remain inside the closure.
+  return !declaration.isTypeOnly;
+}
+
+function stringSpecifier(node) {
+  return node !== undefined && isStringLiteralLike(node) ? node.text : undefined;
+}
+
+function importDeclarationSpecifier(node) {
+  if (!isImportDeclaration(node) || !runtimeImport(node)) return undefined;
+  return stringSpecifier(node.moduleSpecifier);
+}
+
+function exportDeclarationSpecifier(node) {
+  if (!isExportDeclaration(node) || !runtimeExport(node)) return undefined;
+  return stringSpecifier(node.moduleSpecifier);
+}
+
+function importEqualsSpecifier(node) {
+  if (
+    !isImportEqualsDeclaration(node) ||
+    node.isTypeOnly ||
+    !isExternalModuleReference(node.moduleReference)
+  ) {
+    return undefined;
+  }
+  return stringSpecifier(node.moduleReference.expression);
+}
+
+function dynamicImportSpecifier(node) {
+  if (!isCallExpression(node) || node.expression.kind !== SyntaxKind.ImportKeyword)
+    return undefined;
+  return stringSpecifier(node.arguments[0]);
+}
+
+function commonJsRequireSpecifier(node) {
+  if (
+    !isCallExpression(node) ||
+    !isIdentifier(node.expression) ||
+    node.expression.text !== "require" ||
+    node.arguments.length !== 1
+  ) {
+    return undefined;
+  }
+  return stringSpecifier(node.arguments[0]);
+}
+
+function runtimeSpecifier(node) {
+  const imported = importDeclarationSpecifier(node);
+  if (imported !== undefined) return imported;
+  const exported = exportDeclarationSpecifier(node);
+  if (exported !== undefined) return exported;
+  const importEquals = importEqualsSpecifier(node);
+  if (importEquals !== undefined) return importEquals;
+  const dynamicImport = dynamicImportSpecifier(node);
+  if (dynamicImport !== undefined) return dynamicImport;
+  return commonJsRequireSpecifier(node);
+}
+
+function isLocalSpecifier(specifier) {
+  return specifier?.startsWith("./") === true || specifier?.startsWith("../") === true;
+}
+
+function localRuntimeSpecifiers(path, source) {
+  if (!SOURCE_EXTENSIONS.has(extname(path))) return [];
+  const sourceFile = createSourceFile(
+    path,
+    source,
+    ScriptTarget.Latest,
+    true,
+    getScriptKindFromFileName(path),
+  );
+  const specifiers = new Set();
+  const visit = (node) => {
+    const specifier = runtimeSpecifier(node);
+    if (isLocalSpecifier(specifier)) specifiers.add(specifier);
+    forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return [...specifiers];
+}
+
+function sourceCandidates(importer, specifier) {
+  const requested = resolve(dirname(importer), specifier);
+  const extension = extname(requested);
+  if (extension === ".js") return [requested, `${requested.slice(0, -3)}.ts`];
+  if (extension !== "") return [requested];
+  return [
+    requested,
+    `${requested}.ts`,
+    `${requested}.js`,
+    `${requested}.mjs`,
+    `${requested}.json`,
+    join(requested, "index.ts"),
+    join(requested, "index.js"),
+  ];
+}
+
+function repositoryRelativePath(repositoryRoot, path) {
+  const value = relative(repositoryRoot, path);
+  if (value === "" || value === ".." || value.startsWith(`..${sep}`) || isAbsolute(value)) {
+    throw new TypeError("qualification source must stay inside the repository");
+  }
+  return value.split(sep).join("/");
+}
+
+function resolveLocalSource(repositoryRoot, importer, specifier) {
+  for (const candidate of sourceCandidates(importer, specifier)) {
+    repositoryRelativePath(repositoryRoot, candidate);
+    if (isFile(repositoryRoot, candidate)) return candidate;
+  }
+  throw new TypeError(`qualification source import cannot be resolved: ${specifier}`);
+}
+
+function compareSourcePaths(left, right) {
+  return left.localeCompare(right, "en");
+}
+
+function resolveEntrypoint(repositoryRoot, entrypoint) {
+  if (typeof entrypoint !== "string" || entrypoint === "" || isAbsolute(entrypoint)) {
+    throw new TypeError("qualification source entry point must be repository-relative");
+  }
+  const path = resolve(repositoryRoot, entrypoint);
+  repositoryRelativePath(repositoryRoot, path);
+  if (!isFile(repositoryRoot, path)) {
+    throw new TypeError(`qualification source entry point is missing: ${entrypoint}`);
+  }
+  return path;
+}
+
+/**
+ * Canonical, inspectable manifest behind a source-closure digest.
+ *
+ * Entry points are explicit. Their local runtime imports are then followed to a fixed point, while
+ * type-only and package imports are deliberately excluded: neither can alter the JavaScript that
+ * assembles prompts or invokes the model. Paths are repository-relative and sorted, so identical
+ * source trees at different checkout locations produce the same manifest and digest.
+ */
+export function qualificationSourceClosureManifest(identity) {
+  if (identity?.kind !== "source-closure") {
+    throw new TypeError("qualification source closure identity is required");
+  }
+  const repositoryRoot = resolve(identity.repositoryRoot);
+  if (!Array.isArray(identity.entrypoints) || identity.entrypoints.length === 0) {
+    throw new TypeError("qualification source closure requires entry points");
+  }
+  const resolvedEntrypoints = identity.entrypoints.map((entrypoint) =>
+    resolveEntrypoint(repositoryRoot, entrypoint),
+  );
+  const entrypoints = [
+    ...new Set(resolvedEntrypoints.map((path) => repositoryRelativePath(repositoryRoot, path))),
+  ].sort(compareSourcePaths);
+  const pending = entrypoints.map((entrypoint) => resolve(repositoryRoot, entrypoint));
+  const sources = new Map();
+  while (pending.length > 0) {
+    const path = pending.pop();
+    const relativePath = repositoryRelativePath(repositoryRoot, path);
+    if (sources.has(relativePath)) continue;
+    const bytes = readFileSync(path);
+    sources.set(relativePath, sha256Bytes(bytes));
+    const source = bytes.toString("utf8");
+    for (const specifier of localRuntimeSpecifiers(path, source)) {
+      pending.push(resolveLocalSource(repositoryRoot, path, specifier));
+    }
+  }
+  return {
+    format: SOURCE_CLOSURE_FORMAT,
+    entrypoints,
+    sources: [...sources]
+      .sort(([left], [right]) => compareSourcePaths(left, right))
+      .map(([path, sha256]) => ({ path, sha256 })),
+  };
+}
+
+export function qualificationSourceClosureDigest(identity) {
+  return sha256Text(JSON.stringify(qualificationSourceClosureManifest(identity)));
+}
+
+/** The classic identity remains the binary's byte digest; staged mode hashes its source manifest. */
+export function qualificationEngineDigest(identity) {
+  if (identity?.kind === "file") return sha256File(identity.path);
+  return qualificationSourceClosureDigest(identity);
 }
 
 function adapterCommit() {
@@ -46,21 +292,27 @@ function adapterCommit() {
 }
 
 /**
- * @param {{ binary: string, rule: string | undefined, model: string, protocol: string,
- *           endpoint: string, measuredAt: string }} inputs
+ * @param {{ engine: object, rule: string | undefined, model: string, protocol: string,
+ *           endpoint: string, strictness: string, measuredAt: string }} inputs
  */
 export function buildBinding(inputs) {
-  const manifest = JSON.parse(readFileSync(join(HERE, "..", "package.json"), "utf8"));
+  const repositoryRoot = join(HERE, "..");
+  const manifest = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8"));
   return {
     measuredAt: inputs.measuredAt,
+    strictness: inputs.strictness,
     adapter: { version: manifest.version, commit: adapterCommit() },
-    engine: { sha256: sha256File(inputs.binary) },
+    engine: { sha256: qualificationEngineDigest(inputs.engine) },
     rule: { sha256: sha256File(inputs.rule) },
     // Both halves of the corpus: the cases and the scorer. Digesting only the data would let a
     // change to what counts as a "find" move every number with nothing in the record to show it.
     corpus: {
       cases: sha256File(join(HERE, "cases.mjs")),
-      scorer: sha256File(join(HERE, "run.mjs")),
+      scorer: qualificationSourceClosureDigest({
+        kind: "source-closure",
+        repositoryRoot,
+        entrypoints: QUALIFICATION_SCORER_ENTRYPOINTS,
+      }),
     },
     model: {
       id: inputs.model,

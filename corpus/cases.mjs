@@ -93,36 +93,31 @@ export function lookup(key: string): CacheEntry {
 }
 `;
 
-const RESET_ISOLATION_SINGLE_TEST_SOURCE = `import { beforeEach, describe, expect, it, vi } from "vitest";
-
-// The module under test memoizes at module scope, so each case needs a fresh copy of it.
-beforeEach(() => {
-  vi.resetModules();
-});
+const RESET_ISOLATION_SINGLE_TEST_SOURCE = `import { describe, expect, it, vi } from "vitest";
 
 describe("cache", () => {
   it("memoizes the first answer", async () => {
+    // Reset immediately before the dynamic import so this case owns a fresh module instance.
+    vi.resetModules();
     const { lookup } = await import("./cache.js");
     expect(lookup("a")).toBe(lookup("a"));
   });
 });
 `;
 
-const RESET_ISOLATION_CLEAN_SUITE_SOURCE = `import { beforeEach, describe, expect, it, vi } from "vitest";
-
-// The module under test memoizes at module scope, so each case needs a fresh copy of it.
-beforeEach(() => {
-  vi.resetModules();
-});
+const RESET_ISOLATION_CLEAN_SUITE_SOURCE = `import { describe, expect, it, vi } from "vitest";
 
 describe("cache", () => {
   it("memoizes the first answer", async () => {
+    // Reset immediately before the dynamic import so this case owns a fresh module instance.
+    vi.resetModules();
     const { lookup } = await import("./cache.js");
     expect(lookup("a")).toBe(lookup("a"));
   });
 
   it("does not carry a memoized answer across cases", async () => {
-    // The beforeEach above reset the module registry, so this import re-evaluates the module.
+    // Reset immediately before the dynamic import so the prior case's module cannot be reused.
+    vi.resetModules();
     const { entryCount, lookup } = await import("./cache.js");
     expect(entryCount()).toBe(0);
     lookup("b");
@@ -131,10 +126,12 @@ describe("cache", () => {
 });
 `;
 
-const RESET_ISOLATION_REMOVED_SUITE_SOURCE = `import { describe, expect, it } from "vitest";
+const RESET_ISOLATION_REMOVED_SUITE_SOURCE = `import { describe, expect, it, vi } from "vitest";
 
 describe("cache", () => {
   it("memoizes the first answer", async () => {
+    // Reset immediately before the dynamic import so this case owns a fresh module instance.
+    vi.resetModules();
     const { lookup } = await import("./cache.js");
     expect(lookup("a")).toBe(lookup("a"));
   });
@@ -148,21 +145,18 @@ describe("cache", () => {
 });
 `;
 
-const RESET_ISOLATION_STATIC_IMPORT_SUITE_SOURCE = `import { beforeEach, describe, expect, it, vi } from "vitest";
+const RESET_ISOLATION_STATIC_IMPORT_SUITE_SOURCE = `import { describe, expect, it, vi } from "vitest";
 
 import { entryCount, lookup } from "./cache.js";
 
-// The module under test memoizes at module scope, so each case needs a fresh copy of it.
-beforeEach(() => {
-  vi.resetModules();
-});
-
 describe("cache", () => {
   it("memoizes the first answer", () => {
+    vi.resetModules();
     expect(lookup("a")).toBe(lookup("a"));
   });
 
   it("does not carry a memoized answer across cases", () => {
+    vi.resetModules();
     expect(entryCount()).toBe(0);
     lookup("b");
     expect(entryCount()).toBe(1);
@@ -355,19 +349,22 @@ export async function loadConfig(path: string): Promise<string> {
   },
   {
     id: "off-by-one",
-    // Corrected: `lastN(items, 10)` on three items silently returns all three instead of erroring.
-    // Wrong behaviour on a reachable path — high by the same rubric.
+    // `lastN(["a", "b", "c"], 4)` must return all three items by the shown contract, but the
+    // changed negative slice start returns only `"c"`. Wrong behaviour on a reachable path — high
+    // by the same rubric.
     defect: { file: "src/window.ts", category: "bug", severity: "high" },
-    about: "negative index when n exceeds length",
+    about: "a negative slice start truncates results just above the collection length",
     anchors: ["clamp*", "negative", "math.max", "off-by-one", "exceed*"],
     files: [
       {
         path: "src/window.ts",
-        base: `export function lastN<T>(items: readonly T[], n: number): readonly T[] {
+        base: `/** Return the last n items, or every available item when n exceeds the list length. */
+export function lastN<T>(items: readonly T[], n: number): readonly T[] {
   return items.slice(Math.max(0, items.length - n));
 }
 `,
-        head: `export function lastN<T>(items: readonly T[], n: number): readonly T[] {
+        head: `/** Return the last n items, or every available item when n exceeds the list length. */
+export function lastN<T>(items: readonly T[], n: number): readonly T[] {
   return items.slice(items.length - n);
 }
 `,
@@ -847,22 +844,10 @@ choose one on the caller's behalf.
     defect: { file: "src/capabilities.ts", category: "bug", severity: "high" },
     about: "an intentional empty selection is dropped from the update instead of sent explicitly",
     anchors: ["empty", "clear*", "omit*", "unset", "workfloweligiblemodelids", "partial"],
-    // `EligibilityUpdate` is declared here as unchanged context (present in both revisions, so it
-    // produces no hunk) because part of the verdict hangs on it: whether `return {}` is even legal,
-    // and whether dropping the field loses information, is a question about the field's optionality.
-    //
-    // Measured, and NOT the whole story. Undeclared: 1 of 3 runs passed, the survivor costing ~151k
-    // tokens, two runs dying in the subtask spiral. Declared: 3 of 6, one spiral, 79k–143k tokens.
-    // Real but partial — the declaration was worth keeping and was not the main cause.
-    //
-    // What remains is written in this case's own header and missing from its fixture: the defect is
-    // that "a preserve-existing merge ON THE RECEIVING END keeps the stale list". No receiving end
-    // exists here. Deciding whether the dropped field is a bug means knowing what the consumer does
-    // with an absent key, so the reviewer goes looking for a consumer the fixture never commits —
-    // ~100k tokens of searching for a 180-byte diff. Committing a consumer as context is the fix
-    // this points to; it is a larger intervention than a declaration and is deliberately left for
-    // its own measurement rather than bundled into a release. Until then the case roams, and the
-    // qualification records it as roaming instead of pretending otherwise.
+    // Both the optional type and the preserve-existing receiver are unchanged context inside the
+    // reviewed file. The receiver is verdict-deciding: its `?? current` keeps the stale list for an
+    // omitted field while an explicit empty array clears it. Keeping that evidence in this file is
+    // deliberate — a byte-identical second file never reaches the staged corpus's whole-file view.
     //
     // Twelve other cases reference a type they never declare and are left alone: theirs are opaque
     // handles (`db: Db`, `client: Client`, `store: Store`) whose shape cannot change the verdict —
@@ -878,6 +863,13 @@ choose one on the caller's behalf.
 export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
   return { workflowEligibleModelIds: selected };
 }
+
+export function applyEligibilityUpdate(
+  current: readonly string[],
+  update: EligibilityUpdate,
+): readonly string[] {
+  return update.workflowEligibleModelIds ?? current;
+}
 `,
         head: `export interface EligibilityUpdate {
   workflowEligibleModelIds?: readonly string[];
@@ -886,6 +878,13 @@ export function buildEligibilityUpdate(selected: readonly string[]): Eligibility
 export function buildEligibilityUpdate(selected: readonly string[]): EligibilityUpdate {
   if (selected.length === 0) return {};
   return { workflowEligibleModelIds: selected };
+}
+
+export function applyEligibilityUpdate(
+  current: readonly string[],
+  update: EligibilityUpdate,
+): readonly string[] {
+  return update.workflowEligibleModelIds ?? current;
 }
 `,
       },
@@ -1275,6 +1274,8 @@ export function label(kind: string): string {
     // the defect INSIDE the test file. Left alone deliberately — this fix is built on the one case
     // with failing evidence, and re-cutting six measurement bases on suspicion is the opposite of
     // that discipline.
+    // The test imports that committed module explicitly in both revisions. Keeping the import
+    // identical makes it readable context rather than part of the strengthened-test diff.
     id: "clean-added-test",
     defect: null,
     about: "a strengthened test suite",
@@ -1298,11 +1299,15 @@ export function label(kind: string): string {
       },
       {
         path: "src/ratio.test.ts",
-        base: `it("divides", () => {
+        base: `import { ratio } from "./ratio.js";
+
+it("divides", () => {
   expect(ratio(6, 3)).toBe(2);
 });
 `,
-        head: `it("divides", () => {
+        head: `import { ratio } from "./ratio.js";
+
+it("divides", () => {
   expect(ratio(6, 3)).toBe(2);
 });
 
@@ -1348,7 +1353,10 @@ it("rejects a zero denominator", () => {
   {
     // The reviewer cannot verify that a SHA belongs to a tag, and the rule text forbids
     // speculating about code it cannot see. Asking the author to "double-check the pin" is exactly
-    // the plausible-sounding noise that erodes a reviewer's standing.
+    // the plausible-sounding noise that erodes a reviewer's standing. The 2026-08-10 staged-v6
+    // wave still published one finding here despite correct official SHA/tag pairs, so staged-v7
+    // makes this exact SHA-to-SHA/comment-only shape a terminal SILENT decision while retaining
+    // the mutable-reference and shown-desynchronization recall twins below.
     id: "clean-workflow-pin-update",
     defect: null,
     about: "an action pin advanced with its version comment in step",
@@ -1549,9 +1557,9 @@ export function schemaVersion(): string {
     id: "clean-reset-modules-is-load-bearing",
     defect: null,
     // Published as "remove the redundant vi.resetModules()". Removing it produces exactly the
-    // test bleeding the call prevents — the suite mutates a module-level cache, and the comment
-    // above the call says so. A finding that proposes deleting a guard must account for what the
-    // guard is guarding.
+    // test bleeding the call prevents — the suite mutates a module-level cache, and each test now
+    // resets immediately before its dynamic import. A finding that proposes deleting a guard must
+    // account for what the guard is guarding.
     //
     // Recalibrated 2026-08-06 in three layers, each on its own failing evidence (the full record:
     // corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md). The v0.18.0 qualification
@@ -1573,16 +1581,17 @@ export function schemaVersion(): string {
     // one lookup. That also makes the reset mechanically load-bearing: remove it and this test
     // fails, which is precisely the guard-versus-guarded relationship the published false positive
     // ("remove the redundant reset") got wrong. Layer three, forced by two more validation runs:
-    // the `beforeEach` reset sits at the top of the file, OUTSIDE the added hunk's diff context,
-    // and both post-fix false positives reasoned about module caching without ever mentioning it —
-    // the draws where the model judges the hunk without opening the file. The added test now
-    // states its own premise in an author comment inside the hunk ("the beforeEach above reset the
-    // module registry"), which is what a real author writes when a reviewer misreads isolation,
-    // and which moves the case from measuring tool-use propensity (serving-side variance) to
-    // measuring the judgement it names: respecting a stated, correct isolation mechanism. All
-    // three layers re-cut the measurement basis, so this case's history is not comparable across
-    // 2026-08-06, and the recalibration rides the next full qualification wave rather than any
-    // point release.
+    // the original `beforeEach` reset sat outside the added hunk and repeated false positives
+    // reasoned about module caching without accounting for it. An in-hunk author comment improved
+    // the rate but did not close it: both the 2026-08-10 staged-v5 and staged-v6 waves still
+    // published one finding. The latter did so despite the local executable shape below, proving
+    // the remaining fault was an examiner decision ambiguity rather than missing fixture evidence.
+    // The final shape therefore makes the mechanism local and executable in both tests: each
+    // `vi.resetModules()` is immediately followed by the dynamic import it protects. The two
+    // seeded twins below retain the opposing mechanics — one removes the second reset, the other
+    // establishes static bindings before both retained resets — so precision cannot improve by
+    // erasing the corresponding recall pressure. This re-cuts the measurement basis and must ride
+    // a fresh full qualification wave.
     about: "a test reset whose removal would reintroduce state bleeding",
     files: [
       {

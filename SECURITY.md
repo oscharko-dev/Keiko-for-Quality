@@ -123,7 +123,8 @@ budget-exhausted, timed-out, and malformed results all settle as incomplete.
 **Coverage is reconciled at one of two strengths, and the run says which.** Against a released
 engine only a `files_reviewed` count is available, so omission is caught by cardinality rather than
 by identity. Against an engine that emits a run manifest, every path is matched individually. See
-the README's _Coverage guarantee_; do not read a clean counted result as the stronger claim.
+the [coverage guarantee](docs/operations.md#coverage-guarantee); do not read a clean counted result
+as the stronger claim.
 
 **The engine binary is pinned by digest.** It is downloaded at an exact version and verified against
 a SHA-256 digest held in this repository, with no fallback artifact and no retry against a different

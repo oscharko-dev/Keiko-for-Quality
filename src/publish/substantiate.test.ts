@@ -388,6 +388,8 @@ describe("role prompts", () => {
     const refereePrompt = buildRefereePrompt(candidate, CHALLENGE_EVIDENCE, planned!);
 
     expect(truthPrompt).toContain("A matching excerpt alone is not positive proof");
+    expect(truthPrompt).toContain("Impact, severity language");
+    expect(terminalTruthPrompt).toContain("Do not require proof of impact");
     expect(truthPrompt).toContain("D:H");
     expect(truthPrompt).toContain("needs_context");
     expect(plannerPrompt).toContain("same_file_contract");
@@ -1596,6 +1598,7 @@ describe("strict failure policy", () => {
       [candidate],
       () => CHANGE_EVIDENCE,
       endpointReplying([TRANSPORT_FAIL]).deps,
+      "default",
     );
     const traces: SubstantiationTerminalTrace[] = [];
     const paranoid = await substantiate(
@@ -1748,7 +1751,7 @@ describe("hard shared request budget", () => {
     expect(substantiationOnePathTokenUpperBound(candidate, evidence)).toBe(
       MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
     );
-    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(955_880);
+    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(956_079);
   });
 
   it("shares the same hard ceiling across later findings", async () => {
@@ -1807,8 +1810,11 @@ describe("hard shared request budget", () => {
 
 describe("resolveSubstantiationStrictness", () => {
   it("defaults silently and reads every closed level", () => {
-    expect(resolveSubstantiationStrictness({})).toBe("default");
     expect(resolveSubstantiationStrictness({ KFQ_SUBSTANTIATION_STRICTNESS: "strictt" })).toBe(
+      "paranoid",
+    );
+    expect(resolveSubstantiationStrictness({})).toBe("paranoid");
+    expect(resolveSubstantiationStrictness({ KFQ_SUBSTANTIATION_STRICTNESS: "default" })).toBe(
       "default",
     );
     expect(resolveSubstantiationStrictness({ KFQ_SUBSTANTIATION_STRICTNESS: " Paranoid \n" })).toBe(

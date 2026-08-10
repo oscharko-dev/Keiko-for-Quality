@@ -10,9 +10,12 @@ import { commitSha } from "../core/brands.js";
 import { createSilentDiagnostics } from "../diagnostics/sink.js";
 import { buildInventory, type ReviewPair } from "../inventory/inventory.js";
 import {
+  BOUNDARY_OMISSION_EVIDENCE_POLICY,
+  DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
+  WORKFLOW_TRUST_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
 import { GENERATION_COMPLETION_LIMIT, generationRequestUpperBound } from "./generation-workflow.js";
 import { parseEngineResult } from "./result.js";
@@ -386,7 +389,13 @@ describe("runSingleShotEngine staged generation", () => {
       const system = body.messages?.[0]?.content ?? "";
       const user = body.messages?.[1]?.content ?? "";
       const role = stage(system);
-      for (const policy of [TEST_ISOLATION_EVIDENCE_POLICY, REFERENCE_TRANSITION_EVIDENCE_POLICY]) {
+      for (const policy of [
+        TEST_ISOLATION_EVIDENCE_POLICY,
+        REFERENCE_TRANSITION_EVIDENCE_POLICY,
+        BOUNDARY_OMISSION_EVIDENCE_POLICY,
+        WORKFLOW_TRUST_EVIDENCE_POLICY,
+        DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+      ]) {
         expect(system.split(policy)).toHaveLength(2);
         expect(user).not.toContain(policy);
       }

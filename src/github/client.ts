@@ -53,7 +53,7 @@ export interface ReviewComment {
    * (GitHub exposes thread resolution only through `PullRequestReviewThread.isResolved`/
    * `isOutdated`). Absent — not `false` — means the lookup did not run or did not resolve this
    * comment; callers must treat an absent value the same as `false`, i.e. "treated as open" — the
-   * documented degradation contract (see README's Deduplication section) — never as "known
+   * documented degradation contract (see `docs/operations.md#deduplication`) — never as "known
    * resolved".
    */
   readonly resolved?: boolean;

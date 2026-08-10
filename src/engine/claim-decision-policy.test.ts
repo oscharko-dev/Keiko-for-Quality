@@ -1,18 +1,24 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  BOUNDARY_OMISSION_EVIDENCE_POLICY,
+  DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
+  WORKFLOW_TRUST_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
 
 describe("shared claim-decision policy", () => {
-  it("derives one compact examiner capsule from the two canonical policies", () => {
+  it("derives one compact examiner capsule from the three canonical policies", () => {
     expect(EXAMINER_CLAIM_DECISION_POLICY).toBe(
       [
         `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
         `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
+        `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
+        `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
+        `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
       ].join("\n"),
     );
     expect(new TextEncoder().encode(EXAMINER_CLAIM_DECISION_POLICY).byteLength).toBeLessThanOrEqual(
@@ -20,30 +26,64 @@ describe("shared claim-decision policy", () => {
     );
   });
 
+  it("closes privileged checkout and harmless diagnostic-context decisions", () => {
+    expect(WORKFLOW_TRUST_EVIDENCE_POLICY).toContain(
+      "changes checkout from the trusted base SHA to the candidate head SHA",
+    );
+    expect(WORKFLOW_TRUST_EVIDENCE_POLICY).toContain("`security`/`critical`");
+    expect(WORKFLOW_TRUST_EVIDENCE_POLICY).toContain(
+      "only fetches candidate Git objects as review data",
+    );
+    expect(DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY).toContain(
+      "adds an already-available non-secret primitive field",
+    );
+    expect(DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY).toContain("rethrows the identical error");
+    expect(DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY).toContain("disclose a secret or payload");
+  });
+
   it("keeps clean reset and full-SHA transitions explicit beside their recall boundaries", () => {
     expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
-      "dynamic import after a shown `beforeEach` module-registry reset as fresh; leave it silent",
+      "SILENT (emit no claim): each case executes `vi.resetModules()` immediately before its awaited dynamic import",
+    );
+    expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain("That sequence loads a fresh module instance");
+    expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
+      "never call its reset redundant or insufficient",
     );
     expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
-      "missing, removed, late, wrong, or bypassed reset",
+      "REPORT: the reset is shown missing, removed, late, or wrong",
     );
-    expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain("Never invent an unshown reset helper");
+    expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
+      "BYPASS (report): the module under test or a shared-state dependency was imported at top level or cached before the reset",
+    );
+    expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
+      "unrelated framework or helper imports are not bypass evidence",
+    );
 
     expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain(
-      "one full 40-hex SHA to another remains immutable and is clean by itself",
+      "SILENT (emit no claim): at the same action/dependency coordinate, one full 40-hex SHA or digest changes to another",
     );
+    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("no shown local counterevidence exists");
+    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("never request remote tag verification");
     expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain(
-      "shown local counterevidence still applies",
+      "claim that the comment and immutable pin need alignment",
     );
-    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain(
-      "Version comments do not prove remote tag mapping",
-    );
-    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("Review changed coordinates");
-    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("report only SHA-to-tag/branch");
+    expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("REPORT only SHA/digest-to-tag/branch");
     expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("repo-proven pin mismatch");
     expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain("shown sync-contract desync");
     expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain(
       "`security`/`high`, including first-party actions; never critical",
+    );
+  });
+
+  it("requires runtime boundary walks and shown preserve-state evidence for omitted clears", () => {
+    expect(BOUNDARY_OMISSION_EVIDENCE_POLICY).toContain(
+      "compare empty, exact-boundary, and just-outside inputs after runtime normalization against old behavior",
+    );
+    expect(BOUNDARY_OMISSION_EVIDENCE_POLICY).toContain(
+      "report an explicit clear omitted from an optional update only when shown consumer code preserves existing state on absence",
+    );
+    expect(BOUNDARY_OMISSION_EVIDENCE_POLICY).toContain(
+      "without that consumer evidence, leave silent",
     );
   });
 });

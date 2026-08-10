@@ -10,8 +10,11 @@ import { FIXED_PATH } from "./fixed-path.mjs";
 import { registerTsExtensionHooks } from "./rule-source.mjs";
 import {
   CORPUS_REVIEW_TIMEOUT_SECONDS,
+  STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS,
   corpusReviewDeadlineMs,
-  qualificationEngineImplementation,
+  qualificationEngineIdentity,
+  qualificationOutcomeFromLocalReview,
+  singleShotCorpusContextOptions,
   singleShotCorpusDispatch,
 } from "./single-shot-invocation.mjs";
 
@@ -84,28 +87,145 @@ function caseFixture(testCase, writeFixture = write) {
   }
 }
 
+function contextPackFixture() {
+  const repo = mkdtempSync(join(tmpdir(), "kfq-corpus-context-pack-"));
+  try {
+    git(repo, ["init", "-q"]);
+    write(repo, "src/helper.ts", "export function computeAllowance(value) { return value * 2; }\n");
+    for (const path of ["src/eligible.ts", "src/tiny.ts", "src/mechanical.ts"]) {
+      write(repo, path, "export const baseline = 1;\n");
+    }
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "base"]);
+    const base = git(repo, ["rev-parse", "HEAD"]);
+
+    const eligible = [
+      'import { computeAllowance } from "./helper.js";',
+      ...Array.from(
+        { length: 60 },
+        (_, index) => `export const eligible${String(index)} = computeAllowance(${String(index)});`,
+      ),
+      "",
+    ].join("\n");
+    write(repo, "src/eligible.ts", eligible);
+    write(
+      repo,
+      "src/tiny.ts",
+      'import { computeAllowance } from "./helper.js";\nexport const tiny = computeAllowance(1);\n',
+    );
+    write(repo, "src/mechanical.ts", eligible.replaceAll("eligible", "mechanical"));
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "head"]);
+    const head = git(repo, ["rev-parse", "HEAD"]);
+    return {
+      repo,
+      pair: { base: commitSha(base), head: commitSha(head), mergeBase: commitSha(base) },
+    };
+  } catch (error) {
+    rmSync(repo, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 test("the corpus deadline is one real absolute review boundary", () => {
   assert.equal(corpusReviewDeadlineMs(10_000), 10_000 + CORPUS_REVIEW_TIMEOUT_SECONDS * 1_000);
   assert.throws(() => corpusReviewDeadlineMs(Number.NaN), /clock/u);
 });
 
 test("staged binding ignores a fetched but unused classic engine", () => {
-  assert.equal(
-    qualificationEngineImplementation({
+  assert.deepEqual(
+    qualificationEngineIdentity({
       singleShot: true,
       binary: "/tmp/unused-ocr",
       repositoryRoot: "/repo",
     }),
-    "/repo/src/engine/single-shot.ts",
+    {
+      kind: "source-closure",
+      repositoryRoot: "/repo",
+      entrypoints: STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS,
+    },
   );
+  assert.equal(STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS.includes("src/review.ts"), true);
   assert.equal(
-    qualificationEngineImplementation({
+    STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS.includes("src/engine/single-shot.ts"),
+    false,
+  );
+  assert.deepEqual(
+    qualificationEngineIdentity({
       singleShot: false,
       binary: "/tmp/ocr",
       repositoryRoot: "/repo",
     }),
-    "/tmp/ocr",
+    { kind: "file", path: "/tmp/ocr" },
   );
+});
+
+test("publication-quality local results retain only scorer-compatible findings and counters", () => {
+  const { result, plan } = qualificationOutcomeFromLocalReview(
+    {
+      outcome: "complete",
+      findings: [
+        {
+          path: "src/a.ts",
+          startLine: 4,
+          endLine: 4,
+          category: "bug",
+          severity: "high",
+          body: "Fix the bound.\n\nWhen input is empty, the index is negative.",
+        },
+      ],
+      spend: { engine: 10, classify: 5, total: 15, allotted: 100 },
+      inventory: { total: 2, reviewable: 2, reviewed: 2 },
+      ruleDigest: "a".repeat(64),
+      engineVersion: "v1",
+      cacheHits: 0,
+      cacheMisses: 2,
+    },
+    [
+      { code: "publish.finding_suppressed_intra_run" },
+      { code: "publish.finding_rejected_sanitization" },
+    ],
+  );
+
+  assert.equal(result.status, "success");
+  assert.equal(result.summary.total_tokens, 15);
+  assert.equal(result.summary.files_reviewed, 2);
+  assert.equal(result.summary.budget_exceeded, false);
+  assert.equal(result.manifest.coverage.selected.length, 2);
+  assert.equal(result.manifest.coverage.completed.length, 2);
+  assert.deepEqual(result.comments, [
+    {
+      path: "src/a.ts",
+      startLine: 4,
+      endLine: 4,
+      category: "bug",
+      severity: "high",
+      content: "Fix the bound.\n\nWhen input is empty, the index is negative.",
+    },
+  ]);
+  assert.equal(plan.survivors[0]?.sanitizedBody, result.comments[0]?.content);
+  assert.deepEqual(plan.counters, { rejectedSanitization: 1, suppressedIntraRun: 1 });
+});
+
+test("an incomplete local budget stop remains an explicit budget-pressure result", () => {
+  const { result } = qualificationOutcomeFromLocalReview(
+    {
+      outcome: "incomplete",
+      reason: "settlement.incomplete.budget_exceeded",
+      findings: [],
+      spend: { engine: 25_000, classify: 0, total: 25_000, allotted: 25_000 },
+      inventory: { total: 5, reviewable: 5, reviewed: 2 },
+      ruleDigest: "b".repeat(64),
+      engineVersion: "v1",
+      cacheHits: 0,
+      cacheMisses: 5,
+    },
+    [],
+  );
+
+  assert.equal(result.status, "budget_exceeded");
+  assert.equal(result.summary.budget_exceeded, true);
+  assert.equal(result.summary.files_reviewed, 2);
 });
 
 test("a corpus case repository is removed when fixture construction fails", () => {
@@ -154,6 +274,34 @@ test("staged corpus dispatch uses production structural classification, not matc
     assert.equal(result.expectedReviewablePaths.includes("assets/image.bin"), false);
     assert.equal(result.expectedReviewablePaths.includes("vendor/dependency"), false);
     assert.deepEqual(result.mechanicallyCleanPaths, []);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("staged corpus forwards eligible production context packs without lowering the tiny-file threshold", async () => {
+  const { repo, pair } = contextPackFixture();
+  try {
+    const forwarded = await singleShotCorpusContextOptions({
+      repositoryPath: repo,
+      pair,
+      pathValue: FIXED_PATH,
+      expectedReviewablePaths: ["src/eligible.ts", "src/tiny.ts", "src/mechanical.ts"],
+      mechanicallyCleanPaths: ["src/mechanical.ts"],
+    });
+    assert.ok(forwarded.contextPacks instanceof Map);
+    assert.match(forwarded.contextPacks.get("src/eligible.ts") ?? "", /src\/helper\.ts:1:/u);
+    assert.equal(forwarded.contextPacks.has("src/tiny.ts"), false);
+    assert.equal(forwarded.contextPacks.has("src/mechanical.ts"), false);
+
+    const tinyOnly = await singleShotCorpusContextOptions({
+      repositoryPath: repo,
+      pair,
+      pathValue: FIXED_PATH,
+      expectedReviewablePaths: ["src/tiny.ts"],
+      mechanicallyCleanPaths: [],
+    });
+    assert.deepEqual(tinyOnly, {});
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

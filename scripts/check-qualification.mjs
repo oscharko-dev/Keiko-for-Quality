@@ -106,7 +106,14 @@ for (const testCase of CASES) {
     console.log(`     absent:    ${testCase.id} — no result in the report`);
   } else if (result.pass !== true) {
     const detail = isRedactedEvidence
-      ? "private diagnostic detail omitted from release evidence"
+      ? [
+          `kind=${String(result.kind)}`,
+          `findings=${String(result.findingCount)}`,
+          `tokens=${String(result.tokens)}`,
+          `rejected=${String(result.rejectedCount)}`,
+          `sanitizer=${String(result.rejectedSanitization)}`,
+          `suppressed=${String(result.suppressedIntraRun)}`,
+        ].join(", ")
       : String(result.detail);
     console.log(`     regressed: ${testCase.id} — ${detail}`);
   }
@@ -117,7 +124,8 @@ if (binding !== undefined) {
   console.log(
     `     measured with adapter ${String(binding.adapter.version)} @ ${String(binding.adapter.commit).slice(0, 12)}, ` +
       `engine ${String(binding.engine.sha256).slice(0, 12)}, rule ${String(binding.rule.sha256).slice(0, 12)}, ` +
-      `model ${String(binding.model.id)} (${String(binding.model.protocol)})`,
+      `model ${String(binding.model.id)} (${String(binding.model.protocol)}), ` +
+      `strictness ${String(binding.strictness)}`,
   );
 }
 

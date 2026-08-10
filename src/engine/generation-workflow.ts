@@ -19,7 +19,7 @@ import { EXAMINER_CLAIM_DECISION_POLICY } from "./claim-decision-policy.js";
 
 export const GENERATION_COMPLETION_LIMIT = 4_096;
 /** Bump whenever a stage prompt, parser, renderer, or routing rule changes review semantics. */
-export const GENERATION_WORKFLOW_IDENTITY = "staged-v4";
+export const GENERATION_WORKFLOW_IDENTITY = "staged-v9";
 const REQUEST_FRAMING_TOKENS = 512;
 const MAX_RISK_HYPOTHESES = 6;
 const MAX_CLAIMS_PER_EXAMINER = 4;
@@ -199,11 +199,13 @@ export const EXAMINER_EVIDENCE_CONTRACT = [
   "state as their current contract unless shown evidence exposes a boundary that can violate it.",
   "A member actually added to a union, private state actually exported or leaked, or a caller-selected",
   "key shown reaching a prototype is evidence; a hypothetical future member or mutation is not.",
+  "A matching SILENT row below is terminal: discard any risk-map hypothesis about that shape and",
+  "emit no claim or verification request for it.",
   EXAMINER_CLAIM_DECISION_POLICY,
 ].join("\n");
 
 /** Keeps the universal evidence contract compact enough for both mandatory examiner calls. */
-export const EXAMINER_EVIDENCE_CONTRACT_MAX_BYTES = 1_450;
+export const EXAMINER_EVIDENCE_CONTRACT_MAX_BYTES = 3_150;
 
 /** Compact exact line-set rendering: `1,2,3,7` becomes `1-3,7`, without widening the set. */
 function renderAnchorRanges(lines: readonly number[]): string {

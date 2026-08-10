@@ -3,8 +3,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import {
+  BOUNDARY_OMISSION_EVIDENCE_POLICY,
+  DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
+  WORKFLOW_TRUST_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
 import { buildRuleFile, deriveRepoConventions, serializeRuleFile } from "./rule-file.js";
 import { loadReviewProfile } from "../config/profile.js";
@@ -154,6 +157,9 @@ describe("buildRuleFile", () => {
       "Pin this action to a full commit SHA.\n\nOn every run, a tag is resolved fresh, so the reviewed bytes and the executed bytes stop being the same bytes.",
       "Restore the per-test module reset.\n\nWhen the reset is removed, the second case reuses the first case's memoized module state.",
       "Restore the immutable action pin.\n\nWhen the workflow resolves `actions/setup-node@v4`, the executed bytes can move after review.",
+      "Keep the explicit empty-list update.\n\nWhen `workflowEligibleModelIds` is empty, omitting it makes the shown `?? current` consumer preserve stale eligibility instead of clearing it.",
+      "Keep the privileged checkout on the base SHA.\n\nWhen `pull_request_target` checks out the candidate head before install, candidate code runs with base-repository authority.",
+      "Remove the token from diagnostic context.\n\nWhen authentication fails, adding the raw token to the structured log discloses the credential.",
     ];
     for (const example of examples) {
       expect(sanitizeFindingBody(example).ok).toBe(true);
@@ -358,6 +364,18 @@ describe("buildRuleFile", () => {
         name: "distinguishes a fresh dynamic import from removed or bypassed reset setup",
         phrases: [TEST_ISOLATION_EVIDENCE_POLICY],
       },
+      {
+        name: "walks normalized boundaries and requires a shown preserve-state consumer",
+        phrases: [BOUNDARY_OMISSION_EVIDENCE_POLICY],
+      },
+      {
+        name: "distinguishes privileged candidate execution from a trusted-base data fetch",
+        phrases: [WORKFLOW_TRUST_EVIDENCE_POLICY],
+      },
+      {
+        name: "keeps harmless primitive log context separate from secrets and changed errors",
+        phrases: [DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY],
+      },
     ];
 
     // Rows are spread as positional tuples with a `%s` title, not as objects with `$name`: `$key`
@@ -375,10 +393,16 @@ describe("buildRuleFile", () => {
     );
   });
 
-  it("binds both canonical claim-decision policies exactly once in the serialized rule", () => {
+  it("binds all canonical claim-decision policies exactly once in the serialized rule", () => {
     const file = buildRuleFile(profileWith({}));
     const rule = file.rules[0]?.rule ?? "";
-    for (const policy of [TEST_ISOLATION_EVIDENCE_POLICY, REFERENCE_TRANSITION_EVIDENCE_POLICY]) {
+    for (const policy of [
+      TEST_ISOLATION_EVIDENCE_POLICY,
+      REFERENCE_TRANSITION_EVIDENCE_POLICY,
+      BOUNDARY_OMISSION_EVIDENCE_POLICY,
+      WORKFLOW_TRUST_EVIDENCE_POLICY,
+      DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+    ]) {
       expect(rule.split(policy)).toHaveLength(2);
       expect(serializeRuleFile(file).split(policy)).toHaveLength(2);
     }

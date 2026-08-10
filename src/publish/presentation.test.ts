@@ -14,6 +14,12 @@ import {
 import { sanitizeFindingBody } from "./sanitize.js";
 
 const MARKER = `keiko-for-quality:v1:${"a".repeat(32)}`;
+const ASSET_BASE =
+  "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/6b59f533afef15820991b3a0470ddc22c6c6d436/.github/assets/kq";
+
+function commentChip(asset: string, alt: string): string {
+  return `<img src="${ASSET_BASE}/${asset}.svg" height="24" alt="${alt}">`;
+}
 
 /** The shape the rule text asks the model to produce, and what a real run returned. */
 const REAL_PROSE = `Validate the token in full, not by prefix.
@@ -58,13 +64,15 @@ describe("splitTitle", () => {
 describe("composeFindingBody", () => {
   const document = composeFindingBody(REAL_PROSE, MARKER, CONTEXT);
 
-  it("leads with the design system's text-grammar classification line", () => {
-    expect(document.split("\n")[0]).toBe("`SECURITY · CRITICAL`");
+  it("leads with the design system's category and severity badges", () => {
+    expect(document.split("\n")[0]).toBe(
+      `${commentChip("cat-security", "Security")} ${commentChip("sev-critical", "Critical")}`,
+    );
   });
 
   it("states the action as a bold imperative before the argument", () => {
     expect(document).toContain("**Validate the token in full, not by prefix.**");
-    const header = document.indexOf("`SECURITY · CRITICAL`");
+    const header = document.indexOf("cat-security.svg");
     const title = document.indexOf("**Validate");
     const prose = document.indexOf("This comparison");
     // An absent needle indexes as -1 and would satisfy any "before" comparison — the reviewer's
@@ -91,13 +99,38 @@ describe("composeFindingBody", () => {
     expect(document.trimEnd().endsWith(`<!-- ${MARKER} -->`)).toBe(true);
   });
 
-  it("falls back to neutral labels for an unknown classification", () => {
+  it("falls back to neutral badges for an unknown classification", () => {
     const unknown = composeFindingBody(REAL_PROSE, MARKER, {
       ...CONTEXT,
       severity: "catastrophic",
       category: "vibes",
     });
-    expect(unknown.split("\n")[0]).toBe("`REVIEW · MINOR`");
+    expect(unknown.split("\n")[0]).toBe(
+      `${commentChip("cat-review", "Review")} ${commentChip("sev-minor", "Minor")}`,
+    );
+  });
+
+  it.each([
+    ["security", "cat-security", "Security"],
+    ["bug", "cat-correctness", "Correctness"],
+    ["performance", "cat-performance", "Performance"],
+    ["maintainability", "cat-maintainability", "Maintainability"],
+    ["test", "cat-tests", "Tests"],
+    ["documentation", "cat-docs", "Documentation"],
+    ["other", "cat-review", "Review"],
+  ])("maps category %s to its Keiko badge", (category, asset, alt) => {
+    const body = composeFindingBody(REAL_PROSE, MARKER, { ...CONTEXT, category });
+    expect(body.split("\n")[0]).toContain(commentChip(asset, alt));
+  });
+
+  it.each([
+    ["critical", "sev-critical", "Critical"],
+    ["high", "sev-major", "Major"],
+    ["medium", "sev-minor", "Minor"],
+    ["low", "sev-nit", "Nit"],
+  ])("maps severity %s to its Keiko badge", (severity, asset, alt) => {
+    const body = composeFindingBody(REAL_PROSE, MARKER, { ...CONTEXT, severity });
+    expect(body.split("\n")[0]).toContain(commentChip(asset, alt));
   });
 
   it("omits the location clause when no line is known", () => {
@@ -120,6 +153,8 @@ describe("composeFindingBody", () => {
     it("adds exactly the tags this module writes and no others", () => {
       const tags = [...document.matchAll(/<\/?[a-z!][^>]*>/g)].map((m) => m[0]);
       expect(tags).toEqual([
+        expect.stringMatching(/^<img .*cat-security\.svg.*>$/),
+        expect.stringMatching(/^<img .*sev-critical\.svg.*>$/),
         "<details>",
         "<summary>",
         "</summary>",
@@ -134,10 +169,9 @@ describe("composeIncompleteNotice", () => {
   const notice = composeIncompleteNotice("settlement.incomplete.coverage_gap", MARKER);
 
   it("is visually distinct from a defect finding", () => {
-    // Specimen ③'s chip pair, SHA-pinned, with the words in the alt text — and no finding ever
-    // opens with an image, which keeps the two composers' opening lines disjoint.
-    expect(notice.split("\n")[0]).toMatch(
-      /^<img src="https:\/\/raw\.githubusercontent\.com\/oscharko-dev\/Keiko-for-Quality\/[0-9a-f]{40}\/[^"]+\/coverage\.svg" height="22" alt="Coverage"> <img src="[^"]+\/sev-major\.svg" height="22" alt="Major">$/,
+    // Specimen ③'s chip pair, SHA-pinned, with the words in the alt text.
+    expect(notice.split("\n")[0]).toBe(
+      `${commentChip("coverage", "Coverage")} ${commentChip("sev-major", "Major")}`,
     );
     expect(notice).toContain("**This change was not fully reviewed.**");
   });

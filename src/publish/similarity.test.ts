@@ -396,6 +396,24 @@ describe("existing-side composition stripping", () => {
     );
     expect(found).toBe(true);
   });
+
+  it("strips only known legacy classification headers, not legitimate emphasized prose", () => {
+    const knownLegacy = "**CORRECTNESS · MAJOR**\nAlpha beta gamma delta epsilon";
+    const knownFound = findsSimilarOpenConversation(
+      candidate({ body: "Alpha beta gamma delta epsilon" }),
+      [thread({ body: knownLegacy })],
+      IDENTITY,
+    );
+    expect(knownFound).toBe(true);
+
+    const emphasizedProse = "**GENERAL · GUIDANCE**\nAlpha beta gamma";
+    const proseFound = findsSimilarOpenConversation(
+      candidate({ body: emphasizedProse }),
+      [thread({ body: emphasizedProse })],
+      IDENTITY,
+    );
+    expect(proseFound).toBe(true);
+  });
 });
 
 describe("zero-line anchors", () => {

@@ -561,8 +561,8 @@ describe("performLocalReview (issue #95)", () => {
 });
 
 /**
- * `--store` end to end on the LOCAL path (README's "Local runs": the mitigation for repeated runs
- * over unchanged content).
+ * `--store` end to end on the LOCAL path (`docs/operations.md#local-runs`: the mitigation for
+ * repeated runs over unchanged content).
  *
  * The block above proves `performLocalReview` behaves when no store is supplied. Nothing proved it
  * behaves when one IS: `baseRequest` never sets `cacheStore`, so `prepareMemoization` short-circuits

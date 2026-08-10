@@ -109,7 +109,7 @@ var CLOSED_RUNTIME_FACT_IDS = Object.freeze(
 
 // src/cache/review-cache.ts
 var SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
-var PUBLICATION_SEMANTICS = `v0.23.0-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}`;
+var PUBLICATION_SEMANTICS = `v0.23.0-finding-badges-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}`;
 var CACHE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 var PROTOCOLS = /* @__PURE__ */ new Set(["openai", "anthropic"]);
 var FIELD_SEPARATOR = "\0";
@@ -1616,29 +1616,37 @@ function escapeInline(text3) {
 
 // src/publish/presentation.ts
 var CATEGORIES = {
-  security: "Security",
-  bug: "Correctness",
-  performance: "Performance",
-  maintainability: "Maintainability",
-  test: "Tests",
-  documentation: "Documentation",
-  other: "Review"
+  security: { asset: "cat-security", label: "Security" },
+  bug: { asset: "cat-correctness", label: "Correctness" },
+  performance: { asset: "cat-performance", label: "Performance" },
+  maintainability: { asset: "cat-maintainability", label: "Maintainability" },
+  test: { asset: "cat-tests", label: "Tests" },
+  documentation: { asset: "cat-docs", label: "Documentation" },
+  other: { asset: "cat-review", label: "Review" }
 };
 var SEVERITIES = {
-  critical: "Critical",
-  high: "Major",
-  medium: "Minor",
-  low: "Nit"
+  critical: { asset: "sev-critical", label: "Critical" },
+  high: { asset: "sev-major", label: "Major" },
+  medium: { asset: "sev-minor", label: "Minor" },
+  low: { asset: "sev-nit", label: "Nit" }
 };
-function label(table, key, fallback) {
+function classificationChip(table, key, fallback) {
   if (key === void 0) return fallback;
   return table[key.toLowerCase()] ?? fallback;
 }
-var FALLBACK_CATEGORY = "Review";
-var FALLBACK_SEVERITY = "Minor";
+var FALLBACK_CATEGORY = { asset: "cat-review", label: "Review" };
+var FALLBACK_SEVERITY = { asset: "sev-minor", label: "Minor" };
 var ASSET_BASE = "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/6b59f533afef15820991b3a0470ddc22c6c6d436/.github/assets/kq";
 function assetChip(name, height, alt) {
   return `<img src="${ASSET_BASE}/${name}.svg" height="${String(height)}" alt="${alt}">`;
+}
+var COMMENT_CHIP_HEIGHT = 24;
+function classificationLine(category, severity) {
+  return `${assetChip(category.asset, COMMENT_CHIP_HEIGHT, category.label)} ${assetChip(
+    severity.asset,
+    COMMENT_CHIP_HEIGHT,
+    severity.label
+  )}`;
 }
 var MAX_TITLE_CHARS = 120;
 function splitTitle(prose2) {
@@ -1671,10 +1679,10 @@ function repairPrompt(context, title) {
   ].join("\n");
 }
 function composeFindingBody(sanitizedProse, marker, context) {
-  const category = label(CATEGORIES, context.category, FALLBACK_CATEGORY);
-  const severity = label(SEVERITIES, context.severity, FALLBACK_SEVERITY);
+  const category = classificationChip(CATEGORIES, context.category, FALLBACK_CATEGORY);
+  const severity = classificationChip(SEVERITIES, context.severity, FALLBACK_SEVERITY);
   const { title, body } = splitTitle(sanitizedProse);
-  const parts = [`\`${category.toUpperCase()} \xB7 ${severity.toUpperCase()}\``, ""];
+  const parts = [classificationLine(category, severity), ""];
   if (title !== "") parts.push(`**${title}**`, "");
   parts.push(
     body,
@@ -1711,10 +1719,13 @@ function gapLine(counts) {
 }
 function composeIncompleteNotice(reasonCode, marker, counts) {
   return [
-    // Specimen ③'s chip pair. "COVERAGE" is deliberately outside the CATEGORIES vocabulary
-    // above, and no finding opens with an image, so the two composers can never collide on
-    // their opening line — the invariant `isIncompleteNoticeBody` documents.
-    `${assetChip("coverage", 22, "Coverage")} ${assetChip("sev-major", 22, "Major")}`,
+    // Specimen ③'s chip pair. "COVERAGE" is deliberately outside the CATEGORIES vocabulary;
+    // the fixed notice sentence and marker keep this surface distinct from a defect finding.
+    `${assetChip("coverage", COMMENT_CHIP_HEIGHT, "Coverage")} ${assetChip(
+      "sev-major",
+      COMMENT_CHIP_HEIGHT,
+      "Major"
+    )}`,
     "",
     "**This change was not fully reviewed.**",
     "",
@@ -1784,7 +1795,7 @@ function countRows(counts) {
     ["Read-back failures", counts.readbackFailures],
     ["API failures", counts.apiFailures]
   ];
-  return rows.map(([label2, value]) => `| ${label2} | ${String(value)} |`);
+  return rows.map(([label, value]) => `| ${label} | ${String(value)} |`);
 }
 function budgetLine(budget) {
   if (budget.allotted === void 0) return void 0;
@@ -3187,20 +3198,47 @@ import { createHash as createHash6 } from "node:crypto";
 
 // src/engine/claim-decision-policy.ts
 var TEST_ISOLATION_EVIDENCE_POLICY = [
-  "Treat a dynamic import after a shown `beforeEach` module-registry reset as fresh; leave it silent.",
-  "Report only a missing, removed, late, wrong, or bypassed reset after tracing suite setup,",
-  "import timing, and shared state. Never invent an unshown reset helper."
+  "Test-isolation decision \u2014 SILENT (emit no claim): each case executes `vi.resetModules()`",
+  "immediately before its awaited dynamic import, whether directly in the test or through shown",
+  "per-case setup. That sequence loads a fresh module instance; never call its reset redundant or",
+  "insufficient, and never demand or invent a module clear/reset helper. REPORT: the reset is shown",
+  "missing, removed, late, or wrong after tracing suite setup and shared state. BYPASS (report): the",
+  "module under test or a shared-state dependency was imported at top level or cached before the",
+  "reset; unrelated framework or helper imports are not bypass evidence."
 ].join(" ");
 var REFERENCE_TRANSITION_EVIDENCE_POLICY = [
-  "At one action/dependency coordinate, one full 40-hex SHA to another remains immutable and is",
-  "clean by itself; shown local counterevidence still applies. Version comments do not prove remote",
-  "tag mapping. Review changed coordinates; report only SHA-to-tag/branch, repo-proven pin mismatch,",
-  "or shown sync-contract desync. Mutable references are `security`/`high`, including first-party",
-  "actions; never critical. Never invent remote mapping, validity, staleness, or cadence."
+  "Reference-transition decision \u2014 SILENT (emit no claim): at the same action/dependency coordinate,",
+  "one full 40-hex SHA or digest changes to another and no shown local counterevidence exists. An",
+  "adjacent version comment does not change that decision: never request remote tag verification or",
+  "claim that the comment and immutable pin need alignment. REPORT only SHA/digest-to-tag/branch, a",
+  "repo-proven pin mismatch, or shown sync-contract desync. Mutable references are `security`/`high`,",
+  "including first-party actions; never critical. Never invent remote mapping, validity, staleness,",
+  "or cadence."
+].join(" ");
+var BOUNDARY_OMISSION_EVIDENCE_POLICY = [
+  "Boundary/omission table \u2014 BOUNDS: compare empty, exact-boundary, and just-outside inputs after",
+  "runtime normalization against old behavior. CLEAR: report an explicit clear omitted from an optional",
+  "update only when shown consumer code preserves existing state on absence; without that consumer",
+  "evidence, leave silent."
+].join(" ");
+var WORKFLOW_TRUST_EVIDENCE_POLICY = [
+  "Privileged-workflow decision \u2014 REPORT `security`/`critical`: a `pull_request_target` or other",
+  "trusted-context workflow changes checkout from the trusted base SHA to the candidate head SHA",
+  "before install or execution, so candidate code runs with base-repository authority. SILENT: the",
+  "workflow keeps the trusted base checkout and only fetches candidate Git objects as review data."
+].join(" ");
+var DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY = [
+  "Diagnostic-context decision \u2014 SILENT: a catch block only adds an already-available non-secret",
+  "primitive field to structured log context and rethrows the identical error. REPORT only when",
+  "the added context can disclose a secret or payload, or the change replaces, wraps, or swallows",
+  "the thrown error."
 ].join(" ");
 var EXAMINER_CLAIM_DECISION_POLICY = [
   `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
-  `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`
+  `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
+  `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
+  `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
+  `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`
 ].join("\n");
 
 // src/engine/rule-file.ts
@@ -3286,10 +3324,8 @@ var CATCH_ALL_RULE = [
   "  primary key or unique constraint on the compared columns already rules out the collision you",
   "  are worried about. A cursor cannot skip or repeat a row on a column that cannot repeat; do not",
   "  ask for a tie-breaker it does not need.",
-  "- **before concluding a changed loop bound, index calculation, or slice endpoint is correct** \u2014",
-  "  walk the edge concretely: run n=0, n=1, and the last index through the new expression and",
-  "  compare each against the old one. An off-by-one survives every skim and dies on one concrete",
-  "  walk; do the walk before concluding, not after a doubt.",
+  `- **boundary and omitted-state transitions** \u2014 ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
+  `- **diagnostic context in error paths** \u2014 ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
   "  or termination can recommend a fix that weakens correct code instead of improving it.",
@@ -3384,6 +3420,8 @@ var CATCH_ALL_RULE = [
   "- low \u2014 genuine but minor; when tempted, report nothing instead.",
   "",
   "## Workflow and pipeline files",
+  "",
+  WORKFLOW_TRUST_EVIDENCE_POLICY,
   "",
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   "",
@@ -3828,7 +3866,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v4";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v9";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;
@@ -3932,6 +3970,8 @@ var EXAMINER_EVIDENCE_CONTRACT = [
   "state as their current contract unless shown evidence exposes a boundary that can violate it.",
   "A member actually added to a union, private state actually exported or leaked, or a caller-selected",
   "key shown reaching a prototype is evidence; a hypothetical future member or mutation is not.",
+  "A matching SILENT row below is terminal: discard any risk-map hypothesis about that shape and",
+  "emit no claim or verification request for it.",
   EXAMINER_CLAIM_DECISION_POLICY
 ].join("\n");
 function renderAnchorRanges(lines) {
@@ -6549,10 +6589,10 @@ function escapeForCodeSpan2(text3) {
 }
 function formatLineList(sites) {
   const lines = [...new Set(sites.map((site) => site.line))].sort((a, b) => a - b);
-  const label2 = lines.length === 1 ? "line" : "lines";
-  if (lines.length <= 1) return `${label2} ${String(lines[0] ?? "?")}`;
+  const label = lines.length === 1 ? "line" : "lines";
+  if (lines.length <= 1) return `${label} ${String(lines[0] ?? "?")}`;
   const last = lines.at(-1) ?? "?";
-  return `${label2} ${lines.slice(0, -1).join(", ")} and ${String(last)}`;
+  return `${label} ${lines.slice(0, -1).join(", ")} and ${String(last)}`;
 }
 function describePinDesync(desync, path) {
   const movedText = formatLineList(desync.movedSites);
@@ -7259,8 +7299,20 @@ function tokenOverlap(a, b) {
   const smaller = Math.min(a.size, b.size);
   return { score: smaller === 0 ? 0 : shared / smaller, shared };
 }
+var LEGACY_CATEGORY_LABELS = "SECURITY|CORRECTNESS|PERFORMANCE|MAINTAINABILITY|TESTS|DOCUMENTATION|REVIEW";
+var LEGACY_SEVERITY_LABELS = "CRITICAL|MAJOR|MINOR|NIT";
+var LEGACY_CLASSIFICATION_TEXT = `(?:${LEGACY_CATEGORY_LABELS}) \xB7 (?:${LEGACY_SEVERITY_LABELS})`;
+var LEGACY_HEADER_END = String.raw`[ \t]*\n?`;
+var LEGACY_CODE_SPAN_HEADER = new RegExp(
+  ["^`", LEGACY_CLASSIFICATION_TEXT, "`", LEGACY_HEADER_END].join(""),
+  "u"
+);
+var LEGACY_BOLD_HEADER = new RegExp(
+  [String.raw`^\*\*`, LEGACY_CLASSIFICATION_TEXT, String.raw`\*\*`, LEGACY_HEADER_END].join(""),
+  "u"
+);
 function stripComposedArtifacts(body) {
-  return clip2(body).replace(/^`[A-Z]+ · [A-Z]+`[ \t]*\n?/, "").replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "").replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<img[^>\n]*>/g, " ").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
+  return clip2(body).replace(LEGACY_CODE_SPAN_HEADER, "").replace(LEGACY_BOLD_HEADER, "").replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<img[^>\n]*>/g, " ").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
 }
 function similarByContent(a, b) {
   if (shareCodeBlock(a, b)) return true;
@@ -8322,8 +8374,8 @@ function renderRepositoryCandidate(headCommit, entries) {
     ""
   ];
   const rows = displayed.map((entry) => {
-    const label2 = labels.get(entry.path) ?? "H1";
-    return `${label2}:${String(entry.line)}| ${defuseCandidateData(entry.content)}`;
+    const label = labels.get(entry.path) ?? "H1";
+    return `${label}:${String(entry.line)}| ${defuseCandidateData(entry.content)}`;
   });
   return [...header2, ...rows, "END CANDIDATE REPOSITORY DATA", "</repository_evidence>"].join("\n");
 }
@@ -8338,8 +8390,8 @@ function renderRepositoryEvidence(context, maximumChars = MAX_REPOSITORY_EVIDENC
   }
   return "";
 }
-function labelledEvidence(label2, evidence) {
-  return evidence.text === "" ? evidence : { ...evidence, text: `${label2}:
+function labelledEvidence(label, evidence) {
+  return evidence.text === "" ? evidence : { ...evidence, text: `${label}:
 ${evidence.text}` };
 }
 function validLineRange(range) {
@@ -10591,7 +10643,7 @@ var SUBSTANTIATION_STRICTNESS_LEVELS = [
   "paranoid"
 ];
 var STRICTNESS_ENV_VAR = "KFQ_SUBSTANTIATION_STRICTNESS";
-var DEFAULT_STRICTNESS = "default";
+var DEFAULT_STRICTNESS = "paranoid";
 function isSubstantiationStrictness(value) {
   return SUBSTANTIATION_STRICTNESS_LEVELS.includes(value);
 }
@@ -10650,8 +10702,9 @@ function buildTruthPrompt(finding, evidence, dossier) {
     '"evidence_refs" contains 1-4 exact refs visible below. "lookup_terms" contains 0-3',
     "repository identifiers (3-80 characters), never paths or prose.",
     "",
-    "confirmed \u2014 evidence positively proves the exact condition, faulty behavior, and consequence",
-    "            claimed, plus that this PR introduced or worsened it. Cite H:n or D:H:n for an",
+    "confirmed \u2014 evidence positively proves the exact triggering condition and faulty code behavior",
+    "            claimed, plus that this PR introduced or worsened it. Impact, severity language,",
+    "            and remediation prose are not part of this truth decision. Cite H:n or D:H:n for an",
     "            added/changed HEAD line inside the finding range, or B:n for a removed BASE line.",
     "            A mapped D:B:n@H:m row binds that old line to deletion anchor m. The verifier",
     "            binds the exact state/change counterpart from the evidence; do not repeat both",
@@ -10691,7 +10744,8 @@ function buildTerminalTruthPrompt(finding, evidence) {
     `"reason_code" must be one of: ${SUBSTANTIATION_REASON_CODES.join(", ")}.`,
     '"evidence_refs" contains 1-4 exact refs visible below.',
     "",
-    "confirmed \u2014 positive evidence proves the exact defect, consequence, and PR causality.",
+    "confirmed \u2014 positive evidence proves the exact triggering condition, faulty code behavior,",
+    "            and PR causality. Do not require proof of impact, severity, or remediation prose.",
     "refuted \u2014 evidence proves the claim false, already handled, or not introduced by this PR.",
     "insufficient_evidence \u2014 the bounded evidence still cannot prove or refute the exact claim.",
     "confirmed uses direct_proof. refuted uses contradicted, already_handled, or not_introduced.",
@@ -11021,7 +11075,7 @@ function runtimeFactEvidenceSource(row) {
   if (match === null) return void 0;
   const fields = runtimeFactSourceMatch(match);
   if (fields === void 0) return void 0;
-  const [label2, version, id, side, displayPath, lineText] = fields;
+  const [label, version, id, side, displayPath, lineText] = fields;
   if (Number(version) !== CLOSED_RUNTIME_FACT_CATALOG_VERSION) return void 0;
   if (!Object.hasOwn(CLOSED_RUNTIME_FACT_CATALOG, id)) return void 0;
   const path = decodeEvidenceSourcePath(displayPath);
@@ -11029,7 +11083,7 @@ function runtimeFactEvidenceSource(row) {
   const line = Number(lineText);
   if (!Number.isSafeInteger(line) || line < 1) return void 0;
   return {
-    label: label2,
+    label,
     catalogVersion: CLOSED_RUNTIME_FACT_CATALOG_VERSION,
     id,
     path,
@@ -11059,9 +11113,9 @@ function directRefProvenance(reference, findingPath, basePath) {
   const base = /^(?:B|D:B):([1-9]\d*)(?:@H:[1-9]\d*)?$/u.exec(reference)?.[1];
   return base === void 0 ? void 0 : evidenceProvenanceKey(basePath, "B", base);
 }
-function sourceRefProvenance(label2, line, expectedSide, sources) {
-  if (label2 === void 0 || line === void 0) return void 0;
-  const source = sources.get(label2);
+function sourceRefProvenance(label, line, expectedSide, sources) {
+  if (label === void 0 || line === void 0) return void 0;
+  const source = sources.get(label);
   if (source === void 0 || expectedSide !== void 0 && expectedSide !== source.side)
     return void 0;
   return evidenceProvenanceKey(source.path, source.side, line);
@@ -11436,22 +11490,22 @@ function renderRetrievedSources(chunks, facts, firstReferenceNumber) {
   let sourceIndex = 0;
   for (const fact of facts) {
     lineCount += 1;
-    const label2 = `R${String(sourceIndex + firstReferenceNumber)}`;
+    const label = `R${String(sourceIndex + firstReferenceNumber)}`;
     rows.push(
-      `${label2} = CLOSED_RUNTIME_FACT v${String(fact.catalogVersion)} ${fact.id} AT ${fact.source.side === "H" ? "HEAD" : "BASE"} ${encodeEvidenceSourcePath(fact.source.path)} LINE ${String(fact.source.line)}`,
-      `${label2}:T:1| ${fact.statement}`
+      `${label} = CLOSED_RUNTIME_FACT v${String(fact.catalogVersion)} ${fact.id} AT ${fact.source.side === "H" ? "HEAD" : "BASE"} ${encodeEvidenceSourcePath(fact.source.path)} LINE ${String(fact.source.line)}`,
+      `${label}:T:1| ${fact.statement}`
     );
     sourceIndex += 1;
   }
   for (const chunk of chunks) {
     lineCount += chunk.lines.length;
     if (lineCount > MAX_RETRIEVAL_LINES) return void 0;
-    const label2 = `R${String(sourceIndex + firstReferenceNumber)}`;
+    const label = `R${String(sourceIndex + firstReferenceNumber)}`;
     rows.push(
-      `${label2} = ${chunk.side === "H" ? "HEAD" : "BASE"} ${encodeEvidenceSourcePath(chunk.path)}`
+      `${label} = ${chunk.side === "H" ? "HEAD" : "BASE"} ${encodeEvidenceSourcePath(chunk.path)}`
     );
     for (const line of chunk.lines)
-      rows.push(`${label2}:${chunk.side}:${String(line.line)}| ${line.text}`);
+      rows.push(`${label}:${chunk.side}:${String(line.line)}| ${line.text}`);
     sourceIndex += 1;
   }
   const rendered = rows.join("\n");
@@ -13377,9 +13431,9 @@ async function substantiateModelSurvivors(run2, context, modelFindings) {
     judgeable,
     (finding) => evidenceByJudgeable.get(finding) ?? "",
     deps,
-    // Production does not publish a candidate the verifier could not check. Unlike a silent drop,
-    // `outcome.undecided` is surfaced as incomplete by the caller below.
-    "paranoid",
+    // The same closed operating point is bound into qualification evidence. Production defaults
+    // fail-closed (`paranoid`); explicit sweep stages may vary it without creating a second path.
+    resolveSubstantiationStrictness(run2.request.env),
     remaining,
     evidenceRetriever(evidence, run2)
   );
