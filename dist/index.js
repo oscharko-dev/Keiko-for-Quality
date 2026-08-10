@@ -11898,7 +11898,8 @@ async function falsifyConfirmed(run2, evidence, truth) {
     });
   }
   if (context.kind === "insufficient") {
-    return decidedResult(void 0, "insufficient_evidence", run2.metrics, {
+    run2.metrics.confirmed += 1;
+    return decidedResult(run2.finding, "kept", run2.metrics, {
       stage: "challenge_retrieval",
       reasonCode: context.reasonCode
     });

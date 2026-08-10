@@ -3016,8 +3016,10 @@ function recordSubstantiation(
  * retrieval, and verifier behavior can change independently of the per-file generation digest, so
  * replay never saves this stage. Truth may request one deterministic lookup and then must make a
  * terminal decision. Every confirmed claim receives a separate contract challenge whose terms are
- * retrieved before the terminal adversarial Falsifier. A surviving or malformed Falsifier reaches
- * the independent Referee on both the direct and Truth-retrieval paths, within the four-call cap.
+ * retrieved before the terminal adversarial Falsifier. A challenge search with no novel evidence
+ * is the closed no-defeater result for an already direct-proven claim; an expanded challenge reaches
+ * the Falsifier. A surviving or malformed Falsifier reaches the independent Referee on both the
+ * direct and Truth-retrieval paths, within the four-call cap.
  * Wording is never repaired here: an unproven hypothesis leaves the cohort unchanged only in the
  * sense that no replacement is invented — under production's paranoid policy it is withheld.
  *

@@ -1069,7 +1069,8 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
       () => retrievedCaller(),
     );
 
-    expect(out.findings).toHaveLength(0);
+    expect(out.findings).toHaveLength(1);
+    expect(out.confirmed).toBe(1);
     expect(out.challengePlanned).toBe(1);
     expect(out.challengeRetrievalPerformed).toBe(1);
     expect(out.challengeExpanded).toBe(0);
@@ -1125,7 +1126,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     expect(out.challengeFailed).toBe(1);
   });
 
-  it("maps challenge no-match to insufficient and challenge failure to undecided", async () => {
+  it("keeps direct proof after a challenge no-match and maps challenge failure to undecided", async () => {
     const noMatchTraces: SubstantiationTerminalTrace[] = [];
     const noMatch = await substantiate(
       [finding("When an unseen caller passes seconds, the wait is short.")],
@@ -1149,7 +1150,9 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
       (trace) => failedTraces.push(trace),
     );
 
-    expect(noMatch.droppedInsufficientEvidence).toBe(1);
+    expect(noMatch.findings).toHaveLength(1);
+    expect(noMatch.confirmed).toBe(1);
+    expect(noMatch.droppedInsufficientEvidence).toBe(0);
     expect(noMatch.challengePlanned).toBe(1);
     expect(noMatch.challengeRetrievalPerformed).toBe(1);
     expect(noMatch.challengeNoMatches).toBe(1);
@@ -1165,7 +1168,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     expect(failed.retrievalFailed).toBe(0);
     expect(noMatchTraces[0]).toMatchObject({
       stage: "challenge_retrieval",
-      disposition: "insufficient_evidence",
+      disposition: "kept",
       reasonCode: "retrieval_no_match",
     });
     expect(failedTraces[0]).toMatchObject({
@@ -1457,6 +1460,8 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
 
     expect(noMatch.retrievalNoMatches).toBe(1);
     expect(noMatch.challengeNoMatches).toBe(0);
+    expect(noMatch.findings).toHaveLength(0);
+    expect(noMatch.droppedInsufficientEvidence).toBe(1);
     expect(failed.retrievalFailed).toBe(1);
     expect(failed.challengeFailed).toBe(0);
   });
