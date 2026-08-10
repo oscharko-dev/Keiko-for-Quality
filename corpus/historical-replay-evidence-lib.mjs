@@ -140,14 +140,15 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
 const MAX_ENDPOINT_REQUESTS_PER_CASE = 4;
 /**
- * Worst-case ledger reservation for one historical case. Substantiation can make four sequential
- * model calls, so budgeting only one 32k request per case makes dry-run affordability misleading.
+ * Conservative whole-case reservation. Production substantiation's current four-call request
+ * upper bound is below one million tokens; rounding upward keeps a thrown verifier chargeable
+ * without retiring the rest of the run's allowance.
  */
-export const HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE = 32_000 * MAX_ENDPOINT_REQUESTS_PER_CASE;
+export const HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE = 1_000_000;
 const CALIBRATED_POPULATION_RECORDS = 92;
 const CALIBRATED_CORROBORATED_CASES = 66;
-const MINIMUM_LOCALLY_BOUND_CASES = 62;
-const MINIMUM_ATTEMPTED_CASES = 62;
+const MINIMUM_LOCALLY_BOUND_CASES = 61;
+const MINIMUM_ATTEMPTED_CASES = 61;
 const CALIBRATED_HOLDOUT_FROM_PULL_REQUEST = 3037;
 const CALIBRATED_FIXED_CONFIRMED = 17;
 const CALIBRATED_REFUTED_CONFIRMED = 49;

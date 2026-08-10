@@ -195,8 +195,24 @@ test("CLI requires an explicit dry or execute mode and a visible token ceiling",
   );
 });
 
-test("the dry-run estimate reserves every possible substantiation request for one case", () => {
-  assert.equal(HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE, 4 * 32_000);
+test("the dry-run reserve safely covers one complete production substantiation path", () => {
+  assert.equal(HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE, 1_000_000);
+  const productionMaximum = Number(
+    execFileSync(
+      process.execPath,
+      [
+        "--import",
+        "./scripts/register-ts-hooks.mjs",
+        "--experimental-strip-types",
+        "--input-type=module",
+        "-e",
+        'import { MAX_SUBSTANTIATION_TOKENS_PER_FINDING as value } from "./src/publish/substantiate.ts"; process.stdout.write(String(value));',
+      ],
+      { cwd: process.cwd(), encoding: "utf8" },
+    ),
+  );
+  assert.ok(productionMaximum > 0);
+  assert.ok(productionMaximum <= HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE);
 });
 
 test("the replay model pin has no deviation escape hatch", () => {
@@ -432,6 +448,10 @@ function git(repo, args) {
 }
 
 function stubHistoricalChange(replayCase, overrides = {}) {
+  const anchorSource = (value) =>
+    Array.from({ length: replayCase.endLine }, (_entry, index) =>
+      index + 1 < replayCase.startLine ? "// context" : value,
+    ).join("\n") + "\n";
   return {
     headCommitOid: replayCase.originalCommitOid,
     baseCommitOid: "f".repeat(40),
@@ -445,8 +465,8 @@ function stubHistoricalChange(replayCase, overrides = {}) {
       "+export const exact = true;",
       "",
     ].join("\n"),
-    headSource: "export const exact = true;\n",
-    baseSource: "export const exact = false;\n",
+    headSource: anchorSource("export const exact = true;"),
+    baseSource: anchorSource("export const exact = false;"),
     ...overrides,
   };
 }
@@ -574,8 +594,8 @@ test("the local dry-run plan reports binding failures and budget without a verif
     maxTokens: 2 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
     readChangeAtCommits: (_repo, replayCase) =>
       stubHistoricalChange(replayCase, {
-        headSource: `// exact proposed source for ${replayCase.path}\n`,
-        baseSource: `// exact base source for ${replayCase.path}\n`,
+        headSource: `// context\n// exact proposed source for ${replayCase.path}\nreturn true;\n`,
+        baseSource: `// context\n// exact base source for ${replayCase.path}\nreturn false;\n`,
       }),
   });
   assert.deepEqual(
@@ -597,6 +617,26 @@ test("the local dry-run plan reports binding failures and budget without a verif
     },
   );
   assert.equal(plan.localUnmeasured.missingHistoricalBinding, 1);
+});
+
+test("the dry-run excludes an anchor the production evidence renderer cannot show whole", async () => {
+  const dataset = extractHistoricalReplayDataset(harvestDocument());
+  const plan = await buildHistoricalReplayPlan({
+    ...dataset,
+    repo: "/consumer",
+    maxTokens: 4 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
+    readChangeAtCommits: (_repo, replayCase) =>
+      stubHistoricalChange(replayCase, {
+        headSource: `header\nshort anchor\n${"x".repeat(501)}\n`,
+        baseSource: "header\nshort anchor\nshort base\n",
+      }),
+  });
+
+  assert.equal(plan.locallyBoundCases, 0);
+  assert.equal(plan.structurallyUnmeasuredCases, 4);
+  assert.equal(plan.localUnmeasured.evidenceUnavailable, 4);
+  assert.equal(plan.estimatedAffordableCases, 0);
+  assert.equal(plan.estimatedStartWorkTokens, 0);
 });
 
 function substantiationOutcome(findings, overrides = {}) {
@@ -1454,6 +1494,29 @@ test("invalid budget accounting exhausts the local ledger before another verifie
     undecided: 0,
     budgetBlocked: 0,
   });
+});
+
+test("one failed verifier retires a safe case allowance and later cases still run", async () => {
+  let calls = 0;
+  const result = await runHistoricalReplayVerification({
+    databaseIds: [1, 2],
+    cases: [boundReplayCase(1), boundReplayCase(2)],
+    maxTokens: 2 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE,
+    ...replayVerificationDependencies(async (findings) => {
+      calls += 1;
+      if (calls === 1) throw new Error("one verifier failed after an unreported attempt");
+      return substantiationOutcome(findings, { tokens: 100 });
+    }),
+  });
+
+  assert.equal(calls, 2);
+  assert.equal(result.report.accountedTokens, HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE + 100);
+  assert.equal(result.report.unmeasuredByReason.verificationError, 1);
+  assert.equal(result.report.unmeasuredByReason.budget, 0);
+  assert.deepEqual(result.decisions, [
+    { databaseId: 1, decision: "unmeasured" },
+    { databaseId: 2, decision: "keep" },
+  ]);
 });
 
 test("an outcome claiming more tokens than its supplied remainder aborts the replay", async () => {

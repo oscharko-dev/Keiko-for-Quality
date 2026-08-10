@@ -8,18 +8,18 @@ import {
 } from "./historical-replay-evidence-lib.mjs";
 import { productionHistoricalReplayEvidenceFixture } from "./historical-replay-evidence.test-fixture.mjs";
 
-test("accepts the production-shaped 92/66 replay with 62 bound and attempted cases", () => {
+test("accepts the production-shaped 92/66 replay with 61 measurable and attempted cases", () => {
   const evidence = productionHistoricalReplayEvidenceFixture();
 
   assert.equal(evidence.artifact, HISTORICAL_REPLAY_EVIDENCE_ARTIFACT);
   assert.equal(evidence.plan.populationRecords, 92);
   assert.equal(evidence.plan.corroboratedCases, 66);
-  assert.equal(evidence.plan.locallyBoundCases, 62);
-  assert.equal(evidence.execution.attemptedCases, 62);
+  assert.equal(evidence.plan.locallyBoundCases, 61);
+  assert.equal(evidence.execution.attemptedCases, 61);
   assert.deepEqual(evidence.execution.stageCounters, {
     confirmed: 21,
     truthRefuted: 30,
-    falsifierDefeated: 7,
+    falsifierDefeated: 6,
     droppedInsufficientEvidence: 4,
     retrievalRequested: 10,
     retrievalPerformed: 8,
@@ -78,17 +78,21 @@ test("rejects digest, aggregate arithmetic, population-floor, and extra-field ta
   assert.ok(validateHistoricalReplayEvidence(arithmetic).failures.includes("score_arithmetic"));
 
   const planFloor = productionHistoricalReplayEvidenceFixture();
-  planFloor.plan.locallyBoundCases = 61;
-  planFloor.plan.structurallyUnmeasuredCases = 5;
-  planFloor.plan.estimatedStartWorkTokens = 61 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE;
-  planFloor.plan.localUnmeasured.sourceUnavailable = 5;
-  planFloor.budget.estimatedStartWorkTokens = 61 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE;
+  planFloor.plan.locallyBoundCases = 60;
+  planFloor.plan.structurallyUnmeasuredCases = 6;
+  planFloor.plan.estimatedAffordableCases = 60;
+  planFloor.plan.estimatedCostExcessCases = 0;
+  planFloor.plan.estimatedStartWorkTokens = 60 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE;
+  planFloor.plan.estimatedMaximumEndpointRequests = 240;
+  planFloor.plan.localUnmeasured.evidenceUnavailable = 2;
+  planFloor.budget.estimatedStartWorkTokens = 60 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE;
+  planFloor.budget.estimatedMaximumEndpointRequests = 240;
   assert.ok(validateHistoricalReplayEvidence(planFloor).failures.includes("plan_population_floor"));
 
   const executionFloor = productionHistoricalReplayEvidenceFixture();
-  executionFloor.execution.attemptedCases = 61;
+  executionFloor.execution.attemptedCases = 60;
   executionFloor.execution.estimatedAttemptedTokens =
-    61 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE;
+    60 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE;
   assert.ok(
     validateHistoricalReplayEvidence(executionFloor).failures.includes(
       "execution_population_floor",
