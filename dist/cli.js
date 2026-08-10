@@ -2022,9 +2022,16 @@ var EMPTY_LOOKUP = {
   eligiblePaths: /* @__PURE__ */ new Set(),
   contextInvalidated: 0
 };
+var EMPTY_VERDICT_CONTEXT_DOMAIN = "keiko-for-quality.cache.empty-verdict-context/v1";
+function cacheContextDigest(pathSetDigest, contextDigest, findings) {
+  if (findings.length > 0) return contextDigest ?? pathSetDigest;
+  if (contextDigest === void 0) return pathSetDigest;
+  const material = [EMPTY_VERDICT_CONTEXT_DOMAIN, pathSetDigest, contextDigest].join("\0");
+  return createHash3("sha256").update(material, "utf8").digest("hex");
+}
 function contextMatches(entry, path, pathSetDigest, contextDigests) {
-  const expected = entry.findings.length === 0 ? pathSetDigest : contextDigests?.get(path);
-  return entry.prPathSetDigest === (expected ?? pathSetDigest);
+  const expected = cacheContextDigest(pathSetDigest, contextDigests?.get(path), entry.findings);
+  return entry.prPathSetDigest === expected;
 }
 function lookupMemoized(store, inventory, ruleDigest, engineDigest, config, pathSetDigest, contextDigests) {
   if (store === void 0 || engineDigest === void 0) return EMPTY_LOOKUP;
@@ -2078,10 +2085,6 @@ function findingsByPath(findings) {
   }
   return byPath;
 }
-function cacheContextDigest(inputs, path, pathFindings) {
-  if (pathFindings.length === 0) return inputs.pathSetDigest;
-  return inputs.contextDigests?.get(path) ?? inputs.pathSetDigest;
-}
 function buildNewEntries(inputs) {
   let model;
   try {
@@ -2111,9 +2114,14 @@ function buildNewEntries(inputs) {
       headBlob: item.headBlob,
       ruleDigest: inputs.ruleDigest,
       engineDigest: inputs.engineDigest,
-      // Positive hypotheses can be reverified against current repository context on replay. An
-      // empty result cannot, so it deliberately keeps the conservative whole-PR path-set stamp.
-      prPathSetDigest: cacheContextDigest(inputs, path, pathFindings),
+      // Positive hypotheses use their narrow prompt-context identity. Empty single-shot results
+      // cannot be reverified, so they bind that identity together with the whole reviewed path set;
+      // agentic results have no per-path identity and retain the historical scalar.
+      prPathSetDigest: cacheContextDigest(
+        inputs.pathSetDigest,
+        inputs.contextDigests?.get(path),
+        pathFindings
+      ),
       // Stamped from the constant rather than passed in: only this build knows which publication
       // contract produced these findings, and an entry that lied about it would be replayed by a
       // build whose sanitizer disagrees with the body it stored.
@@ -3603,7 +3611,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v2";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v3";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;
@@ -3699,6 +3707,18 @@ function roleContract(role) {
     "housekeeping, coverage wishes, or a pre-existing issue unrelated to the change."
   ].join("\n");
 }
+var EXAMINER_EVIDENCE_CONTRACT = [
+  "Before emitting each claim, actively try to disprove it against the shown current source. Omit",
+  "a claim that asks for a field, guard, import, fallback, or check already present, or whose",
+  "consequence requires an unshown caller, mutation, input, or future contract change.",
+  "Treat non-nullable typed parameters, closed unions, literal-initialized values, and module-private",
+  "state as their current contract unless shown evidence exposes a boundary that can violate it.",
+  "A member actually added to a union, private state actually exported or leaked, or a caller-selected",
+  "key shown reaching a prototype is evidence; a hypothetical future member or mutation is not.",
+  "A syntactically complete 40-hex action or dependency SHA is immutable for this review. Report a",
+  "shown SHA-to-tag/branch regression or visible in-repository pin mismatch, but do not invent remote",
+  "commit validity, tag-to-SHA identity, staleness, or a periodic-update requirement."
+].join("\n");
 function renderAnchorRanges(lines) {
   const sorted = [...new Set(lines)].sort((left, right) => left - right);
   const first = sorted[0];
@@ -3742,6 +3762,8 @@ function buildExaminerPrompt(role, context, risks, evidence) {
   return {
     system: [
       roleContract(role),
+      "",
+      EXAMINER_EVIDENCE_CONTRACT,
       ...applicablePathRuleBlock(context),
       "",
       "A claim must state one concrete imperative action (at most 100 characters), a reachable",
@@ -5142,6 +5164,7 @@ async function planRisks(state, context) {
 async function examine(state, dispatch, context, risks, role, seedOffset) {
   const prompt = buildExaminerPrompt(role, context, risks, { view: evidenceView(dispatch) });
   const result = await callStage(state, prompt, state.seed + seedOffset);
+  if (result.kind === "budget_blocked") state.mandatoryBudgetBlocked = true;
   if (result.kind !== "success") return void 0;
   const claims = parseStructuredClaims(result.content, new Set(dispatch.allowedAnchors));
   if (claims === void 0) return void 0;
@@ -5211,18 +5234,27 @@ function unionComments(first, second) {
 function coverageEntries(paths) {
   return [...paths].map((path) => ({ path }));
 }
+function stagedRunStatus(state) {
+  if (state.mandatoryBudgetBlocked) return "budget_exceeded";
+  if (state.warnings.length === 0) return "success";
+  return "completed_with_errors";
+}
 function assembleStdout(state, dispatches, startedMs) {
   const selected = [...new Set(state.options.expectedReviewablePaths)];
   const failed = new Set(state.warnings.map((warning) => warning.file));
   const completed = dispatches.map((dispatch) => dispatch.path).filter((path) => !failed.has(path));
+  const budgetExceeded = state.mandatoryBudgetBlocked;
   return JSON.stringify({
-    status: state.warnings.length === 0 ? "success" : "completed_with_errors",
+    // Match the engine result contract: a budget stop overrides warning-derived statuses, while
+    // the manifest below still reports exactly which file dispatches completed or failed.
+    status: stagedRunStatus(state),
     summary: {
       files_reviewed: dispatches.length,
       comments: state.comments.length,
       total_tokens: state.ledger.spent,
       input_tokens: state.ledger.prompt,
       output_tokens: state.ledger.completion,
+      budget_exceeded: budgetExceeded,
       elapsed: `${String(Math.max(1, Math.round((Date.now() - startedMs) / 1e3)))}s`
     },
     tool_calls: { total: 0, by_tool: {} },
@@ -5255,7 +5287,8 @@ function initialRunState(options2, rule, fetchImpl, token) {
     warnings: [],
     plannerFallbacks: 0,
     coreExaminations: 0,
-    integrationExaminations: 0
+    integrationExaminations: 0,
+    mandatoryBudgetBlocked: false
   };
 }
 function warnMissingDispatches(state, paths) {

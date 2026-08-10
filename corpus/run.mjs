@@ -9,7 +9,13 @@ import { fileURLToPath } from "node:url";
 import { buildBinding } from "./binding.mjs";
 import { classifyMeasurement } from "./measurement.mjs";
 import { FIXED_PATH } from "./fixed-path.mjs";
-import { engineArguments, engineEvidence, skipRetryAfterBudgetStop } from "./engine-invocation.mjs";
+import {
+  engineArguments,
+  engineEvidence,
+  scoreCleanCase,
+  singleShotCorpusConcurrency,
+  skipRetryAfterBudgetStop,
+} from "./engine-invocation.mjs";
 import { evidenceShapeCounts, statesTriggeringCondition } from "./evidence-shape.mjs";
 import { checkQualificationModel, DEVIATION_ENV } from "./qualification-model.mjs";
 import { CASES } from "./cases.mjs";
@@ -56,8 +62,8 @@ const execFileAsync = promisify(execFile);
  * Measures the reviewer against the seeded-defect corpus.
  *
  * This is the only thing that turns "the reviews are good" into a claim anyone can check. It runs
- * the real pinned engine against a real model — no mocks — because the question it answers is about
- * judgement, and judgement is exactly what a mock cannot stand in for.
+ * the release-selected generation workflow against a real model — no mocks — because the question
+ * it answers is about judgement, and judgement is exactly what a mock cannot stand in for.
  *
  * It reports four things separately, because they fail for different reasons and a single number
  * would hide which one moved:
@@ -452,8 +458,8 @@ async function planCaseFindings(testCase, findings) {
  * Motivated the same day it was built (2026-08-07): the agentic loop spent 2.17M tokens against a
  * 1.27M allotment on this product's own pull request and settled coverage_gap twice, and the
  * single-shot smoke on the same commit ran complete at 132k. Recall is the open question, and this
- * branch is what lets the 32-case corpus answer it on the same measurement basis as every
- * qualification before it.
+ * branch is what lets the current corpus answer it with the same fixtures, graders, and publication
+ * gates as every qualification before it.
  */
 async function runSingleShotForCorpus(dir, seed, budgetTokens) {
   const git = (args) =>
@@ -482,7 +488,7 @@ async function runSingleShotForCorpus(dir, seed, budgetTokens) {
         model: process.env.OCR_LLM_MODEL ?? "",
         tokenEnvName: "OCR_LLM_TOKEN",
         language: "English",
-        concurrency: 2,
+        concurrency: singleShotCorpusConcurrency(budgetTokens),
         fileTimeoutSeconds: 180,
         reviewTimeoutSeconds: CORPUS_REVIEW_TIMEOUT_SECONDS,
         tokenBudget: allotted,
@@ -751,11 +757,11 @@ function scoreOne(testCase, result, plan) {
   }
 
   if (testCase.defect === null) {
+    const verdict = scoreCleanCase(result, testCase.budgetTokens, published.length);
     return {
       ...base,
       kind: "precision",
-      pass: published.length === 0,
-      detail: published.length === 0 ? "silent" : `${String(published.length)} unwanted finding(s)`,
+      ...verdict,
     };
   }
 

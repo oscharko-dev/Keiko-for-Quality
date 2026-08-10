@@ -1,6 +1,6 @@
 /**
- * The two decisions `corpus/run.mjs` makes around every engine invocation, extracted as pure
- * functions so `node --test` can hold them without spawning the script (whose import runs the
+ * The budget-sensitive decisions `corpus/run.mjs` makes around every engine invocation, extracted
+ * as pure functions so `node --test` can hold them without spawning the script (whose import runs the
  * harness — the same reason `rule-source.mjs` exists as its own module).
  *
  * Both exist for the budget-pressure precision cases (cycle 2 of the 2026-08-05 optimization
@@ -34,6 +34,18 @@ export function engineArguments(rulePath, budgetTokens = undefined) {
 }
 
 /**
+ * The staged runner's dispatch width for one corpus case.
+ *
+ * This is the same load-bearing distinction `engineArguments` makes for the classic engine above:
+ * a budget-pressure case must dispatch sequentially so one request can book its spend before the
+ * next file decides whether any budget remains. Ordinary cases retain the staged runner's existing
+ * width of two, preserving their recorded measurement basis.
+ */
+export function singleShotCorpusConcurrency(budgetTokens = undefined) {
+  return budgetTokens === undefined ? 2 : 1;
+}
+
+/**
  * Whether the harness's one status-triggered retry must be skipped for this result.
  *
  * Production never re-runs a budget-stopped attempt (`engine.resume_skipped_budget_exceeded`,
@@ -49,6 +61,30 @@ export function engineArguments(rulePath, budgetTokens = undefined) {
  */
 export function skipRetryAfterBudgetStop(result, budgetTokens = undefined) {
   return budgetTokens !== undefined && result?.summary?.budget_exceeded === true;
+}
+
+/**
+ * Scores the clean half of a corpus case, including the budget-pressure precondition.
+ *
+ * Silence is evidence of precision only after the condition the case claims to measure actually
+ * occurred. A budgeted run that never reports its budget stop is therefore a failed measurement,
+ * even when it happened to emit no finding; crediting that silence would turn a broken instrument
+ * into a promotion pass.
+ */
+export function scoreCleanCase(result, budgetTokens, publishedFindingCount) {
+  if (!Number.isSafeInteger(publishedFindingCount) || publishedFindingCount < 0) {
+    throw new TypeError("published finding count must be a non-negative safe integer");
+  }
+  if (budgetTokens !== undefined && result?.summary?.budget_exceeded !== true) {
+    return { pass: false, detail: "UNMEASURED: budget pressure did not trigger" };
+  }
+  return {
+    pass: publishedFindingCount === 0,
+    detail:
+      publishedFindingCount === 0
+        ? "silent"
+        : `${String(publishedFindingCount)} unwanted finding(s)`,
+  };
 }
 
 /**

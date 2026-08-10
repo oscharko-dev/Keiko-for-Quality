@@ -43,7 +43,7 @@ const ISOLATED_CONTEXT: GenerationContext = {
 
 describe("risk planner", () => {
   it("pins the manually bumped cache identity", () => {
-    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v2");
+    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v3");
   });
 
   it("sees the complete qualified rule but never receives the whole file", () => {
@@ -108,6 +108,24 @@ describe("focused examiners", () => {
       expect(prompt.system).toContain("Reject prefix-only token comparisons on this path.");
       expect(prompt.system).toContain("even when the risk map is empty or missed it");
       expect(prompt.user).toContain("<untrusted_risk_map_json>\n[]");
+    }
+  });
+
+  it("gives both mandatory examiners the same contradiction and contract checks", () => {
+    for (const role of [CORE_ROLE, INTEGRATION_ROLE] as const) {
+      const prompt = buildExaminerPrompt(role, ISOLATED_CONTEXT, [], { view: "evidence" });
+      expect(prompt.system).toContain(
+        "actively try to disprove it against the shown current source",
+      );
+      expect(prompt.system).toContain("field, guard, import, fallback, or check already present");
+      expect(prompt.system).toContain("non-nullable typed parameters, closed unions");
+      expect(prompt.system).toContain("private state actually exported or leaked");
+      expect(prompt.system).toContain("caller-selected");
+      expect(prompt.system).toContain("key shown reaching a prototype is evidence");
+      expect(prompt.system).toContain("40-hex action or dependency SHA is immutable");
+      expect(prompt.system).toContain("shown SHA-to-tag/branch regression");
+      expect(prompt.system).toContain("visible in-repository pin mismatch");
+      expect(prompt.system).toContain("do not invent remote");
     }
   });
 

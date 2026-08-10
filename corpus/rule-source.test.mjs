@@ -23,9 +23,9 @@ test("builds the committed corpus profile through the production loader", async 
 
 // Release criterion for v0.10.0 (#26): the qualification run must exercise a profile that
 // carries pathInstructions, so the shipped rule shape — including the #44 section — is what the
-// corpus measures. The entries in corpus/profile.json are deliberately neutral to the 32 cases:
-// none of the seeded defects hinges on either instruction, so recall/precision stay comparable
-// across releases while the rendering path is genuinely executed.
+// corpus measures. The entries in corpus/profile.json do not encode any individual fixture's
+// expected verdict, so the rendering path is genuinely executed without turning a case's answer
+// into profile policy.
 test("the corpus profile renders its path-scoped guidance into the rule", async () => {
   const document = await generateRuleDocument(PROFILE_TEXT);
   const rule = JSON.parse(document).rules[0].rule;

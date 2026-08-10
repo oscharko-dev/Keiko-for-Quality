@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
+import { CASES } from "./cases.mjs";
 import { FIXED_PATH } from "./fixed-path.mjs";
 import { registerTsExtensionHooks } from "./rule-source.mjs";
 import {
@@ -63,6 +64,26 @@ function fixture() {
   return { repo, base, head };
 }
 
+function caseFixture(testCase, writeFixture = write) {
+  const repo = mkdtempSync(join(tmpdir(), `kfq-corpus-case-${testCase.id}-`));
+  try {
+    git(repo, ["init", "-q"]);
+    for (const file of testCase.files) writeFixture(repo, file.path, file.base);
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "base"]);
+    const base = git(repo, ["rev-parse", "HEAD"]);
+
+    for (const file of testCase.files) writeFixture(repo, file.path, file.head);
+    git(repo, ["add", "."]);
+    git(repo, ["commit", "-qm", "head"]);
+    const head = git(repo, ["rev-parse", "HEAD"]);
+    return { repo, base, head };
+  } catch (error) {
+    rmSync(repo, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 test("the corpus deadline is one real absolute review boundary", () => {
   assert.equal(corpusReviewDeadlineMs(10_000), 10_000 + CORPUS_REVIEW_TIMEOUT_SECONDS * 1_000);
   assert.throws(() => corpusReviewDeadlineMs(Number.NaN), /clock/u);
@@ -85,6 +106,23 @@ test("staged binding ignores a fetched but unused classic engine", () => {
     }),
     "/tmp/ocr",
   );
+});
+
+test("a corpus case repository is removed when fixture construction fails", () => {
+  let createdRepo;
+  assert.throws(
+    () =>
+      caseFixture(
+        { id: "cleanup-failure", files: [{ path: "src/a.ts", base: "old\n", head: "new\n" }] },
+        (repo) => {
+          createdRepo = repo;
+          throw new Error("fixture write failed");
+        },
+      ),
+    /fixture write failed/u,
+  );
+  assert.notEqual(createdRepo, undefined);
+  assert.equal(existsSync(createdRepo), false);
 });
 
 test("staged corpus dispatch uses production structural classification, not matching globs", async () => {
@@ -118,5 +156,58 @@ test("staged corpus dispatch uses production structural classification, not matc
     assert.deepEqual(result.mechanicallyCleanPaths, []);
   } finally {
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The v0.23.0 qualification first discovered an unclassified `package.json` in its final case,
+ * after the preceding cases had already spent 584,237 model tokens. Build every fixture through
+ * production Inventory here, for free, so a future path/profile gap fails `verify` before a paid
+ * run. Requiring at least one dispatch also preserves this case set's no-zero-token rule.
+ */
+test("every corpus fixture is classified and dispatches reviewable content before a paid run", async () => {
+  const profileSource = readFileSync(new URL("./profile.json", import.meta.url), "utf8");
+  const profile = loadReviewProfile(profileSource);
+  for (const testCase of CASES) {
+    const { repo, base, head } = caseFixture(testCase);
+    try {
+      const pair = { base: commitSha(base), head: commitSha(head), mergeBase: commitSha(base) };
+      const result = await singleShotCorpusDispatch({
+        repositoryPath: repo,
+        pair,
+        profile,
+        pathValue: FIXED_PATH,
+        renameDetectionPercent: 50,
+        diagnostics: createSilentDiagnostics(),
+      });
+      assert.ok(
+        result.expectedReviewablePaths.length > 0,
+        `${testCase.id} would spend zero tokens because it dispatches no reviewable path`,
+      );
+      if (testCase.id === "clean-version-bump-twin") {
+        assert.deepEqual(result.expectedReviewablePaths, ["src/examplepkg/version.ts"]);
+        assert.deepEqual(result.mechanicallyCleanPaths, []);
+
+        const incompleteProfile = JSON.parse(profileSource);
+        incompleteProfile.excluded = incompleteProfile.excluded.filter(
+          (entry) => entry.pattern !== "**/package.json",
+        );
+        await assert.rejects(
+          singleShotCorpusDispatch({
+            repositoryPath: repo,
+            pair,
+            profile: loadReviewProfile(JSON.stringify(incompleteProfile)),
+            pathValue: FIXED_PATH,
+            renameDetectionPercent: 50,
+            diagnostics: createSilentDiagnostics(),
+          }),
+          /unclassified changed path/u,
+        );
+      }
+    } catch (error) {
+      throw new Error(`${testCase.id}: ${String(error)}`, { cause: error });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   }
 });

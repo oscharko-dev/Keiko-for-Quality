@@ -303,3 +303,91 @@ test("cleared-list-omitted-from-update declares its return type as optional cont
     "the declaration must be identical on both sides, so the graded diff stays the seeded change alone",
   );
 });
+
+function caseById(id) {
+  const testCase = CASES.find((entry) => entry.id === id);
+  assert.ok(testCase !== undefined, `missing corpus case: ${id}`);
+  return testCase;
+}
+
+function changedSource(id) {
+  return caseById(id)
+    .files.filter((file) => file.base !== file.head)
+    .map((file) => file.head)
+    .join("\n");
+}
+
+function headSource(id, path) {
+  const file = caseById(id).files.find((entry) => entry.path === path);
+  assert.ok(file !== undefined, `${id} is missing ${path}`);
+  return file.head;
+}
+
+/**
+ * The v0.23 qualification exposed a fixture defect rather than reviewer noise: both supposedly
+ * clean additions created a fresh identifier from only eight UUID hex characters. A collision
+ * warning against newly introduced 32-bit identifiers is defensible, so those cases cannot grade
+ * silence until the additions keep the complete UUID. The authentication-prefix case remains the
+ * positive twin: truncating a secret comparison is still the seeded defect the reviewer must find.
+ */
+test("clean UUID additions retain full entropy while the prefix-auth defect remains seeded", () => {
+  assert.match(
+    headSource("clean-import-present-above", "src/ids.ts"),
+    /export function traceId\(\): string \{\s+return "trace-" \+ randomUUID\(\);/u,
+  );
+  assert.match(
+    headSource("budget-starved-clean-neighbours", "src/trace-context.ts"),
+    /export function hopId\(context: TraceContext\): string \{\s+return context\.id \+ "\." \+ randomUUID\(\);/u,
+  );
+  assert.match(
+    changedSource("auth-prefix-compare"),
+    /provided\.slice\(0, 8\) === expected\.slice\(0, 8\)/u,
+    "the true-positive prefix comparison must remain in the recall corpus",
+  );
+});
+
+/**
+ * Existing paid cases are the retention fixtures for the examiner's new evidence contract. Each
+ * clean shape has a nearby positive twin where the missing fact is actually visible; pinning both
+ * sides prevents a future clean-case calibration from quietly deleting the corresponding recall
+ * question instead of teaching the examiner to distinguish it.
+ */
+test("precision counterexamples retain their visible true-positive twins", () => {
+  const cleanPinUpdate = changedSource("clean-workflow-pin-update");
+  assert.match(
+    cleanPinUpdate,
+    /actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4\.2\.2/u,
+    "the clean pin update must bind the real v4.2.2 tag commit",
+  );
+  assert.match(
+    caseById("clean-workflow-pin-update").files[0]?.base ?? "",
+    /actions\/checkout@d632683dd7b4114ad314bca15554477dd762a938 # v4\.2\.0/u,
+    "the clean pin update must begin at the real v4.2.0 tag commit",
+  );
+  assert.match(changedSource("workflow-unpinned-action"), /actions\/setup-node@v4/u);
+
+  assert.match(changedSource("clean-literal-is-in-union"), /type Mode = "strict" \| "lenient"/u);
+  assert.match(
+    changedSource("status-union-widened-consumer-missed"),
+    /type CandidateStatus = "draft" \| "needs-review" \| "approved" \| "rejected"/u,
+  );
+
+  assert.match(changedSource("clean-refactor"), /new Map<string, string>/u);
+  assert.match(changedSource("prototype-lookup-refactor"), /LABELS\[kind\]/u);
+
+  assert.match(changedSource("clean-error-context-added"), /correlationId: client\.id, attempt/u);
+  assert.match(
+    changedSource("secret-in-log"),
+    /logger\.info\("auth attempt", \{ user, token \}\)/u,
+  );
+
+  const desynchronized = changedSource("pinned-reference-duplicate-desync");
+  const visiblePins = [
+    ...desynchronized.matchAll(/(?:ACTION_PIN:\s*|actions\/checkout@)([0-9a-f]{40})/gu),
+  ].map((match) => match[1]);
+  assert.equal(
+    new Set(visiblePins).size,
+    2,
+    "the true-positive workflow must retain two visibly different full-SHA pins",
+  );
+});

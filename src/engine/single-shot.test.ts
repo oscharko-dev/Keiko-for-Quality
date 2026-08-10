@@ -9,7 +9,7 @@ import type { RuntimeConfig } from "../config/runtime.js";
 import { commitSha } from "../core/brands.js";
 import { createSilentDiagnostics } from "../diagnostics/sink.js";
 import { buildInventory, type ReviewPair } from "../inventory/inventory.js";
-import { GENERATION_COMPLETION_LIMIT } from "./generation-workflow.js";
+import { GENERATION_COMPLETION_LIMIT, generationRequestUpperBound } from "./generation-workflow.js";
 import { parseEngineResult } from "./result.js";
 import type { EngineRunOptions } from "./run.js";
 import { sanitizeFindingBody } from "../publish/sanitize.js";
@@ -649,6 +649,84 @@ describe("runSingleShotEngine staged generation", () => {
     expect(parsed.warnings[0]?.file).toBe("src/a.ts");
     expect(seen).toHaveLength(3); // planner + two core attempts
     expect(output.wireTokens).toBeGreaterThan(110); // unknown retry spend is conservatively charged
+  });
+
+  it("reports an atomically blocked generation budget through the engine result contract", async () => {
+    const { repo, pair } = await makeRepo("kfq-budget-blocked-", {
+      "src/a.ts": "keep\nconst local = 1;\n",
+    });
+    let calls = 0;
+    const diagnostics = createSilentDiagnostics();
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo, allottedBudget: 0 }),
+      diagnostics,
+      (() => {
+        calls += 1;
+        return Promise.reject(new Error("a blocked request must not reach the endpoint"));
+      }) as typeof fetch,
+    );
+
+    const wire = JSON.parse(output.stdout) as {
+      status?: unknown;
+      summary?: { budget_exceeded?: unknown };
+    };
+    expect(wire.status).toBe("budget_exceeded");
+    expect(wire.summary?.budget_exceeded).toBe(true);
+    expect(calls).toBe(0);
+    expect(output.wireTokens).toBe(0);
+
+    const parsed = parseEngineResult(output.stdout);
+    expect(parsed.status).toBe("budget_exceeded");
+    expect(parsed.budgetExceeded).toBe(true);
+    expect(parsed.terminalState).toBe("partial");
+    expect(
+      diagnostics.drain().find((record) => record.code === "model.usage")?.counts?.budget_blocked,
+    ).toBeGreaterThan(0);
+  });
+
+  it("keeps a planner-only budget fallback complete when the mandatory examiner still runs", async () => {
+    const { repo, pair } = await makeRepo("kfq-planner-budget-fallback-", {
+      "src/a.ts": "keep\nconst local = 1;\n",
+    });
+    const probeSeen: CapturedBody[] = [];
+    await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchStub(
+        (system) =>
+          stage(system) === "planner"
+            ? { status: 200, reply: "not-json" }
+            : { status: 200, reply: "[]" },
+        probeSeen,
+      ),
+    );
+    expect(probeSeen).toHaveLength(2);
+    const requestBound = (body: CapturedBody): number => {
+      const system = body.messages?.find((message) => message.role === "system")?.content ?? "";
+      const user = body.messages?.find((message) => message.role === "user")?.content ?? "";
+      return generationRequestUpperBound(system, user);
+    };
+    const plannerBound = requestBound(probeSeen[0] ?? {});
+    const coreBound = requestBound(probeSeen[1] ?? {});
+    expect(plannerBound).toBeGreaterThan(coreBound);
+
+    const seen: CapturedBody[] = [];
+    const diagnostics = createSilentDiagnostics();
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo, allottedBudget: coreBound }),
+      diagnostics,
+      fetchStub(() => ({ status: 200, reply: "[]" }), seen),
+    );
+
+    expect(seen).toHaveLength(1);
+    expect(stage(seen[0]?.messages?.[0]?.content ?? "")).toBe("core");
+    const parsed = parseEngineResult(output.stdout);
+    expect(parsed.status).toBe("success");
+    expect(parsed.budgetExceeded).toBe(false);
+    expect(parsed.terminalState).toBe("complete");
+    expect(
+      diagnostics.drain().find((record) => record.code === "model.usage")?.counts?.budget_blocked,
+    ).toBe(1);
   });
 
   it("honors the configured review deadline before starting any model request", async () => {
