@@ -3204,7 +3204,9 @@ var TEST_ISOLATION_EVIDENCE_POLICY = [
   "insufficient, and never demand or invent a module clear/reset helper. REPORT: the reset is shown",
   "missing, removed, late, or wrong after tracing suite setup and shared state. BYPASS (report): the",
   "module under test or a shared-state dependency was imported at top level or cached before the",
-  "reset; unrelated framework or helper imports are not bypass evidence."
+  "reset; unrelated framework or helper imports are not bypass evidence. A removed per-case reset",
+  "before a later dynamic import is reportable when an earlier case imported the same mutable",
+  "module: the later import reuses that earlier module instance and its state."
 ].join(" ");
 var REFERENCE_TRANSITION_EVIDENCE_POLICY = [
   "Reference-transition decision \u2014 SILENT (emit no claim): at the same action/dependency coordinate,",
@@ -3233,12 +3235,28 @@ var DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY = [
   "the added context can disclose a secret or payload, or the change replaces, wraps, or swallows",
   "the thrown error."
 ].join(" ");
+var TRIGGER_AND_GUARD_EVIDENCE_POLICY = [
+  "Trigger/guard decision \u2014 UNIT: when a changed value feeds a unit-sensitive API, trace every",
+  "shown producer branch and state the exact branch whose units mismatch; a mixed-unit producer",
+  "cannot share one conversion silently. GUARD: when a range or termination guard is removed on a",
+  "claim that no caller reaches it, check every shown caller. Report when one supplies the rejected",
+  "value, naming that trigger and the resulting wrong behavior; without shown producer or caller",
+  "evidence, leave silent."
+].join(" ");
+var MIRRORED_VALIDATOR_EVIDENCE_POLICY = [
+  "Mirrored-validator decision \u2014 when a changed audit, preflight, or compatibility check states",
+  "that it mirrors a shown production validator, compare every required predicate in both. Report",
+  "a loosened mirror that omits shown required fields and therefore accepts objects production",
+  "rejects; do not infer parity or drift without both implementations in evidence."
+].join(" ");
 var EXAMINER_CLAIM_DECISION_POLICY = [
   `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
   `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
   `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
   `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
-  `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`
+  `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
+  `- trigger-guard: ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
+  `- mirrored-validator: ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`
 ].join("\n");
 
 // src/engine/rule-file.ts
@@ -3325,6 +3343,8 @@ var CATCH_ALL_RULE = [
   "  are worried about. A cursor cannot skip or repeat a row on a column that cannot repeat; do not",
   "  ask for a tie-breaker it does not need.",
   `- **boundary and omitted-state transitions** \u2014 ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
+  `- **unit-sensitive consumers and removed guards** \u2014 ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
+  `- **mirrored validators** \u2014 ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`,
   `- **diagnostic context in error paths** \u2014 ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
@@ -3866,7 +3886,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v9";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v10";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;

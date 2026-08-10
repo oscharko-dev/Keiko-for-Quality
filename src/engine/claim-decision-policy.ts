@@ -11,7 +11,9 @@ export const TEST_ISOLATION_EVIDENCE_POLICY = [
   "insufficient, and never demand or invent a module clear/reset helper. REPORT: the reset is shown",
   "missing, removed, late, or wrong after tracing suite setup and shared state. BYPASS (report): the",
   "module under test or a shared-state dependency was imported at top level or cached before the",
-  "reset; unrelated framework or helper imports are not bypass evidence.",
+  "reset; unrelated framework or helper imports are not bypass evidence. A removed per-case reset",
+  "before a later dynamic import is reportable when an earlier case imported the same mutable",
+  "module: the later import reuses that earlier module instance and its state.",
 ].join(" ");
 
 export const REFERENCE_TRANSITION_EVIDENCE_POLICY = [
@@ -45,6 +47,22 @@ export const DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY = [
   "the thrown error.",
 ].join(" ");
 
+export const TRIGGER_AND_GUARD_EVIDENCE_POLICY = [
+  "Trigger/guard decision — UNIT: when a changed value feeds a unit-sensitive API, trace every",
+  "shown producer branch and state the exact branch whose units mismatch; a mixed-unit producer",
+  "cannot share one conversion silently. GUARD: when a range or termination guard is removed on a",
+  "claim that no caller reaches it, check every shown caller. Report when one supplies the rejected",
+  "value, naming that trigger and the resulting wrong behavior; without shown producer or caller",
+  "evidence, leave silent.",
+].join(" ");
+
+export const MIRRORED_VALIDATOR_EVIDENCE_POLICY = [
+  "Mirrored-validator decision — when a changed audit, preflight, or compatibility check states",
+  "that it mirrors a shown production validator, compare every required predicate in both. Report",
+  "a loosened mirror that omits shown required fields and therefore accepts objects production",
+  "rejects; do not infer parity or drift without both implementations in evidence.",
+].join(" ");
+
 /** The whole policy block injected into each mandatory examiner, assembled from canonical text. */
 export const EXAMINER_CLAIM_DECISION_POLICY = [
   `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
@@ -52,7 +70,9 @@ export const EXAMINER_CLAIM_DECISION_POLICY = [
   `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
   `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
   `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
+  `- trigger-guard: ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
+  `- mirrored-validator: ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`,
 ].join("\n");
 
 /** Prevent a focused examiner fix from silently becoming another copy of the complete rule. */
-export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 2_350;
+export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 3_500;

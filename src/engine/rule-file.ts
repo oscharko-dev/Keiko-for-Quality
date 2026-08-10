@@ -3,8 +3,10 @@ import type { GuidelineIndex } from "../config/guidelines.js";
 import {
   BOUNDARY_OMISSION_EVIDENCE_POLICY,
   DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+  MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
+  TRIGGER_AND_GUARD_EVIDENCE_POLICY,
   WORKFLOW_TRUST_EVIDENCE_POLICY,
 } from "./claim-decision-policy.js";
 
@@ -123,6 +125,8 @@ const CATCH_ALL_RULE = [
   "  are worried about. A cursor cannot skip or repeat a row on a column that cannot repeat; do not",
   "  ask for a tie-breaker it does not need.",
   `- **boundary and omitted-state transitions** — ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
+  `- **unit-sensitive consumers and removed guards** — ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
+  `- **mirrored validators** — ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`,
   `- **diagnostic context in error paths** — ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
   "- **before stating how an encoding, format, or algorithm behaves** — verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
