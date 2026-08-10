@@ -65,6 +65,41 @@ function fixture() {
   return root;
 }
 
+function assertImportBindsDependency(importDeclaration, before, after) {
+  const root = mkdtempSync(join(tmpdir(), "kfq-import-binding-"));
+  try {
+    write(root, "src/entry.ts", `${importDeclaration}\nexport const entry = true;\n`);
+    write(root, "src/dependency.ts", before);
+    const identity = sourceIdentity(root, ["src/entry.ts"]);
+    const initial = qualificationSourceClosureDigest(identity);
+    assert.deepEqual(
+      qualificationSourceClosureManifest(identity).sources.map(({ path }) => path),
+      ["src/dependency.ts", "src/entry.ts"],
+    );
+
+    write(root, "src/dependency.ts", after);
+    assert.notEqual(qualificationSourceClosureDigest(identity), initial);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("an ordinary empty named import remains a causal runtime binding edge", () => {
+  assertImportBindsDependency(
+    'import {} from "./dependency.js";',
+    "export const sideEffectVersion = 1;\n",
+    "export const sideEffectVersion = 2;\n",
+  );
+});
+
+test("an inline type-only named import remains a causal runtime binding edge", () => {
+  assertImportBindsDependency(
+    'import { type DependencyShape } from "./dependency.js";',
+    "export interface DependencyShape { readonly before: string }\n",
+    "export interface DependencyShape { readonly after: string }\n",
+  );
+});
+
 test("staged engine digest follows runtime prompt and context dependencies transitively", () => {
   const root = fixture();
   try {

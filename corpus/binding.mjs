@@ -64,14 +64,12 @@ function isFile(path) {
 
 function runtimeImport(declaration) {
   const clause = declaration.importClause;
-  if (clause === undefined) return true;
-  if (clause.isTypeOnly) return false;
-  if (clause.name !== undefined) return true;
-  const bindings = clause.namedBindings;
-  return (
-    bindings !== undefined &&
-    (!isNamedImports(bindings) || bindings.elements.some((element) => !element.isTypeOnly))
-  );
+  // Only a declaration-level `import type` promises that the module has no runtime edge. An
+  // ordinary empty import and `import { type T }` are still value-import declarations: with
+  // verbatim module syntax they emit an empty import and therefore still execute module effects.
+  // The binding must conservatively follow both rather than let an emit-policy change leave the
+  // qualification digest blind to runtime source.
+  return clause === undefined || !clause.isTypeOnly;
 }
 
 function runtimeExport(declaration) {

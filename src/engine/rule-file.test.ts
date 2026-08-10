@@ -155,6 +155,7 @@ describe("buildRuleFile", () => {
       "Pin this action to a full commit SHA.\n\nOn every run, a tag is resolved fresh, so the reviewed bytes and the executed bytes stop being the same bytes.",
       "Restore the per-test module reset.\n\nWhen the reset is removed, the second case reuses the first case's memoized module state.",
       "Restore the immutable action pin.\n\nWhen the workflow resolves `actions/setup-node@v4`, the executed bytes can move after review.",
+      "Keep the explicit empty-list update.\n\nWhen `workflowEligibleModelIds` is empty, omitting it makes the shown `?? current` consumer preserve stale eligibility instead of clearing it.",
     ];
     for (const example of examples) {
       expect(sanitizeFindingBody(example).ok).toBe(true);
