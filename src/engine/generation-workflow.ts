@@ -486,8 +486,8 @@ const INTEGRATION_SIGNAL =
   /(?:^|\n)\d+ \+[\s\S]{0,160}\b(?:export|public|interface|schema|config|workflow|action|version|protocol|contract|assert|expect)\b/iu;
 const DELETION_SIGNAL = /(?:^|\n)\d+ -/u;
 const FILE_METADATA_SIGNAL = /(?:^|\n)__file metadata__(?:\n|$)/u;
-const MEMBER_NAME = /^["']?[\p{L}_$][\p{L}\p{N}_$-]*["']?\??$/u;
-const FUNCTION_NAME = /^[\p{L}_$][\p{L}\p{N}_$]*\??$/u;
+const MEMBER_NAME =
+  /^(?:[\p{L}_$][\p{L}\p{N}_$]*|"[\p{L}_$][\p{L}\p{N}_$-]*"|'[\p{L}_$][\p{L}\p{N}_$-]*')\??$/u;
 const NON_DECLARATION_HEADS: ReadonlySet<string> = new Set([
   "await",
   "case",
@@ -608,7 +608,7 @@ function declarationHeadTokens(head: string): readonly string[] | undefined {
   const first = tokens[0]?.toLowerCase();
   if (
     name === undefined ||
-    !FUNCTION_NAME.test(name) ||
+    !MEMBER_NAME.test(name) ||
     first === undefined ||
     NON_DECLARATION_HEADS.has(first)
   ) {

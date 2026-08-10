@@ -255,6 +255,8 @@ describe("focused examiners", () => {
       "__new hunk__\n8 +if (ready) {",
       "__new hunk__\n8 +else if (ready) {",
       "__new hunk__\n8 +} else if (ready) {",
+      "__new hunk__\n8 +foo-bar: Result;",
+      "__new hunk__\n8 +foo-bar(): void;",
     ]) {
       expect(
         shouldRunIntegrationExaminer({ ...ISOLATED_CONTEXT, renderedDiff }),
@@ -267,6 +269,10 @@ describe("focused examiners", () => {
       "__new hunk__\n8 +prüfen(eingabe: Wert): Ergebnis;",
       "__new hunk__\n8 +foo?(): void;",
       "__new hunk__\n8 +export function authenticate(callback: (value: string) => void) {}",
+      "__new hunk__\n8 +'foo-bar': Result;",
+      '__new hunk__\n8 +"foo-bar": Result;',
+      "__new hunk__\n8 +'foo-bar'(): void;",
+      '__new hunk__\n8 +"foo-bar"(): void;',
     ]) {
       expect(
         shouldRunIntegrationExaminer({ ...ISOLATED_CONTEXT, renderedDiff }),

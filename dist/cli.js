@@ -3927,8 +3927,7 @@ function renderStructuredClaim(path, claim) {
 var INTEGRATION_SIGNAL = /(?:^|\n)\d+ \+[\s\S]{0,160}\b(?:export|public|interface|schema|config|workflow|action|version|protocol|contract|assert|expect)\b/iu;
 var DELETION_SIGNAL = /(?:^|\n)\d+ -/u;
 var FILE_METADATA_SIGNAL = /(?:^|\n)__file metadata__(?:\n|$)/u;
-var MEMBER_NAME = /^["']?[\p{L}_$][\p{L}\p{N}_$-]*["']?\??$/u;
-var FUNCTION_NAME = /^[\p{L}_$][\p{L}\p{N}_$]*\??$/u;
+var MEMBER_NAME = /^(?:[\p{L}_$][\p{L}\p{N}_$]*|"[\p{L}_$][\p{L}\p{N}_$-]*"|'[\p{L}_$][\p{L}\p{N}_$-]*')\??$/u;
 var NON_DECLARATION_HEADS = /* @__PURE__ */ new Set([
   "await",
   "case",
@@ -4038,7 +4037,7 @@ function declarationHeadTokens(head) {
   const tokens = head.split(/\s+/u);
   const name = tokens.at(-1);
   const first = tokens[0]?.toLowerCase();
-  if (name === void 0 || !FUNCTION_NAME.test(name) || first === void 0 || NON_DECLARATION_HEADS.has(first)) {
+  if (name === void 0 || !MEMBER_NAME.test(name) || first === void 0 || NON_DECLARATION_HEADS.has(first)) {
     return void 0;
   }
   return tokens;
