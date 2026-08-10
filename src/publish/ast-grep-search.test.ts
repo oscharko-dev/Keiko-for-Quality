@@ -10,6 +10,7 @@ import type { GitContext } from "../git/plumbing.js";
 import {
   AstGrepSearchError,
   findAstAnchorOwnerAtHead,
+  findAstCallerOwnerAtHead,
   searchAstGrepAtHead,
 } from "./ast-grep-search.js";
 
@@ -136,6 +137,112 @@ process.stdin.on("end", () => {
   process.stdout.write(JSON.stringify(matches));
 });
 `;
+
+const CALLER_OWNER_TOOL = String.raw`
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const args = process.argv.slice(2);
+  const position = (offset) => {
+    const before = input.slice(0, offset).split("\n");
+    return {line: before.length - 1, column: before.at(-1).length};
+  };
+  const range = (start, end) => ({
+    byteOffset: {start, end},
+    start: position(start),
+    end: position(end),
+  });
+  const structures = () => {
+    const items = [];
+    const declarations = /(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]*)[^\{]*\{/g;
+    let match;
+    while ((match = declarations.exec(input)) !== null) {
+      const open = input.indexOf("{", match.index);
+      let depth = 0;
+      let end = -1;
+      for (let cursor = open; cursor < input.length; cursor += 1) {
+        if (input[cursor] === "{") depth += 1;
+        if (input[cursor] === "}") depth -= 1;
+        if (depth === 0) { end = cursor + 1; break; }
+      }
+      if (end < 0) process.exit(7);
+      items.push({name: match[1], range: range(match.index, end)});
+    }
+    return items;
+  };
+  if (args[0] === "outline") {
+    process.stdout.write(JSON.stringify([{path:"STDIN",language:"TypeScript",items:structures()}]));
+    return;
+  }
+  const rule = args[args.indexOf("--inline-rules") + 1] || "";
+  if (!rule.includes("kind: call_expression") || !rule.includes("kind: identifier") ||
+      !rule.includes("regex: '^downloadAssets$'")) process.exit(8);
+  const matches = [];
+  const marker = "/* DIRECT */ downloadAssets()";
+  let cursor = input.indexOf(marker);
+  while (cursor >= 0) {
+    const start = cursor + "/* DIRECT */ ".length;
+    const end = start + "downloadAssets()".length;
+    matches.push({text:input.slice(start,end),file:"STDIN",language:"TypeScript",range:range(start,end)});
+    cursor = input.indexOf(marker, cursor + marker.length);
+  }
+  const propertyMarker = "/* PROPERTY */ downloadAssets.member()";
+  cursor = input.indexOf(propertyMarker);
+  while (cursor >= 0) {
+    const start = cursor + "/* PROPERTY */ ".length;
+    const end = start + "downloadAssets.member()".length;
+    matches.push({text:input.slice(start,end),file:"STDIN",language:"TypeScript",range:range(start,end)});
+    cursor = input.indexOf(propertyMarker, cursor + propertyMarker.length);
+  }
+  process.stdout.write(JSON.stringify(matches));
+});
+`;
+
+function concurrencyTrackingTool(stateDirectory: string): string {
+  return String.raw`
+const { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } = require("node:fs");
+const { join } = require("node:path");
+const statePath = join(${JSON.stringify(stateDirectory)}, "state.json");
+const lockPath = join(${JSON.stringify(stateDirectory)}, "state.lock");
+const sleep = (milliseconds) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+const update = (delta) => {
+  let descriptor;
+  while (descriptor === undefined) {
+    try {
+      descriptor = openSync(lockPath, "wx");
+    } catch (error) {
+      if (error === null || typeof error !== "object" || error.code !== "EEXIST") throw error;
+      sleep(2);
+    }
+  }
+  try {
+    const state = existsSync(statePath)
+      ? JSON.parse(readFileSync(statePath, "utf8"))
+      : { active: 0, maximum: 0 };
+    state.active += delta;
+    state.maximum = Math.max(state.maximum, state.active);
+    writeFileSync(statePath, JSON.stringify(state));
+  } finally {
+    closeSync(descriptor);
+    unlinkSync(lockPath);
+  }
+};
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  if (!input.includes("function target")) process.exit(3);
+  update(1);
+  sleep(500);
+  update(-1);
+  const args = process.argv.slice(2);
+  process.stdout.write(args[0] === "outline"
+    ? JSON.stringify([{path:"STDIN",language:"TypeScript",items:[]}])
+    : "[]");
+});
+`;
+}
 
 afterEach(async () => {
   await Promise.all(
@@ -322,6 +429,42 @@ describe("searchAstGrepAtHead", () => {
     );
   });
 
+  it("processes source blobs sequentially while each blob's scan and outline run concurrently", async () => {
+    const { repository, context } = await fixture();
+    for (const path of ["src/b-concurrency.ts", "src/c-concurrency.ts"] as const) {
+      await writeFile(join(repository, path), "export function target(): void {}\n", "utf8");
+    }
+    git(repository, "add", "src/b-concurrency.ts", "src/c-concurrency.ts");
+    git(repository, "commit", "-qm", "add concurrency fixtures");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const tools = await mkdtemp(join(tmpdir(), "kfq-concurrency-ast-grep-"));
+    temporaryDirectories.push(tools);
+    const binary = await executable(tools, concurrencyTrackingTool(tools));
+
+    await expect(
+      searchAstGrepAtHead(
+        {
+          context,
+          head,
+          reviewPath: "src/review.ts",
+          findingAnchor: { startLine: 1, endLine: 1 },
+          candidatePaths: [
+            "src/definition.ts",
+            "src/z-priority.ts",
+            "src/b-concurrency.ts",
+            "src/c-concurrency.ts",
+          ],
+          terms: ["target"],
+        },
+        { acquireBinary: () => Promise.resolve(binary) },
+      ),
+    ).resolves.toEqual([]);
+
+    await expect(readFile(join(tools, "state.json"), "utf8")).resolves.toBe(
+      JSON.stringify({ active: 0, maximum: 2 }),
+    );
+  }, 10_000);
+
   it("emits one anchor per requested term before kind and path ballast", async () => {
     const { repository, context } = await fixture();
     await mkdir(join(repository, "tests"));
@@ -473,6 +616,139 @@ describe("findAstAnchorOwnerAtHead", () => {
           head,
           reviewPath: "src/definition.ts",
           findingAnchor: { startLine: 0, endLine: 0 },
+        },
+        {
+          acquireBinary: () => {
+            acquisitions += 1;
+            return Promise.reject(new Error("must not acquire"));
+          },
+        },
+      ),
+    ).resolves.toBeUndefined();
+    expect(acquisitions).toBe(0);
+  });
+});
+
+describe("findAstCallerOwnerAtHead", () => {
+  async function callerFixture(source: string): Promise<{
+    readonly context: GitContext;
+    readonly head: ReturnType<typeof commitSha>;
+    readonly binary: string;
+    readonly repository: string;
+  }> {
+    const { repository, context } = await fixture();
+    await writeFile(join(repository, "src/caller.ts"), `${source}\n`, "utf8");
+    git(repository, "add", "src/caller.ts");
+    git(repository, "commit", "-qm", "add caller-owner fixture");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    await writeFile(join(repository, "src/caller.ts"), "const WORKTREE_ONLY = true;\n", "utf8");
+    const tools = await mkdtemp(join(tmpdir(), "kfq-caller-owner-"));
+    temporaryDirectories.push(tools);
+    const binary = await executable(tools, CALLER_OWNER_TOOL);
+    return { repository, context, head, binary };
+  }
+
+  it("maps one distant direct call to its smallest distinct named owner", async () => {
+    const source = [
+      "async function downloadAssets(): Promise<void> {",
+      "  await fetchArtifact();",
+      "}",
+      ...Array.from({ length: 25 }, (_value, index) => `const pad${String(index)} = true;`),
+      "function unrelatedText(): void {",
+      '  const note = "downloadAssets()";',
+      "  /* PROPERTY */ downloadAssets.member();",
+      "}",
+      "export async function runPortablePrerelease(): Promise<void> {",
+      "  /* DIRECT */ downloadAssets();",
+      "}",
+    ].join("\n");
+    const { repository, context, head, binary } = await callerFixture(source);
+
+    await expect(
+      findAstCallerOwnerAtHead(
+        {
+          context,
+          head,
+          reviewPath: "src/caller.ts",
+          findingAnchor: { startLine: 1, endLine: 3 },
+          ownerName: "downloadAssets",
+        },
+        { acquireBinary: () => Promise.resolve(binary) },
+      ),
+    ).resolves.toEqual({
+      name: "runPortablePrerelease",
+      definition: {
+        path: "src/caller.ts",
+        line: 33,
+        content: "export async function runPortablePrerelease(): Promise<void> {",
+        kind: "definition",
+      },
+    });
+    expect(await readFile(join(repository, "src/caller.ts"), "utf8")).toContain("WORKTREE_ONLY");
+  });
+
+  it("ignores comments, strings, imports, and property-only mentions", async () => {
+    const source = [
+      "function downloadAssets(): void {}",
+      ...Array.from({ length: 25 }, (_value, index) => `const pad${String(index)} = true;`),
+      'import { downloadAssets as importedAsset } from "./remote";',
+      "function unrelatedText(): void {",
+      "  // downloadAssets();",
+      '  const note = "downloadAssets()";',
+      "  api.downloadAssets();",
+      "}",
+    ].join("\n");
+    const { context, head, binary } = await callerFixture(source);
+
+    await expect(
+      findAstCallerOwnerAtHead(
+        {
+          context,
+          head,
+          reviewPath: "src/caller.ts",
+          findingAnchor: { startLine: 1, endLine: 1 },
+          ownerName: "downloadAssets",
+        },
+        { acquireBinary: () => Promise.resolve(binary) },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("stops at a recursive call instead of walking outward to another owner", async () => {
+    const source = [
+      "function downloadAssets(): void {",
+      ...Array.from({ length: 25 }, (_value, index) => `  consume(${String(index)});`),
+      "  /* DIRECT */ downloadAssets();",
+      "}",
+    ].join("\n");
+    const { context, head, binary } = await callerFixture(source);
+
+    await expect(
+      findAstCallerOwnerAtHead(
+        {
+          context,
+          head,
+          reviewPath: "src/caller.ts",
+          findingAnchor: { startLine: 1, endLine: 1 },
+          ownerName: "downloadAssets",
+        },
+        { acquireBinary: () => Promise.resolve(binary) },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not acquire a parser for a qualified or otherwise invalid owner name", async () => {
+    const { context, head } = await fixture();
+    let acquisitions = 0;
+
+    await expect(
+      findAstCallerOwnerAtHead(
+        {
+          context,
+          head,
+          reviewPath: "src/definition.ts",
+          findingAnchor: { startLine: 1, endLine: 1 },
+          ownerName: "api.downloadAssets",
         },
         {
           acquireBinary: () => {

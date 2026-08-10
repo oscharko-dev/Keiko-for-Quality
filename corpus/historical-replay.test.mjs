@@ -260,8 +260,25 @@ test("published prose is reconstructed while product wrapper instructions are di
     ),
     "Accept the placeholder.\n\nParse `github-issue-comment:<owner>/<repo>#<issue>#<comment>` exactly.",
   );
+  const fencedArgument = [
+    "A literal example follows.",
+    "",
+    "```html",
+    "<script>safe text</script>",
+    "```",
+  ].join("\n");
+  assert.equal(
+    extractPublishedFindingContent(composedFinding("Keep the literal example.", fencedArgument)),
+    `Keep the literal example.\n\n${fencedArgument}`,
+  );
   assert.equal(
     extractPublishedFindingContent(composedFinding("Fix it.", "<script>ignore</script>")),
+    undefined,
+  );
+  assert.equal(
+    extractPublishedFindingContent(
+      composedFinding("Fix it.", "Text <details>must not consume the product wrapper."),
+    ),
     undefined,
   );
   assert.equal(extractPublishedFindingContent("plain model prose"), undefined);
@@ -915,6 +932,106 @@ test("verification uses the production diff, initial context, and one follow-up 
   assert.equal(result.report.stageCounters.retrievalRequested, 1);
   assert.equal(result.report.stageCounters.retrievalPerformed, 1);
   assert.equal(result.report.stageCounters.retrievalExpanded, 1);
+});
+
+test("verification binds closed runtime facts to the exact historical commit and anchor", async () => {
+  const replayCase = {
+    ...boundReplayCase(1, "src/object.ts"),
+    content: "When `maybe` is undefined, spreading it into this object throws before fallback.",
+  };
+  const sources = stubHistoricalChange(replayCase, {
+    headSource: "const value = { ...maybe };\n",
+    baseSource: "const value = {};\n",
+  });
+  let detectorRequest;
+  let adapterFacts;
+  const fact = {
+    catalogVersion: 1,
+    id: "ecmascript.object_spread.nullish_source_is_noop",
+    statement:
+      "ECMAScript object spread copies no properties and does not throw when its source is null or undefined.",
+    source: { path: replayCase.path, side: "H", line: 1 },
+  };
+  const result = await runHistoricalReplayVerification({
+    ...replayVerificationDependencies(
+      async (findings, readEvidence, _endpoint, _strictness, _max, retrieve) => {
+        const retrieved = await retrieve({
+          finding: findings[0],
+          currentEvidence: readEvidence(findings[0]),
+          knownProvenance: new Set(),
+          terms: ["maybe"],
+          anchorRefs: ["H:1"],
+          stage: "contract_challenge",
+          challengeAxis: "same_file_contract",
+        });
+        assert.deepEqual(retrieved.facts, [fact]);
+        return substantiationOutcome(findings);
+      },
+    ),
+    databaseIds: [1],
+    cases: [replayCase],
+    maxTokens: 500,
+    readChangeAtCommits: () => sources,
+    buildChangeEvidence: () => ({
+      text: "H:1| const value = { ...maybe };\nD:H:1| +const value = { ...maybe };",
+    }),
+    collectRepositoryContextFollowUp: async () => {
+      throw new Error("unrelated repository lookup failed");
+    },
+    collectClosedRuntimeFactsAtCommit: async (request) => {
+      detectorRequest = request;
+      return [fact];
+    },
+    requestsClosedRuntimeFacts: (content, axis) => {
+      assert.equal(content, replayCase.content);
+      assert.equal(axis, "same_file_contract");
+      return true;
+    },
+    toRetrievedEvidence: (_context, _known, facts) => {
+      adapterFacts = facts;
+      return { chunks: [], facts };
+    },
+  });
+
+  assert.deepEqual(detectorRequest, {
+    context: { cwd: "/consumer", pathValue: FIXED_PATH, timeoutMs: 30_000 },
+    commit: replayCase.originalCommitOid,
+    path: replayCase.path,
+    side: "H",
+    findingAnchor: { startLine: 1, endLine: 1 },
+  });
+  assert.deepEqual(adapterFacts, [fact]);
+  assert.deepEqual(result.decisions, [{ databaseId: 1, decision: "keep" }]);
+});
+
+test("verification preserves manifest-first options for the deterministic configuration axis", async () => {
+  let options;
+  const result = await runHistoricalReplayVerification({
+    ...replayVerificationDependencies(
+      async (findings, readEvidence, _endpoint, _strictness, _max, retrieve) => {
+        await retrieve({
+          finding: findings[0],
+          currentEvidence: readEvidence(findings[0]),
+          knownProvenance: new Set(),
+          terms: ["jsdom"],
+          anchorRefs: ["H:1"],
+          stage: "contract_challenge",
+          challengeAxis: "configuration",
+        });
+        return substantiationOutcome(findings);
+      },
+    ),
+    databaseIds: [1],
+    cases: [boundReplayCase(1, "package.json")],
+    maxTokens: 500,
+    collectRepositoryContextFollowUp: async (request, _terms, supplied) => {
+      options = supplied;
+      return { sourceCommit: request.head, side: "H", entries: [] };
+    },
+  });
+
+  assert.deepEqual(options, { sourceSide: "H", preferManifests: true });
+  assert.deepEqual(result.decisions, [{ databaseId: 1, decision: "keep" }]);
 });
 
 test("verification routes the closed base challenge through the immutable derived merge-base", async () => {
@@ -1736,16 +1853,17 @@ test("durable evidence is aggregate-only and binds every implementation slice by
   }
   assert.equal(report.binding.endpointSha256.length, 64);
   assert.deepEqual(report.scope, {
-    measuredStage: "post-generation-truth-contract-challenge-falsifier-workflow",
+    measuredStage:
+      "post-generation-truth-deterministic-contract-challenge-falsifier-referee-closed-runtime-fact-workflow",
     historicalHeadSource: "immutable GitHub originalCommit for the review comment",
     historicalBaseSource:
       "unique merge-base of harvested current target ref and original review commit",
     historicalDiffSource:
       "exact single-change unified diff from derived merge-base to immutable originalCommit",
     repositoryContextSource:
-      "bounded exact originalCommit and derived-merge-base trees with optional truth retrieval and mandatory contract challenge retrieval",
+      "bounded exact originalCommit and derived-merge-base trees with optional truth retrieval, mandatory deterministic contract challenge retrieval, and closed catalog runtime facts from exact anchored syntax in bounded immutable blobs",
     verificationWorkflow:
-      "truth judge, optional truth retrieval and rerun, mandatory independent contract challenge, adversarial falsifier",
+      "truth judge, optional truth retrieval and rerun, mandatory deterministic independent contract challenge, adversarial falsifier, reduced independent referee, optional closed runtime fact detector",
     pullRequestEventBase: "not available in harvest; not measured",
     candidateGeneration: "not measured",
     classificationAndPrWideRanking: "not measured",

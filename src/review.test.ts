@@ -27,6 +27,10 @@ import {
   type ReviewCommentInput,
 } from "./github/client.js";
 import { fingerprint, markerComment } from "./publish/marker.js";
+import {
+  CLOSED_RUNTIME_FACT_CATALOG,
+  CLOSED_RUNTIME_FACT_CATALOG_VERSION,
+} from "./publish/runtime-fact-catalog.js";
 import { MAX_SUBSTANTIATION_TOKENS_PER_FINDING } from "./publish/substantiate.js";
 import type { ReviewRequest } from "./review.js";
 
@@ -39,13 +43,24 @@ vi.mock("./engine/run.js", async (importOriginal) => ({
   runEngine: runEngineMock,
 }));
 
-// Repository-context and Git-grep stay real in this end-to-end suite. Only the optional structural
+// Repository-context and Git-grep stay real in this end-to-end suite. Only optional structural
 // enrichment is deterministic: otherwise a clean runner tries to acquire ast-grep through the
 // model endpoint's global fetch mock and makes the test depend on a pre-existing tool cache.
+const { findAstAnchorOwnerAtHeadMock, findAstCallerOwnerAtHeadMock } = vi.hoisted(() => ({
+  findAstAnchorOwnerAtHeadMock: vi.fn(),
+  findAstCallerOwnerAtHeadMock: vi.fn(),
+}));
 vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
   ...(await importOriginal()),
-  findAstAnchorOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
+  findAstAnchorOwnerAtHead: findAstAnchorOwnerAtHeadMock,
+  findAstCallerOwnerAtHead: findAstCallerOwnerAtHeadMock,
   searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
+}));
+
+const collectClosedRuntimeFactsAtCommitMock = vi.fn();
+vi.mock("./publish/runtime-facts.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  collectClosedRuntimeFactsAtCommit: collectClosedRuntimeFactsAtCommitMock,
 }));
 
 const { computeAllottedBudget, performReview } = await import("./review.js");
@@ -64,6 +79,12 @@ const { EngineRunError } = await import("./engine/run.js");
  * that instance alone.
  */
 beforeEach(() => {
+  findAstAnchorOwnerAtHeadMock.mockReset();
+  findAstAnchorOwnerAtHeadMock.mockResolvedValue(undefined);
+  findAstCallerOwnerAtHeadMock.mockReset();
+  findAstCallerOwnerAtHeadMock.mockResolvedValue(undefined);
+  collectClosedRuntimeFactsAtCommitMock.mockReset();
+  collectClosedRuntimeFactsAtCommitMock.mockResolvedValue([]);
   vi.spyOn(GitHubClient.prototype, "resolveSupersededOwnNotices").mockResolvedValue({
     attempted: 0,
     resolved: 0,
@@ -2979,6 +3000,26 @@ describe("performReview: review-cache memoization end to end", () => {
     beforeEach(() => {
       runEngineMock.mockReset();
       acquireEngineMock.mockReset();
+      // The immutable fixture contains one unchanged contract symbol. Model challenge planning is
+      // gone; the real deterministic follow-up reaches it through the bounded anchor-owner hop.
+      findAstAnchorOwnerAtHeadMock.mockImplementation(
+        ({
+          reviewPath,
+          findingAnchor,
+        }: {
+          reviewPath: string;
+          findingAnchor: { startLine: number };
+        }) =>
+          Promise.resolve({
+            name: "challengeGuard",
+            definition: {
+              path: reviewPath,
+              line: findingAnchor.startLine,
+              content: "export const challengeGuard = true;",
+              kind: "definition" as const,
+            },
+          }),
+      );
     });
 
     afterEach(() => {
@@ -3097,6 +3138,10 @@ describe("performReview: review-cache memoization end to end", () => {
       });
     }
 
+    function withChallengeProbe(content: string): string {
+      return `${content} The independent \`claimProbe\` branch must also hold.`;
+    }
+
     /**
      * A stand-in classify endpoint: answers `repairPair` to a repair prompt and `auditPair` to an
      * audit prompt. `classify.ts`'s `buildPrompt`/`buildAuditPrompt` preambles are disjoint text
@@ -3115,6 +3160,7 @@ describe("performReview: review-cache memoization end to end", () => {
       onJudgePrompt?: (prompt: string) => void;
       onChallengePrompt?: (prompt: string) => void;
       onFalsifierPrompt?: (prompt: string) => void;
+      onRefereePrompt?: (prompt: string) => void;
       challengeAxis?:
         | "same_file_contract"
         | "caller"
@@ -3125,6 +3171,7 @@ describe("performReview: review-cache memoization end to end", () => {
       challengeEvidenceRef?: string;
       challengeLookupTerm?: string;
       falsifierEvidenceRef?: string;
+      refereeEvidenceRef?: string;
       consequence?: "actionable" | "nitpick";
       tokensPerCall?: number;
     }): { impl: typeof fetch; callCount: () => number } {
@@ -3183,6 +3230,30 @@ describe("performReview: review-cache memoization end to end", () => {
                               evidence_refs: [opts.falsifierEvidenceRef ?? "R4:H:1"],
                             },
                       ),
+                    },
+                  },
+                ],
+                usage: { total_tokens: tokens },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (prompt.includes("final independent referee")) {
+          opts.onRefereePrompt?.(prompt);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                choices: [
+                  {
+                    finish_reason: "stop",
+                    message: {
+                      content: JSON.stringify({
+                        verdict: "survives",
+                        evidence_refs: [
+                          opts.refereeEvidenceRef ?? opts.falsifierEvidenceRef ?? "R4:H:1",
+                        ],
+                      }),
                     },
                   },
                 ],
@@ -3257,6 +3328,61 @@ describe("performReview: review-cache memoization end to end", () => {
       return { impl, callCount: () => calls };
     }
 
+    it("binds a closed runtime fact to the exact reviewed commit and requires its T ref", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [
+            {
+              path: "src/a.ts",
+              content:
+                "When `maybe` is undefined, spreading it into this object throws before fallback.",
+              category: "bug",
+              severity: "medium",
+            },
+          ],
+          2,
+        ),
+        ruleDigest: engineDigest,
+      });
+      collectClosedRuntimeFactsAtCommitMock.mockResolvedValue([
+        {
+          catalogVersion: CLOSED_RUNTIME_FACT_CATALOG_VERSION,
+          id: "ecmascript.object_spread.nullish_source_is_noop",
+          statement: CLOSED_RUNTIME_FACT_CATALOG["ecmascript.object_spread.nullish_source_is_noop"],
+          source: { path: "src/a.ts", side: "H", line: 1 },
+        },
+      ]);
+      let falsifierPrompt = "";
+      const { impl, callCount } = classifyFetchMock({
+        consequence: "nitpick",
+        falsifierEvidenceRef: "R4:T:1",
+        onFalsifierPrompt: (prompt) => {
+          falsifierPrompt = prompt;
+        },
+      });
+      globalThis.fetch = impl;
+      const client = successfulClient([]);
+
+      const report = await performReview(auditRequest(client.client), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish?.published).toBe(0);
+      expect(callCount()).toBe(2);
+      expect(collectClosedRuntimeFactsAtCommitMock).toHaveBeenCalledTimes(1);
+      expect(collectClosedRuntimeFactsAtCommitMock.mock.calls[0]?.[0]).toMatchObject({
+        commit: headSha,
+        path: "src/a.ts",
+        side: "H",
+        findingAnchor: { startLine: 1, endLine: 1 },
+      });
+      expect(falsifierPrompt).toContain('"evidence_refs":["R4:T:1"]');
+      expect(falsifierPrompt).toContain(
+        CLOSED_RUNTIME_FACT_CATALOG["ecmascript.object_spread.nullish_source_is_noop"],
+      );
+    });
+
     it("routes a deleted-file same-file challenge through immutable BASE", async () => {
       const deletionRepo = await mkdtemp(join(tmpdir(), "kfq-review-deleted-challenge-"));
       try {
@@ -3285,13 +3411,23 @@ describe("performReview: review-cache memoization end to end", () => {
 
         const engineDigest = requireEngineDigest();
         acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        findAstAnchorOwnerAtHeadMock.mockResolvedValue({
+          name: "baseOnlyGuard",
+          definition: {
+            path: "src/deleted.ts",
+            line: 1,
+            content: "removedContract();",
+            kind: "definition" as const,
+          },
+        });
         runEngineMock.mockResolvedValue({
           stdout: findingsStdout(
             [
               {
                 path: "src/deleted.ts",
-                content:
+                content: withChallengeProbe(
                   "When this startup call is removed, initialization no longer installs its required guard.",
+                ),
                 category: "bug",
                 severity: "medium",
               },
@@ -3338,8 +3474,9 @@ describe("performReview: review-cache memoization end to end", () => {
     it("never caches an exact-suppressed fresh path, so a later run verifies it instead of replaying it", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      const BODY =
-        "This handler swallows the write error and reports success to the caller regardless.";
+      const BODY = withChallengeProbe(
+        "This handler swallows the write error and reports success to the caller regardless.",
+      );
       const finding = { path: "src/a.ts", content: BODY, category: "bug", severity: "medium" };
       runEngineMock
         .mockResolvedValueOnce({
@@ -3405,8 +3542,9 @@ describe("performReview: review-cache memoization end to end", () => {
     it("audits a surviving fresh finding once via the fast path and publishes it with the audited classification", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      const BODY =
-        "This retry loop never resets its attempt counter, so it spins forever after one failure.";
+      const BODY = withChallengeProbe(
+        "This retry loop never resets its attempt counter, so it spins forever after one failure.",
+      );
       runEngineMock.mockResolvedValue({
         stdout: findingsStdout(
           [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
@@ -3435,7 +3573,6 @@ describe("performReview: review-cache memoization end to end", () => {
 
       const diagnostics = createSilentDiagnostics();
       const report = await performReview(auditRequest(client), diagnostics);
-
       expect(report.outcome).toBe("complete");
       expect(report.publish).toMatchObject({ published: 1, suppressed: 0 });
       expect(created).toHaveLength(1);
@@ -3506,6 +3643,7 @@ describe("performReview: review-cache memoization end to end", () => {
         );
       }) as typeof fetch;
       const { client, created } = successfulClient([]);
+      findAstAnchorOwnerAtHeadMock.mockResolvedValue(undefined);
 
       const report = await performReview(auditRequest(client), createSilentDiagnostics());
 
@@ -3525,7 +3663,9 @@ describe("performReview: review-cache memoization end to end", () => {
       const head = blobId(headBlobA);
       const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
       const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
-      const BODY = "This cached finding is regenerated never, but its truth is checked again.";
+      const BODY = withChallengeProbe(
+        "This cached finding is regenerated never, but its truth is checked again.",
+      );
       const baseB = blobId(git(["rev-parse", `${baseSha}:src/b.ts`]).trim());
       const headB = blobId(git(["rev-parse", `${headSha}:src/b.ts`]).trim());
       const keyB = computeKey(baseB, headB, ruleDigest, engineDigest, model, proto);
@@ -3694,8 +3834,9 @@ describe("performReview: review-cache memoization end to end", () => {
       const head = blobId(headBlobA);
       const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
       const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
-      const CACHED_BODY =
-        "`cachedLease` skips its expiry check, so stale holders retain the resource.";
+      const CACHED_BODY = withChallengeProbe(
+        "`cachedLease` skips its expiry check, so stale holders retain the resource.",
+      );
       const store: CacheStore = {
         schemaVersion: SUPPORTED_STORE_SCHEMA,
         entries: [
@@ -3732,7 +3873,7 @@ describe("performReview: review-cache memoization end to end", () => {
         "`golfSnapshot` stores the mutable reference, so later edits corrupt the saved revision.",
         "`hotelRouter` drops the locale prefix, so translated links resolve to missing pages.",
         "`indiaWriter` acknowledges before flushing, so a crash loses confirmed audit records.",
-      ];
+      ].map((content) => withChallengeProbe(content));
 
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       // src/a.ts is the nonfresh cache hit. The engine reviews only src/b.ts and emits nine fresh,
@@ -3867,8 +4008,9 @@ describe("performReview: review-cache memoization end to end", () => {
     it("releases unused atomic-admission headroom for the later classification audit", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      const BODY =
-        "When the cache is empty, this fallback returns stale state instead of loading a value.";
+      const BODY = withChallengeProbe(
+        "When the cache is empty, this fallback returns stale state instead of loading a value.",
+      );
       runEngineMock.mockResolvedValue({
         stdout: findingsStdout(
           [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
@@ -3967,8 +4109,9 @@ describe("performReview: review-cache memoization end to end", () => {
     it("still audits when the engine overshoots its allotment but the consumer ceiling has room", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      const BODY =
-        "This handler discards the parsed configuration and falls back to defaults silently.";
+      const BODY = withChallengeProbe(
+        "This handler discards the parsed configuration and falls back to defaults silently.",
+      );
       runEngineMock.mockResolvedValue({
         // Far above this one-file fixture's 80_000-token allotment floor, far below the consumer's
         // 2M ceiling — the first live v0.12.0 run's exact shape (998k reported against an 80k
@@ -4007,8 +4150,9 @@ describe("performReview: review-cache memoization end to end", () => {
     it("suppresses a reclassified survivor at the execute-time marker re-check, end to end through publishAudited", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      const BODY =
-        "This SQL string concatenates the caller-supplied filter directly into the WHERE clause.";
+      const BODY = withChallengeProbe(
+        "This SQL string concatenates the caller-supplied filter directly into the WHERE clause.",
+      );
       runEngineMock.mockResolvedValue({
         stdout: findingsStdout(
           [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
@@ -4046,8 +4190,9 @@ describe("performReview: review-cache memoization end to end", () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
 
-      const BODY_A =
-        "This function never releases the lock it acquires on the early-return branch.";
+      const BODY_A = withChallengeProbe(
+        "This function never releases the lock it acquires on the early-return branch.",
+      );
       const BODY_B =
         "This workflow step checks out the pull request's own head inside a privileged job.";
       runEngineMock.mockResolvedValue({
@@ -4108,7 +4253,9 @@ describe("performReview: review-cache memoization end to end", () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
 
-      const BODY = "This cache key omits the tenant id, so two tenants can collide on one entry.";
+      const BODY = withChallengeProbe(
+        "This cache key omits the tenant id, so two tenants can collide on one entry.",
+      );
       const nonSuccess = JSON.stringify({
         status: "failed",
         summary: { files_reviewed: 0, total_tokens: 30, budget_exceeded: false },

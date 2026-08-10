@@ -220,7 +220,7 @@ function finishLineProcess(
   stopTimer(state);
   const incomplete = !state.accumulator.endedOnNewline;
   if (state.timedOut || state.parseFailed || code !== 0 || incomplete) {
-    const failureCode = state.timedOut ? 1 : typeof code === "number" ? code : 1;
+    const failureCode = !state.timedOut && typeof code === "number" ? code : 1;
     reject(new ExecFailure(command, failureCode, state.timedOut));
     return;
   }

@@ -58,7 +58,7 @@ function assertRecords(records) {
 
 function assertDecisions(decisions, recordIds) {
   if (!Array.isArray(decisions)) {
-    throw new Error("historical replay decisions must be an array");
+    throw new TypeError("historical replay decisions must be an array");
   }
   const byId = new Map();
   for (const entry of decisions) {
@@ -86,6 +86,18 @@ function assertDecisions(decisions, recordIds) {
 
 function emptyExcludedByLabel() {
   return Object.fromEntries(EXCLUDED_LABELS.map((label) => [label, 0]));
+}
+
+function tallyGradedDecision(record, decision, confusionMatrix, unmeasured) {
+  if (record.label === POSITIVE_LABEL) {
+    if (decision === "keep") confusionMatrix.truePositive += 1;
+    else if (decision === "drop") confusionMatrix.falseNegative += 1;
+    else unmeasured.fixedConfirmed += 1;
+    return;
+  }
+  if (decision === "keep") confusionMatrix.falsePositive += 1;
+  else if (decision === "drop") confusionMatrix.trueNegative += 1;
+  else unmeasured.refutedConfirmed += 1;
 }
 
 /**
@@ -119,15 +131,10 @@ function scorePopulationUnchecked(records, decisionById) {
     eligibleDecisions[decision] += 1;
     if (record.label === POSITIVE_LABEL) {
       fixedConfirmed += 1;
-      if (decision === "keep") confusionMatrix.truePositive += 1;
-      else if (decision === "drop") confusionMatrix.falseNegative += 1;
-      else unmeasured.fixedConfirmed += 1;
     } else {
       refutedConfirmed += 1;
-      if (decision === "keep") confusionMatrix.falsePositive += 1;
-      else if (decision === "drop") confusionMatrix.trueNegative += 1;
-      else unmeasured.refutedConfirmed += 1;
     }
+    tallyGradedDecision(record, decision, confusionMatrix, unmeasured);
   }
 
   unmeasured.total = unmeasured.fixedConfirmed + unmeasured.refutedConfirmed;

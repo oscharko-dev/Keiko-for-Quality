@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { commitSha } from "../core/brands.js";
-import type { RepositoryEvidenceEntry } from "./evidence.js";
+import type { EvidenceLineRange, RepositoryEvidenceEntry } from "./evidence.js";
 import { toRetrievedEvidence } from "./retrieved-evidence.js";
 import { evidenceProvenanceKey } from "./substantiate.js";
 import {
@@ -25,6 +25,7 @@ import {
 vi.mock("./ast-grep-search.js", async (importOriginal) => ({
   ...(await importOriginal()),
   findAstAnchorOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
+  findAstCallerOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
 }));
 
 const temporaryRepositories: string[] = [];
@@ -298,6 +299,123 @@ describe("repository context collection", () => {
       content: '  "packages": { "node_modules/undici": { "version": "7.13.0" } }',
       kind: "callsite",
     });
+  });
+
+  it("reserves exact manifest pins before a noisy configuration term exhausts grep", async () => {
+    const { repository, request } = await fixture();
+    await write(repository, "package.json", '{\n  "devDependencies": { "jsdom": "26.0.0" }\n}\n');
+    await write(
+      repository,
+      "package-lock.json",
+      '{\n  "packages": { "node_modules/jsdom": { "version": "26.0.0" } }\n}\n',
+    );
+    const noise = Array.from({ length: 12 }, () => "jsdom is mentioned here").join("\n");
+    for (let index = 0; index < 8; index += 1) {
+      await write(repository, `aaa-noise/jsdom-${String(index)}.ts`, `${noise}\n`);
+    }
+    git(repository, "add", "package.json", "package-lock.json", "aaa-noise");
+    git(repository, "commit", "-qm", "add noisy manifest fixture");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const configRequest: RepositoryContextRequest = {
+      ...request,
+      head,
+      base: head,
+      reviewPath: "package.json",
+      baseReviewPath: "package.json",
+      findingAnchor: { startLine: 2, endLine: 2 },
+      findingContent: "The `jsdom` override must remain exact.",
+      anchorText: '  "devDependencies": { "jsdom": "26.0.0" }',
+    };
+    const initial = await collectInitialRepositoryContext(configRequest);
+    const known = new Set(
+      initial.entries.map((entry) => evidenceProvenanceKey(entry.path, "H", entry.line)),
+    );
+    let structuralCalls = 0;
+
+    const context = await collectRepositoryContextFollowUp(configRequest, ["jsdom"], {
+      preferManifests: true,
+      structuralSearch: () => {
+        structuralCalls += 1;
+        return Promise.reject(new Error("manifest evidence must remain parser-independent"));
+      },
+    });
+
+    expect(structuralCalls).toBe(1);
+    expect(context.entries.slice(0, 6)).toContainEqual({
+      path: "package-lock.json",
+      line: 2,
+      content: '  "packages": { "node_modules/jsdom": { "version": "26.0.0" } }',
+      kind: "manifest",
+    });
+    expect(initial.entries.some((entry) => entry.path === "package-lock.json")).toBe(false);
+    expect(toRetrievedEvidence(context, known).chunks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          path: "package-lock.json",
+          lines: expect.arrayContaining([
+            expect.objectContaining({ text: expect.stringContaining("node_modules/jsdom") }),
+          ]),
+        }),
+      ]),
+    );
+  });
+
+  it("does not reserve a manifest substring as an exact configuration term", async () => {
+    const { repository, request } = await fixture();
+    await write(repository, "package.json", '{\n  "dependencies": { "preact": "10.0.0" }\n}\n');
+    git(repository, "add", "package.json");
+    git(repository, "commit", "-qm", "add substring manifest fixture");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+
+    const context = await collectRepositoryContextFollowUp(
+      {
+        ...request,
+        head,
+        base: head,
+        reviewPath: "package.json",
+        baseReviewPath: "package.json",
+        findingAnchor: { startLine: 2, endLine: 2 },
+      },
+      ["react"],
+      { preferManifests: true },
+    );
+
+    expect(context.entries.every((entry) => !entry.content.includes("preact"))).toBe(true);
+  });
+
+  it("leaves one verifier path for code counterevidence after two preferred manifests", async () => {
+    const { repository, request } = await fixture();
+    await write(repository, "package.json", '{\n  "dependencies": { "react": "19.0.0" }\n}\n');
+    await write(repository, "package-lock.json", '{\n  "name": "react"\n}\n');
+    await write(repository, "tsconfig.json", '{\n  "react": true\n}\n');
+    await write(repository, "src/react-counter.ts", "export const react = existingGuard();\n");
+    git(repository, "add", "package.json", "package-lock.json", "tsconfig.json", "src");
+    git(repository, "commit", "-qm", "add manifest and code evidence");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+
+    const context = await collectRepositoryContextFollowUp(
+      { ...request, head, base: head },
+      ["react"],
+      {
+        preferManifests: true,
+        structuralSearch: () =>
+          Promise.resolve([
+            {
+              path: "src/react-counter.ts",
+              line: 1,
+              content: "export const react = existingGuard();",
+              kind: "definition" as const,
+            },
+          ]),
+      },
+    );
+
+    expect([...new Set(context.entries.map((entry) => entry.path))].slice(0, 3)).toContain(
+      "src/react-counter.ts",
+    );
+    expect(toRetrievedEvidence(context).chunks.map((chunk) => chunk.path)).toContain(
+      "src/react-counter.ts",
+    );
   });
 
   it("does not let optional code-owner parsing erase package and lockfile evidence", async () => {
@@ -575,6 +693,122 @@ describe("repository context collection", () => {
     ]);
   });
 
+  it("takes one bounded owner-to-caller-owner hop before looking for external tests", async () => {
+    const { repository, request } = await fixture();
+    const source = [
+      "async function downloadAssets(): Promise<void> {",
+      "  await fetchArtifact();",
+      "}",
+      "",
+      ...Array.from(
+        { length: 32 },
+        (_value, index) => `const callerPadding${String(index)} = true;`,
+      ),
+      "export async function runPortablePrerelease(): Promise<void> {",
+      "  await downloadAssets();",
+      "}",
+    ].join("\n");
+    await write(repository, request.reviewPath, `${source}\n`);
+    await write(
+      repository,
+      "tests/run-portable.test.ts",
+      "await expect(runPortablePrerelease()).rejects.toThrow('download failed');\n",
+    );
+    git(repository, "add", request.reviewPath, "tests/run-portable.test.ts");
+    git(repository, "commit", "-qm", "add owner caller fixture");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const anchored: RepositoryContextRequest = {
+      ...request,
+      head,
+      base: head,
+      findingAnchor: { startLine: 1, endLine: 3 },
+      findingContent: "`downloadAssets` can leave temporary files behind on failure.",
+      anchorText: "  await fetchArtifact();",
+    };
+    const ownerAnchors: EvidenceLineRange[] = [];
+    const callerOwners: string[] = [];
+
+    const context = await collectRepositoryContextFollowUp(anchored, ["downloadAssets"], {
+      anchorOwnerSearch: ({ findingAnchor }) => {
+        ownerAnchors.push(findingAnchor);
+        return Promise.resolve({
+          name: "downloadAssets",
+          definition: {
+            path: request.reviewPath,
+            line: 1,
+            content: "async function downloadAssets(): Promise<void> {",
+            kind: "definition" as const,
+          },
+        });
+      },
+      callerOwnerSearch: ({ ownerName, findingAnchor }) => {
+        callerOwners.push(ownerName);
+        expect(findingAnchor).toEqual({ startLine: 1, endLine: 3 });
+        return Promise.resolve({
+          name: "runPortablePrerelease",
+          definition: {
+            path: request.reviewPath,
+            line: 37,
+            content: "export async function runPortablePrerelease(): Promise<void> {",
+            kind: "definition" as const,
+          },
+        });
+      },
+      structuralSearch: ({ terms }) => {
+        expect(terms).toEqual(["downloadAssets", "runPortablePrerelease"]);
+        return Promise.resolve([]);
+      },
+    });
+    const known = new Set(
+      context.entries
+        .filter((entry) => entry.path === request.reviewPath)
+        .map((entry) => evidenceProvenanceKey(entry.path, "H", entry.line)),
+    );
+    const retrieved = toRetrievedEvidence(context, known);
+
+    expect(ownerAnchors).toEqual([{ startLine: 1, endLine: 3 }]);
+    expect(callerOwners).toEqual(["downloadAssets"]);
+    expect(retrieved.chunks).toEqual([
+      {
+        path: "tests/run-portable.test.ts",
+        side: "H",
+        lines: [
+          {
+            line: 1,
+            text: "await expect(runPortablePrerelease()).rejects.toThrow('download failed');",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("keeps exact owner evidence when caller-owner parsing is unavailable", async () => {
+    const { request } = await fixture();
+    let callerAttempts = 0;
+
+    const context = await collectRepositoryContextFollowUp(request, ["secondaryContract"], {
+      anchorOwnerSearch: () =>
+        Promise.resolve({
+          name: "useCapability",
+          definition: {
+            path: request.reviewPath,
+            line: 1,
+            content: "const result = useCapability(input);",
+            kind: "definition",
+          },
+        }),
+      callerOwnerSearch: () => {
+        callerAttempts += 1;
+        return Promise.reject(new Error("optional caller parser unavailable"));
+      },
+      structuralSearch: () => Promise.resolve([]),
+    });
+
+    expect(callerAttempts).toBe(1);
+    expect(context.entries.some((entry) => entry.content.includes("secondaryContract"))).toBe(true);
+    expect(context.entries.some((entry) => entry.content.includes("useCapability"))).toBe(true);
+  });
+
   it("keeps clear primary evidence ahead of independently derived owner context", async () => {
     const { request } = await fixture();
     let searchedTerms: readonly string[] = [];
@@ -769,7 +1003,7 @@ describe("repository context collection", () => {
     expect(followUp.entries.some((entry) => entry.content.includes("secondaryContract"))).toBe(
       true,
     );
-    expect(merged.entries.length).toBe(initial.entries.length + followUp.entries.length);
+    expect(merged.entries).toHaveLength(initial.entries.length + followUp.entries.length);
     expect(merged.entries.slice(0, followUp.entries.length)).toEqual(followUp.entries);
 
     const otherHead = { ...followUp, sourceCommit: commitSha("a".repeat(40)) };
@@ -1236,6 +1470,89 @@ describe("repository context collection", () => {
         ["secondaryContract"],
       ),
     ).rejects.toBeInstanceOf(RepositoryContextRetrievalError);
+  });
+
+  it("does not turn an explicit manifest-read failure into a configuration no-match", async () => {
+    const { repository, request } = await fixture();
+    const wrapper = join(repository, "manifest-failure-bin");
+    await mkdir(wrapper);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    await writeFile(
+      join(wrapper, "git"),
+      `#!/bin/sh\nif [ "$1" = "--no-pager" ] && [ "$2" = "ls-tree" ]; then exit 2; fi\nexec "${realGit}" "$@"\n`,
+      "utf8",
+    );
+    await chmod(join(wrapper, "git"), 0o755);
+
+    await expect(
+      collectRepositoryContextFollowUp(
+        { ...request, pathValue: `${wrapper}:${request.pathValue}` },
+        ["secondaryContract"],
+        { preferManifests: true },
+      ),
+    ).rejects.toBeInstanceOf(RepositoryContextRetrievalError);
+  });
+
+  it("fails closed when a listed preferred manifest blob cannot be read", async () => {
+    const { repository, request } = await fixture();
+    await write(repository, "package.json", '{\n  "dependencies": { "react": "19.0.0" }\n}\n');
+    await write(repository, "package-lock.json", '{\n  "name": "react"\n}\n');
+    git(repository, "add", "package.json", "package-lock.json");
+    git(repository, "commit", "-qm", "add unreadable manifest fixture");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const wrapper = join(repository, "manifest-blob-failure-bin");
+    await mkdir(wrapper);
+    const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+    await writeFile(
+      join(wrapper, "git"),
+      `#!/bin/sh\nif [ "$1" = "cat-file" ] && [ "$2" = "blob" ]; then case "$3" in *:package-lock.json) exit 2;; esac; fi\nexec "${realGit}" "$@"\n`,
+      "utf8",
+    );
+    await chmod(join(wrapper, "git"), 0o755);
+
+    await expect(
+      collectRepositoryContextFollowUp(
+        {
+          ...request,
+          head,
+          base: head,
+          pathValue: `${wrapper}:${request.pathValue}`,
+        },
+        ["react"],
+        { preferManifests: true },
+      ),
+    ).rejects.toBeInstanceOf(RepositoryContextRetrievalError);
+  });
+
+  it("does not preserve manifests after the whole-review deadline expires in structure", async () => {
+    const { repository, request } = await fixture();
+    await write(
+      repository,
+      "package.json",
+      '{\n  "dependencies": { "ambiguousContract": "1" }\n}\n',
+    );
+    git(repository, "add", "package.json");
+    git(repository, "commit", "-qm", "add deadline manifest fixture");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    let now = 1_000;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      await expect(
+        collectRepositoryContextFollowUp(
+          { ...request, head, base: head, deadlineMs: 2_000 },
+          ["ambiguousContract"],
+          {
+            preferManifests: true,
+            structuralSearch: () => {
+              now = 2_001;
+              return Promise.reject(new Error("expired while parsing"));
+            },
+          },
+        ),
+      ).rejects.toBeInstanceOf(RepositoryContextRetrievalError);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("rejects a malformed complete streaming record", async () => {

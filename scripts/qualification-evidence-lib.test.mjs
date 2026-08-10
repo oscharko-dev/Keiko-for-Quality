@@ -98,6 +98,28 @@ test("the public schema rejects raw reports, extra fields and inconsistent aggre
   );
 });
 
+test("the public schema fails closed for invalid result identities, kinds and counts", () => {
+  const mutations = [
+    (evidence) => {
+      evidence.results[1].id = evidence.results[0].id;
+    },
+    (evidence) => {
+      evidence.results[0].kind = "unknown";
+    },
+    (evidence) => {
+      evidence.results[0].rejectedSanitization = 1;
+    },
+  ];
+
+  for (const mutate of mutations) {
+    const evidence = redactQualificationReport(rawReport());
+    mutate(evidence);
+    const validation = validateQualificationEvidence(evidence);
+    assert.equal(validation.valid, false);
+    assert.ok(validation.failures.includes("result_value"));
+  }
+});
+
 test("the normal promotion checker reads redacted evidence without private diagnostics", () => {
   const directory = mkdtempSync(join(tmpdir(), "kfq-qualification-evidence-test-"));
   const path = join(directory, "qualification.json");

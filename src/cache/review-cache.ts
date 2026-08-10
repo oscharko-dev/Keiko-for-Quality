@@ -19,6 +19,7 @@ import {
   requireKeys,
 } from "../core/validate.js";
 import type { EngineFinding } from "../engine/result.js";
+import { CLOSED_RUNTIME_FACT_CATALOG_VERSION } from "../publish/runtime-fact-catalog.js";
 
 /**
  * Cross-run memoization of per-file review findings.
@@ -112,12 +113,13 @@ export const SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
  *
  * **Bump the human-readable base marker below when a release changes what a stored finding list
  * would publish today versus when it was written.** That includes sanitization, presentation,
- * and settlement. Do NOT fold verifier or retrieval dependencies into this marker: cache hits save
- * generation but pass through the current Truth/Falsifier and current pinned ast-grep retrieval on
- * every run. Keeping those identities out is what lets a cached generation remain useful while a
- * changed external guard or improved verifier still overturns stale prose.
+ * and settlement. Ordinary verifier and retrieval dependencies stay out: cache hits save generation
+ * but pass through the current Truth/Falsifier and current pinned ast-grep retrieval on every run.
+ * The closed runtime catalog is named explicitly because changing its licensed semantics changes
+ * whether a stored claim can publish, and a retired catalog must be visible in serialized entries.
  */
-export const PUBLICATION_SEMANTICS = "v0.23.0-current-verifier";
+export const PUBLICATION_SEMANTICS =
+  `v0.23.0-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}` as const;
 
 declare const cacheBrand: unique symbol;
 type CacheBrand<T, B extends string> = T & { readonly [cacheBrand]: B };

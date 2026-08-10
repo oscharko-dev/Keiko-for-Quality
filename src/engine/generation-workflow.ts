@@ -203,7 +203,9 @@ function renderAnchorRanges(lines: readonly number[]): string {
 
 /** Planner output is untrusted model data; escaping angle brackets keeps it inside its frame. */
 function renderUntrustedRiskMap(risks: readonly RiskHypothesis[]): string {
-  return JSON.stringify(risks).replaceAll("<", "\\u003c").replaceAll(">", "\\u003e");
+  return JSON.stringify(risks)
+    .replaceAll("<", String.raw`\u003c`)
+    .replaceAll(">", String.raw`\u003e`);
 }
 
 /**
@@ -336,7 +338,7 @@ export function parseRiskMap(
   const array = parseArray(text);
   if (array === undefined || array.length > MAX_RISK_HYPOTHESES) return undefined;
   const risks = array.map(parseRisk);
-  if (risks.some((risk) => risk === undefined)) return undefined;
+  if (risks.includes(undefined)) return undefined;
   const parsed = risks as RiskHypothesis[];
   return parsed.every((risk) => allowedEndAnchors.has(risk.end)) ? parsed : undefined;
 }
@@ -431,16 +433,16 @@ export function parseStructuredClaims(
   const array = parseArray(text);
   if (array === undefined || array.length > MAX_CLAIMS_PER_EXAMINER) return undefined;
   const claims = array.map(parseClaim);
-  if (claims.some((claim) => claim === undefined)) return undefined;
+  if (claims.includes(undefined)) return undefined;
   const parsed = claims as StructuredClaim[];
   return parsed.every((claim) => allowedEndAnchors.has(claim.end)) ? parsed : undefined;
 }
 
 function proseFragment(value: string): string {
-  return value
-    .replace(/\s+/gu, " ")
-    .trim()
-    .replace(/[.!?]+$/u, "");
+  const normalized = value.replace(/\s+/gu, " ").trim();
+  let end = normalized.length;
+  while (end > 0 && ".!?".includes(normalized[end - 1] ?? "")) end -= 1;
+  return normalized.slice(0, end);
 }
 
 function conditionFragment(value: string): string {
@@ -484,9 +486,38 @@ const INTEGRATION_SIGNAL =
   /(?:^|\n)\d+ \+[\s\S]{0,160}\b(?:export|public|interface|schema|config|workflow|action|version|protocol|contract|assert|expect)\b/iu;
 const DELETION_SIGNAL = /(?:^|\n)\d+ -/u;
 const FILE_METADATA_SIGNAL = /(?:^|\n)__file metadata__(?:\n|$)/u;
+const MEMBER_NAME = /^["']?[\p{L}_$][\p{L}\p{N}_$-]*["']?\??$/u;
+
+function isFunctionContract(body: string): boolean {
+  const open = body.indexOf("(");
+  const close = open < 0 ? -1 : body.indexOf(")", open + 1);
+  if (open < 1 || close <= open) return false;
+  const name = body.slice(0, open).trim();
+  const suffix = body.slice(close + 1).trimStart();
+  return (
+    name !== "" &&
+    !name.includes("(") &&
+    ["->", ":", "{", ";"].some((marker) => suffix.startsWith(marker))
+  );
+}
+
+function isMemberContract(body: string): boolean {
+  const colon = body.indexOf(":");
+  if (colon < 1) return false;
+  const member = body.slice(0, colon).trim();
+  const value = body.slice(colon + 1).trimStart();
+  return MEMBER_NAME.test(member) && value !== "" && !value.startsWith("=");
+}
+
 /** Function/type/member shapes, based on punctuation rather than one language's keywords. */
-const STRUCTURAL_CONTRACT_SIGNAL =
-  /(?:^|\n)\d+ [+-]\s*(?:(?:[^\s(]+\s+)*[^\s(]+\s*\([^\n)]*\)\s*(?:->|:|\{|;)|["']?[\p{L}_$][\p{L}\p{N}_$-]*["']?\??\s*:\s*[^=\n])/u;
+function isStructuralContractLine(line: string): boolean {
+  const body = /^\d+ [+-]\s*(.*)$/u.exec(line)?.[1];
+  return body !== undefined && (isFunctionContract(body) || isMemberContract(body));
+}
+
+function hasStructuralContractSignal(renderedDiff: string): boolean {
+  return renderedDiff.split("\n").some(isStructuralContractLine);
+}
 
 /** A model can recommend a lens but can never authorize its own extra paid call. */
 export function shouldRunIntegrationExaminer(context: GenerationContext): boolean {
@@ -497,7 +528,7 @@ export function shouldRunIntegrationExaminer(context: GenerationContext): boolea
     INTEGRATION_SIGNAL.test(context.renderedDiff) ||
     DELETION_SIGNAL.test(context.renderedDiff) ||
     FILE_METADATA_SIGNAL.test(context.renderedDiff) ||
-    STRUCTURAL_CONTRACT_SIGNAL.test(context.renderedDiff)
+    hasStructuralContractSignal(context.renderedDiff)
   );
 }
 

@@ -276,7 +276,7 @@ function requireCommittedGateEvidence(version, targetRef, candidateAncestorRef =
     fail("committed gate reports do not agree on one clean candidate commit");
   }
   const candidate = tryRun("git", ["rev-parse", "--verify", `${seed}^{commit}`])?.trim();
-  if (candidate === undefined || !candidate.startsWith(seed)) {
+  if (candidate?.startsWith(seed) !== true) {
     fail(`gate candidate ${seed} is not an unambiguous commit in this repository`);
   }
   requireGateEvidence(version, candidate);

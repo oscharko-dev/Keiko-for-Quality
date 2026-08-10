@@ -150,7 +150,7 @@ async function objectMetadata(
     const rawSize = (await gitObject(request, ["cat-file", "-s", object], SMALL_GIT_OUTPUT))
       .toString("ascii")
       .trim();
-    if (!/^(?:0|[1-9][0-9]*)$/.test(rawSize)) return { kind: "failure", reason: "read_error" };
+    if (!/^(?:0|[1-9]\d*)$/.test(rawSize)) return { kind: "failure", reason: "read_error" };
     const bytes = Number(rawSize);
     return Number.isSafeInteger(bytes)
       ? { kind: "blob", bytes }

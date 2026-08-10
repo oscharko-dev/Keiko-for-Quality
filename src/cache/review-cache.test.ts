@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { sha256, type Sha256 } from "../core/brands.js";
 import type { EngineFinding } from "../engine/result.js";
+import { CLOSED_RUNTIME_FACT_CATALOG_VERSION } from "../publish/runtime-fact-catalog.js";
 import {
   PARSE_LIMITS,
   SUPPORTED_STORE_SCHEMA,
@@ -100,6 +101,12 @@ function entryFor(
 }
 
 const EMPTY_STORE: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+
+it("binds cached publication semantics to the closed runtime-fact catalog", () => {
+  expect(PUBLICATION_SEMANTICS).toContain(
+    `runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}`,
+  );
+});
 
 describe("computeKey", () => {
   it("is a 64-character lowercase hex digest", () => {

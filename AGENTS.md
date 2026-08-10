@@ -61,13 +61,17 @@ a green verify masked a defused pin until a direct `node --test` run surfaced it
 gap is what the step is in the chain for.
 
 What did not go away is a naming collision worth knowing before you trust a green CI page: the CI
-job named `verify` is not the script named `verify`. The job runs typecheck, lint, format check,
-`npm test` and `check:bundle` as separate steps, and `test:corpus` is not among them; the job that
-does execute the corpus suites is CI's `SonarCloud` job, through `test:coverage`, and it is skipped
-on pull requests from forks because a fork receives no secrets. So on a fork pull request nothing
-required exercises the corpus at all, and `npm run verify` locally is the only place it is
-guaranteed to run. Read the `verify` job named in the `dist/index.js` section below the same way:
-that is the CI job, not the script.
+job named `verify` is not the script named `verify`. CI's `core verify` job runs typecheck, lint,
+format check, `npm test` and `check:bundle` as separate steps, and `test:corpus` is not among them;
+the `SonarCloud` job executes the corpus and script suites through `test:coverage`. The protected
+`verify` context is a fail-closed aggregate over both jobs, so a same-repository pull request cannot
+pass without the post-scan Sonar evidence checks. Sonar is skipped on pull requests from forks
+because a fork receives no secrets, and the aggregate deliberately treats that skip as red; carry
+the change on a trusted same-repository branch before merging it. A push to `main` is the one
+non-Sonar path: a separate provenance job must prove `HEAD^{tree}` equals `origin/dev^{tree}`, so
+the release ledger reuses the already-governed dev evidence only for byte-identical source. Read the
+`verify` context named in the `dist/index.js` section below the same way: that is the CI aggregate,
+not the script.
 
 ## Every live run this project makes uses `gpt-oss-120b`
 
@@ -135,7 +139,7 @@ absence of overlap.
 
 Consumers execute `dist/index.js` (`action.yml` → `runs.main`), and the file is tracked in git.
 `npm test`, `typecheck` and `lint` all pass without it being current, so a source change without
-`npm run build` looks green locally and then fails CI's `verify` job at `check:bundle`
+`npm run build` looks green locally and then fails CI's `core verify` job at `check:bundle`
 ("dist/index.js is stale"). Worse than the red check is the near-miss it guards against: a pinned
 SHA whose executed bundle differs from its reviewed source. Run `npm run verify` — not the
 individual commands — before calling any change done, and commit the regenerated `dist/index.js`

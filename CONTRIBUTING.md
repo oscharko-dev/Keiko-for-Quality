@@ -54,7 +54,8 @@ evidence the previous one produced.
 
 Structural repository retrieval uses a separately pinned ast-grep release when lexical
 exact-commit results are ambiguous and may use it to enrich clear hits with bounded owning-function
-context. An unavailable enrichment keeps the exact lexical evidence; an unavailable parser needed
+context. The closed runtime-fact detector uses that same pin against one complete bounded immutable
+blob over stdin and can select only versioned catalog text at the exact finding anchor; it never executes candidate code. An unavailable enrichment keeps the exact lexical evidence; an unavailable parser needed
 to disambiguate code fails closed. Non-code manifests and lockfiles remain bounded lexical
 evidence instead of being routed into an unsupported parser. Update every archive and
 extracted-binary digest in

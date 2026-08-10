@@ -16,8 +16,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
-    name: verify
+  core_verify:
+    name: core verify
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -239,12 +239,14 @@ jobs:
     # The token lives in this environment rather than at repository scope, so only a job that
     # declares it can read it — same pattern as the qualification workflow's model credential.
     environment: sonarcloud
-    # Forked pull requests receive no secrets, so the scanner cannot authenticate from them; the
-    # job is skipped rather than left to fail half-way through. Same-repo pull requests and pushes
-    # to main analyze normally.
+    # Forked pull requests receive no secrets, so the scanner cannot authenticate from them. They
+    # deliberately remain blocked by the protected aggregate until their change is carried by a
+    # trusted same-repository branch. Release-line pushes do not rescan the byte-identical dev tree;
+    # the separate provenance job below proves that identity before the aggregate can pass.
     if: >-
-      github.event_name == 'push' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/dev')
     steps:
       - name: Check out
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -295,3 +297,99 @@ jobs:
             -Dsonar.scm.revision="$SONAR_HEAD_SHA" \
             -Dsonar.qualitygate.wait=true \
             -Dsonar.working.directory="$RUNNER_TEMP/sonar-work"
+
+      # The active Free-plan gate is Sonar way, just as on Keiko. It cannot express the stricter
+      # repository contract, so the exact Keiko Banking Grade definition and its evidence are
+      # checked after the scanner has completed. This step also rejects every unresolved PR issue.
+      - name: Verify Keiko Banking Grade pull-request evidence
+        if: github.event_name == 'pull_request'
+        env:
+          SONAR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SONAR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SONAR_PULL_REQUEST: ${{ github.event.pull_request.number }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: node scripts/check-sonar-pr-quality-gate.mjs
+
+      # KfQ intentionally goes beyond Keiko's legacy-debt allowance: a dev analysis is green only
+      # when ALL unresolved issues are zero, not merely issues inside the current leak period.
+      - name: Verify zero-open-issue dev evidence
+        if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+        env:
+          SONAR_HEAD_SHA: ${{ github.sha }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: node scripts/check-sonar-main-quality-gate.mjs
+
+  main_provenance:
+    name: main provenance
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the immutable main revision
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      # main is a release ledger, not a second integration line. Re-scanning the same source tree
+      # would create a second, differently-timed Sonar measurement; instead prove that the release
+      # squash carries dev byte-for-byte before accepting dev's already-governed evidence.
+      - name: Prove the main release tree is exactly dev
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin 'refs/heads/dev:refs/remotes/origin/dev'
+          main_tree=$(git rev-parse 'HEAD^{tree}')
+          dev_tree=$(git rev-parse 'origin/dev^{tree}')
+          if [ "$main_tree" != "$dev_tree" ]; then
+            echo "main tree $main_tree differs from governed dev tree $dev_tree"
+            exit 1
+          fi
+          echo "main tree $main_tree exactly matches governed dev"
+
+  # Branch protection already requires the `verify` context. Keep that stable while making the
+  # post-scan evidence load-bearing: ordinary work cannot pass when either core verification or
+  # Sonar fails. A main push is the single skipped-Sonar path, and passes only when main_provenance
+  # proves its tree is exactly the already-governed dev tree.
+  verify:
+    name: verify
+    if: ${{ always() }}
+    needs: [core_verify, main_provenance, sonar]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Aggregate core and Sonar evidence fail closed
+        env:
+          CORE_RESULT: ${{ needs.core_verify.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          MAIN_PROVENANCE_RESULT: ${{ needs.main_provenance.result }}
+          REF: ${{ github.ref }}
+          SONAR_RESULT: ${{ needs.sonar.result }}
+        run: |
+          set -euo pipefail
+          if [ "$CORE_RESULT" != "success" ]; then
+            echo "Core verification did not succeed: $CORE_RESULT"
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "push" ] && [ "$REF" = "refs/heads/main" ]; then
+            if [ "$SONAR_RESULT" != "skipped" ]; then
+              echo "main must reuse governed dev evidence instead of starting a second scan: $SONAR_RESULT"
+              exit 1
+            fi
+            if [ "$MAIN_PROVENANCE_RESULT" != "success" ]; then
+              echo "main provenance did not succeed: $MAIN_PROVENANCE_RESULT"
+              exit 1
+            fi
+            exit 0
+          fi
+          if [ "$MAIN_PROVENANCE_RESULT" != "skipped" ]; then
+            echo "main provenance ran outside a main push: $MAIN_PROVENANCE_RESULT"
+            exit 1
+          fi
+          if [ "$SONAR_RESULT" = "success" ]; then
+            exit 0
+          fi
+          echo "Sonar verification did not succeed: $SONAR_RESULT"
+          exit 1

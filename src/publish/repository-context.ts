@@ -20,11 +20,13 @@ import {
 } from "./evidence.js";
 import {
   findAstAnchorOwnerAtHead,
+  findAstCallerOwnerAtHead,
   isStructurallySearchablePath,
   normalizedStructuralTerms,
   searchAstGrepAtHead,
   type AnchorOwner,
   type AnchorOwnerSearchRequest,
+  type CallerOwnerSearchRequest,
   type StructuralSearchRequest,
 } from "./ast-grep-search.js";
 
@@ -81,6 +83,20 @@ const MANIFEST_NAMES = [
   "global.json",
   "Directory.Build.props",
 ] as const;
+
+const LOCKFILE_NAMES = [
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
+  "Cargo.lock",
+  "go.sum",
+  "uv.lock",
+] as const;
+
+const MANIFEST_AND_LOCKFILE_NAMES = [...MANIFEST_NAMES, ...LOCKFILE_NAMES] as const;
 
 const RUNTIME_MANIFESTS: ReadonlySet<string> = new Set([
   ".nvmrc",
@@ -860,8 +876,13 @@ function requiresStructuralFallback(
 export interface RepositoryContextDependencies {
   /** HEAD is the default; BASE is allowed only for the planner's closed `base` challenge axis. */
   readonly sourceSide?: RepositoryEvidenceSide;
+  /** Reserve exact manifest/lockfile sightings before repository-wide lexical search results. */
+  readonly preferManifests?: boolean;
   readonly anchorOwnerSearch?: (
     request: AnchorOwnerSearchRequest,
+  ) => Promise<AnchorOwner | undefined>;
+  readonly callerOwnerSearch?: (
+    request: CallerOwnerSearchRequest,
   ) => Promise<AnchorOwner | undefined>;
   readonly structuralSearch?: (
     request: StructuralSearchRequest,
@@ -1024,6 +1045,7 @@ function mergeOwnerSearch(
       truncated: search.result.truncated || ownerResult.truncated,
     },
     ownerTerm: owner,
+    ownerTermAlreadySearched: false,
   };
 }
 
@@ -1033,9 +1055,11 @@ async function enrichWithAnchorOwner(
   search: FollowUpSearch,
   dependencies: RepositoryContextDependencies,
 ): Promise<FollowUpSearch> {
+  const ownerSearch = dependencies.anchorOwnerSearch ?? findAstAnchorOwnerAtHead;
+  const callerOwnerSearch = dependencies.callerOwnerSearch ?? findAstCallerOwnerAtHead;
   let owner: AnchorOwner | undefined;
   try {
-    owner = await (dependencies.anchorOwnerSearch ?? findAstAnchorOwnerAtHead)({
+    owner = await ownerSearch({
       context,
       head: request.head,
       reviewPath: request.reviewPath,
@@ -1050,12 +1074,59 @@ async function enrichWithAnchorOwner(
   }
   if (owner === undefined || !validTerm(owner.name)) return search;
   if (ownerAlreadySearched(search, owner.name)) {
-    return { ...search, ownerTerm: owner.name, ownerTermAlreadySearched: true };
+    return await enrichWithCallerOwner(
+      context,
+      request,
+      { ...search, ownerTerm: owner.name, ownerTermAlreadySearched: true },
+      owner,
+      callerOwnerSearch,
+    );
   }
   try {
     const ownerResult = await grepAtHead(context, request, [owner.name], true, true);
-    return mergeOwnerSearch(search, owner.name, ownerResult, request);
+    return await enrichWithCallerOwner(
+      context,
+      request,
+      mergeOwnerSearch(search, owner.name, ownerResult, request),
+      owner,
+      callerOwnerSearch,
+    );
   } catch {
+    return search;
+  }
+}
+
+type CallerOwnerSearch = NonNullable<RepositoryContextDependencies["callerOwnerSearch"]>;
+
+async function enrichWithCallerOwner(
+  context: GitContext,
+  request: RepositoryContextRequest,
+  search: FollowUpSearch,
+  owner: AnchorOwner,
+  callerOwnerSearch: CallerOwnerSearch,
+): Promise<FollowUpSearch> {
+  try {
+    const caller = await callerOwnerSearch({
+      context,
+      head: request.head,
+      reviewPath: request.reviewPath,
+      findingAnchor: request.findingAnchor,
+      ownerName: owner.name,
+      ...(request.deadlineMs === undefined ? {} : { deadlineMs: request.deadlineMs }),
+    });
+    if (
+      caller === undefined ||
+      caller.name === owner.name ||
+      !validTerm(caller.name) ||
+      ownerAlreadySearched(search, caller.name)
+    ) {
+      return search;
+    }
+    const callerResult = await grepAtHead(context, request, [caller.name], true, true);
+    return mergeOwnerSearch(search, caller.name, callerResult, request);
+  } catch {
+    // This is a bounded optional depth-one hop. The already collected owner evidence remains exact
+    // positive evidence when caller-owner discovery is unavailable.
     return search;
   }
 }
@@ -1070,20 +1141,54 @@ async function collectFollowUpSearch(
   return await enrichWithAnchorOwner(context, request, planner, dependencies);
 }
 
-function manifestCandidates(reviewPath: string): readonly string[] {
-  const segments = reviewPath.split("/").slice(0, -1);
+function manifestCandidates(reviewPath: string, includeLockfiles: boolean): readonly string[] {
+  const names = includeLockfiles ? MANIFEST_AND_LOCKFILE_NAMES : MANIFEST_NAMES;
+  const reviewSegments = reviewPath.split("/").slice(0, -1);
+  const reviewDirectory = reviewSegments.join("/");
+  const segments = [...reviewSegments];
   const directories: string[] = [];
   while (segments.length > 0) {
     directories.push(segments.join("/"));
     segments.pop();
   }
   const nested = directories.flatMap((directory) =>
-    MANIFEST_NAMES.map((name) => (directory === "" ? name : `${directory}/${name}`)),
+    names.map((name) => (directory === "" ? name : `${directory}/${name}`)),
   );
-  const reservedRoot = MANIFEST_NAMES.length;
+  const reviewName = reviewPath.split("/").at(-1) ?? "";
+  const reviewedManifest = (names as readonly string[]).includes(reviewName) ? [reviewPath] : [];
+  const siblingLockfiles = includeLockfiles
+    ? LOCKFILE_NAMES.map((name) => (reviewDirectory === "" ? name : `${reviewDirectory}/${name}`))
+    : [];
+  const reservedRoot = names.length;
   return [
-    ...new Set([...nested.slice(0, MAX_MANIFEST_CANDIDATES - reservedRoot), ...MANIFEST_NAMES]),
+    ...new Set([
+      ...reviewedManifest,
+      ...siblingLockfiles,
+      ...nested.slice(
+        0,
+        MAX_MANIFEST_CANDIDATES - reservedRoot - reviewedManifest.length - siblingLockfiles.length,
+      ),
+      ...names,
+    ]),
   ];
+}
+
+function boundedPreferredEntries(
+  preferred: readonly RepositoryEvidenceEntry[],
+  remaining: readonly RepositoryEvidenceEntry[],
+): readonly RepositoryEvidenceEntry[] {
+  const leadingPaths = [...new Set(preferred.map((entry) => entry.path))].slice(0, 2);
+  const leading = preferred.filter((entry) => leadingPaths.includes(entry.path));
+  const deferred = preferred.filter((entry) => !leadingPaths.includes(entry.path));
+  const selected: RepositoryEvidenceEntry[] = [];
+  const paths = new Set<string>();
+  // Two exact configuration paths are reserved first, but the third verifier chunk remains
+  // available for an independent caller/test/structural counterexample when one exists.
+  for (const entry of [...leading, ...remaining, ...deferred]) {
+    addCodeEntry(selected, paths, entry);
+    if (selected.length === MAX_CODE_ENTRIES) break;
+  }
+  return selected;
 }
 
 async function existingManifestPaths(
@@ -1091,6 +1196,7 @@ async function existingManifestPaths(
   head: CommitSha,
   candidates: readonly string[],
   deadlineMs?: number,
+  strict = false,
 ): Promise<readonly string[]> {
   try {
     const timeoutMs = boundedRepositoryTimeout(deadlineMs, context.timeoutMs);
@@ -1108,7 +1214,8 @@ async function existingManifestPaths(
     return candidates
       .filter((candidate) => existing.has(candidate))
       .slice(0, MAX_MANIFEST_SCAN_FILES);
-  } catch {
+  } catch (error) {
+    if (strict) throw new RepositoryContextRetrievalError(error);
     return [];
   }
 }
@@ -1117,13 +1224,14 @@ function relevantManifestLines(
   path: string,
   text: string,
   terms: readonly string[],
+  termOnly = false,
 ): readonly number[] {
   const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
   const selected = new Set<number>();
   const runtime = RUNTIME_MANIFESTS.has(path.split("/").at(-1) ?? "");
   lines.forEach((line, index) => {
-    const relevant =
-      runtime || MANIFEST_HINT.test(line) || terms.some((term) => line.includes(term));
+    const termMatch = terms.some((term) => manifestLineContainsTerm(line, term));
+    const relevant = termMatch || (!termOnly && (runtime || MANIFEST_HINT.test(line)));
     if (!relevant) return;
     for (
       let current = Math.max(0, index - 1);
@@ -1138,36 +1246,66 @@ function relevantManifestLines(
   return [...selected].slice(0, MAX_MANIFEST_LINES);
 }
 
+function manifestLineContainsTerm(line: string, term: string): boolean {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`(?:^|[^A-Za-z0-9_$])${escaped}(?:$|[^A-Za-z0-9_$])`, "u").test(line);
+}
+
+async function manifestEntriesAtPath(
+  context: GitContext,
+  request: RepositoryContextRequest,
+  path: string,
+  terms: readonly string[],
+  termOnly: boolean,
+  strict: boolean,
+): Promise<readonly RepositoryEvidenceEntry[] | undefined> {
+  const text = await readTextAtCommit(
+    {
+      ...context,
+      timeoutMs: boundedRepositoryTimeout(request.deadlineMs, context.timeoutMs),
+    },
+    request.head,
+    path,
+  );
+  if (text === undefined) {
+    if (strict) throw new RepositoryContextRetrievalError();
+    return undefined;
+  }
+  const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
+  const relevant = relevantManifestLines(path, text, terms, termOnly);
+  if (relevant.length === 0) return undefined;
+  return relevant.flatMap((line) => {
+    const content = lines[line - 1];
+    return content === undefined ? [] : [{ path, line, content, kind: "manifest" as const }];
+  });
+}
+
 async function manifestEntries(
   context: GitContext,
   request: RepositoryContextRequest,
   terms: readonly string[],
+  termOnly = false,
+  strict = false,
 ): Promise<readonly RepositoryEvidenceEntry[]> {
-  const candidates = manifestCandidates(request.reviewPath);
-  const paths = await existingManifestPaths(context, request.head, candidates, request.deadlineMs);
+  const candidates = manifestCandidates(request.reviewPath, termOnly);
+  const paths = await existingManifestPaths(
+    context,
+    request.head,
+    candidates,
+    request.deadlineMs,
+    strict,
+  );
   const entries: RepositoryEvidenceEntry[] = [];
   let includedFiles = 0;
   for (const path of paths) {
     try {
-      const text = await readTextAtCommit(
-        {
-          ...context,
-          timeoutMs: boundedRepositoryTimeout(request.deadlineMs, context.timeoutMs),
-        },
-        request.head,
-        path,
-      );
-      if (text === undefined) continue;
-      const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
-      const relevant = relevantManifestLines(path, text, terms);
-      if (relevant.length === 0) continue;
+      const found = await manifestEntriesAtPath(context, request, path, terms, termOnly, strict);
+      if (found === undefined) continue;
       includedFiles += 1;
-      for (const line of relevant) {
-        const content = lines[line - 1];
-        if (content !== undefined) entries.push({ path, line, content, kind: "manifest" });
-      }
+      entries.push(...found);
       if (includedFiles === MAX_MANIFEST_FILES) break;
-    } catch {
+    } catch (error) {
+      if (strict) throw new RepositoryContextRetrievalError(error);
       // One unreadable manifest does not make positive sightings from other files untrue.
     }
   }
@@ -1273,6 +1411,59 @@ async function collectStructuralFollowUp(
   }
 }
 
+function lexicalFollowUp(
+  request: RepositoryContextRequest,
+  side: RepositoryEvidenceSide,
+  search: FollowUpSearch,
+  lexical: readonly RepositoryEvidenceEntry[],
+  preferredManifests: readonly RepositoryEvidenceEntry[],
+): RepositoryFollowUpContext | undefined {
+  if (
+    !hasNoStructuralCandidate(search.result) &&
+    search.result.candidatePaths.some(isStructurallySearchablePath)
+  ) {
+    return undefined;
+  }
+  return {
+    sourceCommit: request.head,
+    side,
+    entries: boundedPreferredEntries(preferredManifests, lexical),
+  };
+}
+
+async function structuralFollowUpWithManifests(
+  context: GitContext,
+  request: RepositoryContextRequest,
+  side: RepositoryEvidenceSide,
+  search: FollowUpSearch,
+  lexical: readonly RepositoryEvidenceEntry[],
+  preferredManifests: readonly RepositoryEvidenceEntry[],
+  dependencies: RepositoryContextDependencies,
+): Promise<RepositoryFollowUpContext> {
+  try {
+    const structural = await collectStructuralFollowUp(
+      context,
+      request,
+      side,
+      search,
+      lexical,
+      dependencies,
+    );
+    return {
+      ...structural,
+      entries: boundedPreferredEntries(preferredManifests, structural.entries),
+    };
+  } catch (error) {
+    if (preferredManifests.length === 0) throw error;
+    remainingRepositoryMs(request);
+    // A configuration challenge may have exact parser-independent manifest evidence even when a
+    // noisy identifier also made an unrelated code candidate structurally ambiguous. Preserve the
+    // former; the optional parser failure cannot turn a verified package pin into infrastructure
+    // loss or make the truncated lexical prefix evidence.
+    return { sourceCommit: request.head, side, entries: preferredManifests };
+  }
+}
+
 /** One caller-controlled follow-up stage. Invalid, prose, duplicate, and excess terms disappear. */
 export async function collectRepositoryContextFollowUp(
   request: RepositoryContextRequest,
@@ -1294,28 +1485,33 @@ export async function collectRepositoryContextFollowUp(
     // unmappable BASE file may still supply an explicitly requested cross-file contract.
     return { sourceCommit: sourceRequest.head, side, entries: [] };
   }
+  const preferredManifests = dependencies.preferManifests
+    ? await manifestEntries(
+        context,
+        sourceRequest,
+        expandedSearchTerms(validatedRetrieveTerms(retrieveTerms)),
+        true,
+        true,
+      )
+    : [];
   const search = await collectFollowUpSearch(context, sourceRequest, retrieveTerms, dependencies);
   // Model scope remains capped at three identifiers. The optional second group is deterministic
   // and equally capped; both searches feed one structural invocation over at most four immutable
   // blobs, so this adds recall without adding another model or parser loop.
   remainingRepositoryMs(sourceRequest);
   const lexical = boundedCodeEntries(search.result.matches, sourceRequest, true);
-  if (hasNoStructuralCandidate(search.result)) {
-    return { sourceCommit: sourceRequest.head, side, entries: lexical };
-  }
-  if (!search.result.candidatePaths.some(isStructurallySearchablePath)) {
-    // package manifests and lockfiles have no parser in the closed ast-grep language map. Their
-    // bounded exact lexical lines are still positive evidence; asking AST to "disambiguate" JSON
-    // can only convert usable evidence into an infrastructure-shaped failure.
-    return { sourceCommit: sourceRequest.head, side, entries: lexical };
-  }
-  return await collectStructuralFollowUp(
-    context,
-    sourceRequest,
-    side,
-    search,
-    lexical,
-    dependencies,
+  const lexicalOnly = lexicalFollowUp(sourceRequest, side, search, lexical, preferredManifests);
+  return (
+    lexicalOnly ??
+    (await structuralFollowUpWithManifests(
+      context,
+      sourceRequest,
+      side,
+      search,
+      lexical,
+      preferredManifests,
+      dependencies,
+    ))
   );
 }
 

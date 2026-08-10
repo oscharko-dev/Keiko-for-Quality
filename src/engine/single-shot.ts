@@ -182,7 +182,7 @@ function decodedGitPath(value: string): string | undefined {
   const hasOctal = /\\[0-7]{3}/u.test(trimmed);
   const json = trimmed.replace(/\\([0-7]{3})/gu, (_match, octal: string) => {
     const hex = Number.parseInt(octal, 8).toString(16).padStart(2, "0");
-    return `\\u00${hex}`;
+    return String.raw`\u00${hex}`;
   });
   try {
     const parsed = JSON.parse(json) as unknown;
@@ -198,7 +198,7 @@ function withoutPatchPrefix(path: string): string {
 }
 
 function namedPath(part: string, marker: "---" | "+++" | "rename to"): string | undefined {
-  const escaped = marker.replaceAll("+", "\\+");
+  const escaped = marker.replaceAll("+", String.raw`\+`);
   const raw = new RegExp(`^${escaped} (.+)$`, "mu").exec(part)?.[1];
   if (raw === undefined) return undefined;
   const decoded = decodedGitPath(raw);

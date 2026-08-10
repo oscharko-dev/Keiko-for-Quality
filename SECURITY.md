@@ -30,21 +30,29 @@ invoked with a constructed environment and neutralized global and system configu
 config file can define aliases and hook paths that turn a read into an execution.
 
 **Structural retrieval keeps that boundary.** Follow-up lookup uses `git grep` against an exact
-immutable commit: HEAD normally, or the merge base only for the planner's closed `base` challenge
-axis. For optional owner discovery, a fixed ast-grep release first receives the one bounded reviewed
-blob from that commit through stdin. A subsequent structural search receives at most four bounded
-blobs from the same commit, also only through stdin — never candidate paths, a checkout, or
-repository configuration — when ambiguous sightings require structure and, when available, to add
+immutable commit: HEAD normally, or the merge base only for the deterministic closed `base`
+challenge axis. Optional owner discovery may parse the bounded reviewed blob and, for one depth-one
+caller-owner hop, reuse that same exact reviewed blob as input to a concurrent direct-call scan and
+outline. Thus owner discovery reads at most two reviewed-blob inputs: the initial owner outline and
+that optional caller-owner scan/outline pair. A subsequent structural search receives at most four
+bounded blobs from the same commit, handling blobs sequentially while each blob's scan and outline
+processes run concurrently. A bounded nullish-runtime signal may add one syntax parse of the
+complete bounded selected reviewed blob; only a syntax match at the exact finding anchor can select
+fixed text from a versioned closed fact catalog, and candidate code is never executed. Every
+ast-grep process receives immutable bytes only through stdin — never
+candidate paths, a checkout, or repository configuration. Ambiguous sightings require structure;
+optional enrichment adds
 tightly bounded owning-function context to clear lexical evidence. Both the release archive and
 extracted executable are SHA-256 pinned on every
 supported platform; ZIP paths, sizes and CRCs are checked before verified bytes become executable.
 Malformed output, timeout, unsupported platform, or any acquisition mismatch fails an
-ambiguity-driven lookup closed and leaves the affected review incomplete; optional enrichment
-failure retains only the exact lexical evidence. The reviewed file is eligible only during an
+ambiguity-driven or runtime-fact lookup closed and leaves the affected review incomplete; optional
+owner enrichment failure retains only the exact lexical evidence. The reviewed file is eligible only during an
 explicit follow-up, and lines inside its already-rendered 24-line-per-side anchor window are
 rejected before lexical or structural evidence is returned. Package and lockfile formats that are
 outside ast-grep's language set remain bounded lexical evidence; they are never passed off as
-structurally verified, but an optional parser cannot erase their exact sightings.
+structurally verified, but an optional parser cannot erase their exact sightings. Configuration
+challenges reserve exact manifest and lockfile matches before repository-wide lexical noise.
 
 **Prompt injection is expected, not prevented.** The rule text tells the model that file content is
 data and never an instruction, but that is mitigation, not a guarantee. The real containment is
@@ -169,6 +177,6 @@ rejected outright (Keiko-for-Quality#94).
 
 ## Supported versions
 
-Only the newest release line — currently 0.13 — receives fixes. There are no maintenance branches
-for older lines. Because consumers pin this action to a full commit SHA, a fix takes effect only
-when the pin is advanced to a release that carries it.
+Only the newest release line receives fixes; there are no maintenance branches for older lines.
+Because consumers pin this action to a full commit SHA, a fix takes effect only when the pin is
+advanced to a release that carries it.

@@ -80,7 +80,9 @@ export function parsePrList(raw) {
  * nearest ancestor that exists. `fs` is injectable so the whole thing is testable without touching
  * a real filesystem.
  */
-export function realLocation(path, fs = { existsSync, lstatSync, readlinkSync, realpathSync }) {
+const DEFAULT_FS = { existsSync, lstatSync, readlinkSync, realpathSync };
+
+export function realLocation(path, fs = DEFAULT_FS) {
   let candidate = path;
   for (let hops = 0; hops < 16; hops += 1) {
     let stats;
@@ -155,7 +157,7 @@ function parseRootCommitField(root, field, description) {
   const commit = root?.[field];
   if (commit === undefined || commit === null) return null;
   if (typeof commit !== "object" || Array.isArray(commit)) {
-    throw new Error(`harvest root ${description} must be null or an object carrying an oid`);
+    throw new TypeError(`harvest root ${description} must be null or an object carrying an oid`);
   }
   const value = commit.oid;
   if (typeof value !== "string" || !FULL_COMMIT_OID.test(value)) {

@@ -1,11 +1,12 @@
 /**
  * The quality.keiko.dev widget card: one repository's review record, rendered as a
- * self-contained SVG — a faithful transcription of the card widget in section 07 of
- * `design-system/index.html`. Every dimension, colour and spacing below is copied from that
- * markup, not invented here: 340px card, #171B18 on a 24px dot grid, the 42px orca tile with
- * its green glow, mono 21px metrics with 10px labels, the outcome chip right-aligned ON the
- * metrics row, and the EX EXPERIENTIA DISCO / quality.keiko.dev footer above a hairline.
- * When the design page changes, this module follows it — never the other way around.
+ * self-contained SVG — the production evolution of the card widget foundation in section 07 of
+ * `design-system/index.html`. Its dimensions, colour system, typography, dot grid, orca tile and
+ * footer stay on that visual contract: 340px card, #171B18 on a 24px dot grid, a 42px tile with
+ * its green glow, mono 21px metrics with 10px labels, an explicit workflow-status chip, a quiet
+ * second row of operational signals, and the EX EXPERIENTIA DISCO / quality.keiko.dev footer.
+ * This module is the normative production contract; the design page's section 07 is a historical
+ * layout specimen, not a live source for metric meaning or future card evolution.
  *
  * Pure function of its inputs — no fetch, no clock, no environment — so the whole visual
  * contract is unit-testable byte-for-byte. The dark theme is the canonical card (the design
@@ -24,12 +25,18 @@ export interface CardData {
   readonly repo: string;
   /** Completed review runs in the trailing thirty days, or undefined when unknown. */
   readonly runs30d?: number;
+  /** Share of those runs whose GitHub workflow conclusion was success, 0–100. */
+  readonly runSuccessPct?: number;
   /** Findings published in the same window, or undefined when unknown. */
   readonly findings?: number;
-  /** Share of findings whose conversation was resolved after a code change, 0–100. */
-  readonly actedOnPct?: number;
-  /** The most recent run's outcome. */
-  readonly outcome?: "complete" | "incomplete" | "skipped";
+  /** Share of those findings whose GitHub review thread is currently resolved, 0–100. */
+  readonly resolvedPct?: number;
+  /** Findings in the window whose review thread is currently unresolved. */
+  readonly openThreads?: number;
+  /** Distinct pull requests containing at least one finding from the window. */
+  readonly prsWithFindings?: number;
+  /** The latest counted GitHub workflow run's status — explicitly not review settlement. */
+  readonly runStatus?: "ok" | "not_ok";
   /** Hours since the most recent run, for the "last run" line. */
   readonly lastRunHours?: number;
 }
@@ -50,6 +57,7 @@ interface Palette {
   readonly chipWarn: string;
   readonly chipWarnBg: string;
   readonly chipWarnLine: string;
+  readonly statsBg: string;
   readonly tile: string;
   readonly tileGlow: string;
   readonly tileInk: string;
@@ -71,6 +79,7 @@ const PALETTES: Record<CardTheme, Palette> = {
     chipWarn: "#D9A24F",
     chipWarnBg: "rgba(217,162,79,0.14)",
     chipWarnLine: "rgba(217,162,79,0.4)",
+    statsBg: "rgba(255,255,255,0.025)",
     tile: "#4EBA87",
     tileGlow: "rgba(78,186,135,0.45)",
     tileInk: "#1B211E",
@@ -89,6 +98,7 @@ const PALETTES: Record<CardTheme, Palette> = {
     chipWarn: "#8A6410",
     chipWarnBg: "rgba(138,100,16,0.10)",
     chipWarnLine: "rgba(138,100,16,0.35)",
+    statsBg: "rgba(27,33,30,0.025)",
     tile: "#4EBA87",
     tileGlow: "rgba(78,186,135,0.35)",
     tileInk: "#1B211E",
@@ -114,6 +124,15 @@ function esc(text: string): string {
 
 function metric(value: number | undefined): string {
   return value === undefined ? "—" : String(value);
+}
+
+export function formatPercentage(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value) || value < 0 || value > 100) return "—";
+  if (value === 100) return "100%";
+  const rounded = Math.round(value * 10) / 10;
+  if (rounded === 100) return "<100%";
+  if (value > 0 && rounded === 0) return "<0.1%";
+  return `${String(rounded)}%`;
 }
 
 function lastRunLabel(hours: number | undefined): string {
@@ -156,13 +175,13 @@ function metricsBlock(columns: readonly MetricColumn[], p: Palette): string {
   return parts.join("\n  ");
 }
 
-function chipBlock(outcome: CardData["outcome"], p: Palette): string {
-  if (outcome === undefined) return "";
-  const ok = outcome === "complete";
+function chipBlock(runStatus: CardData["runStatus"], p: Palette): string {
+  if (runStatus === undefined) return "";
+  const ok = runStatus === "ok";
   const color = ok ? p.chipOk : p.chipWarn;
   const bg = ok ? p.chipOkBg : p.chipWarnBg;
   const line = ok ? p.chipOkLine : p.chipWarnLine;
-  const label = outcome.toUpperCase();
+  const label = ok ? "RUN OK" : "RUN NOT OK";
   const textW = label.length * 6.4;
   const w = 9 + 11 + 5 + textW + 9;
   const x = WIDTH - PAD_X - w;
@@ -175,6 +194,29 @@ function chipBlock(outcome: CardData["outcome"], p: Palette): string {
     icon +
     `<text x="${String(x + 25)}" y="${String(cy + 3.5)}" font-family="${MONO}" font-size="9.5" letter-spacing="0.7" fill="${color}">${label}</text>`
   );
+}
+
+interface HealthMetric {
+  readonly value: string;
+  readonly label: string;
+}
+
+/** Three compact, source-verifiable signals fill the card's operational row without competing
+ *  with the primary review record above it. */
+function healthBlock(metrics: readonly HealthMetric[], p: Palette): string {
+  const centers = [70, 170, 270] as const;
+  const parts = [
+    `<rect x="${String(PAD_X)}" y="127" width="${String(WIDTH - 2 * PAD_X)}" height="44" rx="8" fill="${p.statsBg}" stroke="${p.hairline}"/>`,
+  ];
+  for (const [index, item] of metrics.entries()) {
+    const x = centers[index];
+    if (x === undefined) break;
+    parts.push(
+      `<text x="${String(x)}" y="147" text-anchor="middle" font-family="${MONO}" font-size="13" fill="${p.fg}">${esc(item.value)}</text>`,
+      `<text x="${String(x)}" y="161" text-anchor="middle" font-family="${MONO}" font-size="7.5" letter-spacing="0.35" fill="${p.muted}">${esc(item.label)}</text>`,
+    );
+  }
+  return parts.join("\n  ");
 }
 
 function footerBlock(p: Palette): string {
@@ -192,13 +234,17 @@ export function renderCard(data: CardData, theme: CardTheme = "dark"): string {
   const title = "Reviewed by Keiko for Quality";
   const last = esc(lastRunLabel(data.lastRunHours));
   const slug = esc(`${data.owner}/${data.repo}`);
-  const lastRun = last === "" ? "" : ` · ${last}`;
-  const sub = `${slug}${lastRun}`;
-  const acted = data.actedOnPct === undefined ? "—" : `${String(Math.round(data.actedOnPct))}%`;
+  const resolved = formatPercentage(data.resolvedPct);
+  const runSuccess = formatPercentage(data.runSuccessPct);
   const columns: readonly MetricColumn[] = [
     { value: metric(data.runs30d), label: "runs · 30 d", accent: false },
     { value: metric(data.findings), label: "findings", accent: false },
-    { value: acted, label: "acted on", accent: true },
+    { value: resolved, label: "resolved", accent: true },
+  ];
+  const health: readonly HealthMetric[] = [
+    { value: runSuccess, label: "RUNS OK" },
+    { value: metric(data.openThreads), label: "OPEN THREADS" },
+    { value: metric(data.prsWithFindings), label: "PRS W/ FINDINGS" },
   ];
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${String(WIDTH)}" height="${String(HEIGHT)}" viewBox="0 0 ${String(WIDTH)} ${String(HEIGHT)}" role="img" aria-label="${esc(title)} — ${slug}">
   <defs>
@@ -214,10 +260,12 @@ export function renderCard(data: CardData, theme: CardTheme = "dark"): string {
   <rect x="0.5" y="0.5" width="${String(WIDTH - 1)}" height="${String(HEIGHT - 1)}" rx="12" fill="url(#dots)"/>
   <g clip-path="url(#card)">
   ${tileBlock(p)}
-  <text x="75" y="36" font-family="${SANS}" font-size="13.5" font-weight="650" letter-spacing="-0.14" fill="${p.fg}">${esc(title)}</text>
-  <text x="75" y="51" font-family="${MONO}" font-size="10" fill="${p.muted}">${sub}</text>
+  <text x="75" y="32" font-family="${SANS}" font-size="13.5" font-weight="650" letter-spacing="-0.14" fill="${p.fg}">${esc(title)}</text>
+  <text x="75" y="45" font-family="${MONO}" font-size="10" fill="${p.muted}">${slug}</text>
+  ${last === "" ? "" : `<text x="75" y="57" font-family="${MONO}" font-size="8.5" fill="${p.muted}">${last}</text>`}
   ${metricsBlock(columns, p)}
-  ${chipBlock(data.outcome, p)}
+  ${chipBlock(data.runStatus, p)}
+  ${healthBlock(health, p)}
   ${footerBlock(p)}
   </g>
 </svg>

@@ -224,13 +224,7 @@ const AGGREGATE_KEYS = [
   "tokensPerSevereHit",
 ];
 
-/** Strict schema validation used by both the checker and the release gate. */
-export function validateQualificationEvidence(report) {
-  const failures = [];
-  const root = record(report);
-  if (root === undefined || !sameKeys(root, ROOT_KEYS)) {
-    return { valid: false, complete: false, failures: ["root_shape"] };
-  }
+function validateIdentity(root, failures) {
   if (
     root.schemaVersion !== QUALIFICATION_EVIDENCE_SCHEMA_VERSION ||
     root.artifact !== QUALIFICATION_EVIDENCE_ARTIFACT ||
@@ -238,95 +232,139 @@ export function validateQualificationEvidence(report) {
   ) {
     failures.push("identity");
   }
-  if (typeof root.measured !== "boolean" || !REASONS.has(root.reason)) failures.push("measurement");
-  if (root.measured === true && root.reason !== "measured") failures.push("measurement_reason");
-  if (root.measured === false && root.reason === "measured") failures.push("measurement_reason");
+  if (typeof root.measured !== "boolean" || !REASONS.has(root.reason)) {
+    failures.push("measurement");
+  }
+  if (
+    (root.measured === true && root.reason !== "measured") ||
+    (root.measured === false && root.reason === "measured")
+  ) {
+    failures.push("measurement_reason");
+  }
+}
 
-  const binding = record(root.binding);
+function hasBindingShape(binding) {
   const adapter = record(binding?.adapter);
   const engine = record(binding?.engine);
   const rule = record(binding?.rule);
   const corpus = record(binding?.corpus);
   const model = record(binding?.model);
-  if (
-    binding === undefined ||
-    !sameKeys(binding, BINDING_KEYS) ||
-    adapter === undefined ||
-    !sameKeys(adapter, ["commit", "version"]) ||
-    engine === undefined ||
-    !sameKeys(engine, ["sha256"]) ||
-    rule === undefined ||
-    !sameKeys(rule, ["sha256"]) ||
-    corpus === undefined ||
-    !sameKeys(corpus, ["cases", "scorer"]) ||
-    model === undefined ||
-    !sameKeys(model, ["endpointDigest", "id", "protocol"])
-  ) {
+  return (
+    binding !== undefined &&
+    sameKeys(binding, BINDING_KEYS) &&
+    adapter !== undefined &&
+    sameKeys(adapter, ["commit", "version"]) &&
+    engine !== undefined &&
+    sameKeys(engine, ["sha256"]) &&
+    rule !== undefined &&
+    sameKeys(rule, ["sha256"]) &&
+    corpus !== undefined &&
+    sameKeys(corpus, ["cases", "scorer"]) &&
+    model !== undefined &&
+    sameKeys(model, ["endpointDigest", "id", "protocol"])
+  );
+}
+
+function validateBinding(rawBinding, failures) {
+  const binding = record(rawBinding);
+  if (!hasBindingShape(binding)) {
     failures.push("binding_shape");
-  } else {
-    try {
-      bindingFrom(binding);
-    } catch {
-      failures.push("binding_value");
-    }
+    return;
   }
+  try {
+    bindingFrom(binding);
+  } catch {
+    failures.push("binding_value");
+  }
+}
 
-  if (!Array.isArray(root.results)) {
+function validateResultValues(result, seen) {
+  const id = result.id;
+  if (typeof id !== "string" || !CASE_BY_ID.has(id) || seen.has(id)) {
+    throw new TypeError("qualification evidence: result id is unknown or duplicated");
+  }
+  seen.add(id);
+  if (!RESULT_KINDS.has(result.kind)) {
+    throw new TypeError(`qualification evidence: result kind is invalid for ${id}`);
+  }
+  boolean(result.pass, `${id}.pass`);
+  if (result.classified !== null) boolean(result.classified, `${id}.classified`);
+  if (result.severityAdjacent !== null) {
+    boolean(result.severityAdjacent, `${id}.severityAdjacent`);
+  }
+  for (const key of [
+    "noise",
+    "tokens",
+    "findingCount",
+    "rejectedCount",
+    "rejectedSanitization",
+    "suppressedIntraRun",
+  ]) {
+    natural(result[key], `${id}.${key}`);
+  }
+  if (result.rejectedCount !== result.rejectedSanitization) {
+    throw new TypeError(`qualification evidence: rejection counts disagree for ${id}`);
+  }
+}
+
+function validateResults(rawResults, failures) {
+  if (!Array.isArray(rawResults)) {
     failures.push("results_shape");
-  } else {
-    const seen = new Set();
-    for (const result of root.results) {
-      const resultRecord = record(result);
-      if (resultRecord === undefined || !sameKeys(resultRecord, RESULT_KEYS)) {
-        failures.push("result_shape");
-        continue;
-      }
-      try {
-        const id = resultRecord.id;
-        if (typeof id !== "string" || !CASE_BY_ID.has(id) || seen.has(id)) throw new TypeError();
-        seen.add(id);
-        if (!RESULT_KINDS.has(resultRecord.kind)) throw new TypeError();
-        boolean(resultRecord.pass, `${id}.pass`);
-        if (resultRecord.classified !== null) boolean(resultRecord.classified, `${id}.classified`);
-        if (resultRecord.severityAdjacent !== null) {
-          boolean(resultRecord.severityAdjacent, `${id}.severityAdjacent`);
-        }
-        for (const key of [
-          "noise",
-          "tokens",
-          "findingCount",
-          "rejectedCount",
-          "rejectedSanitization",
-          "suppressedIntraRun",
-        ]) {
-          natural(resultRecord[key], `${id}.${key}`);
-        }
-        if (resultRecord.rejectedCount !== resultRecord.rejectedSanitization) throw new TypeError();
-      } catch {
-        failures.push("result_value");
-      }
+    return;
+  }
+  const seen = new Set();
+  for (const result of rawResults) {
+    const resultRecord = record(result);
+    if (resultRecord === undefined || !sameKeys(resultRecord, RESULT_KEYS)) {
+      failures.push("result_shape");
+      continue;
+    }
+    try {
+      validateResultValues(resultRecord, seen);
+    } catch {
+      failures.push("result_value");
     }
   }
+}
 
+function validateAggregateValues(root, aggregates, failures) {
+  try {
+    const expectedAggregates = aggregatesFrom(root.results);
+    if (JSON.stringify(aggregates) !== JSON.stringify(expectedAggregates)) {
+      failures.push("aggregates_value");
+    }
+    const expectedTokens = root.results.reduce((sum, result) => sum + result.tokens, 0);
+    if (root.tokens !== expectedTokens) failures.push("tokens_value");
+  } catch {
+    failures.push("aggregates_value");
+  }
+}
+
+function validateAggregates(root, failures) {
   const aggregates = record(root.aggregates);
   if (aggregates === undefined || !sameKeys(aggregates, AGGREGATE_KEYS)) {
     failures.push("aggregates_shape");
-  } else if (Array.isArray(root.results)) {
-    try {
-      const expectedAggregates = aggregatesFrom(root.results);
-      if (JSON.stringify(aggregates) !== JSON.stringify(expectedAggregates)) {
-        failures.push("aggregates_value");
-      }
-      const expectedTokens = root.results.reduce((sum, result) => sum + result.tokens, 0);
-      if (root.tokens !== expectedTokens) failures.push("tokens_value");
-    } catch {
-      failures.push("aggregates_value");
-    }
+    return;
   }
+  if (Array.isArray(root.results)) validateAggregateValues(root, aggregates, failures);
+}
 
-  const ids = Array.isArray(root.results)
-    ? new Set(root.results.map((result) => result?.id))
-    : new Set();
-  const complete = ids.size === CASES.length && CASES.every((testCase) => ids.has(testCase.id));
+function hasCompleteCaseCoverage(results) {
+  const ids = Array.isArray(results) ? new Set(results.map((result) => result?.id)) : new Set();
+  return ids.size === CASES.length && CASES.every((testCase) => ids.has(testCase.id));
+}
+
+/** Strict schema validation used by both the checker and the release gate. */
+export function validateQualificationEvidence(report) {
+  const failures = [];
+  const root = record(report);
+  if (root === undefined || !sameKeys(root, ROOT_KEYS)) {
+    return { valid: false, complete: false, failures: ["root_shape"] };
+  }
+  validateIdentity(root, failures);
+  validateBinding(root.binding, failures);
+  validateResults(root.results, failures);
+  validateAggregates(root, failures);
+  const complete = hasCompleteCaseCoverage(root.results);
   return { valid: failures.length === 0, complete, failures: [...new Set(failures)] };
 }

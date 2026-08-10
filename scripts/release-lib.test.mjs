@@ -173,6 +173,19 @@ test("release gate reports must be clean, pinned, and green inside the files", (
       .failures,
     ["completion_below_threshold"],
   );
+  assert.deepEqual(
+    validateGateEvidence(seed, completion.replace("100.0%** (3/3", "133.3%** (4/3"), expected)
+      .failures,
+    ["completion_rate_inconsistent"],
+  );
+  assert.deepEqual(
+    validateGateEvidence(
+      seed,
+      completion.replace("(clean)", "(DIRTY — not release evidence)"),
+      expected,
+    ).failures,
+    ["completion_reviewer_not_clean", "completion_disqualified"],
+  );
 });
 
 test("publish and repin bind the requested version to the exact released commit", () => {

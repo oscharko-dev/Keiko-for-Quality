@@ -10,15 +10,14 @@
 </p>
 
 <p align="center">
-  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=alert_status"></a>
-  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=duplicated_lines_density"></a>
-  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=coverage"></a>
-  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=duplicated_lines_density"></a>
-  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=reliability_rating"></a>
-  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=security_rating"></a>
-  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=sqale_rating"></a>
-  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=sqale_index"></a>
-  <a href="https://sonarcloud.io/summary/new_code?id=oscharko-dev_Keiko"><img alt="SonarCloud Quality Gate" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=vulnerabilities"></a>
+  <a href="https://github.com/oscharko-dev/Keiko-for-Quality/actions/workflows/ci.yml"><img alt="Keiko Banking Grade CI contract" src="https://github.com/oscharko-dev/Keiko-for-Quality/actions/workflows/ci.yml/badge.svg?branch=dev"></a>
+  <a href="https://sonarcloud.io/project/overview?id=oscharko-dev_Keiko-for-Quality"><img alt="SonarCloud Duplicated Lines Density" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=duplicated_lines_density"></a>
+  <a href="https://sonarcloud.io/project/overview?id=oscharko-dev_Keiko-for-Quality"><img alt="SonarCloud Coverage" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=coverage"></a>
+  <a href="https://sonarcloud.io/project/overview?id=oscharko-dev_Keiko-for-Quality"><img alt="SonarCloud Reliability Rating" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=reliability_rating"></a>
+  <a href="https://sonarcloud.io/project/overview?id=oscharko-dev_Keiko-for-Quality"><img alt="SonarCloud Security Rating" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=security_rating"></a>
+  <a href="https://sonarcloud.io/project/overview?id=oscharko-dev_Keiko-for-Quality"><img alt="SonarCloud Maintainability Rating" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=sqale_rating"></a>
+  <a href="https://sonarcloud.io/project/overview?id=oscharko-dev_Keiko-for-Quality"><img alt="SonarCloud Technical Debt" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=sqale_index"></a>
+  <a href="https://sonarcloud.io/project/overview?id=oscharko-dev_Keiko-for-Quality"><img alt="SonarCloud Vulnerabilities" src="https://sonarcloud.io/api/project_badges/measure?project=oscharko-dev_Keiko-for-Quality&metric=vulnerabilities"></a>
 </p>
 
 <p align="center">
@@ -33,7 +32,7 @@
        https://quality.keiko.dev/widget/oscharko-dev/Keiko-for-Quality.svg . -->
   <a href="https://github.com/oscharko-dev/Keiko-for-Quality/pulls?q=is%3Apr"><picture>
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/quality-cards/cards/oscharko-dev/Keiko-for-Quality-light.svg">
-    <img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/quality-cards/cards/oscharko-dev/Keiko-for-Quality.svg" width="340" alt="Reviewed by Keiko for Quality — run, finding and acted-on numbers for this repository">
+    <img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/quality-cards/cards/oscharko-dev/Keiko-for-Quality.svg" width="340" alt="Reviewed by Keiko for Quality — 30-day runs, findings, resolution and workflow-health metrics for this repository">
   </picture></a>
 </p>
 
@@ -100,14 +99,16 @@ Model hypotheses then pass an independent truth workflow, including generation-c
 combines exact HEAD/BASE source, merge-base-to-HEAD diff lines and bounded repository retrieval. A
 Truth judge must cite positive change proof and may request one deterministic lookup. Every
 lookup is terminal: it can confirm, refute, or report insufficient evidence, but cannot start
-another search loop. Every confirmed claim then goes to a separate Contract-Challenge planner,
-which selects one bounded disproof axis and forces a second repository lookup before a terminal
-adversarial Falsifier decides. A rejected planner shape may be replaced only by deterministic,
-code-shaped identifiers from the finding and already-cited evidence; no rejected planner field is
-repaired or reused. On the shorter path, one independent
-Referee may retry a rejected Falsifier shape without seeing that rejected response. Planner,
-Falsifier, and Referee never receive Truth's verdict or rationale, and publication still requires
-new R4-R6 source provenance. The path has at most four model calls per finding under one hard
+another search loop. Every confirmed claim then receives a deterministic Contract Challenge: it
+derives one bounded disproof axis and code-shaped identifiers from the finding and Truth-cited
+source, with no model-planner call, and forces a second repository lookup before an adversarial
+Falsifier decides. Configuration challenges reserve exact manifest and lockfile matches before
+noisy repository hits. A bounded nullish-runtime signal may additionally license only a fixed,
+versioned ECMAScript fact selected by syntax at the exact anchor in the complete bounded immutable blob; candidate code is never
+executed and candidate text can never supply the fact wording. A surviving or malformed Falsifier
+must pass one independent reduced-envelope Referee that never sees the rejected response. Falsifier
+and Referee never receive Truth's verdict or rationale, and publication still requires novel R4-R6
+source or closed-tool provenance. The path has at most four model calls per finding under one hard
 budget. Classification and PR-wide ranking happen only after truth survives that challenge. At
 most 16 model candidates enter verification and at most eight are published; deterministic
 contract findings alone remain outside those slots. Missing evidence, exhausted budget or
@@ -115,7 +116,7 @@ malformed terminal output withholds the affected finding and makes the run incom
 clean.
 
 Repository lookup starts with exact-commit `git grep`: HEAD by default, or the immutable merge base
-for the planner's closed `base` challenge axis. A digest-pinned ast-grep parses bounded blobs from
+for the deterministic closed `base` challenge axis. A digest-pinned ast-grep parses bounded blobs from
 that same selected commit through stdin when ambiguous hits require structural disambiguation, and
 may enrich clear lexical hits with tightly bounded owning-function context. Failure is fatal only
 when that structure is required; optional enrichment failure preserves the exact lexical evidence.
@@ -200,10 +201,12 @@ is in [docs/operations.md](docs/operations.md); release discipline is in
 
 ## Design system
 
-The complete design language for every surface — GitHub comments, email, CLI, checks and README
-widgets — lives in [`design-system/`](design-system/): one self-contained page
-(`index.html`), the Lift-grammar quality glyphs, and the orca marks. Comment assets are the
-design page's chip pills, pinned to the full commit SHA that the
+The design language for GitHub comments, email, CLI and checks lives in
+[`design-system/`](design-system/): one self-contained page (`index.html`), the Lift-grammar
+quality glyphs, and the orca marks. Its README-widget panel is explicitly a historical layout
+specimen, not live monitoring data; [`widget/`](widget/) and its tests are the source of truth for
+the current card's metrics, labels and rendering. Comment assets are the design page's chip pills,
+pinned to the full commit SHA that the
 [`kq-assets-v2`](.github/assets/kq/) tag names — the SHA, not the tag, for the same reason
 consumers pin this action by SHA — so published comments can never change appearance
 retroactively.

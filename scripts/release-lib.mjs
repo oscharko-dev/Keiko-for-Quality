@@ -132,49 +132,50 @@ export function gateEvidenceIdentity(report) {
   };
 }
 
-/**
- * Validates the facts inside the two release reports, not merely their filenames.
- *
- * A red or dirty report with the right suffix is evidence that the gate did NOT pass. Treating it
- * as the opposite shipped v0.22.0 over a seed report that literally said "DIRTY — not release
- * evidence". The release driver calls this before changing a version or writing a commit.
- */
-export function validateGateEvidence(seedReport, completionReport, expected) {
-  const failures = [];
-  const seedIdentity = gateEvidenceIdentity(seedReport);
-  const completionIdentity = gateEvidenceIdentity(completionReport);
-  const seedTree = seedIdentity.reviewer;
-  const completionTree = completionIdentity.reviewer;
-  if (seedTree === undefined) failures.push("seed_reviewer_not_clean");
-  if (!PINNED_MODEL.test(seedReport)) failures.push("seed_model_mismatch");
-  if (!GREEN_SEED.test(seedReport)) failures.push("seed_not_green");
-  if (completionTree === undefined) failures.push("completion_reviewer_not_clean");
-  if (!PINNED_MODEL.test(completionReport)) failures.push("completion_model_mismatch");
-  const completion = completionEvidence(completionReport);
+function completionRateIsConsistent(completion) {
+  const computedRate = Number(((completion.complete / completion.graded) * 100).toFixed(1));
+  return (
+    completion.complete <= completion.graded &&
+    completion.reportedRate >= 0 &&
+    completion.reportedRate <= 100 &&
+    completion.reportedRate === computedRate
+  );
+}
+
+function validateCompletionEvidence(report, failures) {
+  const completion = completionEvidence(report);
   if (completion === undefined) {
     failures.push("completion_not_green");
-  } else {
-    const computedRate = Number(((completion.complete / completion.graded) * 100).toFixed(1));
-    if (
-      completion.complete > completion.graded ||
-      completion.reportedRate < 0 ||
-      completion.reportedRate > 100 ||
-      completion.reportedRate !== computedRate
-    ) {
-      failures.push("completion_rate_inconsistent");
-    }
-    if (completion.graded < MINIMUM_COMPLETION_GRADED_ATTEMPTS) {
-      failures.push("completion_sample_too_small");
-    }
-    if (completion.threshold < MINIMUM_COMPLETION_THRESHOLD_PERCENT || completion.threshold > 100) {
-      failures.push("completion_threshold_too_low");
-    }
-    if (completion.reportedRate < completion.threshold) {
-      failures.push("completion_below_threshold");
-    }
+    return;
   }
-  if (seedIdentity.version !== expected.version) failures.push("seed_version_mismatch");
-  if (completionIdentity.version !== expected.version) failures.push("completion_version_mismatch");
+  if (!completionRateIsConsistent(completion)) failures.push("completion_rate_inconsistent");
+  if (completion.graded < MINIMUM_COMPLETION_GRADED_ATTEMPTS) {
+    failures.push("completion_sample_too_small");
+  }
+  if (completion.threshold < MINIMUM_COMPLETION_THRESHOLD_PERCENT || completion.threshold > 100) {
+    failures.push("completion_threshold_too_low");
+  }
+  if (completion.reportedRate < completion.threshold) failures.push("completion_below_threshold");
+}
+
+function validateGateReportHeaders(seedReport, completionReport, identities, failures) {
+  if (identities.seed.reviewer === undefined) failures.push("seed_reviewer_not_clean");
+  if (!PINNED_MODEL.test(seedReport)) failures.push("seed_model_mismatch");
+  if (!GREEN_SEED.test(seedReport)) failures.push("seed_not_green");
+  if (identities.completion.reviewer === undefined) {
+    failures.push("completion_reviewer_not_clean");
+  }
+  if (!PINNED_MODEL.test(completionReport)) failures.push("completion_model_mismatch");
+  validateCompletionEvidence(completionReport, failures);
+}
+
+function validateGateReportBindings(identities, expected, failures) {
+  const seedTree = identities.seed.reviewer;
+  const completionTree = identities.completion.reviewer;
+  if (identities.seed.version !== expected.version) failures.push("seed_version_mismatch");
+  if (identities.completion.version !== expected.version) {
+    failures.push("completion_version_mismatch");
+  }
   if (seedTree !== undefined && !expected.head.startsWith(seedTree)) {
     failures.push("seed_reviewer_mismatch");
   }
@@ -189,10 +190,31 @@ export function validateGateEvidence(seedReport, completionReport, expected) {
   ) {
     failures.push("gate_reviewer_disagreement");
   }
+}
+
+function validateGateReportDisqualifiers(seedReport, completionReport, failures) {
   if (/DIRTY|not release evidence/iu.test(seedReport)) failures.push("seed_disqualified");
   if (/DIRTY|not release evidence/iu.test(completionReport)) {
     failures.push("completion_disqualified");
   }
+}
+
+/**
+ * Validates the facts inside the two release reports, not merely their filenames.
+ *
+ * A red or dirty report with the right suffix is evidence that the gate did NOT pass. Treating it
+ * as the opposite shipped v0.22.0 over a seed report that literally said "DIRTY — not release
+ * evidence". The release driver calls this before changing a version or writing a commit.
+ */
+export function validateGateEvidence(seedReport, completionReport, expected) {
+  const failures = [];
+  const identities = {
+    seed: gateEvidenceIdentity(seedReport),
+    completion: gateEvidenceIdentity(completionReport),
+  };
+  validateGateReportHeaders(seedReport, completionReport, identities, failures);
+  validateGateReportBindings(identities, expected, failures);
+  validateGateReportDisqualifiers(seedReport, completionReport, failures);
   return { valid: failures.length === 0, failures };
 }
 
@@ -249,10 +271,10 @@ export function planReleaseTag({ sha, localTagObject, remoteTagObject, remoteTag
 }
 
 export function isVersionedReleaseEvidencePath(path, version) {
-  const escaped = version.replaceAll(".", "\\.");
+  const escaped = version.replaceAll(".", String.raw`\.`);
   return new RegExp(
-    `^corpus/evidence/(?:(?:seed-gate|completion)-[^/]+-v${escaped}\\.md|` +
-      `(?:qualification|historical-replay)-[^/]+-v${escaped}\\.json)$`,
+    String.raw`^corpus/evidence/(?:(?:seed-gate|completion)-[^/]+-v${escaped}\.md|` +
+      String.raw`(?:qualification|historical-replay)-[^/]+-v${escaped}\.json)$`,
     "u",
   ).test(path);
 }
@@ -264,13 +286,16 @@ export function validatePrepEvidenceChanges(changes, version) {
     const path = change.slice(3);
     return status !== "??" || !isVersionedReleaseEvidencePath(path, version);
   });
-  const escaped = version.replaceAll(".", "\\.");
+  const escaped = version.replaceAll(".", String.raw`\.`);
   const kinds = {
-    seed: new RegExp(`^corpus/evidence/seed-gate-[^/]+-v${escaped}\\.md$`, "u"),
-    completion: new RegExp(`^corpus/evidence/completion-[^/]+-v${escaped}\\.md$`, "u"),
-    qualification: new RegExp(`^corpus/evidence/qualification-[^/]+-v${escaped}\\.json$`, "u"),
+    seed: new RegExp(String.raw`^corpus/evidence/seed-gate-[^/]+-v${escaped}\.md$`, "u"),
+    completion: new RegExp(String.raw`^corpus/evidence/completion-[^/]+-v${escaped}\.md$`, "u"),
+    qualification: new RegExp(
+      String.raw`^corpus/evidence/qualification-[^/]+-v${escaped}\.json$`,
+      "u",
+    ),
     historicalReplay: new RegExp(
-      `^corpus/evidence/historical-replay-[^/]+-v${escaped}\\.json$`,
+      String.raw`^corpus/evidence/historical-replay-[^/]+-v${escaped}\.json$`,
       "u",
     ),
   };
@@ -315,55 +340,63 @@ function replayMetrics(report, cohort, phase) {
   return record(selected.metrics);
 }
 
+function validateQualificationQualityEvidence(qualificationRoot, expected, failures) {
+  const schema = validateQualificationEvidence(qualificationRoot);
+  if (!schema.valid) failures.push("qualification_schema_mismatch");
+  if (!schema.complete) failures.push("qualification_case_coverage_mismatch");
+  const binding = record(qualificationRoot.binding);
+  const adapter = record(binding.adapter);
+  const model = record(binding.model);
+  if (qualificationRoot.measured !== true) failures.push("qualification_not_measured");
+  if (adapter.version !== expected.version) failures.push("qualification_version_mismatch");
+  if (adapter.commit !== expected.head) failures.push("qualification_reviewer_mismatch");
+  if (model.id !== "gpt-oss-120b" || model.protocol !== "openai") {
+    failures.push("qualification_model_mismatch");
+  }
+}
+
+function validateHistoricalBinding(historicalRoot, expected, failures) {
+  const binding = record(historicalRoot.binding);
+  const schema = validateHistoricalReplayEvidence(historicalRoot);
+  if (!schema.valid) failures.push("historical_schema_mismatch");
+  if (binding.reviewerTree !== expected.tree) failures.push("historical_reviewer_mismatch");
+  if (binding.model !== "gpt-oss-120b" || binding.protocol !== "openai") {
+    failures.push("historical_model_mismatch");
+  }
+}
+
+function validateReplayCohort(historicalRoot, cohort, failures) {
+  const before = replayMetrics(historicalRoot, cohort, "before");
+  const after = replayMetrics(historicalRoot, cohort, "after");
+  const beforePrecision = metric(before.precision);
+  const afterPrecision = metric(after.precision);
+  const retention = metric(after.fixedRetention);
+  const coverage = metric(after.decisionCoverage);
+  const minimumGain = cohort === "all" ? 0.1 : 0.05;
+  if (
+    beforePrecision === undefined ||
+    afterPrecision === undefined ||
+    afterPrecision < beforePrecision + minimumGain
+  ) {
+    failures.push(`historical_${cohort}_precision_gain_missing`);
+  }
+  if (retention === undefined || retention < 0.8) {
+    failures.push(`historical_${cohort}_fixed_retention_low`);
+  }
+  if (coverage === undefined || coverage < 0.75) {
+    failures.push(`historical_${cohort}_decision_coverage_low`);
+  }
+}
+
 /** Machine-checkable provenance and promotion floor for the two quality measurements. */
 export function validateQualityEvidence(qualification, historicalReplay, expected) {
   const failures = [];
   const qualificationRoot = record(qualification);
-  const qualificationSchema = validateQualificationEvidence(qualificationRoot);
-  if (!qualificationSchema.valid) failures.push("qualification_schema_mismatch");
-  if (!qualificationSchema.complete) failures.push("qualification_case_coverage_mismatch");
-  const qualificationBinding = record(qualificationRoot.binding);
-  const adapter = record(qualificationBinding.adapter);
-  const qualificationModel = record(qualificationBinding.model);
-  if (qualificationRoot.measured !== true) failures.push("qualification_not_measured");
-  if (adapter.version !== expected.version) failures.push("qualification_version_mismatch");
-  if (adapter.commit !== expected.head) failures.push("qualification_reviewer_mismatch");
-  if (qualificationModel.id !== "gpt-oss-120b" || qualificationModel.protocol !== "openai") {
-    failures.push("qualification_model_mismatch");
-  }
-
   const historicalRoot = record(historicalReplay);
-  const historicalBinding = record(historicalRoot.binding);
-  const historicalSchema = validateHistoricalReplayEvidence(historicalRoot);
-  if (!historicalSchema.valid) failures.push("historical_schema_mismatch");
-  if (historicalBinding.reviewerTree !== expected.tree) {
-    failures.push("historical_reviewer_mismatch");
-  }
-  if (historicalBinding.model !== "gpt-oss-120b" || historicalBinding.protocol !== "openai") {
-    failures.push("historical_model_mismatch");
-  }
-
+  validateQualificationQualityEvidence(qualificationRoot, expected, failures);
+  validateHistoricalBinding(historicalRoot, expected, failures);
   for (const cohort of ["all", "holdout"]) {
-    const before = replayMetrics(historicalRoot, cohort, "before");
-    const after = replayMetrics(historicalRoot, cohort, "after");
-    const beforePrecision = metric(before.precision);
-    const afterPrecision = metric(after.precision);
-    const retention = metric(after.fixedRetention);
-    const coverage = metric(after.decisionCoverage);
-    const minimumGain = cohort === "all" ? 0.1 : 0.05;
-    if (
-      beforePrecision === undefined ||
-      afterPrecision === undefined ||
-      afterPrecision < beforePrecision + minimumGain
-    ) {
-      failures.push(`historical_${cohort}_precision_gain_missing`);
-    }
-    if (retention === undefined || retention < 0.8) {
-      failures.push(`historical_${cohort}_fixed_retention_low`);
-    }
-    if (coverage === undefined || coverage < 0.75) {
-      failures.push(`historical_${cohort}_decision_coverage_low`);
-    }
+    validateReplayCohort(historicalRoot, cohort, failures);
   }
   return { valid: failures.length === 0, failures };
 }
