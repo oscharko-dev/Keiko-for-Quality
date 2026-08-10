@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   CORE_ROLE,
+  EXAMINER_EVIDENCE_CONTRACT,
+  EXAMINER_EVIDENCE_CONTRACT_MAX_BYTES,
   FALLBACK_RISK_LENSES,
   GENERATION_COMPLETION_LIMIT,
   GENERATION_WORKFLOW_IDENTITY,
@@ -18,6 +20,12 @@ import {
   shouldRunIntegrationExaminer,
   type GenerationContext,
 } from "./generation-workflow.js";
+import {
+  EXAMINER_CLAIM_DECISION_POLICY,
+  EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
+  REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  TEST_ISOLATION_EVIDENCE_POLICY,
+} from "./claim-decision-policy.js";
 
 const CONTEXT: GenerationContext = {
   path: "src/gateway.ts",
@@ -41,9 +49,13 @@ const ISOLATED_CONTEXT: GenerationContext = {
   changeIntent: "Keep token validation backward compatible.",
 };
 
+function occurrenceCount(value: string, needle: string): number {
+  return value.split(needle).length - 1;
+}
+
 describe("risk planner", () => {
   it("pins the manually bumped cache identity", () => {
-    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v3");
+    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v4");
   });
 
   it("sees the complete qualified rule but never receives the whole file", () => {
@@ -54,6 +66,9 @@ describe("risk planner", () => {
     expect(prompt.user).toContain("<companion_changes>");
     expect(prompt.user).toContain("<repository_context>");
     expect(prompt.user).not.toContain("<current_file>");
+    expect(prompt.system).not.toContain(TEST_ISOLATION_EVIDENCE_POLICY);
+    expect(prompt.system).not.toContain(REFERENCE_TRANSITION_EVIDENCE_POLICY);
+    expect(prompt.system).not.toContain(EXAMINER_CLAIM_DECISION_POLICY);
   });
 
   it("accepts at most six exact, bounded hypotheses", () => {
@@ -122,11 +137,22 @@ describe("focused examiners", () => {
       expect(prompt.system).toContain("private state actually exported or leaked");
       expect(prompt.system).toContain("caller-selected");
       expect(prompt.system).toContain("key shown reaching a prototype is evidence");
-      expect(prompt.system).toContain("40-hex action or dependency SHA is immutable");
-      expect(prompt.system).toContain("shown SHA-to-tag/branch regression");
-      expect(prompt.system).toContain("visible in-repository pin mismatch");
-      expect(prompt.system).toContain("do not invent remote");
+      expect(occurrenceCount(prompt.system, EXAMINER_CLAIM_DECISION_POLICY)).toBe(1);
+      expect(occurrenceCount(prompt.system, TEST_ISOLATION_EVIDENCE_POLICY)).toBe(1);
+      expect(occurrenceCount(prompt.system, REFERENCE_TRANSITION_EVIDENCE_POLICY)).toBe(1);
+      expect(prompt.system).not.toContain("## Workflow and pipeline files");
+      expect(prompt.system).not.toContain("## Look before you claim");
     }
+  });
+
+  it("keeps the shared examiner policy and complete evidence contract within their byte caps", () => {
+    const bytes = (value: string): number => new TextEncoder().encode(value).byteLength;
+    expect(bytes(EXAMINER_CLAIM_DECISION_POLICY)).toBeLessThanOrEqual(
+      EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
+    );
+    expect(bytes(EXAMINER_EVIDENCE_CONTRACT)).toBeLessThanOrEqual(
+      EXAMINER_EVIDENCE_CONTRACT_MAX_BYTES,
+    );
   });
 
   it("rejects an internally assembled path-policy block past the profile aggregate bound", () => {

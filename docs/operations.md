@@ -416,11 +416,11 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 ## Measured quality
 
 "The reviews are good" is not a claim anyone can check, so there is a corpus that turns it into one.
-`corpus/cases.mjs` holds 40 two-commit fixtures — 29 with exactly one seeded defect (four of them
-cross-artifact: the defect is invisible in the diff of any single file, issue #80), 11 that are
-clean and must produce silence — run through the release-selected generation workflow against a
-real model. No mocks: the question is about judgement, and judgement is what a mock cannot stand in
-for.
+`corpus/cases.mjs` holds 42 two-commit fixtures spanning 50 changed files — 31 with exactly one
+seeded defect (four of them cross-artifact: the defect is invisible in the diff of any single file,
+issue #80), 11 that are clean and must produce silence — run through the release-selected generation
+workflow against a real model. No mocks: the question is about judgement, and judgement is what a
+mock cannot stand in for.
 
 Four things are scored separately, because they fail for different reasons:
 
