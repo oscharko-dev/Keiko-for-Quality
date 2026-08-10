@@ -32,9 +32,9 @@ jobs:
     # request boundary, and the harness's single resume can carry a failing case past its first
     # attempt. Generation-only staged attempts took about twelve minutes; qualification now also
     # runs the shipped Truth/Challenge/Falsifier verification path, whose bounded follow-up calls
-    # make the wider job boundary load-bearing. A scheduled job has nothing waiting on it, while a
-    # timeout that cuts a healthy run produces a drift issue about the runner rather than the
-    # reviewer.
+    # make the wider job boundary load-bearing. A scheduled job has nothing waiting on it. A job
+    # timeout cancels the later escalation steps too, so it remains visible as a failed workflow
+    # and requires manual inspection; only a completed red threshold evaluation files a drift issue.
     timeout-minutes: 120
     # Arming switch, so this can be merged and reviewed before any credential exists. Until the
     # variable is set the job never starts and never consumes a token.
