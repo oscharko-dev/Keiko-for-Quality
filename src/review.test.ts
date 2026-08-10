@@ -44,6 +44,7 @@ vi.mock("./engine/run.js", async (importOriginal) => ({
 // model endpoint's global fetch mock and makes the test depend on a pre-existing tool cache.
 vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
   ...(await importOriginal()),
+  findAstAnchorOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
   searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
 }));
 
@@ -3175,13 +3176,11 @@ describe("performReview: review-cache memoization end to end", () => {
                               verdict: "defeated",
                               reason_code: "counterexample",
                               evidence_refs: [opts.falsifierEvidenceRef ?? "R4:H:1"],
-                              lookup_terms: [],
                             }
                           : {
                               verdict: "survives",
                               reason_code: "no_defeater_found",
                               evidence_refs: [opts.falsifierEvidenceRef ?? "R4:H:1"],
-                              lookup_terms: [],
                             },
                       ),
                     },

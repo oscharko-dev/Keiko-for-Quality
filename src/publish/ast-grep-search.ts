@@ -97,6 +97,21 @@ export interface StructuralSearchDependencies {
   readonly acquireBinary?: () => Promise<string>;
 }
 
+/** Exact-commit owner discovery for the reviewed anchor, before caller retrieval. */
+export interface AnchorOwnerSearchRequest {
+  readonly context: GitContext;
+  readonly head: CommitSha;
+  readonly reviewPath: string;
+  readonly findingAnchor: EvidenceLineRange;
+  /** Absolute whole-review boundary. Absent only for standalone callers. */
+  readonly deadlineMs?: number;
+}
+
+export interface AnchorOwner {
+  readonly name: string;
+  readonly definition: RepositoryEvidenceEntry;
+}
+
 interface SourceCandidate {
   readonly path: string;
   readonly source: string;
@@ -215,6 +230,11 @@ export function normalizedStructuralTerms(terms: readonly string[]): readonly st
 
 function languageForPath(path: string): LanguageSpec | undefined {
   return LANGUAGE_BY_EXTENSION[extname(path).toLowerCase()];
+}
+
+/** Whether the pinned parser has a closed language mapping for this repository path. */
+export function isStructurallySearchablePath(path: string): boolean {
+  return languageForPath(path) !== undefined;
 }
 
 function regexEscape(value: string): string {
@@ -427,6 +447,10 @@ function parseOutline(value: unknown, source: SourceCandidate): readonly Outline
   return outlineNodes(file.items, source);
 }
 
+function validOwnerName(name: string): boolean {
+  return name.length >= 3 && name.length <= 80 && /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(name);
+}
+
 function scanArguments(source: SourceCandidate, terms: readonly string[]): readonly string[] {
   return [
     "scan",
@@ -583,6 +607,65 @@ function inclusiveRangeEndLine(source: SourceCandidate, range: SourceRange): num
   return lineAtByteOffset(source.bytes, range.byteOffset.end - 1);
 }
 
+function validAnchorRange(anchor: EvidenceLineRange): boolean {
+  return !Number.isSafeInteger(anchor.startLine) ||
+    !Number.isSafeInteger(anchor.endLine) ||
+    anchor.startLine < 1 ||
+    anchor.endLine < anchor.startLine
+    ? false
+    : true;
+}
+
+function ownsCompleteAnchor(
+  node: OutlineNode,
+  source: SourceCandidate,
+  first: number,
+  last: number,
+): boolean {
+  return (
+    validOwnerName(node.name) &&
+    node.range.start.line <= first &&
+    inclusiveRangeEndLine(source, node.range) >= last
+  );
+}
+
+function narrowerOwner(candidate: OutlineNode, selected: OutlineNode | undefined): boolean {
+  return (
+    selected === undefined ||
+    candidate.range.byteOffset.end - candidate.range.byteOffset.start <
+      selected.range.byteOffset.end - selected.range.byteOffset.start
+  );
+}
+
+function anchorOwner(
+  nodes: readonly OutlineNode[],
+  source: SourceCandidate,
+  anchor: EvidenceLineRange,
+): AnchorOwner | undefined {
+  if (!validAnchorRange(anchor)) return undefined;
+  const first = anchor.startLine - 1;
+  const last = anchor.endLine - 1;
+  let selected: OutlineNode | undefined;
+  for (const node of nodes) {
+    if (ownsCompleteAnchor(node, source, first, last) && narrowerOwner(node, selected))
+      selected = node;
+  }
+  if (selected === undefined) return undefined;
+  const line = identifierLine(source, selected.range, selected.name);
+  const content = line === undefined ? undefined : sourceLine(source, line);
+  return line === undefined || content === undefined
+    ? undefined
+    : {
+        name: selected.name,
+        definition: {
+          path: source.path,
+          line: line + 1,
+          content,
+          kind: "definition",
+        },
+      };
+}
+
 function contextEntries(hit: StructuralHit): readonly StructuralEvidenceEntry[] {
   const anchorLine = hit.anchor.line - 1;
   const startLine = hit.ownerRange?.start.line ?? 0;
@@ -698,4 +781,38 @@ export async function searchAstGrepAtHead(
     )
   ).flat();
   return boundedStructuralEntries(hits, terms.length, sources.length, request);
+}
+
+/**
+ * Find the smallest named AST structure that owns the complete reviewed anchor.
+ *
+ * The source is the same bounded immutable blob used by structural retrieval and reaches the
+ * digest-pinned parser only through stdin. Returning `undefined` is a valid "no named owner"
+ * result; acquisition, execution, and malformed-output failures remain distinguishable errors so
+ * the caller can preserve clear lexical evidence without mistaking infrastructure loss for proof.
+ */
+export async function findAstAnchorOwnerAtHead(
+  request: AnchorOwnerSearchRequest,
+  dependencies: StructuralSearchDependencies = {},
+): Promise<AnchorOwner | undefined> {
+  structuralTimeoutMs(request.deadlineMs, STRUCTURAL_PROCESS_TIMEOUT_MS);
+  const sourceRequest: StructuralSearchRequest = {
+    ...request,
+    candidatePaths: [request.reviewPath],
+    terms: [],
+  };
+  const source = (await sourceCandidates(sourceRequest))[0];
+  if (source === undefined) return undefined;
+  let binaryPath: string;
+  try {
+    binaryPath =
+      dependencies.acquireBinary === undefined
+        ? await acquireDefaultAstGrep(request.deadlineMs)
+        : await dependencies.acquireBinary();
+    structuralTimeoutMs(request.deadlineMs, STRUCTURAL_PROCESS_TIMEOUT_MS);
+  } catch (error) {
+    throw new AstGrepSearchError(error);
+  }
+  const outline = await toolJson(binaryPath, outlineArguments(source), source, request.deadlineMs);
+  return anchorOwner(parseOutline(outline, source), source, request.findingAnchor);
 }

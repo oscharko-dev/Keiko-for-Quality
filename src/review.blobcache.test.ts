@@ -35,6 +35,7 @@ vi.mock("./engine/run.js", async (importOriginal) => ({
 // hermetic so a clean runner never needs a downloaded binary or a warm global tool cache.
 vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
   ...(await importOriginal()),
+  findAstAnchorOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
   searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
 }));
 
@@ -281,7 +282,7 @@ describe("performReview: the gate and the change-level pass share one blob-text 
           content = '{"axis":"caller","evidence_refs":["H:1"],"lookup_terms":["challengeGuard"]}';
         } else if (prompt.startsWith("Adversarially falsify one AI-generated code-review claim")) {
           content =
-            '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"],"lookup_terms":[]}';
+            '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"]}';
         } else {
           content = '{"category":"bug","severity":"high"}';
         }

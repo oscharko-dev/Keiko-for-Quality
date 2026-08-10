@@ -44,6 +44,7 @@ vi.mock("./engine/single-shot.js", async (importOriginal) => ({
 // runner has no ast-grep cache, and the model fetch mock must never become the tool downloader.
 vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
   ...(await importOriginal()),
+  findAstAnchorOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
   searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
 }));
 
@@ -254,7 +255,6 @@ describe("performLocalReview (issue #95)", () => {
                   verdict: "survives",
                   reason_code: "no_defeater_found",
                   evidence_refs: ["R4:H:1"],
-                  lookup_terms: [],
                 })
               : JSON.stringify(pair);
         return Promise.resolve(
@@ -450,7 +450,7 @@ describe("performLocalReview (issue #95)", () => {
           : prompt.includes("Plan one independent contract trace")
             ? '{"axis":"caller","evidence_refs":["H:1"],"lookup_terms":["challengeGuard"]}'
             : prompt.includes("Adversarially falsify")
-              ? '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"],"lookup_terms":[]}'
+              ? '{"verdict":"survives","reason_code":"no_defeater_found","evidence_refs":["R4:H:1"]}'
               : '{"category":"bug","severity":"medium"}';
         return Promise.resolve(
           new Response(

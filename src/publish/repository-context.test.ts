@@ -3,7 +3,7 @@ import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { commitSha } from "../core/brands.js";
 import type { RepositoryEvidenceEntry } from "./evidence.js";
@@ -18,6 +18,14 @@ import {
   validatedRetrieveTerms,
   type RepositoryContextRequest,
 } from "./repository-context.js";
+
+// The pinned parser and its acquisition path have dedicated hermetic suites. Default owner
+// enrichment is disabled here so repository/Git tests stay offline on a runner with an empty tool
+// cache; owner-specific cases inject the exact owner result they exercise.
+vi.mock("./ast-grep-search.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  findAstAnchorOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
+}));
 
 const temporaryRepositories: string[] = [];
 
@@ -178,6 +186,48 @@ describe("repository context collection", () => {
     });
   });
 
+  it("withholds a BASE challenge when an added file has no BASE anchor", async () => {
+    const { repository, request } = await fixture();
+    const base = request.head;
+    await write(
+      repository,
+      "src/added.ts",
+      "export function addedContract(): boolean { return true; }\n",
+    );
+    git(repository, "add", "src/added.ts");
+    git(repository, "commit", "-qm", "add contract fixture");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    let ownerCalls = 0;
+    let structuralCalls = 0;
+
+    const context = await collectRepositoryContextFollowUp(
+      {
+        ...request,
+        head,
+        base,
+        reviewPath: "src/added.ts",
+        baseReviewPath: "src/added.ts",
+        findingAnchor: { startLine: 1, endLine: 1 },
+      },
+      ["addedContract"],
+      {
+        sourceSide: "B",
+        anchorOwnerSearch: () => {
+          ownerCalls += 1;
+          return Promise.reject(new Error("must not inspect an absent BASE file"));
+        },
+        structuralSearch: () => {
+          structuralCalls += 1;
+          return Promise.reject(new Error("must not inspect an absent BASE file"));
+        },
+      },
+    );
+
+    expect(context).toEqual({ sourceCommit: base, side: "B", entries: [] });
+    expect(ownerCalls).toBe(0);
+    expect(structuralCalls).toBe(0);
+  });
+
   it("keeps strong-term sightings when a later noisy initial term fails", async () => {
     const { repository, request } = await fixture();
     const wrapper = join(repository, "term-isolation-bin");
@@ -206,6 +256,92 @@ describe("repository context collection", () => {
     await expect(readFile(join(repository, "noisy-term-searched"), "utf8")).resolves.toBe(
       "searched\n",
     );
+  });
+
+  it("keeps package and lockfile evidence lexical for historical finding 3740855222", async () => {
+    const { repository, request } = await fixture();
+    await write(repository, "package.json", '{\n  "dependencies": { "undici": "7.13.0" }\n}\n');
+    await write(
+      repository,
+      "package-lock.json",
+      '{\n  "packages": { "node_modules/undici": { "version": "7.13.0" } }\n}\n',
+    );
+    git(repository, "add", "package.json", "package-lock.json");
+    git(repository, "commit", "-qm", "add lockfile fixture");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    let structuralCalls = 0;
+
+    const context = await collectRepositoryContextFollowUp(
+      {
+        ...request,
+        head,
+        base: head,
+        reviewPath: "package.json",
+        baseReviewPath: "package.json",
+        findingAnchor: { startLine: 2, endLine: 2 },
+        findingContent: "The `undici` dependency and lockfile must agree.",
+        anchorText: '  "dependencies": { "undici": "7.13.0" }',
+      },
+      ["undici"],
+      {
+        structuralSearch: () => {
+          structuralCalls += 1;
+          return Promise.reject(new Error("JSON must stay outside ast-grep"));
+        },
+      },
+    );
+
+    expect(structuralCalls).toBe(0);
+    expect(context.entries).toContainEqual({
+      path: "package-lock.json",
+      line: 2,
+      content: '  "packages": { "node_modules/undici": { "version": "7.13.0" } }',
+      kind: "callsite",
+    });
+  });
+
+  it("does not let optional code-owner parsing erase package and lockfile evidence", async () => {
+    const { repository, request } = await fixture();
+    await write(repository, request.reviewPath, "const undici = useCapability(input);\n");
+    await write(repository, "package.json", '{\n  "dependencies": { "undici": "7.13.0" }\n}\n');
+    await write(
+      repository,
+      "package-lock.json",
+      '{\n  "packages": { "node_modules/undici": { "version": "7.13.0" } }\n}\n',
+    );
+    git(repository, "add", request.reviewPath, "package.json", "package-lock.json");
+    git(repository, "commit", "-qm", "add parser-independent package evidence");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    let structuralCalls = 0;
+
+    const context = await collectRepositoryContextFollowUp(
+      { ...request, head, base: head },
+      ["undici"],
+      {
+        anchorOwnerSearch: () =>
+          Promise.resolve({
+            name: "useCapability",
+            definition: {
+              path: request.reviewPath,
+              line: 1,
+              content: "const result = useCapability(input);",
+              kind: "definition",
+            },
+          }),
+        structuralSearch: () => {
+          structuralCalls += 1;
+          return Promise.reject(new Error("optional owner parser unavailable"));
+        },
+      },
+    );
+
+    expect(structuralCalls).toBe(1);
+    expect(context.entries).toContainEqual({
+      path: "package-lock.json",
+      line: 2,
+      content: '  "packages": { "node_modules/undici": { "version": "7.13.0" } }',
+      kind: "callsite",
+    });
   });
 
   it("reserves matches for a later term when the first term saturates its share", async () => {
@@ -402,6 +538,16 @@ describe("repository context collection", () => {
     let structuralTerms: readonly string[] = [];
 
     const context = await collectRepositoryContextFollowUp(anchored, ["privateArtifactFailures"], {
+      anchorOwnerSearch: () =>
+        Promise.resolve({
+          name: "publicManifestFailures",
+          definition: {
+            path: request.reviewPath,
+            line: 34,
+            content: "export function publicManifestFailures(manifest: unknown): string[] {",
+            kind: "definition",
+          },
+        }),
       structuralSearch: ({ terms }) => {
         structuralTerms = terms;
         return Promise.resolve([]);
@@ -429,11 +575,38 @@ describe("repository context collection", () => {
     ]);
   });
 
-  it("does not add a broad adjacent fallback to a clear primary lexical trace", async () => {
+  it("keeps clear primary evidence ahead of independently derived owner context", async () => {
     const { request } = await fixture();
     let searchedTerms: readonly string[] = [];
 
     const context = await collectRepositoryContextFollowUp(request, ["secondaryContract"], {
+      anchorOwnerSearch: () =>
+        Promise.resolve({
+          name: "useCapability",
+          definition: {
+            path: request.reviewPath,
+            line: 1,
+            content: "const result = useCapability(input);",
+            kind: "definition",
+          },
+        }),
+      structuralSearch: ({ terms }) => {
+        searchedTerms = terms;
+        return Promise.resolve([]);
+      },
+    });
+
+    expect(searchedTerms).toEqual(["secondaryContract", "useCapability"]);
+    expect(context.entries.some((entry) => entry.content.includes("secondaryContract"))).toBe(true);
+    expect(context.entries.some((entry) => entry.content.includes("useCapability"))).toBe(true);
+  });
+
+  it("does not add a broad adjacent fallback when clear primary owner enrichment is unavailable", async () => {
+    const { request } = await fixture();
+    let searchedTerms: readonly string[] = [];
+
+    const context = await collectRepositoryContextFollowUp(request, ["secondaryContract"], {
+      anchorOwnerSearch: () => Promise.reject(new Error("owner unavailable")),
       structuralSearch: ({ terms }) => {
         searchedTerms = terms;
         return Promise.resolve([]);
@@ -441,12 +614,144 @@ describe("repository context collection", () => {
     });
 
     // `useCapability` is visible at the reviewed anchor and would be the deterministic fallback.
-    // The clear cross-file primary result means that fallback is never searched, so it cannot
-    // saturate Git, turn optional enrichment into required AST, or erase the primary evidence.
+    // A clear cross-file primary hit cannot activate that broader search merely because optional
+    // owner discovery failed.
     expect(searchedTerms).toEqual(["secondaryContract"]);
     expect(context.entries.some((entry) => entry.content.includes("secondaryContract"))).toBe(true);
     expect(context.entries.every((entry) => !entry.content.includes("useCapability"))).toBe(true);
   });
+
+  it("reserves all four ambiguous primary blobs ahead of optional owner enrichment", async () => {
+    const { repository, request } = await fixture();
+    await write(repository, request.reviewPath, "return publicOwner(input);\n");
+    for (let index = 0; index < 4; index += 1) {
+      await write(
+        repository,
+        `src/primary-${String(index)}.ts`,
+        "return contract.primary(input);\n",
+      );
+    }
+    for (let index = 0; index < 3; index += 1) {
+      await write(repository, `src/owner-${String(index)}.ts`, "return publicOwner(input);\n");
+    }
+    git(repository, "add", "src");
+    git(repository, "commit", "-qm", "add ambiguous primary and owner candidates");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const primaryPaths = Array.from(
+      { length: 4 },
+      (_value, index) => `src/primary-${String(index)}.ts`,
+    );
+    let searchedTerms: readonly string[] = [];
+
+    const context = await collectRepositoryContextFollowUp(
+      { ...request, head, base: head },
+      ["contract.primary"],
+      {
+        anchorOwnerSearch: () =>
+          Promise.resolve({
+            name: "publicOwner",
+            definition: {
+              path: request.reviewPath,
+              line: 1,
+              content: "return publicOwner(input);",
+              kind: "definition",
+            },
+          }),
+        structuralSearch: ({ candidatePaths, terms }) => {
+          searchedTerms = terms;
+          expect(candidatePaths.slice(0, 4)).toEqual(primaryPaths);
+          return Promise.resolve([
+            {
+              path: primaryPaths[0] ?? "",
+              line: 1,
+              content: "return contract.primary(input);",
+              kind: "callsite" as const,
+            },
+          ]);
+        },
+      },
+    );
+
+    expect(searchedTerms[0]).toBe("primary");
+    expect(context.entries).toContainEqual({
+      path: primaryPaths[0],
+      line: 1,
+      content: "return contract.primary(input);",
+      kind: "callsite",
+    });
+  });
+
+  it.each([
+    [3740721453, "downloadAssets"],
+    [3741289682, "applyUploadedVoiceRoles"],
+    [3741289718, "voiceRoles"],
+  ] as const)(
+    "recovers owner callers and tests for historical finding %i (%s)",
+    async (_databaseId, ownerName) => {
+      const { repository, request } = await fixture();
+      const source = [
+        `function ${ownerName}(): void {`,
+        "  verifyChangedContract();",
+        "}",
+        ...Array.from(
+          { length: 25 },
+          (_value, index) => `const ownerPadding${String(index)} = true;`,
+        ),
+        `${ownerName}();`,
+      ].join("\n");
+      await write(repository, request.reviewPath, `${source}\n`);
+      await write(
+        repository,
+        `tests/${ownerName}.test.ts`,
+        `expect(${ownerName}()).toBeDefined();\n`,
+      );
+      git(repository, "add", request.reviewPath, `tests/${ownerName}.test.ts`);
+      git(repository, "commit", "-qm", `add ${ownerName} historical shape`);
+      const head = commitSha(git(repository, "rev-parse", "HEAD"));
+      const anchored: RepositoryContextRequest = {
+        ...request,
+        head,
+        base: head,
+        findingAnchor: { startLine: 1, endLine: 3 },
+        findingContent: "The changed contract may fail at its owner.",
+        anchorText: "  verifyChangedContract();",
+      };
+
+      const context = await collectRepositoryContextFollowUp(
+        anchored,
+        ["DefinitelyMissingIdentifier"],
+        {
+          anchorOwnerSearch: ({ head: selected, reviewPath, findingAnchor }) => {
+            expect(selected).toBe(head);
+            expect(reviewPath).toBe(request.reviewPath);
+            expect(findingAnchor).toEqual({ startLine: 1, endLine: 3 });
+            return Promise.resolve({
+              name: ownerName,
+              definition: {
+                path: request.reviewPath,
+                line: 1,
+                content: `function ${ownerName}(): void {`,
+                kind: "definition",
+              },
+            });
+          },
+          structuralSearch: () => Promise.resolve([]),
+        },
+      );
+      const retrieved = toRetrievedEvidence(context);
+
+      expect(retrieved.chunks).toHaveLength(2);
+      expect(new Set(retrieved.chunks.map((chunk) => chunk.path))).toEqual(
+        new Set([request.reviewPath, `tests/${ownerName}.test.ts`]),
+      );
+      expect(retrieved.chunks.flatMap((chunk) => chunk.lines)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: `${ownerName}();` }),
+          expect.objectContaining({ text: `expect(${ownerName}()).toBeDefined();` }),
+        ]),
+      );
+    },
+  );
 
   it("keeps the one follow-up separate and combines only the same exact commit", async () => {
     const { request } = await fixture();
@@ -834,6 +1139,7 @@ describe("repository context collection", () => {
   it("keeps clear lexical evidence when optional structural enrichment is unavailable", async () => {
     const { request } = await fixture();
     const context = await collectRepositoryContextFollowUp(request, ["secondaryContract"], {
+      anchorOwnerSearch: () => Promise.reject(new Error("owner unavailable")),
       structuralSearch: () => Promise.reject(new Error("unavailable")),
     });
 
@@ -858,6 +1164,7 @@ describe("repository context collection", () => {
       request,
       ["DefinitelyMissingIdentifier"],
       {
+        anchorOwnerSearch: () => Promise.resolve(undefined),
         structuralSearch: () => {
           structuralCalls += 1;
           return Promise.resolve([]);

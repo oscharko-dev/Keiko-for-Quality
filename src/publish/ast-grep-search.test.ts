@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { commitSha } from "../core/brands.js";
 import type { GitContext } from "../git/plumbing.js";
-import { AstGrepSearchError, searchAstGrepAtHead } from "./ast-grep-search.js";
+import {
+  AstGrepSearchError,
+  findAstAnchorOwnerAtHead,
+  searchAstGrepAtHead,
+} from "./ast-grep-search.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -425,4 +429,59 @@ describe("searchAstGrepAtHead", () => {
       ),
     ).rejects.toBeInstanceOf(AstGrepSearchError);
   }, 5_000);
+});
+
+describe("findAstAnchorOwnerAtHead", () => {
+  it("derives the complete anchor owner from the exact immutable blob through stdin", async () => {
+    const { repository, context, head } = await fixture();
+    const tools = await mkdtemp(join(tmpdir(), "kfq-owner-ast-grep-"));
+    temporaryDirectories.push(tools);
+    const binary = await executable(tools, SUCCESSFUL_TOOL);
+
+    const owner = await findAstAnchorOwnerAtHead(
+      {
+        context,
+        head,
+        reviewPath: "src/definition.ts",
+        findingAnchor: { startLine: 1, endLine: 3 },
+      },
+      { acquireBinary: () => Promise.resolve(binary) },
+    );
+
+    expect(owner).toEqual({
+      name: "target",
+      definition: {
+        path: "src/definition.ts",
+        line: 1,
+        content: "export function target(): void {",
+        kind: "definition",
+      },
+    });
+    expect(await readFile(join(repository, "src/definition.ts"), "utf8")).toContain(
+      "WORKTREE_ONLY",
+    );
+  });
+
+  it("does not acquire a parser for an invalid anchor", async () => {
+    const { context, head } = await fixture();
+    let acquisitions = 0;
+
+    await expect(
+      findAstAnchorOwnerAtHead(
+        {
+          context,
+          head,
+          reviewPath: "src/definition.ts",
+          findingAnchor: { startLine: 0, endLine: 0 },
+        },
+        {
+          acquireBinary: () => {
+            acquisitions += 1;
+            return Promise.reject(new Error("must not acquire"));
+          },
+        },
+      ),
+    ).resolves.toBeUndefined();
+    expect(acquisitions).toBe(0);
+  });
 });

@@ -19,8 +19,12 @@ import {
   type RepositoryEvidenceKind,
 } from "./evidence.js";
 import {
+  findAstAnchorOwnerAtHead,
+  isStructurallySearchablePath,
   normalizedStructuralTerms,
   searchAstGrepAtHead,
+  type AnchorOwner,
+  type AnchorOwnerSearchRequest,
   type StructuralSearchRequest,
 } from "./ast-grep-search.js";
 
@@ -856,6 +860,9 @@ function requiresStructuralFallback(
 export interface RepositoryContextDependencies {
   /** HEAD is the default; BASE is allowed only for the planner's closed `base` challenge axis. */
   readonly sourceSide?: RepositoryEvidenceSide;
+  readonly anchorOwnerSearch?: (
+    request: AnchorOwnerSearchRequest,
+  ) => Promise<AnchorOwner | undefined>;
   readonly structuralSearch?: (
     request: StructuralSearchRequest,
   ) => Promise<readonly RepositoryEvidenceEntry[]>;
@@ -866,6 +873,9 @@ interface FollowUpSearch {
   readonly expandedTerms: readonly string[];
   readonly result: GrepSearchResult;
   readonly usedFallback: boolean;
+  readonly preservePrimaryEvidence: boolean;
+  readonly ownerTerm?: string;
+  readonly ownerTermAlreadySearched?: boolean;
 }
 
 function followUpSourceRequest(
@@ -912,7 +922,27 @@ function mayUseAdjacentFallback(
   );
 }
 
-async function collectFollowUpSearch(
+function hasClearLexicalEvidence(
+  search: GrepSearchResult,
+  terms: readonly string[],
+  request: RepositoryContextRequest,
+): boolean {
+  const lexical = boundedCodeEntries(search.matches, request, true);
+  return lexical.length > 0 && !requiresStructuralFallback(search, lexical, terms);
+}
+
+function hasParserIndependentLexicalEvidence(
+  search: GrepSearchResult,
+  request: RepositoryContextRequest,
+): boolean {
+  const lexical = boundedCodeEntries(search.matches, request, true);
+  // Candidate paths deliberately include the reviewed file even when its only sighting is inside
+  // the already-visible anchor. Judge only the eligible lines which can enter the new evidence;
+  // an anchor-only code candidate must not erase an independent exact lockfile sighting.
+  return lexical.length > 0 && lexical.every((entry) => !isStructurallySearchablePath(entry.path));
+}
+
+async function collectPlannerFollowUpSearch(
   context: GitContext,
   request: RepositoryContextRequest,
   retrieveTerms: readonly string[],
@@ -920,12 +950,19 @@ async function collectFollowUpSearch(
   const primaryTerms = validatedRetrieveTerms(retrieveTerms);
   const primaryExpanded = expandedSearchTerms(primaryTerms);
   const primary = await grepAtHead(context, request, primaryExpanded, true, true);
+  const preservePrimaryEvidence =
+    hasClearLexicalEvidence(primary, primaryTerms, request) ||
+    // Exact package/lockfile sightings are parser-independent positive evidence. Record that
+    // before owner enrichment adds a code path; an optional owner parser failure must not erase
+    // the primary result merely because the merged candidate set later becomes AST-capable.
+    hasParserIndependentLexicalEvidence(primary, request);
   if (!mayUseAdjacentFallback(request, primaryTerms, primary)) {
     return {
       terms: primaryTerms,
       expandedTerms: primaryExpanded,
       result: primary,
       usedFallback: false,
+      preservePrimaryEvidence,
     };
   }
   const source = await readFollowUpReviewSource(context, request);
@@ -938,6 +975,7 @@ async function collectFollowUpSearch(
       expandedTerms: primaryExpanded,
       result: primary,
       usedFallback: false,
+      preservePrimaryEvidence,
     };
   }
   const fallback = await grepAtHead(context, request, fallbackExpanded, true, true);
@@ -946,7 +984,90 @@ async function collectFollowUpSearch(
     expandedTerms: [...primaryExpanded, ...fallbackExpanded],
     result: mergeFollowUpSearches(primary, fallback, primaryExpanded.length),
     usedFallback: true,
+    preservePrimaryEvidence,
   };
+}
+
+function ownerAlreadySearched(search: FollowUpSearch, owner: string): boolean {
+  return search.expandedTerms.some((term) => (term.split(".").at(-1) ?? term) === owner);
+}
+
+function mergeOwnerSearch(
+  search: FollowUpSearch,
+  owner: string,
+  ownerResult: GrepSearchResult,
+  request: RepositoryContextRequest,
+): FollowUpSearch {
+  if (ownerAlreadySearched(search, owner)) {
+    return { ...search, ownerTerm: owner, ownerTermAlreadySearched: true };
+  }
+  const ownerRank = search.expandedTerms.length;
+  const ownerCandidatePaths = [request.reviewPath, ...ownerResult.candidatePaths];
+  const candidatePaths = search.preservePrimaryEvidence
+    ? [...ownerCandidatePaths, ...search.result.candidatePaths]
+    : [...search.result.candidatePaths, ...ownerCandidatePaths];
+  return {
+    ...search,
+    terms: [...search.terms, owner],
+    expandedTerms: [...search.expandedTerms, owner],
+    result: {
+      // The planner's clear positive evidence remains first. Owner paths are reserved separately
+      // below so this optional enrichment cannot consume the verifier's three chunks first.
+      matches: [
+        ...search.result.matches,
+        ...ownerResult.matches.map((match) => ({ ...match, termRank: ownerRank })),
+      ],
+      // Ambiguous primary evidence owns the parser's four-blob budget. Owner enrichment may use
+      // only remaining slots; it can lead solely when the primary lexical evidence is already
+      // independently sufficient and structure is optional.
+      candidatePaths: [...new Set(candidatePaths)],
+      truncated: search.result.truncated || ownerResult.truncated,
+    },
+    ownerTerm: owner,
+  };
+}
+
+async function enrichWithAnchorOwner(
+  context: GitContext,
+  request: RepositoryContextRequest,
+  search: FollowUpSearch,
+  dependencies: RepositoryContextDependencies,
+): Promise<FollowUpSearch> {
+  let owner: AnchorOwner | undefined;
+  try {
+    owner = await (dependencies.anchorOwnerSearch ?? findAstAnchorOwnerAtHead)({
+      context,
+      head: request.head,
+      reviewPath: request.reviewPath,
+      findingAnchor: request.findingAnchor,
+      ...(request.deadlineMs === undefined ? {} : { deadlineMs: request.deadlineMs }),
+    });
+  } catch {
+    // Owner discovery is enrichment. The planner's ordinary lexical/structural path below still
+    // fails closed on ambiguity, while an unavailable owner cannot turn a valid no-match into a
+    // fabricated match or erase already-collected positive evidence.
+    return search;
+  }
+  if (owner === undefined || !validTerm(owner.name)) return search;
+  if (ownerAlreadySearched(search, owner.name)) {
+    return { ...search, ownerTerm: owner.name, ownerTermAlreadySearched: true };
+  }
+  try {
+    const ownerResult = await grepAtHead(context, request, [owner.name], true, true);
+    return mergeOwnerSearch(search, owner.name, ownerResult, request);
+  } catch {
+    return search;
+  }
+}
+
+async function collectFollowUpSearch(
+  context: GitContext,
+  request: RepositoryContextRequest,
+  retrieveTerms: readonly string[],
+  dependencies: RepositoryContextDependencies,
+): Promise<FollowUpSearch> {
+  const planner = await collectPlannerFollowUpSearch(context, request, retrieveTerms);
+  return await enrichWithAnchorOwner(context, request, planner, dependencies);
 }
 
 function manifestCandidates(reviewPath: string): readonly string[] {
@@ -1087,6 +1208,34 @@ export async function collectInitialRepositoryContext(
   return { headCommit: request.head, entries: [...code, ...manifests] };
 }
 
+function structuralTermsForFollowUp(search: FollowUpSearch): readonly string[] {
+  const matchedTerms = search.result.matches
+    .map((match) => search.expandedTerms[match.termRank])
+    .filter((term): term is string => term !== undefined);
+  const candidates = search.usedFallback
+    ? [...matchedTerms, ...search.expandedTerms]
+    : search.terms;
+  const ownerTail = search.ownerTerm?.split(".").at(-1);
+  if (ownerTail === undefined) return normalizedStructuralTerms(candidates);
+  // An owner which the bounded fallback search already selected is not optional enrichment: keep
+  // its original match-ranked position. Only a newly appended owner term participates in the
+  // primary-versus-enrichment ordering below.
+  if (search.ownerTermAlreadySearched === true) return normalizedStructuralTerms(candidates);
+  const withoutOwner = candidates.filter((term) => (term.split(".").at(-1) ?? term) !== ownerTail);
+  if (withoutOwner.length === 0) return normalizedStructuralTerms(candidates);
+  if (!search.preservePrimaryEvidence) {
+    return normalizedStructuralTerms([...withoutOwner, ownerTail]);
+  }
+  // Preserve the planner's leading term, then reserve one of the three AST term slots for the
+  // independently derived owner. That supplies caller/test context without allowing enrichment to
+  // displace the clear primary evidence which justified the challenge lookup in the first place.
+  return normalizedStructuralTerms([
+    withoutOwner[0] ?? ownerTail,
+    ownerTail,
+    ...withoutOwner.slice(1),
+  ]);
+}
+
 async function collectStructuralFollowUp(
   context: GitContext,
   request: RepositoryContextRequest,
@@ -1098,12 +1247,7 @@ async function collectStructuralFollowUp(
   const structuralRequired = requiresStructuralFallback(search.result, lexical, search.terms);
   // Prefer identifiers that produced eligible lexical evidence. A private anchor-only primary term
   // must not consume all three AST term slots ahead of its adjacent public-owner fallback.
-  const matchedTerms = search.result.matches
-    .map((match) => search.expandedTerms[match.termRank])
-    .filter((term): term is string => term !== undefined);
-  const structuralTerms = normalizedStructuralTerms(
-    search.usedFallback ? [...matchedTerms, ...search.expandedTerms] : search.terms,
-  );
+  const structuralTerms = structuralTermsForFollowUp(search);
   try {
     const structural = await (dependencies.structuralSearch ?? searchAstGrepAtHead)({
       context,
@@ -1120,7 +1264,9 @@ async function collectStructuralFollowUp(
       entries: boundedEvidenceEntries(structural, lexical, request, structuralTerms.length),
     };
   } catch (error) {
-    if (structuralRequired) throw new RepositoryContextRetrievalError(error);
+    if (structuralRequired && !search.preservePrimaryEvidence) {
+      throw new RepositoryContextRetrievalError(error);
+    }
     // A clear lexical definition remains exact positive evidence. Structural body enrichment is
     // optional on this path, so tool acquisition or parsing failure must not erase it.
     return { sourceCommit: request.head, side, entries: lexical };
@@ -1137,13 +1283,30 @@ export async function collectRepositoryContextFollowUp(
   const sourceRequest = followUpSourceRequest(request, side);
   remainingRepositoryMs(sourceRequest);
   const context = await strictlyVerifiedContext(sourceRequest);
-  const search = await collectFollowUpSearch(context, sourceRequest, retrieveTerms);
+  if (
+    side === "B" &&
+    request.baseFindingAnchor === undefined &&
+    (await readFollowUpReviewSource(context, sourceRequest)) === undefined
+  ) {
+    // An added file has no reviewed BASE blob. A repository-wide search at BASE could only find a
+    // same-named but unrelated construct, so withhold the challenge rather than laundering that
+    // sighting into evidence for a file which did not exist on the selected side. An existing but
+    // unmappable BASE file may still supply an explicitly requested cross-file contract.
+    return { sourceCommit: sourceRequest.head, side, entries: [] };
+  }
+  const search = await collectFollowUpSearch(context, sourceRequest, retrieveTerms, dependencies);
   // Model scope remains capped at three identifiers. The optional second group is deterministic
   // and equally capped; both searches feed one structural invocation over at most four immutable
   // blobs, so this adds recall without adding another model or parser loop.
   remainingRepositoryMs(sourceRequest);
   const lexical = boundedCodeEntries(search.result.matches, sourceRequest, true);
   if (hasNoStructuralCandidate(search.result)) {
+    return { sourceCommit: sourceRequest.head, side, entries: lexical };
+  }
+  if (!search.result.candidatePaths.some(isStructurallySearchablePath)) {
+    // package manifests and lockfiles have no parser in the closed ast-grep language map. Their
+    // bounded exact lexical lines are still positive evidence; asking AST to "disambiguate" JSON
+    // can only convert usable evidence into an infrastructure-shaped failure.
     return { sourceCommit: sourceRequest.head, side, entries: lexical };
   }
   return await collectStructuralFollowUp(

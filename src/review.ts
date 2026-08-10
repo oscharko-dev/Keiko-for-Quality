@@ -2930,9 +2930,10 @@ function recordSubstantiation(
  * The initial dossier includes exact HEAD/BASE state, exact merge-base-to-HEAD changed lines, and
  * bounded repository sightings. A cache hit saves generation only: repository state, structural
  * retrieval, and verifier behavior can change independently of the per-file generation digest, so
- * replay never saves this stage. Truth may request one deterministic lookup and rerun. Every
- * confirmed claim then receives a separate contract challenge whose independently selected terms
- * are retrieved before the adversarial falsifier runs.
+ * replay never saves this stage. Truth may request one deterministic lookup and then must make a
+ * terminal decision. Every confirmed claim receives a separate contract challenge whose terms are
+ * retrieved before the terminal adversarial Falsifier; a fourth-call Referee is available only on
+ * the shorter no-Truth-retrieval path after a rejected Falsifier shape.
  * Wording is never repaired here: an unproven hypothesis leaves the cohort unchanged only in the
  * sense that no replacement is invented — under production's paranoid policy it is withheld.
  *
@@ -2956,7 +2957,8 @@ async function substantiateModelSurvivors(
 
   // Same whole-review ceiling as `auditFreshSurvivors`, enforced inside `substantiate` before
   // every endpoint request. Passing the exact remainder makes the limit hard even when one
-  // finding takes the full truth -> retrieval -> truth -> challenge -> falsifier path.
+  // finding takes either full truth -> retrieval -> terminal truth -> challenge -> falsifier or
+  // truth -> challenge -> falsifier -> referee. Both paths remain atomically admitted at four calls.
   const remaining = Math.max(
     0,
     run.request.config.tokenBudget - run.ledger.engine - run.ledger.classify,
