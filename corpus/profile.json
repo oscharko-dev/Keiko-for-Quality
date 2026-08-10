@@ -14,6 +14,10 @@
       "reason": "prose; a corpus case that changes it is measuring dilution, not documentation review"
     },
     {
+      "pattern": "**/package.json",
+      "reason": "package manifests are companion evidence for reviewable source in this corpus"
+    },
+    {
       "pattern": "**/*.{png,jpg,svg,ico,woff,woff2}",
       "reason": "binary assets carry no reviewable source"
     }

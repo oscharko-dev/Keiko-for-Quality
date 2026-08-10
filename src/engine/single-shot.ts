@@ -441,6 +441,8 @@ interface RunState {
   plannerFallbacks: number;
   coreExaminations: number;
   integrationExaminations: number;
+  /** A required examiner call was refused by the hard generation ledger. */
+  mandatoryBudgetBlocked: boolean;
 }
 
 /**
@@ -632,6 +634,7 @@ async function examine(
 ): Promise<readonly EngineComment[] | undefined> {
   const prompt = buildExaminerPrompt(role, context, risks, { view: evidenceView(dispatch) });
   const result = await callStage(state, prompt, state.seed + seedOffset);
+  if (result.kind === "budget_blocked") state.mandatoryBudgetBlocked = true;
   if (result.kind !== "success") return undefined;
   const claims = parseStructuredClaims(result.content, new Set(dispatch.allowedAnchors));
   if (claims === undefined) return undefined;
@@ -720,6 +723,14 @@ function coverageEntries(paths: Iterable<string>): readonly { readonly path: str
   return [...paths].map((path) => ({ path }));
 }
 
+/** Closed engine status for the completed staged run, kept outside the wire renderer so the
+ * budget override is explicit rather than hidden inside a nested conditional expression. */
+function stagedRunStatus(state: RunState): "budget_exceeded" | "success" | "completed_with_errors" {
+  if (state.mandatoryBudgetBlocked) return "budget_exceeded";
+  if (state.warnings.length === 0) return "success";
+  return "completed_with_errors";
+}
+
 /**
  * The engine-shaped stdout plus an exact v1 coverage manifest.
  *
@@ -736,14 +747,18 @@ function assembleStdout(
   const selected = [...new Set(state.options.expectedReviewablePaths)];
   const failed = new Set(state.warnings.map((warning) => warning.file));
   const completed = dispatches.map((dispatch) => dispatch.path).filter((path) => !failed.has(path));
+  const budgetExceeded = state.mandatoryBudgetBlocked;
   return JSON.stringify({
-    status: state.warnings.length === 0 ? "success" : "completed_with_errors",
+    // Match the engine result contract: a budget stop overrides warning-derived statuses, while
+    // the manifest below still reports exactly which file dispatches completed or failed.
+    status: stagedRunStatus(state),
     summary: {
       files_reviewed: dispatches.length,
       comments: state.comments.length,
       total_tokens: state.ledger.spent,
       input_tokens: state.ledger.prompt,
       output_tokens: state.ledger.completion,
+      budget_exceeded: budgetExceeded,
       elapsed: `${String(Math.max(1, Math.round((Date.now() - startedMs) / 1000)))}s`,
     },
     tool_calls: { total: 0, by_tool: {} },
@@ -784,6 +799,7 @@ function initialRunState(
     plannerFallbacks: 0,
     coreExaminations: 0,
     integrationExaminations: 0,
+    mandatoryBudgetBlocked: false,
   };
 }
 

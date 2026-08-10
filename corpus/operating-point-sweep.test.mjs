@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   buildPlan,
+  buildStageEnvironment,
   buildSweepRows,
   estimateStageCost,
   FULL_CORPUS_CASE_COUNT,
@@ -14,6 +15,9 @@ import {
   renderEvidenceMarkdown,
   renderSweepTable,
   STRICTNESS_LEVELS,
+  SWEEP_RUNNER_ENV_VALUE,
+  SWEEP_RUNNER_ENV_VAR,
+  SWEEP_RUNNER_MODE,
   summarizeStageReport,
   USAGE,
 } from "./operating-point-sweep.mjs";
@@ -29,9 +33,9 @@ import { registerTsExtensionHooks } from "./rule-source.mjs";
  * which take the identical shape for the identical reason.
  *
  * A real, paid sweep is exercised nowhere in this repository's automated suite, by design — see
- * AGENTS.md's "Three commands spend real money" and this script's own header comment. What CI can
- * hold instead is that the plan this script prints, the arithmetic it derives from a report, and the
- * document it writes are each correct on their own terms.
+ * AGENTS.md's "Four commands and one manual workflow spend real money" and this script's own header
+ * comment. What CI can hold instead is that the plan this script prints, the arithmetic it derives
+ * from a report, and the document it writes are each correct on their own terms.
  */
 
 registerTsExtensionHooks();
@@ -119,9 +123,26 @@ test("estimateStageCost: --only narrows to one case, proportionally, and says so
 
 test("buildPlan sums the per-stage estimate across every requested stage, not a flat total", () => {
   const plan = buildPlan({ stages: ["lenient", "default", "strict", "paranoid"], only: undefined });
+  assert.equal(plan.runnerMode, SWEEP_RUNNER_MODE);
   assert.equal(plan.totalTokensLow, FULL_CORPUS_TOKENS_LOW * 4);
   assert.equal(plan.totalTokensHigh, FULL_CORPUS_TOKENS_HIGH * 4);
   assert.equal(plan.totalMinutes, FULL_CORPUS_MINUTES * 4);
+});
+
+test("buildStageEnvironment pins every paid child to the staged runner", () => {
+  const parent = {
+    PATH: "/usr/bin",
+    KFQ_SINGLE_SHOT: "0",
+    KFQ_SUBSTANTIATION_STRICTNESS: "paranoid",
+    OCR_REPORT: "/stale/report.json",
+  };
+  const child = buildStageEnvironment(parent, "default", "/fresh/report.json");
+
+  assert.equal(child[SWEEP_RUNNER_ENV_VAR], SWEEP_RUNNER_ENV_VALUE);
+  assert.equal(child.KFQ_SUBSTANTIATION_STRICTNESS, "default");
+  assert.equal(child.OCR_REPORT, "/fresh/report.json");
+  assert.equal(child.PATH, "/usr/bin");
+  assert.equal(parent.KFQ_SINGLE_SHOT, "0", "building a child must not mutate the parent env");
 });
 
 test("buildPlan on a narrowed --only + two stages costs a small fraction of the full sweep", () => {
@@ -139,6 +160,8 @@ test("renderDryRunPlan leads with the structural limitation, not the price", () 
   assert.ok(limitationIndex > -1, "the structural limitation must be stated");
   assert.ok(priceIndex > -1, "the cost estimate must be stated");
   assert.ok(limitationIndex < priceIndex, "the limitation must precede the price, not follow it");
+  assert.ok(text.includes(`runner: ${SWEEP_RUNNER_MODE}`));
+  assert.ok(text.includes(`${SWEEP_RUNNER_ENV_VAR}=${SWEEP_RUNNER_ENV_VALUE}`));
 });
 
 test("renderDryRunPlan names every requested stage in order and the --only scope", () => {
@@ -258,6 +281,8 @@ test("renderEvidenceMarkdown titles itself a sweep, never a qualification, and s
   assert.ok(doc.startsWith("# Substantiation strictness sweep — NOT a qualification"));
   assert.ok(!/^# Qualification/mu.test(doc), "must never open with a qualification-shaped title");
   assert.ok(doc.includes("not release evidence"));
+  assert.ok(doc.includes(`Runner: ${SWEEP_RUNNER_MODE}`));
+  assert.ok(doc.includes(`${SWEEP_RUNNER_ENV_VAR}=${SWEEP_RUNNER_ENV_VALUE}`));
 });
 
 test("renderEvidenceMarkdown includes the serving-variance caveat as prose, not only a code comment", () => {

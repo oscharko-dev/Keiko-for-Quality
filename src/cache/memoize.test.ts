@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { compileProfile, type CompiledProfile, type ReviewProfile } from "../config/profile.js";
 import type { RuntimeConfig } from "../config/runtime.js";
 import { blobId, commitSha, repoPath, sha256, type Sha256 } from "../core/brands.js";
+import { singleShotContextDigest } from "../engine/companions.js";
 import type { EngineFinding } from "../engine/result.js";
 import { toItem } from "../inventory/classify.js";
 import type { Inventory } from "../inventory/inventory.js";
@@ -480,7 +481,7 @@ describe("computePrPathSetDigest", () => {
     );
   });
 
-  it("does not change when an excluded path is added between runs — excluded content is invisible to review, not review context", () => {
+  it("does not widen the reviewed-set component when an excluded path is added", () => {
     const excludingProfile = compileProfile({
       version: 1,
       reviewRelevant: ["src/**"],
@@ -493,13 +494,15 @@ describe("computePrPathSetDigest", () => {
     } satisfies ReviewProfile);
 
     const reviewed = rawChange({ path: "src/a.ts" });
-    const excluded = rawChange({ path: "docs/notes.md" }); // matches the exclusion above verbatim
+    // The staged path-specific digest separately binds this file if its bounded diff is actually
+    // selected as a companion; mere non-reviewable set membership must not reprice every entry.
+    const excluded = rawChange({ path: "docs/notes.md" });
     expect(computePrPathSetDigest(inventoryWithProfile(excludingProfile, [reviewed]))).toBe(
       computePrPathSetDigest(inventoryWithProfile(excludingProfile, [reviewed, excluded])),
     );
   });
 
-  it("does not change when a generated path is added between runs — generated content is invisible to review too", () => {
+  it("does not widen the reviewed-set component when a generated path is added", () => {
     const generatingProfile = compileProfile({
       version: 1,
       reviewRelevant: ["src/**"],
@@ -512,7 +515,9 @@ describe("computePrPathSetDigest", () => {
     } satisfies ReviewProfile);
 
     const reviewed = rawChange({ path: "src/a.ts" });
-    const generated = rawChange({ path: "dist/bundle.js" }); // matches the `generated` glob above
+    // As above, any actual staged prompt contribution belongs to that path's narrow context
+    // identity; this digest names only the globally reviewable set.
+    const generated = rawChange({ path: "dist/bundle.js" });
     expect(computePrPathSetDigest(inventoryWithProfile(generatingProfile, [reviewed]))).toBe(
       computePrPathSetDigest(inventoryWithProfile(generatingProfile, [reviewed, generated])),
     );
@@ -693,6 +698,42 @@ describe("buildNewEntries", () => {
 });
 
 describe("per-path context digests (single-shot, v0.20.1)", () => {
+  const EMPTY_CHANGE = rawChange({ path: "src/empty.ts" });
+  const EMPTY_INVENTORY = inventoryOf([EMPTY_CHANGE]);
+
+  function emptyEntry(contextDigest: Sha256, pathSetDigest = PATH_SET_DIGEST): CacheEntry {
+    const entries = buildNewEntries({
+      inventory: EMPTY_INVENTORY,
+      eligiblePaths: new Set(["src/empty.ts"]),
+      hitPaths: new Set(),
+      findings: [],
+      ruleDigest: RULE_DIGEST,
+      engineDigest: ENGINE_DIGEST,
+      pathSetDigest,
+      contextDigests: new Map([["src/empty.ts", contextDigest]]),
+      config: CONFIG,
+    });
+    const entry = entries[0];
+    if (entry === undefined) throw new Error("expected empty cache entry fixture");
+    return entry;
+  }
+
+  function lookupEmpty(
+    entry: CacheEntry,
+    pathSetDigest: Sha256,
+    contextDigest: Sha256,
+  ): ReturnType<typeof lookupMemoized> {
+    return lookupMemoized(
+      storeWithEntry(entry),
+      EMPTY_INVENTORY,
+      RULE_DIGEST,
+      ENGINE_DIGEST,
+      CONFIG,
+      pathSetDigest,
+      new Map([["src/empty.ts", contextDigest]]),
+    );
+  }
+
   it("reuses positive hypotheses on matching per-path context and refuses a moved group", () => {
     const changeA = rawChange({ path: "src/a.ts" });
     const changeB = rawChange({
@@ -761,36 +802,80 @@ describe("per-path context digests (single-shot, v0.20.1)", () => {
     expect(partial.contextInvalidated).toBe(1);
   });
 
-  it("binds an empty verdict to the whole path set because no finding exists to reverify", () => {
-    const change = rawChange({ path: "src/a.ts" });
-    const inventory = inventoryOf([change]);
-    const narrow = sha256("c".repeat(64));
-    const digests = new Map<string, Sha256>([["src/a.ts", narrow]]);
+  it("binds an empty staged verdict to the domain-separated path-set and per-path composite", () => {
+    const contextDigest = sha256("c".repeat(64));
+    const entry = emptyEntry(contextDigest);
+
+    // Pins the framing and domain, not merely that the result differs from either scalar.
+    expect(entry.prPathSetDigest).toBe(
+      sha256("296b7ca345910536aafc227f201823a1f536d2da4a39e3f086d14898583ae803"),
+    );
+    expect(entry.prPathSetDigest).not.toBe(PATH_SET_DIGEST);
+    expect(entry.prPathSetDigest).not.toBe(contextDigest);
+
+    const sameContext = lookupEmpty(entry, PATH_SET_DIGEST, contextDigest);
+    expect(sameContext.hits.has("src/empty.ts")).toBe(true);
+    expect(sameContext.contextInvalidated).toBe(0);
+  });
+
+  it("invalidates an empty staged verdict when the whole reviewable path set changes", () => {
+    const contextDigest = sha256("c".repeat(64));
+    const moved = lookupEmpty(emptyEntry(contextDigest), sha256("8".repeat(64)), contextDigest);
+
+    expect(moved.hits.size).toBe(0);
+    expect(moved.contextInvalidated).toBe(1);
+  });
+
+  it("invalidates an empty staged verdict when its companion or prompt context changes", () => {
+    const entry = emptyEntry(sha256("c".repeat(64)));
+    const moved = lookupEmpty(entry, PATH_SET_DIGEST, sha256("d".repeat(64)));
+
+    expect(moved.hits.size).toBe(0);
+    expect(moved.contextInvalidated).toBe(1);
+  });
+
+  it("invalidates an empty staged-v2 verdict under the staged-v3 workflow identity", () => {
+    const identity = {
+      renderedChangeIntent: "same intent",
+      contextPack: "same context pack",
+      guidelineContextIdentity: "same guidelines",
+    };
+    const stagedV2 = singleShotContextDigest([], () => undefined, {
+      ...identity,
+      workflowIdentity: "staged-v2",
+    });
+    const stagedV3 = singleShotContextDigest([], () => undefined, {
+      ...identity,
+      workflowIdentity: "staged-v3",
+    });
+
+    expect(stagedV3).not.toBe(stagedV2);
+    const moved = lookupEmpty(emptyEntry(stagedV2), PATH_SET_DIGEST, stagedV3);
+    expect(moved.hits.size).toBe(0);
+    expect(moved.contextInvalidated).toBe(1);
+  });
+
+  it("preserves the historical whole-path-set scalar for empty agentic entries", () => {
     const written = buildNewEntries({
-      inventory,
-      eligiblePaths: new Set(["src/a.ts"]),
+      inventory: EMPTY_INVENTORY,
+      eligiblePaths: new Set(["src/empty.ts"]),
       hitPaths: new Set(),
       findings: [],
       ruleDigest: RULE_DIGEST,
       engineDigest: ENGINE_DIGEST,
       pathSetDigest: PATH_SET_DIGEST,
-      contextDigests: digests,
       config: CONFIG,
     });
 
     expect(written[0]?.prPathSetDigest).toBe(PATH_SET_DIGEST);
-    const store: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: written };
-    const widened = lookupMemoized(
-      store,
-      inventory,
+    const replayed = lookupMemoized(
+      { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: written },
+      EMPTY_INVENTORY,
       RULE_DIGEST,
       ENGINE_DIGEST,
       CONFIG,
-      sha256("8".repeat(64)),
-      digests,
+      PATH_SET_DIGEST,
     );
-
-    expect(widened.hits.size).toBe(0);
-    expect(widened.contextInvalidated).toBe(1);
+    expect(replayed.hits.has("src/empty.ts")).toBe(true);
   });
 });

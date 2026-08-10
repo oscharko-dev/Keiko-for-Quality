@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 
+import { CASES } from "./cases.mjs";
+
 /**
  * The operating-point sweep — corpus/run.mjs, once per `KFQ_SUBSTANTIATION_STRICTNESS` level.
  *
@@ -61,16 +63,18 @@ import { tmpdir } from "node:os";
  *
  * ## Cost, and the guardrails around it
  *
- * A full corpus run costs 1,200,000-1,700,000 tokens and roughly 40 minutes (AGENTS.md; this
- * script's own task brief). Four stages of that is four times the money and four times the wait —
+ * The latest staged release attempt used 584,237 tokens in 10m17s. This planner keeps a wider
+ * 500,000-800,000-token / 20-minute envelope because serving variance remains real and the current
+ * examiner evidence contract is longer, even though its call topology is unchanged. Four stages
+ * are four times the money and four times the wait —
  * and, per the section above, the strictness axis is not even the thing that cost would be buying on
  * the default `--stages`. `estimateStageCost`/`buildPlan` compute and `renderDryRunPlan` prints an
  * explicit estimate before a single stage runs, `--dry-run` stops there and spends nothing, `--only`
- * narrows every stage to one case (roughly 1/39th of a full run — corpus/cases.mjs; the 2026-08-06
- * v0.19.1 qualification's own 27/29 recall + 10/10 precision scoreboard is 39 cases), and `--stages`
- * narrows which levels run at all. None of this is optional politeness: `npm run corpus` alone is
- * already excluded from `verify` and gated on a human's explicit go-ahead (AGENTS.md, "Three
- * commands spend real money"), and this script can spend up to four times that in one invocation.
+ * narrows every stage to one case (the exact fraction is derived from `CASES.length`), and
+ * `--stages` narrows which levels run at all. None of this is optional politeness: `npm run corpus`
+ * alone is already excluded from `verify` and gated on a human's explicit go-ahead (AGENTS.md,
+ * "Four commands and one manual workflow spend real money"), and this script can spend up to four
+ * times that in one invocation.
  *
  * ## Shape, mirroring corpus/seed-gate-lib.mjs
  *
@@ -87,9 +91,11 @@ import { tmpdir } from "node:os";
  *   node corpus/operating-point-sweep.mjs [--stages lenient,default,strict,paranoid] [--only <id>]
  *     [--dry-run] [--evidence <path>]
  *
- * Same environment contract as `corpus/run.mjs` (OCR_BINARY, OCR_LLM_URL, OCR_LLM_TOKEN,
- * OCR_LLM_MODEL, OCR_RULE, OCR_ALLOW_MODEL_DEVIATION) — this script sets only `KFQ_SUBSTANTIATION_STRICTNESS`
- * and `OCR_REPORT` per child, inheriting everything else from its own environment unchanged.
+ * Same endpoint/model/rule environment contract as `corpus/run.mjs` (OCR_LLM_URL, OCR_LLM_TOKEN,
+ * OCR_LLM_MODEL, OCR_RULE, OCR_ALLOW_MODEL_DEVIATION). This sweep owns the runner selection too:
+ * every child receives `KFQ_SINGLE_SHOT=1`, regardless of the caller's environment, because the
+ * plan and cost envelope below bind the staged runner rather than the classic binary. It also sets
+ * `KFQ_SUBSTANTIATION_STRICTNESS` and a fresh `OCR_REPORT` per child, inheriting everything else.
  */
 
 /**
@@ -106,22 +112,21 @@ export const STRICTNESS_LEVELS = ["lenient", "default", "strict", "paranoid"];
  *  rather than importing it: `substantiate.ts`'s own doc comment says this name is deliberately not
  *  part of that module's public surface. */
 export const STRICTNESS_ENV_VAR = "KFQ_SUBSTANTIATION_STRICTNESS";
+export const SWEEP_RUNNER_MODE = "staged-single-shot";
+export const SWEEP_RUNNER_ENV_VAR = "KFQ_SINGLE_SHOT";
+export const SWEEP_RUNNER_ENV_VALUE = "1";
 
-// Given by this script's own task brief and AGENTS.md's "Three commands spend real money" section —
-// not derived, not measured here, and not to be replaced with a computed guess. A full run's cost
-// varies with which cases rotate through a repair or a resume; this range is the honest envelope
-// that variation has been observed to sit inside, not a promise either bound is exact.
-export const FULL_CORPUS_TOKENS_LOW = 1_200_000;
-export const FULL_CORPUS_TOKENS_HIGH = 1_700_000;
-export const FULL_CORPUS_MINUTES = 40;
+// Planning bounds anchored to the complete staged attempt recorded above. They are deliberately
+// wider than that one observation to allow serving variance and the longer examiner contract; they
+// are a forecast, not an observed minimum/maximum and not a hard spending cap.
+export const FULL_CORPUS_TOKENS_LOW = 500_000;
+export const FULL_CORPUS_TOKENS_HIGH = 800_000;
+export const FULL_CORPUS_MINUTES = 20;
 
-// corpus/cases.mjs's own case count, cross-checked against a real scoreboard rather than trusted to
-// a comment staying in sync with the array: corpus/evidence/qualification-2026-08-06-v0.19.1.md
-// records "recall 27/29" and "precision 10/10" under this exact rule/engine/model binding, i.e. 29
-// recall-graded cases plus 10 precision-graded cases. `case-coherence.test.mjs` is what actually
-// keeps corpus/cases.mjs honest; this constant is a cost-estimation input, not a second source of
-// truth for it.
-export const FULL_CORPUS_CASE_COUNT = 39;
+// Derived from the only case registry rather than copied from a historical scoreboard. This count
+// changed twice while the old literal remained at 39, making every `--only` estimate understate its
+// fraction of the current corpus.
+export const FULL_CORPUS_CASE_COUNT = CASES.length;
 
 export const USAGE =
   "usage: node corpus/operating-point-sweep.mjs " +
@@ -209,6 +214,7 @@ export function buildPlan(options) {
   const perStage = estimateStageCost(options.only);
   const stageCount = options.stages.length;
   return {
+    runnerMode: SWEEP_RUNNER_MODE,
     stages: options.stages,
     only: options.only,
     perStage,
@@ -243,6 +249,7 @@ export function renderDryRunPlan(plan) {
     "",
     `stages (${String(plan.stages.length)}): ${plan.stages.join(" -> ")}`,
     plan.only !== undefined ? `only: ${plan.only}` : "only: (unset — full corpus per stage)",
+    `runner: ${plan.runnerMode} (${SWEEP_RUNNER_ENV_VAR}=${SWEEP_RUNNER_ENV_VALUE}, pinned by this sweep)`,
     "",
     `per-stage estimate:   ${formatTokenRange(plan.perStage.tokensLow, plan.perStage.tokensHigh)} tokens, ~${String(plan.perStage.minutes)} min` +
       (plan.perStage.isProportional
@@ -251,7 +258,7 @@ export function renderDryRunPlan(plan) {
     `total for this plan:  ${formatTokenRange(plan.totalTokensLow, plan.totalTokensHigh)} tokens, ~${String(plan.totalMinutes)} min` +
       ` across ${String(plan.stages.length)} stage(s)`,
     "",
-    'This is real money against a real endpoint (AGENTS.md, "Three commands spend real money") —',
+    'This is real money against a real endpoint (AGENTS.md, "Four commands and one manual workflow spend real money") —',
     "narrow with --only <caseId> for a cheap smoke test, or --stages to drop levels, before running",
     "the full plan. --dry-run (this output) never contacts a model.",
   ];
@@ -427,6 +434,7 @@ export function renderEvidenceMarkdown({ generatedAtIso, plan, stageOutcomes }) 
     "",
     `- Stages: ${plan.stages.join(", ")}`,
     `- Scope: ${describeScope(plan.only)}`,
+    `- Runner: ${plan.runnerMode} (${SWEEP_RUNNER_ENV_VAR}=${SWEEP_RUNNER_ENV_VALUE}, pinned by this sweep)`,
     "- Each stage: one `node corpus/run.mjs` child process, KFQ_SUBSTANTIATION_STRICTNESS set in",
     "  its environment only, a fresh OCR_REPORT path read back afterward. corpus/run.mjs itself is",
     "  unmodified and was not imported — only invoked, through its own documented CLI.",
@@ -472,6 +480,23 @@ function spawnRunMjs(args, env) {
   });
 }
 
+/**
+ * Complete child environment for one paid stage.
+ *
+ * Runner selection is owned here rather than inherited: the planner's cost and measurement target
+ * are staged-single-shot, so even a caller carrying a stale `KFQ_SINGLE_SHOT=0` cannot silently
+ * spend against the classic engine. Returning a fresh object also keeps the parent environment
+ * unchanged across stages and gives the hermetic suite a pure boundary to pin.
+ */
+export function buildStageEnvironment(parentEnvironment, stage, reportPath) {
+  return {
+    ...parentEnvironment,
+    [SWEEP_RUNNER_ENV_VAR]: SWEEP_RUNNER_ENV_VALUE,
+    [STRICTNESS_ENV_VAR]: stage,
+    OCR_REPORT: reportPath,
+  };
+}
+
 /** One stage: a fresh OCR_REPORT path, a child `corpus/run.mjs` invocation carrying this stage's
  *  strictness and (optionally) `--only`, and the parsed-back report. */
 async function runStage(stage, only) {
@@ -479,7 +504,7 @@ async function runStage(stage, only) {
     tmpdir(),
     `kfq-sweep-${stage}-${String(process.pid)}-${String(Date.now())}.json`,
   );
-  const env = { ...process.env, [STRICTNESS_ENV_VAR]: stage, OCR_REPORT: reportPath };
+  const env = buildStageEnvironment(process.env, stage, reportPath);
   const args = only !== undefined ? ["--only", only] : [];
   const startedAt = Date.now();
   const exitCode = await spawnRunMjs(args, env);

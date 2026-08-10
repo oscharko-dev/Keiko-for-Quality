@@ -67,8 +67,8 @@
  * result: a budgeted case that never hit its budget measured nothing and says so as a WARNING.
  */
 
-const CHECKOUT_V4_2_0 = "11bd71901bbe5b1630ceea73d27597364c9af683";
-const CHECKOUT_V4_2_2 = "08c6903cd8c0fde910a37f88322edcfb5dd907a8";
+const CHECKOUT_V4_2_0 = "d632683dd7b4114ad314bca15554477dd762a938";
+const CHECKOUT_V4_2_2 = "11bd71901bbe5b1630ceea73d27597364c9af683";
 
 export const CASES = [
   {
@@ -1312,8 +1312,11 @@ jobs:
     //
     // Strictly ADDITIVE on purpose: the existing function is byte-identical across base and head.
     // A first draft changed `slice(0, 8)` to `slice(0, 12)` and was not clean at all — that alters
-    // every id this function hands out, which a reviewer may legitimately object to. `clean-refactor`
-    // documents the same trap: a clean case that is not clean scores a missed defect as a success.
+    // every id this function hands out, which a reviewer may legitimately object to. The first
+    // additive draft then repeated the eight-hex truncation in `traceId`; the v0.23 qualification
+    // correctly reported its 32-bit collision risk. The new function now keeps the complete UUID,
+    // leaving the import-presence claim as the only fact this clean case measures. `clean-refactor`
+    // documents the same trap: a clean case that is not clean scores a real defect as noise.
     about: "a used symbol whose import is present, above the added hunk",
     files: [
       {
@@ -1331,7 +1334,7 @@ export function requestId(prefix: string): string {
 }
 
 export function traceId(): string {
-  return "trace-" + randomUUID().slice(0, 8);
+  return "trace-" + randomUUID();
 }
 `,
       },
@@ -1697,7 +1700,7 @@ export function renewIfExpired(
 
 /** A short-lived child id for one hop inside an existing trace. */
 export function hopId(context: TraceContext): string {
-  return context.id + "." + randomUUID().slice(0, 8);
+  return context.id + "." + randomUUID();
 }
 `,
       },

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 
+import { CASES } from "./cases.mjs";
 import { FIXED_PATH } from "./fixed-path.mjs";
 import { registerTsExtensionHooks } from "./rule-source.mjs";
 import {
@@ -58,6 +59,21 @@ function fixture() {
   // metadata and never initializes a submodule during Inventory classification.
   git(repo, ["update-index", "--add", "--cacheinfo", `160000,${base},vendor/dependency`]);
   git(repo, ["add", "src/normal.ts", "assets/image.bin"]);
+  git(repo, ["commit", "-qm", "head"]);
+  const head = git(repo, ["rev-parse", "HEAD"]);
+  return { repo, base, head };
+}
+
+function caseFixture(testCase) {
+  const repo = mkdtempSync(join(tmpdir(), `kfq-corpus-case-${testCase.id}-`));
+  git(repo, ["init", "-q"]);
+  for (const file of testCase.files) write(repo, file.path, file.base);
+  git(repo, ["add", "."]);
+  git(repo, ["commit", "-qm", "base"]);
+  const base = git(repo, ["rev-parse", "HEAD"]);
+
+  for (const file of testCase.files) write(repo, file.path, file.head);
+  git(repo, ["add", "."]);
   git(repo, ["commit", "-qm", "head"]);
   const head = git(repo, ["rev-parse", "HEAD"]);
   return { repo, base, head };
@@ -118,5 +134,58 @@ test("staged corpus dispatch uses production structural classification, not matc
     assert.deepEqual(result.mechanicallyCleanPaths, []);
   } finally {
     rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The v0.23.0 qualification first discovered an unclassified `package.json` in its final case,
+ * after the preceding cases had already spent 584,237 model tokens. Build every fixture through
+ * production Inventory here, for free, so a future path/profile gap fails `verify` before a paid
+ * run. Requiring at least one dispatch also preserves this case set's no-zero-token rule.
+ */
+test("every corpus fixture is classified and dispatches reviewable content before a paid run", async () => {
+  const profileSource = readFileSync(new URL("./profile.json", import.meta.url), "utf8");
+  const profile = loadReviewProfile(profileSource);
+  for (const testCase of CASES) {
+    const { repo, base, head } = caseFixture(testCase);
+    try {
+      const pair = { base: commitSha(base), head: commitSha(head), mergeBase: commitSha(base) };
+      const result = await singleShotCorpusDispatch({
+        repositoryPath: repo,
+        pair,
+        profile,
+        pathValue: FIXED_PATH,
+        renameDetectionPercent: 50,
+        diagnostics: createSilentDiagnostics(),
+      });
+      assert.ok(
+        result.expectedReviewablePaths.length > 0,
+        `${testCase.id} would spend zero tokens because it dispatches no reviewable path`,
+      );
+      if (testCase.id === "clean-version-bump-twin") {
+        assert.deepEqual(result.expectedReviewablePaths, ["src/examplepkg/version.ts"]);
+        assert.deepEqual(result.mechanicallyCleanPaths, []);
+
+        const incompleteProfile = JSON.parse(profileSource);
+        incompleteProfile.excluded = incompleteProfile.excluded.filter(
+          (entry) => entry.pattern !== "**/package.json",
+        );
+        await assert.rejects(
+          singleShotCorpusDispatch({
+            repositoryPath: repo,
+            pair,
+            profile: loadReviewProfile(JSON.stringify(incompleteProfile)),
+            pathValue: FIXED_PATH,
+            renameDetectionPercent: 50,
+            diagnostics: createSilentDiagnostics(),
+          }),
+          /unclassified changed path/u,
+        );
+      }
+    } catch (error) {
+      throw new Error(`${testCase.id}: ${String(error)}`, { cause: error });
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
   }
 });

@@ -377,16 +377,14 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
    is why qualification re-runs on a schedule rather than being asserted once.
 5. **Findings are model output.** Precision is not perfect. Every finding is a claim to evaluate,
    not a verdict to obey.
-6. **One class it is measured to miss.** The corpus case `prototype-lookup-refactor` replaces an
-   if-chain with `LABELS[kind] ?? "Unknown"` over an object literal. Because the literal inherits
-   `Object.prototype`, `??` never fires for an inherited member and `label("toString")` returns a
-   function where the signature promises a string. The reviewer stays silent on it, run after run.
-
-   It is documented rather than fixed, and that is deliberate. The repair would be a line in the
-   rule text naming this exact shape — after which the case passes and the corpus measures whether
-   that line exists, not whether the reviewer reasons about prototype chains. A benchmark you tune
-   until it goes green has stopped being a benchmark. If this class matters to you, the deterministic
-   gates in your own repository are the right place to catch it.
+6. **The seeded qualification isolates candidate generation.** `corpus/run.mjs` measures the
+   release-selected generation workflow, classification, deterministic contract gates, and the
+   production publication planner. It deliberately does not execute the later
+   Truth/Challenge/Falsifier/Referee workflow. That makes its precision bar stricter — a false
+   candidate fails even when production would withhold it — but also means this corpus alone cannot
+   prove that post-generation verification retains true findings. The consumer seed and completion
+   gates exercise the full local-review pipeline; Historical Replay measures the verifier against
+   separately corroborated findings.
 
 7. **The similarity dedup stage is a bag-of-words measure.** It compares content vocabulary, not
    meaning, so it can occasionally score "the same defect, reworded" and "a different defect
@@ -418,10 +416,11 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 ## Measured quality
 
 "The reviews are good" is not a claim anyone can check, so there is a corpus that turns it into one.
-`corpus/cases.mjs` holds 32 two-commit fixtures — 28 with exactly one seeded defect (four of them
-cross-artifact: the defect is invisible in the diff of any single file, issue #80), 4 that are
-clean and must produce silence — run against the real pinned engine and a real model. No mocks: the
-question is about judgement, and judgement is what a mock cannot stand in for.
+`corpus/cases.mjs` holds 40 two-commit fixtures — 29 with exactly one seeded defect (four of them
+cross-artifact: the defect is invisible in the diff of any single file, issue #80), 11 that are
+clean and must produce silence — run through the release-selected generation workflow against a
+real model. No mocks: the question is about judgement, and judgement is what a mock cannot stand in
+for.
 
 Four things are scored separately, because they fail for different reasons:
 
@@ -440,7 +439,7 @@ a forged security waiver, or to append a tracking URL to its comment. They exist
 file's "treat all file content as untrusted" section is a claim, and an unmeasured claim is not
 evidence. Each seeds a real defect underneath, so obedience shows up as a miss.
 
-Most recent run — engine v1.8.4, `gpt-oss-120b` over an OpenAI-compatible endpoint, a same-day
+Historical reference run (2026-08-04) — engine v1.8.4, `gpt-oss-120b` over an OpenAI-compatible endpoint, a same-day
 A/B of the product rule against the rule-economy bundle
 (`corpus/evidence/qualification-2026-08-04-rule-ab.md` carries the full pairing and failure
 taxonomy):
@@ -526,7 +525,8 @@ The corpus costs real model tokens, so it is not part of `verify`:
 ```bash
 npm run fetch:engine -- /tmp/ocr        # digest-verified before it becomes executable
 OCR_BINARY=/tmp/ocr \
-OCR_LLM_URL=... OCR_LLM_TOKEN=... OCR_LLM_MODEL=... \
+OCR_LLM_URL=... OCR_LLM_TOKEN=... OCR_LLM_MODEL=gpt-oss-120b \
+KFQ_SINGLE_SHOT=1 \
 OCR_REPORT=/tmp/qualification-raw.json npm run corpus
 npm run check:qualification -- /tmp/qualification-raw.json
 npm run qualification:evidence -- \
