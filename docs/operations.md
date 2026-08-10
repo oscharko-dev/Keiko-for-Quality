@@ -550,11 +550,14 @@ manual **historical diagnostic** workflow on the exact reviewer commit. Its inpu
 of public review-comment database IDs, the expected digest and timestamp of the already inspected
 private snapshot, and a hard token ceiling. The workflow harvests and filters the unredacted records
 only under the ephemeral runner directory, refuses drift from that exact snapshot, checks the
-zero-token plan first, and prints only `historical-replay.mjs`'s aggregate redacted metrics. It runs
-only when the requested commit is the current `dev` tip and an explicit confirmation is supplied;
-the credential environment admits protected branches only. A targeted diagnostic is an iteration
-tool, never release evidence: promotion still requires the complete calibrated historical population
-on the final clean release candidate.
+zero-token plan first, and prints aggregate redacted metrics plus a strictly validated, text-free
+terminal trace per requested database ID: closed stage, disposition and reason codes with call and
+token counts. Raw bodies and paths stay in `RUNNER_TEMP`; evidence, refs, prompts and model responses
+have no trace field and are never written to it. The private trace is deleted with the harvest and
+is never uploaded or accepted as release evidence. The workflow runs only when the requested commit
+is the current `dev` tip and an explicit confirmation is supplied; the credential environment
+admits protected branches only. A targeted diagnostic is an iteration tool: promotion still
+requires the complete calibrated historical population on the final clean release candidate.
 
 `npm test` runs Vitest, which transpiles without type-checking — it will happily go green on code
 `tsc` rejects. Run `npm run verify`, not `npm test`, before believing a change is done.

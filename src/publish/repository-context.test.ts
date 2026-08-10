@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { commitSha } from "../core/brands.js";
 import type { RepositoryEvidenceEntry } from "./evidence.js";
 import { toRetrievedEvidence } from "./retrieved-evidence.js";
+import { evidenceProvenanceKey } from "./substantiate.js";
 import {
   MAX_REPOSITORY_FOLLOW_UP_TERMS,
   RepositoryContextRetrievalError,
@@ -365,6 +366,86 @@ describe("repository context collection", () => {
     expect(sameFile.some((entry) => entry.line <= 25)).toBe(false);
     expect(followUp.entries.length).toBeLessThanOrEqual(12);
     expect(new Set(followUp.entries.map((entry) => entry.path)).size).toBeLessThanOrEqual(5);
+  });
+
+  it("falls back from an anchor-only private helper to its adjacent public owner and tests", async () => {
+    const { repository, request } = await fixture();
+    const source = [
+      ...Array.from({ length: 28 }, (_value, index) => `const filler${String(index)} = true;`),
+      "function privateArtifactFailures(manifest: unknown): string[] {",
+      "  const failures: string[] = [];",
+      "  if (manifest === undefined) failures.push('malformed');",
+      "  return failures;",
+      "}",
+      "export function publicManifestFailures(manifest: unknown): string[] {",
+      "  return privateArtifactFailures(manifest);",
+      "}",
+    ].join("\n");
+    await write(repository, request.reviewPath, `${source}\n`);
+    await write(
+      repository,
+      "tests/manifest.test.ts",
+      "expect(publicManifestFailures(validManifest)).toEqual([]);\n",
+    );
+    git(repository, "add", "src/review.ts", "tests/manifest.test.ts");
+    git(repository, "commit", "-qm", "add adjacent owner fixture");
+    const head = commitSha(git(repository, "rev-parse", "HEAD"));
+    const anchored: RepositoryContextRequest = {
+      ...request,
+      head,
+      base: head,
+      findingAnchor: { startLine: 31, endLine: 31 },
+      findingContent:
+        "`privateArtifactFailures` rejects valid manifests when the malformed-entry guard fires.",
+      anchorText: "  if (manifest === undefined) failures.push('malformed');",
+    };
+    let structuralTerms: readonly string[] = [];
+
+    const context = await collectRepositoryContextFollowUp(anchored, ["privateArtifactFailures"], {
+      structuralSearch: ({ terms }) => {
+        structuralTerms = terms;
+        return Promise.resolve([]);
+      },
+    });
+    const known = new Set(
+      context.entries
+        .filter((entry) => entry.path === request.reviewPath)
+        .map((entry) => evidenceProvenanceKey(entry.path, "H", entry.line)),
+    );
+    const retrieved = toRetrievedEvidence(context, known);
+
+    expect(structuralTerms).toContain("publicManifestFailures");
+    expect(retrieved.chunks).toEqual([
+      {
+        path: "tests/manifest.test.ts",
+        side: "H",
+        lines: [
+          {
+            line: 1,
+            text: "expect(publicManifestFailures(validManifest)).toEqual([]);",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("does not add a broad adjacent fallback to a clear primary lexical trace", async () => {
+    const { request } = await fixture();
+    let searchedTerms: readonly string[] = [];
+
+    const context = await collectRepositoryContextFollowUp(request, ["secondaryContract"], {
+      structuralSearch: ({ terms }) => {
+        searchedTerms = terms;
+        return Promise.resolve([]);
+      },
+    });
+
+    // `useCapability` is visible at the reviewed anchor and would be the deterministic fallback.
+    // The clear cross-file primary result means that fallback is never searched, so it cannot
+    // saturate Git, turn optional enrichment into required AST, or erase the primary evidence.
+    expect(searchedTerms).toEqual(["secondaryContract"]);
+    expect(context.entries.some((entry) => entry.content.includes("secondaryContract"))).toBe(true);
+    expect(context.entries.every((entry) => !entry.content.includes("useCapability"))).toBe(true);
   });
 
   it("keeps the one follow-up separate and combines only the same exact commit", async () => {

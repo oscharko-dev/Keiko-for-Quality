@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import { FIXED_PATH } from "./fixed-path.mjs";
+import { validateHistoricalReplayDiagnostic } from "./historical-replay-diagnostic-lib.mjs";
 import { buildHistoricalReplayReport } from "./historical-replay-lib.mjs";
 import {
   buildHistoricalReplayPlan,
@@ -152,6 +153,35 @@ test("CLI requires an explicit dry or execute mode and a visible token ceiling",
     /positive integer/,
   );
   assert.throws(() => parseHistoricalReplayArgs(["--dry-run", ...common, "unexpected"]));
+  assert.throws(
+    () =>
+      parseHistoricalReplayArgs([
+        "--dry-run",
+        ...common,
+        "--diagnostic-trace-out",
+        "/tmp/trace.json",
+      ]),
+    /only with --execute/u,
+  );
+  assert.deepEqual(
+    parseHistoricalReplayArgs([
+      "--execute",
+      ...common,
+      "--out",
+      "/tmp/report.json",
+      "--diagnostic-trace-out",
+      "/tmp/trace.json",
+    ]),
+    {
+      mode: "execute",
+      harvestPath: "/tmp/raw.json",
+      repoPath: "/tmp/consumer",
+      holdoutFromPullRequest: 20,
+      maxTokens: 64_000,
+      outPath: "/tmp/report.json",
+      diagnosticTraceOutPath: "/tmp/trace.json",
+    },
+  );
 });
 
 test("the replay model pin has no deviation escape hatch", () => {
@@ -716,6 +746,77 @@ test("verification maps each paranoid outcome to keep/drop/unmeasured without se
   });
 });
 
+test("verification binds one text-free terminal trace to every requested database id", async () => {
+  const cases = [boundReplayCase(1), boundReplayCase(2)];
+  const result = await runHistoricalReplayVerification({
+    databaseIds: [1, 2, 3],
+    cases,
+    maxTokens: 300,
+    captureDiagnosticTrace: true,
+    ...replayVerificationDependencies(
+      async (findings, _read, _endpoint, _strictness, _maximum, _retrieve, trace) => {
+        const keep = findings[0].path.endsWith("1.ts");
+        trace({
+          stage: keep ? "falsifier" : "challenge_planner",
+          disposition: keep ? "kept" : "undecided",
+          reasonCode: keep ? "no_defeater_found" : "json_or_envelope_invalid",
+          usage: { callCount: keep ? 3 : 2, tokens: 100 },
+        });
+        return keep ? substantiationOutcome(findings) : substantiationOutcome([], { undecided: 1 });
+      },
+    ),
+  });
+
+  assert.deepEqual(result.diagnosticCases, [
+    {
+      databaseId: 1,
+      stage: "falsifier",
+      disposition: "kept",
+      reasonCode: "no_defeater_found",
+      usage: { callCount: 3, tokens: 100 },
+    },
+    {
+      databaseId: 2,
+      stage: "challenge_planner",
+      disposition: "undecided",
+      reasonCode: "json_or_envelope_invalid",
+      usage: { callCount: 2, tokens: 100 },
+    },
+    {
+      databaseId: 3,
+      stage: "population",
+      disposition: "unmeasured",
+      reasonCode: "outside_corroborated_population",
+      usage: { callCount: 0, tokens: 0 },
+    },
+  ]);
+  assert.equal(result.report.attemptedCases, 2);
+  assert.equal(result.report.accountedTokens, 200);
+});
+
+test("verification rejects a terminal trace that contradicts the measured disposition", async () => {
+  await assert.rejects(
+    runHistoricalReplayVerification({
+      databaseIds: [1],
+      cases: [boundReplayCase(1)],
+      maxTokens: 100,
+      captureDiagnosticTrace: true,
+      ...replayVerificationDependencies(
+        async (findings, _read, _endpoint, _strictness, _maximum, _retrieve, trace) => {
+          trace({
+            stage: "truth_initial",
+            disposition: "refuted",
+            reasonCode: "contradicted",
+            usage: { callCount: 1, tokens: 100 },
+          });
+          return substantiationOutcome(findings);
+        },
+      ),
+    }),
+    /terminal trace is missing or inconsistent/u,
+  );
+});
+
 test("verification uses the production diff, initial context, and one follow-up adapter boundary", async () => {
   const replayCase = boundReplayCase(1, "src/parse.ts");
   const sources = stubHistoricalChange(replayCase, {
@@ -1274,6 +1375,95 @@ test("execute refuses an existing final output before loading model-facing depen
   assert.equal(readFileSync(outputPath, "utf8"), "foreign report");
 });
 
+test("execute refuses an existing private trace before loading model-facing dependencies", async () => {
+  const directory = temporaryDirectory();
+  const harvestPath = join(directory, "raw.json");
+  const outputPath = join(directory, "report.json");
+  const diagnosticPath = join(directory, "diagnostic.json");
+  writeFileSync(harvestPath, JSON.stringify(harvestDocument()));
+  writeFileSync(diagnosticPath, "foreign diagnostic");
+  let verifierLoads = 0;
+
+  await assert.rejects(
+    runHistoricalReplayCommand(
+      [
+        "--execute",
+        "--harvest",
+        harvestPath,
+        "--repo",
+        "/consumer",
+        "--holdout-from-pr",
+        "20",
+        "--max-tokens",
+        String(4 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE),
+        "--out",
+        outputPath,
+        "--diagnostic-trace-out",
+        diagnosticPath,
+      ],
+      {
+        OCR_LLM_MODEL: QUALIFICATION_MODEL,
+        OCR_LLM_URL: "https://model.example.test/v1",
+        OCR_LLM_TOKEN: "secret",
+      },
+      {
+        resolveRepo: () => "/consumer",
+        readChangeAtCommits: (_repo, replayCase) => stubHistoricalChange(replayCase),
+        implementation: { reviewerTree: "c".repeat(40), sourceSha256: {} },
+        loadVerificationDependencies: async () => {
+          verifierLoads += 1;
+          throw new Error("must not load");
+        },
+      },
+    ),
+    /EEXIST|file already exists/u,
+  );
+  assert.equal(verifierLoads, 0);
+  assert.equal(readFileSync(diagnosticPath, "utf8"), "foreign diagnostic");
+  assert.throws(() => statSync(outputPath));
+});
+
+test("the private trace path must resolve outside the reviewer repository", async () => {
+  const directory = temporaryDirectory();
+  const reviewerDirectory = join(directory, "reviewer");
+  mkdirSync(reviewerDirectory);
+  const repositoryRoot = realpathSync(reviewerDirectory);
+  const harvestPath = join(directory, "raw.json");
+  writeFileSync(harvestPath, JSON.stringify(harvestDocument()));
+
+  await assert.rejects(
+    runHistoricalReplayCommand(
+      [
+        "--execute",
+        "--harvest",
+        harvestPath,
+        "--repo",
+        "/consumer",
+        "--holdout-from-pr",
+        "20",
+        "--max-tokens",
+        String(4 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE),
+        "--out",
+        join(directory, "report.json"),
+        "--diagnostic-trace-out",
+        join(repositoryRoot, "trace.json"),
+      ],
+      {
+        OCR_LLM_MODEL: QUALIFICATION_MODEL,
+        OCR_LLM_URL: "https://model.example.test/v1",
+        OCR_LLM_TOKEN: "secret",
+      },
+      {
+        repositoryRoot,
+        resolveRepo: () => "/consumer",
+        readChangeAtCommits: (_repo, replayCase) => stubHistoricalChange(replayCase),
+        implementation: { reviewerTree: "c".repeat(40), sourceSha256: {} },
+      },
+    ),
+    /must be outside this repository/u,
+  );
+});
+
 test("a successful verification fails closed when another file replaces its reservation", async () => {
   const directory = temporaryDirectory();
   const harvestPath = join(directory, "raw.json");
@@ -1342,6 +1532,92 @@ test("a successful verification fails closed when another file replaces its rese
   assert.equal(sawReservation, true);
   assert.equal(verificationCalls, 4);
   assert.equal(readFileSync(outputPath, "utf8"), "foreign replacement");
+});
+
+test("the private trace is exclusively reserved and rejects a pathname replacement", async () => {
+  const directory = temporaryDirectory();
+  const harvestPath = join(directory, "raw.json");
+  const outputPath = join(directory, "report.json");
+  const diagnosticPath = join(directory, "diagnostic.json");
+  writeFileSync(harvestPath, JSON.stringify(harvestDocument()));
+  let sawReservations = false;
+
+  await assert.rejects(
+    runHistoricalReplayCommand(
+      [
+        "--execute",
+        "--harvest",
+        harvestPath,
+        "--repo",
+        "/consumer",
+        "--holdout-from-pr",
+        "20",
+        "--max-tokens",
+        String(4 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE),
+        "--out",
+        outputPath,
+        "--diagnostic-trace-out",
+        diagnosticPath,
+      ],
+      {
+        OCR_LLM_MODEL: QUALIFICATION_MODEL,
+        OCR_LLM_URL: "https://model.example.test/v1",
+        OCR_LLM_TOKEN: "secret",
+      },
+      {
+        resolveRepo: () => "/consumer",
+        readChangeAtCommits: (_repo, replayCase) =>
+          stubHistoricalChange(replayCase, {
+            headSource: "header\nexact historical proposed source\nreturn true\n",
+            baseSource: "header\nexact historical base source\nreturn false\n",
+          }),
+        implementation: {
+          reviewerTree: "c".repeat(40),
+          sourceSha256: {},
+        },
+        loadVerificationDependencies: async () => {
+          sawReservations =
+            readFileSync(outputPath, "utf8") === "" && readFileSync(diagnosticPath, "utf8") === "";
+          rmSync(diagnosticPath);
+          writeFileSync(diagnosticPath, "foreign diagnostic replacement");
+          return {
+            buildChangeEvidence: () => ({ text: "H:1| exact historical source" }),
+            mappedBaseRangeFromUnifiedDiff: (_diff, range) => range,
+            collectInitialRepositoryContext: async (request) => ({
+              headCommit: request.head,
+              entries: [],
+            }),
+            collectRepositoryContextFollowUp: async (request) => ({
+              headCommit: request.head,
+              entries: [],
+            }),
+            toRetrievedEvidence: () => ({ chunks: [] }),
+            substantiate: async (
+              findings,
+              _read,
+              _endpoint,
+              _strictness,
+              _maximum,
+              _retrieve,
+              trace,
+            ) => {
+              trace({
+                stage: "falsifier",
+                disposition: "kept",
+                reasonCode: "no_defeater_found",
+                usage: { callCount: 3, tokens: 100 },
+              });
+              return substantiationOutcome(findings);
+            },
+          };
+        },
+      },
+    ),
+    /output reservation no longer owns --diagnostic-trace-out/u,
+  );
+  assert.equal(sawReservations, true);
+  assert.equal(readFileSync(diagnosticPath, "utf8"), "foreign diagnostic replacement");
+  assert.equal(readFileSync(outputPath, "utf8"), "");
 });
 
 function prohibitedReportKeys(value, found = []) {
@@ -1490,6 +1766,7 @@ test("execute joins fake verifier decisions, scores them, and writes only the re
   const directory = temporaryDirectory();
   const harvestPath = join(directory, "raw.json");
   const outputPath = join(directory, "report.json");
+  const diagnosticPath = join(directory, "diagnostic.json");
   writeFileSync(harvestPath, JSON.stringify(harvestDocument()));
   let verificationCalls = 0;
   const result = await runHistoricalReplayCommand(
@@ -1505,6 +1782,8 @@ test("execute joins fake verifier decisions, scores them, and writes only the re
       String(4 * HISTORICAL_REPLAY_ESTIMATED_TOKENS_PER_CASE),
       "--out",
       outputPath,
+      "--diagnostic-trace-out",
+      diagnosticPath,
     ],
     {
       OCR_LLM_MODEL: QUALIFICATION_MODEL,
@@ -1530,11 +1809,24 @@ test("execute joins fake verifier decisions, scores them, and writes only the re
           entries: [],
         }),
         toRetrievedEvidence: () => ({ chunks: [] }),
-        substantiate: async (findings) => {
+        substantiate: async (
+          findings,
+          _read,
+          _endpoint,
+          _strictness,
+          _maximum,
+          _retrieve,
+          trace,
+        ) => {
           verificationCalls += 1;
-          return substantiationOutcome(
-            findings[0].path.endsWith("1.ts") || findings[0].path.endsWith("4.ts") ? findings : [],
-          );
+          const keep = findings[0].path.endsWith("1.ts") || findings[0].path.endsWith("4.ts");
+          trace({
+            stage: keep ? "falsifier" : "truth_initial",
+            disposition: keep ? "kept" : "refuted",
+            reasonCode: keep ? "no_defeater_found" : "contradicted",
+            usage: { callCount: keep ? 3 : 1, tokens: 100 },
+          });
+          return substantiationOutcome(keep ? findings : []);
         },
       }),
       implementation: {
@@ -1552,6 +1844,7 @@ test("execute joins fake verifier decisions, scores them, and writes only the re
     },
   );
   const written = readFileSync(outputPath, "utf8");
+  const diagnostic = JSON.parse(readFileSync(diagnosticPath, "utf8"));
   assert.equal(result.mode, "execute");
   assert.equal(verificationCalls, 4);
   assert.equal(result.report.score.all.after.metrics.precision, 1);
@@ -1562,4 +1855,27 @@ test("execute joins fake verifier decisions, scores them, and writes only the re
   assert.deepEqual(prohibitedReportKeys(JSON.parse(written)), []);
   assert.ok(!written.includes("REPLY_SENTINEL"));
   assert.equal(statSync(outputPath).mode & 0o777, 0o600);
+  assert.equal(validateHistoricalReplayDiagnostic(diagnostic), true);
+  assert.deepEqual(
+    diagnostic.cases.map((entry) => entry.databaseId),
+    [1, 2, 3, 4, 5],
+  );
+  assert.equal(diagnostic.cases.filter((entry) => entry.stage !== "population").length, 4);
+  assert.equal(statSync(diagnosticPath).mode & 0o777, 0o600);
+});
+
+test("the manual diagnostic prints, summarizes, and deletes only the validated text-free trace", () => {
+  const workflow = readFileSync(
+    new URL("../.github/workflows/historical-diagnostic.yml", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(workflow, /--diagnostic-trace-out "\$\{TRACE_PATH\}"/u);
+  assert.match(workflow, /validateHistoricalReplayDiagnostic\(diagnostic\)/u);
+  assert.match(workflow, /appendFileSync\(process\.env\.GITHUB_STEP_SUMMARY/u);
+  assert.match(
+    workflow,
+    /rm -f -- "\$\{HARVEST_PATH\}" "\$\{FILTERED_PATH\}" "\$\{REPORT_PATH\}" "\$\{TRACE_PATH\}"/u,
+  );
+  assert.doesNotMatch(workflow, /upload-artifact/iu);
 });

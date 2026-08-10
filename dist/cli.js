@@ -8140,6 +8140,8 @@ var MAX_REPOSITORY_FOLLOW_UP_TERMS = 3;
 var MAX_GREP_TERMS = 8;
 var MAX_RAW_MATCHES = 96;
 var MAX_STRUCTURAL_CANDIDATE_PATHS_PER_TERM = 4;
+var MAX_DETERMINISTIC_FALLBACK_TERMS = 3;
+var FALLBACK_DECLARATION_RADIUS = 32;
 var MAX_CODE_ENTRIES = 12;
 var MAX_CODE_PATHS = 5;
 var MAX_MANIFEST_FILES = 3;
@@ -8238,6 +8240,75 @@ function expandedSearchTerms(terms) {
     }
   }
   return expanded;
+}
+function mergeFollowUpSearches(primary, fallback, fallbackTermOffset) {
+  return {
+    matches: [
+      ...primary.matches,
+      ...fallback.matches.map((match) => ({
+        ...match,
+        termRank: match.termRank + fallbackTermOffset
+      }))
+    ],
+    candidatePaths: [.../* @__PURE__ */ new Set([...primary.candidatePaths, ...fallback.candidatePaths])],
+    truncated: primary.truncated || fallback.truncated
+  };
+}
+var DECLARED_IDENTIFIER = /\b(?:class|const|enum|function|interface|let|type|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b/gu;
+function declarationDistance(line, anchor) {
+  if (line < anchor.startLine) return anchor.startLine - line;
+  if (line > anchor.endLine) return line - anchor.endLine;
+  return 0;
+}
+function declarationsNearAnchor(request, source) {
+  if (source === void 0) return [];
+  const lines = source.endsWith("\n") ? source.slice(0, -1).split("\n") : source.split("\n");
+  const first = Math.max(1, request.findingAnchor.startLine - FALLBACK_DECLARATION_RADIUS);
+  const last = Math.min(lines.length, request.findingAnchor.endLine + FALLBACK_DECLARATION_RADIUS);
+  const declarations = [];
+  for (let line = first; line <= last; line += 1) {
+    for (const match of (lines[line - 1] ?? "").matchAll(DECLARED_IDENTIFIER)) {
+      const identifier = match[1];
+      if (identifier !== void 0) declarations.push({ identifier, line });
+    }
+  }
+  declarations.sort(
+    (left, right) => declarationDistance(left.line, request.findingAnchor) - declarationDistance(right.line, request.findingAnchor) || left.line - right.line || left.identifier.localeCompare(right.identifier)
+  );
+  return declarations.map(({ identifier }) => identifier);
+}
+function takeFallbackTerms(candidates, primary) {
+  const excluded = new Set(primary);
+  const accepted = [];
+  for (const candidate of candidates) {
+    if (!validTerm(candidate) || excluded.has(candidate) || accepted.includes(candidate)) continue;
+    accepted.push(candidate);
+    if (accepted.length === MAX_DETERMINISTIC_FALLBACK_TERMS) break;
+  }
+  return accepted;
+}
+function deterministicFallbackTerms(request, source, primary) {
+  return takeFallbackTerms(
+    [
+      ...declarationsNearAnchor(request, source),
+      ...extractEvidenceIdentifiers({
+        findingContent: request.findingContent,
+        anchorText: request.anchorText,
+        ...request.unifiedDiff === void 0 ? {} : { unifiedDiff: request.unifiedDiff }
+      })
+    ],
+    primary
+  );
+}
+function plannerTermsBelongToFinding(request, primary) {
+  const visible = new Set(
+    extractEvidenceIdentifiers({
+      findingContent: request.findingContent,
+      anchorText: request.anchorText,
+      ...request.unifiedDiff === void 0 ? {} : { unifiedDiff: request.unifiedDiff }
+    }).flatMap((term) => [term, term.split(".").at(-1) ?? term])
+  );
+  return primary.some((term) => visible.has(term) || visible.has(term.split(".").at(-1) ?? term));
 }
 function safeRepositoryPath2(path) {
   if (path.length === 0 || path.length > 4096 || path.startsWith("/")) return false;
@@ -8609,6 +8680,55 @@ function followUpSourceRequest(request, side) {
     findingAnchor: request.baseFindingAnchor ?? { startLine: 0, endLine: 0 }
   };
 }
+async function readFollowUpReviewSource(context, request) {
+  try {
+    return await readTextAtCommit(
+      {
+        ...context,
+        timeoutMs: boundedRepositoryTimeout(request.deadlineMs, context.timeoutMs)
+      },
+      request.head,
+      request.reviewPath
+    );
+  } catch (error) {
+    throw new RepositoryContextRetrievalError(error);
+  }
+}
+function mayUseAdjacentFallback(request, primaryTerms, result) {
+  return result.matches.length === 0 && !result.truncated && (result.candidatePaths.length > 0 || plannerTermsBelongToFinding(request, primaryTerms));
+}
+async function collectFollowUpSearch(context, request, retrieveTerms) {
+  const primaryTerms = validatedRetrieveTerms(retrieveTerms);
+  const primaryExpanded = expandedSearchTerms(primaryTerms);
+  const primary = await grepAtHead(context, request, primaryExpanded, true, true);
+  if (!mayUseAdjacentFallback(request, primaryTerms, primary)) {
+    return {
+      terms: primaryTerms,
+      expandedTerms: primaryExpanded,
+      result: primary,
+      usedFallback: false
+    };
+  }
+  const source = await readFollowUpReviewSource(context, request);
+  const fallbackTerms = deterministicFallbackTerms(request, source, primaryTerms);
+  const remainingTermSlots = Math.max(0, MAX_GREP_TERMS - primaryExpanded.length);
+  const fallbackExpanded = expandedSearchTerms(fallbackTerms).slice(0, remainingTermSlots);
+  if (fallbackExpanded.length === 0) {
+    return {
+      terms: primaryTerms,
+      expandedTerms: primaryExpanded,
+      result: primary,
+      usedFallback: false
+    };
+  }
+  const fallback = await grepAtHead(context, request, fallbackExpanded, true, true);
+  return {
+    terms: [...primaryTerms, ...fallbackTerms],
+    expandedTerms: [...primaryExpanded, ...fallbackExpanded],
+    result: mergeFollowUpSearches(primary, fallback, primaryExpanded.length),
+    usedFallback: true
+  };
+}
 function manifestCandidates(reviewPath) {
   const segments = reviewPath.split("/").slice(0, -1);
   const directories = [];
@@ -8712,41 +8832,51 @@ async function collectInitialRepositoryContext(request) {
   ]);
   return { headCommit: request.head, entries: [...code, ...manifests] };
 }
+async function collectStructuralFollowUp(context, request, side, search, lexical, dependencies) {
+  const structuralRequired = requiresStructuralFallback(search.result, lexical, search.terms);
+  const matchedTerms = search.result.matches.map((match) => search.expandedTerms[match.termRank]).filter((term) => term !== void 0);
+  const structuralTerms = normalizedStructuralTerms(
+    search.usedFallback ? [...matchedTerms, ...search.expandedTerms] : search.terms
+  );
+  try {
+    const structural = await (dependencies.structuralSearch ?? searchAstGrepAtHead)({
+      context,
+      head: request.head,
+      reviewPath: request.reviewPath,
+      findingAnchor: request.findingAnchor,
+      candidatePaths: search.result.candidatePaths,
+      terms: structuralTerms,
+      ...request.deadlineMs === void 0 ? {} : { deadlineMs: request.deadlineMs }
+    });
+    return {
+      sourceCommit: request.head,
+      side,
+      entries: boundedEvidenceEntries(structural, lexical, request, structuralTerms.length)
+    };
+  } catch (error) {
+    if (structuralRequired) throw new RepositoryContextRetrievalError(error);
+    return { sourceCommit: request.head, side, entries: lexical };
+  }
+}
 async function collectRepositoryContextFollowUp(request, retrieveTerms, dependencies = {}) {
   const side = dependencies.sourceSide ?? "H";
   const sourceRequest = followUpSourceRequest(request, side);
   remainingRepositoryMs(sourceRequest);
   const context = await strictlyVerifiedContext(sourceRequest);
-  const terms = validatedRetrieveTerms(retrieveTerms);
-  const result = await grepAtHead(context, sourceRequest, expandedSearchTerms(terms), true, true);
+  const search = await collectFollowUpSearch(context, sourceRequest, retrieveTerms);
   remainingRepositoryMs(sourceRequest);
-  const lexical = boundedCodeEntries(result.matches, sourceRequest, true);
-  if (hasNoStructuralCandidate(result)) {
+  const lexical = boundedCodeEntries(search.result.matches, sourceRequest, true);
+  if (hasNoStructuralCandidate(search.result)) {
     return { sourceCommit: sourceRequest.head, side, entries: lexical };
   }
-  const structuralRequired = requiresStructuralFallback(result, lexical, terms);
-  const structuralTerms = normalizedStructuralTerms(terms);
-  try {
-    const structural = await (dependencies.structuralSearch ?? searchAstGrepAtHead)({
-      context,
-      head: sourceRequest.head,
-      reviewPath: sourceRequest.reviewPath,
-      findingAnchor: sourceRequest.findingAnchor,
-      candidatePaths: result.candidatePaths,
-      terms: structuralTerms,
-      ...sourceRequest.deadlineMs === void 0 ? {} : { deadlineMs: sourceRequest.deadlineMs }
-    });
-    return {
-      sourceCommit: sourceRequest.head,
-      side,
-      entries: boundedEvidenceEntries(structural, lexical, sourceRequest, structuralTerms.length)
-    };
-  } catch (error) {
-    if (structuralRequired) {
-      throw new RepositoryContextRetrievalError(error);
-    }
-    return { sourceCommit: sourceRequest.head, side, entries: lexical };
-  }
+  return await collectStructuralFollowUp(
+    context,
+    sourceRequest,
+    side,
+    search,
+    lexical,
+    dependencies
+  );
 }
 
 // src/publish/substantiate.ts
@@ -8835,6 +8965,21 @@ var CONTRACT_CHALLENGE_AXES = [
   "runtime",
   "test",
   "base"
+];
+var SUBSTANTIATION_TRACE_REASON_CODES = [
+  "diff_echo",
+  "unreadable_hunk",
+  "budget",
+  "request_transport_or_status",
+  "usage_invalid",
+  "finish_reason_nonstop",
+  "json_or_envelope_invalid",
+  "semantic_shape_invalid",
+  "retrieval_error",
+  "retrieval_no_match",
+  "context_limit",
+  ...SUBSTANTIATION_REASON_CODES,
+  ...FALSIFIER_REASON_CODES
 ];
 function buildTruthPrompt(finding, evidence, dossier) {
   return [
@@ -9030,7 +9175,7 @@ function validReportedUsage3(value, upperBound) {
 }
 async function fetchBody(prompt, deps, seed, completionLimit) {
   const remaining = deps.deadlineMs === void 0 ? REQUEST_TIMEOUT_MS2 : Math.max(0, Math.trunc(deps.deadlineMs - Date.now()));
-  if (remaining === 0) return void 0;
+  if (remaining === 0) return { body: void 0, attempted: false };
   const doFetch = deps.fetchImpl ?? fetch;
   try {
     const response = await doFetch(`${withoutTrailingSlashes4(deps.endpoint)}/chat/completions`, {
@@ -9045,31 +9190,47 @@ async function fetchBody(prompt, deps, seed, completionLimit) {
       }),
       signal: AbortSignal.timeout(Math.min(REQUEST_TIMEOUT_MS2, remaining))
     });
-    return response.ok ? await response.json() : void 0;
+    return {
+      body: response.ok ? await response.json() : void 0,
+      attempted: true
+    };
   } catch {
-    return void 0;
+    return { body: void 0, attempted: true };
   }
 }
 function endpointUsage(body) {
   return body?.usage?.total_tokens;
 }
-function completedText(body) {
-  const choice = body?.choices?.[0];
-  if (choice?.finish_reason !== "stop") return void 0;
-  const content = choice.message?.content;
-  return typeof content === "string" ? content : void 0;
-}
 async function requestText(prompt, deps, budget, seed, completionLimit) {
   const upperBound = requestTokenUpperBound3(prompt, completionLimit);
-  if (!budgetAllows2(budget, upperBound)) return { text: void 0, budgetBlocked: true };
-  const body = await fetchBody(prompt, deps, seed, completionLimit);
+  if (!budgetAllows2(budget, upperBound)) {
+    return { text: void 0, failure: "budget" };
+  }
+  const fetched = await fetchBody(prompt, deps, seed, completionLimit);
+  if (fetched.attempted) budget.calls += 1;
+  const body = fetched.body;
+  if (body === void 0) {
+    budget.spent += upperBound;
+    return {
+      text: void 0,
+      failure: "request_transport_or_status"
+    };
+  }
   const reported = endpointUsage(body);
   if (!validReportedUsage3(reported, upperBound)) {
     budget.spent += upperBound;
-    return { text: void 0, budgetBlocked: false };
+    return { text: void 0, failure: "usage_invalid" };
   }
   budget.spent += reported;
-  return { text: completedText(body), budgetBlocked: false };
+  const choice = body.choices?.[0];
+  if (choice?.finish_reason !== "stop") {
+    return { text: void 0, failure: "finish_reason_nonstop" };
+  }
+  const content = choice.message?.content;
+  return {
+    text: typeof content === "string" ? content : void 0,
+    failure: void 0
+  };
 }
 function parseExactObject(text) {
   if (text === void 0) return void 0;
@@ -9260,20 +9421,25 @@ function hasOneOfEachEnvelopeKey(text) {
   const keys = [...text.matchAll(ENVELOPE_KEY)].map((match) => match[1]);
   return keys.length === 4 && new Set(keys).size === 4;
 }
-function parseDecisionFields(text, evidence, verdicts, reasons) {
-  if (!hasOneOfEachEnvelopeKey(text)) return void 0;
+function parseDecisionFieldsResult(text, evidence, verdicts, reasons) {
+  if (!hasOneOfEachEnvelopeKey(text)) {
+    return { decision: void 0, failure: "json_or_envelope_invalid" };
+  }
   const record = parseExactObject(text);
   if (record === void 0 || !exactKeys2(record, ["verdict", "reason_code", "evidence_refs", "lookup_terms"])) {
-    return void 0;
+    return { decision: void 0, failure: "json_or_envelope_invalid" };
   }
   const verdict = closedValue2(record.verdict, verdicts);
   const reasonCode = closedValue2(record.reason_code, reasons);
   const evidenceRefs = parseEvidenceRefs(record.evidence_refs, evidence);
   const lookupTerms = parseLookupTerms(record.lookup_terms);
   if (verdict === void 0 || reasonCode === void 0 || evidenceRefs === void 0 || lookupTerms === void 0) {
-    return void 0;
+    return { decision: void 0, failure: "semantic_shape_invalid" };
   }
-  return { verdict, reasonCode, evidenceRefs, lookupTerms };
+  return {
+    decision: { verdict, reasonCode, evidenceRefs, lookupTerms },
+    failure: void 0
+  };
 }
 function isTruthReason(decision) {
   if (decision.verdict === "confirmed") {
@@ -9295,14 +9461,15 @@ function validTruthShape(decision, evidence, finding) {
   }
   return decision.reasonCode !== "not_introduced" || hasHeadAndBaseState(decision.evidenceRefs);
 }
-function extractTruthDecision(text, evidence, finding) {
-  const decision = parseDecisionFields(
+function extractTruthDecisionResult(text, evidence, finding) {
+  const parsed = parseDecisionFieldsResult(
     text,
     evidence,
     SUBSTANTIATION_VERDICTS,
     SUBSTANTIATION_REASON_CODES
   );
-  return decision !== void 0 && validTruthShape(decision, evidence, finding) ? decision : void 0;
+  if (parsed.decision === void 0) return parsed;
+  return validTruthShape(parsed.decision, evidence, finding) ? { decision: parsed.decision, failure: void 0 } : { decision: void 0, failure: "semantic_shape_invalid" };
 }
 var CHALLENGE_ENVELOPE_KEY = /"(axis|evidence_refs|lookup_terms)"\s*:/gu;
 function hasOneOfEachChallengeEnvelopeKey(text) {
@@ -9310,19 +9477,21 @@ function hasOneOfEachChallengeEnvelopeKey(text) {
   const keys = [...text.matchAll(CHALLENGE_ENVELOPE_KEY)].map((match) => match[1]);
   return keys.length === 3 && new Set(keys).size === 3;
 }
-function extractContractChallengeDecision(text, evidence) {
-  if (!hasOneOfEachChallengeEnvelopeKey(text)) return void 0;
+function extractContractChallengeDecisionResult(text, evidence) {
+  if (!hasOneOfEachChallengeEnvelopeKey(text)) {
+    return { decision: void 0, failure: "json_or_envelope_invalid" };
+  }
   const record = parseExactObject(text);
   if (record === void 0 || !exactKeys2(record, ["axis", "evidence_refs", "lookup_terms"])) {
-    return void 0;
+    return { decision: void 0, failure: "json_or_envelope_invalid" };
   }
   const axis = closedValue2(record.axis, CONTRACT_CHALLENGE_AXES);
   const evidenceRefs = parseEvidenceRefs(record.evidence_refs, evidence);
   const lookupTerms = parseLookupTerms(record.lookup_terms);
   if (axis === void 0 || evidenceRefs === void 0 || evidenceRefs.length === 0 || lookupTerms === void 0 || lookupTerms.length === 0) {
-    return void 0;
+    return { decision: void 0, failure: "semantic_shape_invalid" };
   }
-  return { axis, evidenceRefs, lookupTerms };
+  return { decision: { axis, evidenceRefs, lookupTerms }, failure: void 0 };
 }
 function isFalsifierReason(decision) {
   if (decision.verdict === "survives") {
@@ -9359,9 +9528,15 @@ function validFalsifierShape(decision, contract, evidence) {
   if (decision.verdict === "survives") return true;
   return decision.reasonCode !== "unchanged_base" || hasHeadAndBaseState(decision.evidenceRefs);
 }
-function extractFalsifierDecision(text, evidence, contract) {
-  const decision = parseDecisionFields(text, evidence, FALSIFIER_VERDICTS, FALSIFIER_REASON_CODES);
-  return decision !== void 0 && validFalsifierShape(decision, contract, evidence) ? decision : void 0;
+function extractFalsifierDecisionResult(text, evidence, contract) {
+  const parsed = parseDecisionFieldsResult(
+    text,
+    evidence,
+    FALSIFIER_VERDICTS,
+    FALSIFIER_REASON_CODES
+  );
+  if (parsed.decision === void 0) return parsed;
+  return validFalsifierShape(parsed.decision, contract, evidence) ? { decision: parsed.decision, failure: void 0 } : { decision: void 0, failure: "semantic_shape_invalid" };
 }
 var MAX_RETRIEVAL_CHUNKS = 3;
 var MAX_RETRIEVAL_LINES = 200;
@@ -9467,20 +9642,22 @@ function emptyMetrics() {
     challengeFailed: 0
   };
 }
-function decidedResult(finding, disposition, metrics) {
-  return { finding, disposition, budgetBlocked: false, metrics };
+function decidedResult(finding, disposition, metrics, terminal) {
+  return { finding, disposition, budgetBlocked: false, metrics, terminal };
 }
-function undecidedResult(finding, strictness, metrics, budgetBlocked) {
+function undecidedResult(finding, strictness, metrics, budgetBlocked, terminal) {
   return {
     finding: dropsOnUndecidedJudge(strictness) ? void 0 : finding,
     disposition: "undecided",
     budgetBlocked,
-    metrics
+    metrics,
+    terminal
   };
 }
 async function resolveTruthContext(finding, evidence, decision, retriever, truthRetrievalUsed, metrics) {
   metrics.retrievalRequested += 1;
-  if (truthRetrievalUsed || retriever === void 0) return { kind: "insufficient" };
+  if (truthRetrievalUsed) return { kind: "insufficient", reasonCode: "context_limit" };
+  if (retriever === void 0) return { kind: "insufficient", reasonCode: "context_limit" };
   metrics.retrievalPerformed += 1;
   let retrieved;
   try {
@@ -9496,16 +9673,16 @@ async function resolveTruthContext(finding, evidence, decision, retriever, truth
     });
   } catch {
     metrics.retrievalFailed += 1;
-    return { kind: "undecided" };
+    return { kind: "undecided", reasonCode: "retrieval_error" };
   }
   const rendered = validateAndRenderRetrieval(retrieved, 1);
   if (rendered === void 0) {
     metrics.retrievalFailed += 1;
-    return { kind: "undecided" };
+    return { kind: "undecided", reasonCode: "retrieval_error" };
   }
   if (rendered === "") {
     metrics.retrievalNoMatches += 1;
-    return { kind: "insufficient" };
+    return { kind: "insufficient", reasonCode: "retrieval_no_match" };
   }
   metrics.retrievalExpanded += 1;
   return { kind: "expanded", evidence: `${evidence}
@@ -9520,9 +9697,11 @@ async function callTruth(finding, evidence, dossier, deps, budget) {
     42,
     TRUTH_COMPLETION_LIMIT
   );
+  if (call.failure !== void 0) return { decision: void 0, failure: call.failure };
+  const parsed = extractTruthDecisionResult(call.text, evidence, finding);
   return {
-    decision: extractTruthDecision(call.text, evidence, finding),
-    budgetBlocked: call.budgetBlocked
+    decision: parsed.decision,
+    failure: parsed.failure
   };
 }
 async function callContractChallenge(finding, evidence, deps, budget) {
@@ -9533,9 +9712,11 @@ async function callContractChallenge(finding, evidence, deps, budget) {
     63,
     CHALLENGE_COMPLETION_LIMIT
   );
+  if (call.failure !== void 0) return { decision: void 0, failure: call.failure };
+  const parsed = extractContractChallengeDecisionResult(call.text, evidence);
   return {
-    decision: extractContractChallengeDecision(call.text, evidence),
-    budgetBlocked: call.budgetBlocked
+    decision: parsed.decision,
+    failure: parsed.failure
   };
 }
 async function callFalsifier(finding, evidence, challenge, truth, deps, budget) {
@@ -9546,14 +9727,16 @@ async function callFalsifier(finding, evidence, challenge, truth, deps, budget) 
     84,
     FALSIFIER_COMPLETION_LIMIT
   );
+  if (call.failure !== void 0) return { decision: void 0, failure: call.failure };
+  const parsed = extractFalsifierDecisionResult(call.text, evidence, {
+    proofRefs: truth.evidenceRefs,
+    findingPath: finding.path,
+    ...finding.basePath === void 0 ? {} : { basePath: finding.basePath },
+    requireChallengeRetrievedRef: true
+  });
   return {
-    decision: extractFalsifierDecision(call.text, evidence, {
-      proofRefs: truth.evidenceRefs,
-      findingPath: finding.path,
-      ...finding.basePath === void 0 ? {} : { basePath: finding.basePath },
-      requireChallengeRetrievedRef: true
-    }),
-    budgetBlocked: call.budgetBlocked
+    decision: parsed.decision,
+    failure: parsed.failure
   };
 }
 async function continueTruthWithContext(run2, evidence, decision, truthRetrievalUsed) {
@@ -9566,10 +9749,16 @@ async function continueTruthWithContext(run2, evidence, decision, truthRetrieval
     run2.metrics
   );
   if (context.kind === "undecided") {
-    return undecidedResult(run2.finding, run2.strictness, run2.metrics, false);
+    return undecidedResult(run2.finding, run2.strictness, run2.metrics, false, {
+      stage: "truth_retrieval",
+      reasonCode: context.reasonCode
+    });
   }
   if (context.kind === "insufficient") {
-    return decidedResult(void 0, "insufficient_evidence", run2.metrics);
+    return decidedResult(void 0, "insufficient_evidence", run2.metrics, {
+      stage: "truth_retrieval",
+      reasonCode: context.reasonCode
+    });
   }
   return await verifyEvidenceRound(run2, context.evidence, true);
 }
@@ -9577,7 +9766,7 @@ async function resolveContractChallenge(run2, evidence, challenge) {
   run2.metrics.challengePlanned += 1;
   if (run2.retriever === void 0) {
     run2.metrics.challengeFailed += 1;
-    return { kind: "undecided" };
+    return { kind: "undecided", reasonCode: "retrieval_error" };
   }
   run2.metrics.challengeRetrievalPerformed += 1;
   let retrieved;
@@ -9599,33 +9788,62 @@ async function resolveContractChallenge(run2, evidence, challenge) {
     });
   } catch {
     run2.metrics.challengeFailed += 1;
-    return { kind: "undecided" };
+    return { kind: "undecided", reasonCode: "retrieval_error" };
   }
   const rendered = validateAndRenderRetrieval(retrieved, 4, evidence, run2.finding.path);
   if (rendered === void 0) {
     run2.metrics.challengeFailed += 1;
-    return { kind: "undecided" };
+    return { kind: "undecided", reasonCode: "retrieval_error" };
   }
   if (rendered === "") {
     run2.metrics.challengeNoMatches += 1;
-    return { kind: "insufficient" };
+    return { kind: "insufficient", reasonCode: "retrieval_no_match" };
   }
   run2.metrics.challengeExpanded += 1;
   return { kind: "expanded", evidence: `${evidence}
 
 ${rendered}` };
 }
+function applyFalsifierDecision(run2, decision) {
+  if (decision.verdict === "defeated") {
+    run2.metrics.falsifierDefeated += 1;
+    return decidedResult(void 0, "refuted", run2.metrics, {
+      stage: "falsifier",
+      reasonCode: decision.reasonCode
+    });
+  }
+  if (decision.verdict === "survives") {
+    run2.metrics.confirmed += 1;
+    return decidedResult(run2.finding, "kept", run2.metrics, {
+      stage: "falsifier",
+      reasonCode: decision.reasonCode
+    });
+  }
+  return decidedResult(void 0, "insufficient_evidence", run2.metrics, {
+    stage: "falsifier",
+    reasonCode: decision.reasonCode
+  });
+}
 async function falsifyConfirmed(run2, evidence, truth) {
   const planned = await callContractChallenge(run2.finding, evidence, run2.deps, run2.budget);
   if (planned.decision === void 0) {
-    return undecidedResult(run2.finding, run2.strictness, run2.metrics, planned.budgetBlocked);
+    return undecidedResult(run2.finding, run2.strictness, run2.metrics, planned.failure === "budget", {
+      stage: "challenge_planner",
+      reasonCode: planned.failure ?? "semantic_shape_invalid"
+    });
   }
   const context = await resolveContractChallenge(run2, evidence, planned.decision);
   if (context.kind === "undecided") {
-    return undecidedResult(run2.finding, run2.strictness, run2.metrics, false);
+    return undecidedResult(run2.finding, run2.strictness, run2.metrics, false, {
+      stage: "challenge_retrieval",
+      reasonCode: context.reasonCode
+    });
   }
   if (context.kind === "insufficient") {
-    return decidedResult(void 0, "insufficient_evidence", run2.metrics);
+    return decidedResult(void 0, "insufficient_evidence", run2.metrics, {
+      stage: "challenge_retrieval",
+      reasonCode: context.reasonCode
+    });
   }
   const call = await callFalsifier(
     run2.finding,
@@ -9637,22 +9855,20 @@ async function falsifyConfirmed(run2, evidence, truth) {
   );
   const decision = call.decision;
   if (decision === void 0) {
-    return undecidedResult(run2.finding, run2.strictness, run2.metrics, call.budgetBlocked);
+    return undecidedResult(run2.finding, run2.strictness, run2.metrics, call.failure === "budget", {
+      stage: "falsifier",
+      reasonCode: call.failure ?? "semantic_shape_invalid"
+    });
   }
-  if (decision.verdict === "defeated") {
-    run2.metrics.falsifierDefeated += 1;
-    return decidedResult(void 0, "refuted", run2.metrics);
-  }
-  if (decision.verdict === "survives") {
-    run2.metrics.confirmed += 1;
-    return decidedResult(run2.finding, "kept", run2.metrics);
-  }
-  return decidedResult(void 0, "insufficient_evidence", run2.metrics);
+  return applyFalsifierDecision(run2, decision);
 }
 async function applyTruthDecision(run2, evidence, decision, truthRetrievalUsed) {
   if (decision.verdict === "refuted") {
     run2.metrics.truthRefuted += 1;
-    return decidedResult(void 0, "refuted", run2.metrics);
+    return decidedResult(void 0, "refuted", run2.metrics, {
+      stage: truthRetrievalUsed ? "truth_followup" : "truth_initial",
+      reasonCode: decision.reasonCode
+    });
   }
   if (decision.verdict === "needs_context") {
     return await continueTruthWithContext(run2, evidence, decision, truthRetrievalUsed);
@@ -9662,7 +9878,10 @@ async function applyTruthDecision(run2, evidence, decision, truthRetrievalUsed) 
 async function verifyEvidenceRound(run2, evidence, truthRetrievalUsed) {
   const call = await callTruth(run2.finding, evidence, run2.dossier, run2.deps, run2.budget);
   if (call.decision === void 0) {
-    return undecidedResult(run2.finding, run2.strictness, run2.metrics, call.budgetBlocked);
+    return undecidedResult(run2.finding, run2.strictness, run2.metrics, call.failure === "budget", {
+      stage: truthRetrievalUsed ? "truth_followup" : "truth_initial",
+      reasonCode: call.failure ?? "semantic_shape_invalid"
+    });
   }
   return await applyTruthDecision(run2, evidence, call.decision, truthRetrievalUsed);
 }
@@ -9670,7 +9889,10 @@ async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) 
   const dossier = buildDossier(finding.content);
   const metrics = emptyMetrics();
   if (!needsJudging(dossier)) {
-    return decidedResult(void 0, "insufficient_evidence", metrics);
+    return decidedResult(void 0, "insufficient_evidence", metrics, {
+      stage: "preflight",
+      reasonCode: "diff_echo"
+    });
   }
   const evidence = readHunk(finding);
   if (evidence === "") {
@@ -9678,11 +9900,15 @@ async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) 
       finding: dropsOnUnreadableHunk(strictness) ? void 0 : finding,
       disposition: "undecided",
       budgetBlocked: false,
-      metrics
+      metrics,
+      terminal: { stage: "preflight", reasonCode: "unreadable_hunk" }
     };
   }
   if (!budgetAllows2(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
-    return undecidedResult(finding, strictness, metrics, true);
+    return undecidedResult(finding, strictness, metrics, true, {
+      stage: "preflight",
+      reasonCode: "budget"
+    });
   }
   return await verifyEvidenceRound(
     { finding, dossier, deps, strictness, budget, retriever, metrics },
@@ -9720,14 +9946,24 @@ function tallyJudgement(counts, judged) {
   if (judged.disposition === "undecided") counts.undecided += 1;
   if (judged.budgetBlocked) counts.budgetBlocked += 1;
 }
-async function substantiate(findings, readHunk, deps, strictness = resolveSubstantiationStrictness(), maxTokens, retrieveEvidence) {
+async function substantiate(findings, readHunk, deps, strictness = resolveSubstantiationStrictness(), maxTokens, retrieveEvidence, historicalTraceSink) {
   const kept = [];
   const counts = emptyCounts();
-  const budget = { maximum: hardMaximum2(maxTokens), spent: 0 };
+  const budget = { maximum: hardMaximum2(maxTokens), spent: 0, calls: 0 };
   for (const finding of findings) {
+    const tokensBefore = budget.spent;
+    const callsBefore = budget.calls;
     const judged = await judgeOne(finding, readHunk, deps, strictness, budget, retrieveEvidence);
     if (judged.finding !== void 0) kept.push(judged.finding);
     tallyJudgement(counts, judged);
+    historicalTraceSink?.({
+      ...judged.terminal,
+      disposition: judged.disposition,
+      usage: {
+        callCount: budget.calls - callsBefore,
+        tokens: budget.spent - tokensBefore
+      }
+    });
   }
   return {
     findings: kept,

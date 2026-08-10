@@ -1,9 +1,9 @@
 name: historical diagnostic
 
-# A deliberately manual, aggregate-only precision diagnostic. The raw harvest and its filtered
-# finding bodies exist only in RUNNER_TEMP; only aggregate metrics from historical-replay.mjs are
-# printed. This is not release evidence: the calibrated full replay is a separate run over the
-# complete 92-record population.
+# A deliberately manual precision diagnostic. The raw harvest and its filtered finding bodies
+# exist only in RUNNER_TEMP. Logs and the step summary receive aggregate metrics plus a strictly
+# validated per-id terminal trace containing only closed states and numeric usage. This is not
+# release evidence: the calibrated full replay is a separate run over the complete population.
 on:
   workflow_dispatch:
     inputs:
@@ -66,6 +66,7 @@ jobs:
             echo "HARVEST_PATH=${RUNNER_TEMP}/kfq-harvest.json"
             echo "FILTERED_PATH=${RUNNER_TEMP}/kfq-filtered.json"
             echo "REPORT_PATH=${RUNNER_TEMP}/kfq-report.json"
+            echo "TRACE_PATH=${RUNNER_TEMP}/kfq-trace.json"
             echo "CONSUMER_REPO=${RUNNER_TEMP}/keiko.git"
           } >> "${GITHUB_ENV}"
 
@@ -263,26 +264,78 @@ jobs:
           --holdout-from-pr 3037
           --max-tokens "${MAX_TOKENS}"
           --out "${REPORT_PATH}"
+          --diagnostic-trace-out "${TRACE_PATH}"
 
-      - name: Print aggregate result
+      - name: Print aggregate result and text-free case trace
         if: success()
+        working-directory: reviewer
         shell: bash
         run: |
           set -euo pipefail
           node --input-type=module <<'NODE'
-          import { readFileSync } from "node:fs";
+          import { appendFileSync, readFileSync } from "node:fs";
+
+          import { validateHistoricalReplayDiagnostic } from "./corpus/historical-replay-diagnostic-lib.mjs";
 
           const report = JSON.parse(readFileSync(process.env.REPORT_PATH, "utf8"));
-          console.log(JSON.stringify({
+          const diagnostic = JSON.parse(readFileSync(process.env.TRACE_PATH, "utf8"));
+          if (!validateHistoricalReplayDiagnostic(diagnostic)) {
+            throw new Error("the private historical diagnostic trace failed strict validation");
+          }
+          const requested = process.env.FINDING_IDS.split(",").map(Number);
+          const traced = diagnostic.cases.map((entry) => entry.databaseId);
+          if (
+            traced.length !== requested.length ||
+            new Set(traced).size !== traced.length ||
+            requested.some((databaseId) => !traced.includes(databaseId))
+          ) {
+            throw new Error("the private trace does not cover exactly the requested finding ids");
+          }
+          const attemptedStages = new Set([
+            "verification",
+            "preflight",
+            "truth_initial",
+            "truth_retrieval",
+            "truth_followup",
+            "challenge_planner",
+            "challenge_retrieval",
+            "falsifier",
+          ]);
+          const attemptedCases = diagnostic.cases.filter((entry) => attemptedStages.has(entry.stage)).length;
+          const accountedTokens = diagnostic.cases.reduce(
+            (total, entry) => total + entry.usage.tokens,
+            0,
+          );
+          if (
+            attemptedCases !== report.execution.attemptedCases ||
+            accountedTokens !== report.execution.accountedTokens
+          ) {
+            throw new Error("the private trace does not match aggregate execution accounting");
+          }
+          const result = {
             reviewerTree: report.binding.reviewerTree,
             accountedTokens: report.execution.accountedTokens,
             decisions: report.execution.corroboratedDecisions,
             stageCounters: report.execution.stageCounters,
             holdout: report.score.chronological.holdout.after,
-          }, null, 2));
+            diagnosticCases: diagnostic.cases,
+          };
+          console.log(JSON.stringify(result, null, 2));
+
+          const table = [
+            "### Text-free historical diagnostic trace",
+            "",
+            "| databaseId | stage | disposition | reasonCode | calls | tokens |",
+            "| ---: | --- | --- | --- | ---: | ---: |",
+            ...diagnostic.cases.map((entry) =>
+              `| ${String(entry.databaseId)} | ${entry.stage} | ${entry.disposition} | ${entry.reasonCode} | ${String(entry.usage.callCount)} | ${String(entry.usage.tokens)} |`,
+            ),
+            "",
+          ].join("\n");
+          appendFileSync(process.env.GITHUB_STEP_SUMMARY, table, { encoding: "utf8" });
           NODE
 
       - name: Remove private diagnostic data
         if: always()
         shell: bash
-        run: rm -f -- "${HARVEST_PATH}" "${FILTERED_PATH}" "${REPORT_PATH}"
+        run: rm -f -- "${HARVEST_PATH}" "${FILTERED_PATH}" "${REPORT_PATH}" "${TRACE_PATH}"
