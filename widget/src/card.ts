@@ -242,7 +242,7 @@ export function renderCard(data: CardData, theme: CardTheme = "dark"): string {
     { value: resolved, label: "resolved", accent: true },
   ];
   const health: readonly HealthMetric[] = [
-    { value: runSuccess, label: "RUNS OK" },
+    { value: runSuccess, label: "RUN SUCCESS" },
     { value: metric(data.openThreads), label: "OPEN THREADS" },
     { value: metric(data.prsWithFindings), label: "PRS W/ FINDINGS" },
   ];

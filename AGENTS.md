@@ -68,10 +68,14 @@ the `SonarCloud` job executes the corpus and script suites through `test:coverag
 pass without the post-scan Sonar evidence checks. Sonar is skipped on pull requests from forks
 because a fork receives no secrets, and the aggregate deliberately treats that skip as red; carry
 the change on a trusted same-repository branch before merging it. A push to `main` is the one
-non-Sonar path: a separate provenance job must prove `HEAD^{tree}` equals `origin/dev^{tree}`, so
-the release ledger reuses the already-governed dev evidence only for byte-identical source. Read the
-`verify` context named in the `dist/index.js` section below the same way: that is the CI aggregate,
-not the script.
+non-Sonar path: the signed release commit binds the exact dev commit and tree it copied, and a
+separate provenance job resolves that immutable commit from dev history and recomputes both trees.
+The job is load-bearing on the release pull request, where it also checks that the repository's
+squash-message policy will preserve the binding, and repeats on the resulting main push. It does
+not compare against the moving dev tip, so a later dev push cannot invalidate a correct release; a
+missing, malformed, non-dev, or tree-mismatched binding stays red. The release ledger therefore
+reuses already-governed dev evidence only for byte-identical source. Read the `verify` context named
+in the `dist/index.js` section below the same way: that is the CI aggregate, not the script.
 
 ## Every live run this project makes uses `gpt-oss-120b`
 
@@ -174,8 +178,10 @@ Four things the script refuses rather than warns about, each an error already ma
   files changed afterwards.
 - **`npm run verify` is never piped.** A pipeline exits with its LAST command's status, so
   `npm run verify | tail` reads a red chain as green. That shipped a stale `dist/` on 2026-08-08.
-- **The release tree must equal `dev`'s tree**, asserted with `rev-parse HEAD^{tree}`. Its executable
-  source must equal the measured RC; only the attested release-evidence delta may follow that RC.
+- **The release tree must equal `dev`'s tree at branch cut**, asserted with
+  `rev-parse HEAD^{tree}`. The signed release commit records that dev commit and tree for the later
+  main-push provenance check. Its executable source must equal the measured RC; only the attested
+  release-evidence delta may follow that RC.
 - **The consumer's `uses:` and `ACTION_PIN` move together.** The consumer workflow's own sync
   check fails the run when they disagree; the script counts both rewrites so a half-rewrite stops
   before it is pushed.
@@ -206,8 +212,11 @@ for that would be claiming to have verified something it only waited for.
   `dev` is always the correct side of that false conflict, and neither remedy is available here —
   merging `main` into `dev` and rebasing `dev` both break linear history and the no-force-push
   rule. So the release branch takes `dev`'s tree WHOLE (`git checkout origin/dev -- .`), and the
-  release must assert `HEAD^{tree}` equals `origin/dev^{tree}` before opening the pull request, so
-  what ships is the qualified tree rather than the outcome of a hand-resolved merge.
+  release must assert `HEAD^{tree}` equals `origin/dev^{tree}` before opening the pull request and
+  bind that exact commit and tree in its signed message, so what ships is the qualified tree rather
+  than the outcome of a hand-resolved merge. The release pull request validates that immutable
+  binding before merge; main repeats the proof afterwards. Neither compares against the then-current
+  dev tip.
 - Both branches carry identical protection: signed commits, linear history, no force pushes,
   conversation resolution, and the required checks `verify`, `engine pin`, and
   `SonarCloud Code Analysis` (verified against the live branch protection). `action smoke` runs on

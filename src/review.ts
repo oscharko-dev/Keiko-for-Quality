@@ -2940,11 +2940,9 @@ async function challengeFollowUpOrFactOnly(
 function selectedRuntimeFactAnchor(
   prepared: PreparedFindingEvidence,
   sourceSide: "H" | "B",
-): RepositoryContextRequest["findingAnchor"] {
+): RepositoryContextRequest["findingAnchor"] | undefined {
   if (sourceSide === "H") return prepared.repositoryRequest.findingAnchor;
-  const baseAnchor = prepared.repositoryRequest.baseFindingAnchor;
-  if (baseAnchor === undefined) throw new Error("BASE runtime fact anchor is unavailable");
-  return baseAnchor;
+  return prepared.repositoryRequest.baseFindingAnchor;
 }
 
 async function closedRuntimeFactsForChallenge(
@@ -2957,6 +2955,11 @@ async function closedRuntimeFactsForChallenge(
 ): Promise<readonly ClosedRuntimeFact[]> {
   if (stage !== "contract_challenge") return [];
   if (!requestsClosedRuntimeFacts(finding.content, challengeAxis)) return [];
+  const findingAnchor = selectedRuntimeFactAnchor(prepared, sourceSide);
+  // A pure insertion can expose useful cross-file BASE contracts without mapping the finding's
+  // exact syntax to BASE. Keep that repository follow-up, but never substitute a HEAD coordinate
+  // to license a BASE runtime fact.
+  if (findingAnchor === undefined) return [];
   return await collectClosedRuntimeFactsAtCommit({
     context: gitContext(run.request),
     commit: sourceSide === "H" ? prepared.repositoryRequest.head : prepared.repositoryRequest.base,
@@ -2965,7 +2968,7 @@ async function closedRuntimeFactsForChallenge(
         ? prepared.repositoryRequest.reviewPath
         : prepared.repositoryRequest.baseReviewPath,
     side: sourceSide,
-    findingAnchor: selectedRuntimeFactAnchor(prepared, sourceSide),
+    findingAnchor,
     deadlineMs: run.deadline.expiresAtMs,
   });
 }

@@ -1130,7 +1130,7 @@ function historicalRuntimeFactBinding(repositoryRequest, sourceSide) {
     };
   }
   if (repositoryRequest.baseFindingAnchor === undefined) {
-    throw new Error("historical BASE runtime fact anchor is unavailable");
+    return undefined;
   }
   return {
     commit: repositoryRequest.base,
@@ -1160,6 +1160,7 @@ async function collectHistoricalRuntimeFacts({
     throw new TypeError("historical runtime fact detector is unavailable");
   }
   const binding = historicalRuntimeFactBinding(repositoryRequest, sourceSide);
+  if (binding === undefined) return [];
   return collectClosedRuntimeFactsAtCommit({
     context: { cwd: repo, pathValue: FIXED_PATH, timeoutMs: GIT_TIMEOUT_MS },
     ...binding,

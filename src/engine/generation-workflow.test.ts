@@ -241,6 +241,39 @@ describe("focused examiners", () => {
       }),
     ).toBe(true);
   });
+
+  it("recognizes declarations without mistaking calls or control flow for contracts", () => {
+    for (const renderedDiff of [
+      "__new hunk__\n8 +console.log(value);",
+      "__new hunk__\n8 +const result = foo(bar);",
+      "__new hunk__\n8 +register(value => use(value));",
+      "__new hunk__\n8 +register((value: string) => use(value));",
+      "__new hunk__\n8 +emit({ key: value });",
+      '__new hunk__\n8 +schedule({ url: "https://example.test" });',
+      "__new hunk__\n8 +consume(/https?:\\/\\/example[.]test/);",
+      "__new hunk__\n8 +choose(condition ? left : right);",
+      "__new hunk__\n8 +if (ready) {",
+      "__new hunk__\n8 +else if (ready) {",
+      "__new hunk__\n8 +} else if (ready) {",
+    ]) {
+      expect(
+        shouldRunIntegrationExaminer({ ...ISOLATED_CONTEXT, renderedDiff }),
+        renderedDiff,
+      ).toBe(false);
+    }
+
+    for (const renderedDiff of [
+      "__new hunk__\n8 +abonnieren(rückruf: (wert: Wert) => void): Ergebnis;",
+      "__new hunk__\n8 +prüfen(eingabe: Wert): Ergebnis;",
+      "__new hunk__\n8 +foo?(): void;",
+      "__new hunk__\n8 +export function authenticate(callback: (value: string) => void) {}",
+    ]) {
+      expect(
+        shouldRunIntegrationExaminer({ ...ISOLATED_CONTEXT, renderedDiff }),
+        renderedDiff,
+      ).toBe(true);
+    }
+  });
 });
 
 describe("shared request ledger", () => {

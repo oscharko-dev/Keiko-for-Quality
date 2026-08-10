@@ -17,6 +17,9 @@ import { validateQualificationEvidence } from "./qualification-evidence-lib.mjs"
 
 /** `X.Y.Z`, the only shape this project's tags have ever had. */
 const VERSION = /^(\d+)\.(\d+)\.(\d+)$/u;
+const GIT_OBJECT_ID = /^[0-9a-f]{40}$/u;
+const RELEASE_DEV_COMMIT_TRAILER = "Keiko-Release-Dev-Commit";
+const RELEASE_DEV_TREE_TRAILER = "Keiko-Release-Dev-Tree";
 
 export function parseVersion(raw) {
   if (typeof raw !== "string" || !VERSION.test(raw)) return undefined;
@@ -25,6 +28,49 @@ export function parseVersion(raw) {
 
 export function tagFor(version) {
   return `v${version}`;
+}
+
+function exactTrailerValues(message, name) {
+  if (typeof message !== "string") return [];
+  const prefix = `${name}: `;
+  return message
+    .split(/\r?\n/u)
+    .filter((line) => line.startsWith(prefix))
+    .map((line) => line.slice(prefix.length));
+}
+
+/**
+ * The immutable dev revision whose tree a release branch copied.
+ *
+ * The binding rides in the signed release-branch commit and, with the repository's configured
+ * squash-message policy, into the main squash. The main-push verifier never trusts the text by
+ * itself: it resolves the named commit from dev history and recomputes both trees.
+ */
+export function parseReleaseDevBinding(message) {
+  const commitValues = exactTrailerValues(message, RELEASE_DEV_COMMIT_TRAILER);
+  const treeValues = exactTrailerValues(message, RELEASE_DEV_TREE_TRAILER);
+  const failures = [];
+  if (commitValues.length !== 1 || !GIT_OBJECT_ID.test(commitValues[0] ?? "")) {
+    failures.push("release_dev_commit_binding_invalid");
+  }
+  if (treeValues.length !== 1 || !GIT_OBJECT_ID.test(treeValues[0] ?? "")) {
+    failures.push("release_dev_tree_binding_invalid");
+  }
+  return {
+    valid: failures.length === 0,
+    failures,
+    binding: failures.length === 0 ? { commit: commitValues[0], tree: treeValues[0] } : undefined,
+  };
+}
+
+/** Emits only the strict, round-trippable trailer shape the main-push verifier accepts. */
+export function releaseDevBindingMessage(binding) {
+  const message =
+    `${RELEASE_DEV_COMMIT_TRAILER}: ${String(binding?.commit ?? "")}\n` +
+    `${RELEASE_DEV_TREE_TRAILER}: ${String(binding?.tree ?? "")}`;
+  const parsed = parseReleaseDevBinding(message);
+  if (!parsed.valid) throw new TypeError("release dev binding requires full lowercase Git ids");
+  return message;
 }
 
 /**

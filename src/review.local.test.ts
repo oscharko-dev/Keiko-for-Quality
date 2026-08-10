@@ -48,11 +48,13 @@ vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
   findAstCallerOwnerAtHead: (): Promise<undefined> => Promise.resolve(undefined),
   searchAstGrepAtHead: (request: {
     readonly candidatePaths: readonly string[];
+    readonly terms: readonly string[];
   }): Promise<
     readonly [{ path: string; line: number; content: string; kind: "definition" }] | []
   > =>
     Promise.resolve(
-      request.candidatePaths.includes("src/challenge.ts")
+      request.candidatePaths.includes("src/challenge.ts") &&
+        request.terms.includes("challengeGuard")
         ? [
             {
               path: "src/challenge.ts",

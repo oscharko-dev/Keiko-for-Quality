@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 import {
   evaluateSonarPullRequest,
   finiteNumber,
+  isAnalyzableChange,
   measuresFromPayload,
   sonarJson,
 } from "./check-sonar-pr-quality-gate.mjs";
@@ -14,6 +15,20 @@ import {
   SONAR_ORGANIZATION,
   SONAR_PROJECT_KEY,
 } from "./sonar-quality-gate-contract.mjs";
+
+const BRANCH_NEW_CODE_RATE_METRICS = Object.freeze([
+  "new_coverage",
+  "new_duplicated_lines",
+  "new_duplicated_lines_density",
+  "new_lines",
+  "new_lines_to_cover",
+  "new_security_hotspots",
+  "new_security_hotspots_reviewed",
+]);
+
+function hasBranchNewCodeRateEvidence(measures) {
+  return BRANCH_NEW_CODE_RATE_METRICS.some((metric) => measures[metric] !== undefined);
+}
 
 async function fetchMainEvidence(token, load) {
   const project = encodeURIComponent(SONAR_PROJECT_KEY);
@@ -50,9 +65,23 @@ async function fetchMainEvidence(token, load) {
   };
 }
 
-export async function runSonarMainGate({ headSha, load = sonarJson, log = console.log, token }) {
+export async function runSonarMainGate({
+  base,
+  execute,
+  headSha,
+  load = sonarJson,
+  log = console.log,
+  root,
+  token,
+}) {
   const evidence = await fetchMainEvidence(token, load);
-  const failures = evaluateSonarPullRequest({ ...evidence, headSha });
+  // Branch measures cover Sonar's whole new-code period, not only this push. Present measures
+  // therefore remain load-bearing even for a docs-only push; only an actually empty period may
+  // use the Git diff to prove that missing new-code rate evidence is inapplicable.
+  const analyzable =
+    hasBranchNewCodeRateEvidence(evidence.measures) ||
+    isAnalyzableChange({ base, execute, head: headSha, root });
+  const failures = evaluateSonarPullRequest({ ...evidence, analyzable, headSha });
   if (failures.length > 0) throw new Error(failures.join(" "));
   log(`sonar-main-quality-gate: PASS - dev is clean at ${headSha}.`);
 }
@@ -62,6 +91,7 @@ export async function runSonarMainGateCli(input) {
   const env = availableInput.env ?? process.env;
   if (env.SONAR_HEAD_SHA === undefined) throw new Error("SONAR_HEAD_SHA is required.");
   await (availableInput.run ?? runSonarMainGate)({
+    base: env.SONAR_BASE_SHA,
     headSha: env.SONAR_HEAD_SHA,
     token: env.SONAR_TOKEN,
   });

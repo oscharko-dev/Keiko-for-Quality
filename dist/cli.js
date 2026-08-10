@@ -3928,13 +3928,174 @@ var INTEGRATION_SIGNAL = /(?:^|\n)\d+ \+[\s\S]{0,160}\b(?:export|public|interfac
 var DELETION_SIGNAL = /(?:^|\n)\d+ -/u;
 var FILE_METADATA_SIGNAL = /(?:^|\n)__file metadata__(?:\n|$)/u;
 var MEMBER_NAME = /^["']?[\p{L}_$][\p{L}\p{N}_$-]*["']?\??$/u;
+var FUNCTION_NAME = /^[\p{L}_$][\p{L}\p{N}_$]*\??$/u;
+var NON_DECLARATION_HEADS = /* @__PURE__ */ new Set([
+  "await",
+  "case",
+  "catch",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "finally",
+  "for",
+  "if",
+  "lock",
+  "new",
+  "return",
+  "switch",
+  "throw",
+  "try",
+  "typeof",
+  "using",
+  "when",
+  "while",
+  "with",
+  "yield"
+]);
+var STRING_DELIMITERS = /* @__PURE__ */ new Set(["'", '"', "`"]);
+var NESTED_DELIMITERS = Object.freeze({
+  "(": ")",
+  "[": "]",
+  "{": "}"
+});
+var CLOSING_DELIMITERS = new Set(Object.values(NESTED_DELIMITERS));
+function quotedSegmentEnd(body, start) {
+  const quote = body[start];
+  for (let index = start + 1; index < body.length; index += 1) {
+    if (body[index] === "\\") {
+      index += 1;
+    } else if (body[index] === quote) {
+      return index;
+    }
+  }
+  return -1;
+}
+function previousNonWhitespace(body, start) {
+  for (let index = start - 1; index >= 0; index -= 1) {
+    if (!/\s/u.test(body[index] ?? "")) return body[index];
+  }
+  return void 0;
+}
+function regexSegmentEnd(body, start) {
+  let inCharacterClass = false;
+  for (let index = start + 1; index < body.length; index += 1) {
+    const character = body[index];
+    if (character === "\\") {
+      index += 1;
+    } else if (character === "[") {
+      inCharacterClass = true;
+    } else if (character === "]") {
+      inCharacterClass = false;
+    } else if (character === "/" && !inCharacterClass) {
+      return index;
+    }
+  }
+  return -1;
+}
+function startsRegexLiteral(body, start) {
+  if (body[start] !== "/") return false;
+  const previous = previousNonWhitespace(body, start);
+  return previous === void 0 || "([,{=!:;&|?".includes(previous);
+}
+function nonCodeSegmentEnd(body, start) {
+  const character = body[start];
+  if (character !== void 0 && STRING_DELIMITERS.has(character)) {
+    return quotedSegmentEnd(body, start);
+  }
+  if (body.startsWith("/*", start)) {
+    const close = body.indexOf("*/", start + 2);
+    return close < 0 ? -1 : close + 1;
+  }
+  if (body.startsWith("//", start)) return body.length;
+  if (startsRegexLiteral(body, start)) return regexSegmentEnd(body, start);
+  return void 0;
+}
+function matchingCloseParenthesis(body, open2) {
+  let depth = 0;
+  for (let index = open2; index < body.length; index += 1) {
+    const segmentEnd = nonCodeSegmentEnd(body, index);
+    if (segmentEnd !== void 0) {
+      if (segmentEnd < 0) return -1;
+      index = segmentEnd;
+      continue;
+    }
+    const character = body[index];
+    if (character === "(") depth += 1;
+    if (character !== ")") continue;
+    depth -= 1;
+    if (depth === 0) return index;
+  }
+  return -1;
+}
+function declarationHeadTokens(head) {
+  if (head.includes(".") || head.includes("=") || head.includes("{") || head.includes("}")) {
+    return void 0;
+  }
+  const tokens = head.split(/\s+/u);
+  const name = tokens.at(-1);
+  const first = tokens[0]?.toLowerCase();
+  if (name === void 0 || !FUNCTION_NAME.test(name) || first === void 0 || NON_DECLARATION_HEADS.has(first)) {
+    return void 0;
+  }
+  return tokens;
+}
+function nextNonWhitespace(body, start) {
+  for (let index = start; index < body.length; index += 1) {
+    if (!/\s/u.test(body[index] ?? "")) return body[index];
+  }
+  return void 0;
+}
+function consumeNestedDelimiter(character, expectedClosers) {
+  const closer = character === void 0 ? void 0 : NESTED_DELIMITERS[character];
+  if (closer !== void 0) {
+    expectedClosers.push(closer);
+    return true;
+  }
+  if (character === void 0 || !CLOSING_DELIMITERS.has(character)) return false;
+  if (expectedClosers.pop() !== character) expectedClosers.push("invalid");
+  return true;
+}
+function isTopLevelTypeSeparator(parameters, index, state) {
+  const character = parameters[index];
+  if (consumeNestedDelimiter(character, state.expectedClosers)) return false;
+  if (state.expectedClosers.length > 0) return false;
+  if (character === "?") {
+    if (nextNonWhitespace(parameters, index + 1) !== ":") state.ternaryDepth += 1;
+    return false;
+  }
+  if (character !== ":") return false;
+  if (state.ternaryDepth === 0) return true;
+  state.ternaryDepth -= 1;
+  return false;
+}
+function hasTopLevelTypeSeparator(parameters) {
+  const state = { expectedClosers: [], ternaryDepth: 0 };
+  for (let index = 0; index < parameters.length; index += 1) {
+    const segmentEnd = nonCodeSegmentEnd(parameters, index);
+    if (segmentEnd !== void 0) {
+      if (segmentEnd < 0) return false;
+      index = segmentEnd;
+      continue;
+    }
+    if (isTopLevelTypeSeparator(parameters, index, state)) return true;
+  }
+  return false;
+}
+function hasDeclarationSuffix(suffix, headTokens, parameters) {
+  if (suffix.startsWith("->") || suffix.startsWith(":") || suffix.startsWith("{")) return true;
+  if (!suffix.startsWith(";")) return false;
+  return headTokens.length > 1 || hasTopLevelTypeSeparator(parameters);
+}
 function isFunctionContract(body) {
   const open2 = body.indexOf("(");
-  const close = open2 < 0 ? -1 : body.indexOf(")", open2 + 1);
+  const close = open2 < 0 ? -1 : matchingCloseParenthesis(body, open2);
   if (open2 < 1 || close <= open2) return false;
-  const name = body.slice(0, open2).trim();
+  const headTokens = declarationHeadTokens(body.slice(0, open2).trim());
+  if (headTokens === void 0) return false;
+  const parameters = body.slice(open2 + 1, close);
   const suffix = body.slice(close + 1).trimStart();
-  return name !== "" && !name.includes("(") && ["->", ":", "{", ";"].some((marker) => suffix.startsWith(marker));
+  return hasDeclarationSuffix(suffix, headTokens, parameters);
 }
 function isMemberContract(body) {
   const colon = body.indexOf(":");
@@ -11972,19 +12133,19 @@ async function challengeFollowUpOrFactOnly(run2, prepared, terms, challengeAxis,
 }
 function selectedRuntimeFactAnchor(prepared, sourceSide) {
   if (sourceSide === "H") return prepared.repositoryRequest.findingAnchor;
-  const baseAnchor = prepared.repositoryRequest.baseFindingAnchor;
-  if (baseAnchor === void 0) throw new Error("BASE runtime fact anchor is unavailable");
-  return baseAnchor;
+  return prepared.repositoryRequest.baseFindingAnchor;
 }
 async function closedRuntimeFactsForChallenge(run2, prepared, finding, stage, challengeAxis, sourceSide) {
   if (stage !== "contract_challenge") return [];
   if (!requestsClosedRuntimeFacts(finding.content, challengeAxis)) return [];
+  const findingAnchor = selectedRuntimeFactAnchor(prepared, sourceSide);
+  if (findingAnchor === void 0) return [];
   return await collectClosedRuntimeFactsAtCommit({
     context: gitContext2(run2.request),
     commit: sourceSide === "H" ? prepared.repositoryRequest.head : prepared.repositoryRequest.base,
     path: sourceSide === "H" ? prepared.repositoryRequest.reviewPath : prepared.repositoryRequest.baseReviewPath,
     side: sourceSide,
-    findingAnchor: selectedRuntimeFactAnchor(prepared, sourceSide),
+    findingAnchor,
     deadlineMs: run2.deadline.expiresAtMs
   });
 }

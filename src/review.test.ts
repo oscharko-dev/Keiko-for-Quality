@@ -3383,6 +3383,84 @@ describe("performReview: review-cache memoization end to end", () => {
       );
     });
 
+    it("keeps BASE contract retrieval when an inserted finding has no BASE runtime anchor", async () => {
+      const unmappedRepo = await mkdtemp(join(tmpdir(), "kfq-review-unmapped-base-anchor-"));
+      try {
+        const unmappedGit = (args: readonly string[]): string => git(args, unmappedRepo);
+        unmappedGit(["init", "-q", "-b", "main"]);
+        await mkdir(join(unmappedRepo, "src"), { recursive: true });
+        await writeFile(join(unmappedRepo, "src/a.ts"), "export const challengeGuard = true;\n");
+        await writeFile(
+          join(unmappedRepo, "src/challenge.ts"),
+          "export const challengeGuard = true;\n",
+        );
+        unmappedGit(["add", "-A"]);
+        unmappedGit(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+        const unmappedBase = unmappedGit(["rev-parse", "HEAD"]).trim();
+
+        await writeFile(
+          join(unmappedRepo, "src/a.ts"),
+          ["export const copied = { ...maybe };", "export const challengeGuard = true;", ""].join(
+            "\n",
+          ),
+        );
+        unmappedGit(["add", "-A"]);
+        unmappedGit(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+        const unmappedHead = unmappedGit(["rev-parse", "HEAD"]).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        findAstAnchorOwnerAtHeadMock.mockResolvedValue(undefined);
+        runEngineMock.mockResolvedValue({
+          stdout: findingsStdout(
+            [
+              {
+                path: "src/a.ts",
+                content:
+                  "When `maybe` is undefined, this object spread throws before fallback. " +
+                  "The independent `challengeGuard` contract must still hold.",
+                category: "bug",
+                severity: "medium",
+              },
+            ],
+            1,
+          ),
+          ruleDigest: engineDigest,
+        });
+
+        let falsifierPrompt = "";
+        const endpoint = classifyFetchMock({
+          auditPair: { category: "bug", severity: "medium" },
+          judgeEvidenceRef: "H:1",
+          judgeChangeRef: "D:H:1",
+          judgeAdditionalRefs: ["B:1"],
+          falsifierEvidenceRef: "R4:B:1",
+          onFalsifierPrompt: (prompt) => {
+            falsifierPrompt = prompt;
+          },
+        });
+        globalThis.fetch = endpoint.impl;
+        const client = successfulClient([], unmappedHead);
+        const report = await performReview(
+          {
+            ...auditRequest(client.client),
+            base: commitSha(unmappedBase),
+            head: commitSha(unmappedHead),
+            repositoryPath: unmappedRepo,
+          },
+          createSilentDiagnostics(),
+        );
+
+        expect(report.outcome).toBe("complete");
+        expect(report.publish?.published).toBe(1);
+        expect(collectClosedRuntimeFactsAtCommitMock).not.toHaveBeenCalled();
+        expect(falsifierPrompt).toContain("R4 = BASE src/challenge.ts");
+        expect(falsifierPrompt).toContain("R4:B:1| export const challengeGuard = true;");
+      } finally {
+        await rm(unmappedRepo, { recursive: true, force: true });
+      }
+    });
+
     it("routes a deleted-file same-file challenge through immutable BASE", async () => {
       const deletionRepo = await mkdtemp(join(tmpdir(), "kfq-review-deleted-challenge-"));
       try {

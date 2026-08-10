@@ -58,6 +58,7 @@ describe("required Sonar CI contract", () => {
     assert(pullRequestGate > scan);
     assert(devGate > pullRequestGate);
     assert.match(workflow, /github\.event_name == 'push' && github\.ref == 'refs\/heads\/dev'/u);
+    assert.match(workflow, /SONAR_BASE_SHA: \$\{\{ github\.event\.before \}\}/u);
   });
 
   it("runs Sonar only for same-repository pull requests and dev pushes", () => {
@@ -78,17 +79,19 @@ describe("required Sonar CI contract", () => {
     ].map((match) => match[1]);
     assert.deepEqual(skippedComparisons, ["!="]);
     assert.match(workflow, /\[ "\$MAIN_PROVENANCE_RESULT" != "success" \]/u);
+    assert.match(workflow, /\[ "\$BASE_REF" = "main" \]/u);
+    assert.match(workflow, /release provenance did not succeed before the main merge/u);
   });
 
-  it("accepts a main push only after exact dev-tree provenance", () => {
+  it("makes immutable dev-tree provenance load-bearing before and after the main merge", () => {
     assert.match(workflow, /\n {2}main_provenance:\n {4}name: main provenance\n/u);
-    assert.match(
-      workflow,
-      /if: github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u,
-    );
-    assert.match(workflow, /git rev-parse 'HEAD\^\{tree\}'/u);
-    assert.match(workflow, /git rev-parse 'origin\/dev\^\{tree\}'/u);
-    assert.match(workflow, /if \[ "\$main_tree" != "\$dev_tree" \]; then/u);
+    assert.match(workflow, /github\.event_name == 'pull_request' && github\.base_ref == 'main'/u);
+    assert.match(workflow, /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
+    assert.match(workflow, /github\.event\.pull_request\.head\.sha \|\| github\.sha/u);
+    assert.match(workflow, /squash_merge_commit_message/u);
+    assert.match(workflow, /"\$setting" != "COMMIT_MESSAGES"/u);
+    assert.match(workflow, /node scripts\/release-main-provenance\.mjs/u);
+    assert.doesNotMatch(workflow, /git rev-parse 'origin\/dev\^\{tree\}'/u);
   });
 
   it("keeps tested Sonar evidence code inside the 85% coverage scope", () => {

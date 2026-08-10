@@ -1109,6 +1109,93 @@ test("verification routes the closed base challenge through the immutable derive
   assert.deepEqual(result.decisions, [{ databaseId: 1, decision: "keep" }]);
 });
 
+test("an unmapped BASE anchor withholds runtime facts without retiring later replay cases", async () => {
+  const cases = [boundReplayCase(1, "src/first.ts"), boundReplayCase(2, "src/second.ts")];
+  let detectorCalls = 0;
+  let followUpCalls = 0;
+  let substantiationCalls = 0;
+  const result = await runHistoricalReplayVerification({
+    databaseIds: [1, 2],
+    cases,
+    repo: "/consumer",
+    maxTokens: 500,
+    judgeEndpoint: { endpoint: "https://model.example.test/v1", token: "secret", model: "m" },
+    readChangeAtCommits: (_repo, replayCase) =>
+      stubHistoricalChange(replayCase, {
+        headSource: "const value = { ...maybe };\n",
+        baseSource: "const value = {};\n",
+      }),
+    buildChangeEvidence: () => ({
+      text: "H:1| const value = { ...maybe };\nD:H:1| +const value = { ...maybe };",
+    }),
+    mappedBaseRangeFromUnifiedDiff: () => undefined,
+    collectInitialRepositoryContext: async (request) => ({
+      headCommit: request.head,
+      entries: [],
+    }),
+    collectRepositoryContextFollowUp: async (request, _terms, options) => {
+      followUpCalls += 1;
+      assert.deepEqual(options, { sourceSide: "B" });
+      assert.equal(request.base, "f".repeat(40));
+      assert.equal(Object.hasOwn(request, "baseFindingAnchor"), false);
+      return {
+        sourceCommit: request.base,
+        side: "B",
+        entries: [
+          {
+            path: request.baseReviewPath,
+            line: 1,
+            content: "const value = {};",
+            kind: "definition",
+          },
+        ],
+      };
+    },
+    collectClosedRuntimeFactsAtCommit: async () => {
+      detectorCalls += 1;
+      return [];
+    },
+    requestsClosedRuntimeFacts: () => true,
+    toRetrievedEvidence: (context, _knownProvenance, facts) => ({
+      chunks: [
+        {
+          path: context.entries[0].path,
+          side: context.side,
+          lines: [{ line: 1, text: context.entries[0].content }],
+        },
+      ],
+      facts,
+    }),
+    substantiate: async (findings, readEvidence, _endpoint, _strictness, _maximum, retrieve) => {
+      substantiationCalls += 1;
+      if (substantiationCalls === 1) {
+        const retrieved = await retrieve({
+          finding: findings[0],
+          currentEvidence: readEvidence(findings[0]),
+          knownProvenance: new Set(),
+          terms: ["value"],
+          anchorRefs: ["H:1"],
+          stage: "contract_challenge",
+          challengeAxis: "base",
+        });
+        assert.equal(retrieved.chunks[0].side, "B");
+        assert.deepEqual(retrieved.facts, []);
+      }
+      return substantiationOutcome(findings);
+    },
+  });
+
+  assert.equal(detectorCalls, 0);
+  assert.equal(followUpCalls, 1);
+  assert.equal(substantiationCalls, 2);
+  assert.equal(result.report.accountedTokens, 200);
+  assert.equal(result.report.unmeasuredByReason.verificationError, 0);
+  assert.deepEqual(result.decisions, [
+    { databaseId: 1, decision: "keep" },
+    { databaseId: 2, decision: "keep" },
+  ]);
+});
+
 test("verification routes a deleted-file same-file challenge through immutable BASE", async () => {
   const replayCase = boundReplayCase(1, "src/deleted.ts");
   const sources = stubHistoricalChange(replayCase, {

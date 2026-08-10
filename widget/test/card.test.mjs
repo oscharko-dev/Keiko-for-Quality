@@ -33,7 +33,7 @@ test("renders every metric it is handed", () => {
   assert.match(svg, />23</);
   assert.match(svg, />RUN OK</);
   assert.match(svg, />resolved</);
-  assert.match(svg, />RUNS OK</);
+  assert.match(svg, />RUN SUCCESS</);
   assert.match(svg, />OPEN THREADS</);
   assert.match(svg, />PRS W\/ FINDINGS</);
   assert.doesNotMatch(svg, /acted on|COMPLETE/);

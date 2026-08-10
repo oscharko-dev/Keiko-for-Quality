@@ -649,6 +649,8 @@ test("invalid workflow ids and paths cannot be silently classified as non-review
     { id: 11, path: "  " },
     { id: 11, path: 42 },
     { id: 11, path: ".github/workflows/ci.yml\u0000hidden" },
+    { id: 11, path: ".github/workflows/ci.yml\u0080hidden" },
+    { id: 11, path: ".github/workflows/ci.yml\u009fhidden" },
   ]) {
     const data = await collectCardData(
       "o",

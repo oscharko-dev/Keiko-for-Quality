@@ -43,6 +43,15 @@ describe("Sonar Free-plan gate contract", () => {
       "Keiko Banking Grade identity does not match the governed contract.",
       "Keiko Banking Grade conditions drifted from the repository contract.",
     ]);
+    for (const malformed of [null, "Sonar way", [], 1]) {
+      assert.deepEqual(gateContractFailures(malformed), [
+        "Keiko Banking Grade definition is missing.",
+      ]);
+    }
+    assert.deepEqual(
+      gateContractFailures({ conditions: [null], id: 156389, name: KEIKO_GATE_NAME }),
+      ["Keiko Banking Grade conditions drifted from the repository contract."],
+    );
   });
 
   it("fails closed for missing applicability evidence", () => {
@@ -57,5 +66,13 @@ describe("Sonar Free-plan gate contract", () => {
     assert.deepEqual(countAwareRateFailures({ ...base, count: 2, rate: 84.9 }), [
       "Coverage condition failed at 84.9%.",
     ]);
+    assert.deepEqual(countAwareRateFailures({ ...base, count: -1, rate: 90 }), [
+      "Coverage applicability count is invalid.",
+    ]);
+    for (const rate of [-1, 101]) {
+      assert.deepEqual(countAwareRateFailures({ ...base, count: 2, rate }), [
+        "Coverage rate is invalid.",
+      ]);
+    }
   });
 });

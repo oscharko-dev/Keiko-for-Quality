@@ -115,7 +115,7 @@ function validWorkflowPath(path: string | undefined): path is string {
 function hasControlCharacter(value: string): boolean {
   for (const character of value) {
     const code = character.codePointAt(0) ?? 0;
-    if (code <= 31 || code === 127) return true;
+    if (code <= 31 || (code >= 127 && code <= 159)) return true;
   }
   return false;
 }

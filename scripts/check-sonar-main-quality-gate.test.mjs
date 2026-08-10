@@ -76,6 +76,7 @@ describe("SonarCloud dev evidence gate", () => {
     const issuePath = paths.find((path) => path.includes("issues/search"));
     const measurePath = paths.find((path) => path.includes("metricKeys=new_coverage"));
     assert(issuePath.includes("branch=dev"));
+    assert(issuePath.includes("resolved=false"));
     assert.equal(issuePath.includes("sinceLeakPeriod"), false);
     assert.match(measurePath, /new_maintainability_rating/u);
     assert.match(measurePath, /new_reliability_rating/u);
@@ -119,13 +120,92 @@ describe("SonarCloud dev evidence gate", () => {
     );
   });
 
+  it("accepts an empty new-code period only for a proven non-coverable push", async () => {
+    const docsOnlyMeasures = {
+      new_maintainability_rating: 1,
+      new_reliability_rating: 1,
+      new_security_rating: 1,
+      new_violations: 0,
+    };
+    await runSonarMainGate({
+      base: "b".repeat(40),
+      execute: () => "M\tREADME.md\n",
+      headSha,
+      load: async (path) =>
+        path.includes("metricKeys=new_coverage")
+          ? measurePayload(docsOnlyMeasures)
+          : passingLoad(path),
+      log: () => undefined,
+    });
+  });
+
+  it("keeps reported branch-period rates load-bearing on a docs-only push", async () => {
+    await assert.rejects(
+      runSonarMainGate({
+        base: "b".repeat(40),
+        execute: () => assert.fail("reported new_lines makes the branch period applicable"),
+        headSha,
+        load: async (path) =>
+          path.includes("metricKeys=new_coverage")
+            ? measurePayload({ ...newMeasures, new_coverage: 84 })
+            : passingLoad(path),
+      }),
+      /New-code coverage condition failed at 84%/u,
+    );
+    await assert.rejects(
+      runSonarMainGate({
+        base: "b".repeat(40),
+        execute: () => "M\tREADME.md\n",
+        headSha,
+        load: async (path) =>
+          path.includes("metricKeys=new_coverage")
+            ? measurePayload({
+                new_duplicated_lines: 0,
+                new_maintainability_rating: 1,
+                new_reliability_rating: 1,
+                new_security_rating: 1,
+                new_violations: 0,
+              })
+            : passingLoad(path),
+      }),
+      /New-code line count metric is missing/u,
+    );
+  });
+
+  it("fails closed on empty new-code evidence when the push identity is unknown", async () => {
+    const withoutRates = {
+      new_maintainability_rating: 1,
+      new_reliability_rating: 1,
+      new_security_rating: 1,
+      new_violations: 0,
+    };
+    for (const base of [undefined, "", "0".repeat(40), "not-a-commit"]) {
+      await assert.rejects(
+        runSonarMainGate({
+          base,
+          execute: () => assert.fail("invalid ids must fail closed before git"),
+          headSha,
+          load: async (path) =>
+            path.includes("metricKeys=new_coverage")
+              ? measurePayload(withoutRates)
+              : passingLoad(path),
+        }),
+        /New-code line count metric is missing/u,
+      );
+    }
+  });
+
   it("adapts CLI variables and reports missing revision input", async () => {
     const calls = [];
     await runSonarMainGateCli({
-      env: { SONAR_HEAD_SHA: headSha, SONAR_TOKEN: "redacted" },
+      env: {
+        SONAR_BASE_SHA: "b".repeat(40),
+        SONAR_HEAD_SHA: headSha,
+        SONAR_TOKEN: "redacted",
+      },
       run: async (input) => calls.push(input),
     });
-    assert.deepEqual(calls, [{ headSha, token: "redacted" }]);
+    assert.deepEqual(calls, [{ base: "b".repeat(40), headSha, token: "redacted" }]);
     const errors = [];
     const exits = [];
     await executeSonarMainGateCli({

@@ -20,6 +20,8 @@ const NEW_CODE_RATINGS = Object.freeze([
   ["new_reliability_rating", "New-code reliability rating"],
   ["new_security_rating", "New-code security rating"],
 ]);
+const GITHUB_COMMIT = /^[0-9a-f]{40}$/iu;
+const ZERO_COMMIT = /^0{40}$/u;
 
 export function finiteNumber(value) {
   if (value === undefined || value === null || value === "") return undefined;
@@ -43,8 +45,16 @@ function changedPaths(diff) {
 
 export function isAnalyzableChange(input) {
   const { base, execute = execFileSync, head, root = process.cwd() } = input ?? {};
-  if (base === undefined || base.length === 0 || head === undefined || head.length === 0)
+  if (
+    typeof base !== "string" ||
+    !GITHUB_COMMIT.test(base) ||
+    ZERO_COMMIT.test(base) ||
+    typeof head !== "string" ||
+    !GITHUB_COMMIT.test(head) ||
+    ZERO_COMMIT.test(head)
+  ) {
     return true;
+  }
   const diff = execute(
     "/usr/bin/git",
     ["diff", "--name-status", "--diff-filter=ACMR", `${base}...${head}`],
@@ -98,9 +108,8 @@ function ratingFailures(measures) {
 function newCodeFailures(measures, analyzable) {
   if (!analyzable) return [];
   const failures = [];
-  if (measures.new_lines === undefined) failures.push("New-code line count metric is missing.");
   if (measures.new_lines === undefined) {
-    failures.push("Cannot evaluate new-code coverage: Sonar did not report a new-code line count.");
+    failures.push("New-code line count metric is missing.");
   } else {
     failures.push(
       ...countAwareRateFailures({
@@ -144,7 +153,7 @@ export function evaluateSonarPullRequest({
   customGate,
   headSha,
   issuesTotal,
-  measures,
+  measures = {},
   overallMeasures,
 }) {
   return [

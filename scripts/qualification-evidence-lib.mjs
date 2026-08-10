@@ -330,7 +330,7 @@ function validateResults(rawResults, failures) {
 function validateAggregateValues(root, aggregates, failures) {
   try {
     const expectedAggregates = aggregatesFrom(root.results);
-    if (JSON.stringify(aggregates) !== JSON.stringify(expectedAggregates)) {
+    if (AGGREGATE_KEYS.some((key) => aggregates[key] !== expectedAggregates[key])) {
       failures.push("aggregates_value");
     }
     const expectedTokens = root.results.reduce((sum, result) => sum + result.tokens, 0);

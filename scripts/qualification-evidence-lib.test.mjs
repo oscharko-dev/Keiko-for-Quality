@@ -98,6 +98,16 @@ test("the public schema rejects raw reports, extra fields and inconsistent aggre
   );
 });
 
+test("aggregate validation is independent of JSON object key order", () => {
+  const evidence = redactQualificationReport(rawReport());
+  const aggregates = Object.fromEntries(Object.entries(evidence.aggregates).reverse());
+  assert.deepEqual(validateQualificationEvidence({ ...evidence, aggregates }), {
+    valid: true,
+    complete: true,
+    failures: [],
+  });
+});
+
 test("the public schema fails closed for invalid result identities, kinds and counts", () => {
   const mutations = [
     (evidence) => {

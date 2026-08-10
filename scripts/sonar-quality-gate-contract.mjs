@@ -31,7 +31,11 @@ export const KEIKO_GATE_CONDITIONS = Object.freeze([
 ]);
 
 function canonicalCondition(condition) {
-  return `${String(condition.metric)}:${String(condition.op)}:${String(condition.error)}`;
+  const available =
+    typeof condition === "object" && condition !== null && !Array.isArray(condition)
+      ? condition
+      : {};
+  return `${String(available.metric)}:${String(available.op)}:${String(available.error)}`;
 }
 
 function compareCanonicalConditions(left, right) {
@@ -39,7 +43,9 @@ function compareCanonicalConditions(left, right) {
 }
 
 export function gateContractFailures(gate) {
-  if (gate === undefined) return ["Keiko Banking Grade definition is missing."];
+  if (typeof gate !== "object" || gate === null || Array.isArray(gate)) {
+    return ["Keiko Banking Grade definition is missing."];
+  }
   const failures = [];
   if (String(gate.id) !== KEIKO_GATE_ID || gate.name !== KEIKO_GATE_NAME) {
     failures.push("Keiko Banking Grade identity does not match the governed contract.");
@@ -47,7 +53,7 @@ export function gateContractFailures(gate) {
   const expected = KEIKO_GATE_CONDITIONS.map(canonicalCondition).toSorted(
     compareCanonicalConditions,
   );
-  const observed = (gate.conditions ?? [])
+  const observed = (Array.isArray(gate.conditions) ? gate.conditions : [])
     .map(canonicalCondition)
     .toSorted(compareCanonicalConditions);
   if (JSON.stringify(observed) !== JSON.stringify(expected)) {

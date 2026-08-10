@@ -90,6 +90,12 @@ describe("SonarCloud pull-request evidence gate", () => {
     });
     assert(failures.includes("SonarCloud analysis is not bound to the current head commit."));
     assert(failures.includes("SonarCloud reports 1 unresolved issue(s)."));
+    assert(evaluate({ issuesTotal: -1 }).includes("SonarCloud reports -1 unresolved issue(s)."));
+    assert(
+      evaluate({ measures: { ...passingMeasures, new_violations: -1 } }).includes(
+        "SonarCloud reports -1 new violation(s).",
+      ),
+    );
   });
 
   it("enforces 85% coverage, 3% duplication, zero violations, and reviewed hotspots", () => {
@@ -105,7 +111,13 @@ describe("SonarCloud pull-request evidence gate", () => {
       },
       overallMeasures: { security_hotspots: 1, security_hotspots_reviewed: 99 },
     });
-    assert.equal(failures.length, 5);
+    assert.deepEqual(failures, [
+      "SonarCloud reports 1 new violation(s).",
+      "New-code coverage condition failed at 84.9%.",
+      "New-code duplication condition failed at 3.1%.",
+      "New-code security-hotspot review condition failed at 99%.",
+      "Overall security-hotspot review condition failed at 99%.",
+    ]);
   });
 
   it("loads all three rating conditions directly and accepts only Sonar rating A", () => {
@@ -132,16 +144,27 @@ describe("SonarCloud pull-request evidence gate", () => {
       evaluate({ analyzable: false, measures: { ...passingRatings, new_violations: 0 } }),
       [],
     );
-    assert(
-      evaluate({
-        analyzable: true,
-        measures: { ...passingRatings, new_violations: 0 },
-      }).includes("New-code line count metric is missing."),
+    const applicableFailures = evaluate({
+      analyzable: true,
+      measures: { ...passingRatings, new_violations: 0 },
+    });
+    assert.equal(
+      applicableFailures.filter((failure) => failure === "New-code line count metric is missing.")
+        .length,
+      1,
     );
   });
 
+  it("fails closed with deterministic evidence failures when measures are omitted", () => {
+    const failures = evaluate({ measures: undefined });
+    assert(failures.includes("New-code violation metric is missing."));
+    assert(failures.includes("New-code maintainability rating metric is missing."));
+    assert(failures.includes("New-code line count metric is missing."));
+  });
+
   it("classifies source and test-only diffs without reading the checkout", () => {
-    const execute = (_git, _arguments, options) => {
+    const execute = (git, _arguments, options) => {
+      assert.equal(git, "/usr/bin/git");
       assert.equal(options.encoding, "utf8");
       return "M\tREADME.md\nM\tsrc/review.test.ts\n";
     };
@@ -155,6 +178,20 @@ describe("SonarCloud pull-request evidence gate", () => {
       true,
     );
     assert.equal(isAnalyzableChange(), true);
+    for (const input of [
+      { base: "0".repeat(40), head: headSha },
+      { base: "not-a-commit", head: headSha },
+      { base: "b".repeat(40), head: "not-a-commit" },
+      { base: "b".repeat(40), head: "0".repeat(40) },
+    ]) {
+      assert.equal(
+        isAnalyzableChange({
+          ...input,
+          execute: () => assert.fail("invalid ids must not run git"),
+        }),
+        true,
+      );
+    }
   });
 
   it("parses all supported Sonar measure shapes", () => {
@@ -237,6 +274,13 @@ describe("SonarCloud pull-request evidence gate", () => {
     });
     assert.deepEqual(payload, { ok: true });
     assert.equal(observed.options.headers.Authorization, "Bearer secret");
+    for (const token of [undefined, ""]) {
+      await sonarJson("/api/example", token, async (url, options) => {
+        observed = { options, url };
+        return { json: async () => ({}), ok: true, status: 200 };
+      });
+      assert.deepEqual(observed.options.headers, {});
+    }
     await assert.rejects(
       sonarJson("/api/example", "secret", async () => ({ ok: false, status: 503 })),
       { message: "SonarCloud API returned 503." },

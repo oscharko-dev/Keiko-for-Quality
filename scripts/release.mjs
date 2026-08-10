@@ -30,6 +30,7 @@ import {
   parseVersion,
   planReleaseTag,
   reconcileTagsAndReleases,
+  releaseDevBindingMessage,
   sortVersionTags,
   tagFor,
   validateCommittedEvidenceDelta,
@@ -312,6 +313,7 @@ function phaseRelease() {
   requireCleanWorktree();
   run("git", ["fetch", "origin", "main", "dev"]);
   const localTree = run("git", ["rev-parse", "HEAD^{tree}"]).trim();
+  const devCommit = run("git", ["rev-parse", "origin/dev^{commit}"]).trim();
   const devTree = run("git", ["rev-parse", "origin/dev^{tree}"]).trim();
   if (localTree !== devTree) fail("run release from the exact current origin/dev tree");
   requireCommittedGateEvidence(version, "origin/dev");
@@ -319,7 +321,14 @@ function phaseRelease() {
   run("git", ["rm", "-rq", "."]);
   run("git", ["checkout", "origin/dev", "--", "."]);
   run("git", ["add", "-A"]);
-  run("git", ["commit", "-S", "-m", `release: v${version}`]);
+  run("git", [
+    "commit",
+    "-S",
+    "-m",
+    `release: v${version}`,
+    "-m",
+    releaseDevBindingMessage({ commit: devCommit, tree: devTree }),
+  ]);
 
   // dev's tree, whole — asserted, never assumed. A release that is not byte-identical to what the
   // gates ran against is a release with no evidence.
