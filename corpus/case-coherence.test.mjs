@@ -325,9 +325,13 @@ function headSource(id, path) {
 }
 
 test("qualification corpus keeps the 42-case seeded/clean population contract", () => {
+  const changedFiles = CASES.flatMap((entry) =>
+    entry.files.filter((file) => file.base !== file.head),
+  );
   assert.equal(CASES.length, 42);
   assert.equal(CASES.filter((entry) => entry.defect !== null).length, 31);
   assert.equal(CASES.filter((entry) => entry.defect === null).length, 11);
+  assert.equal(changedFiles.length, 50);
 });
 
 /**
