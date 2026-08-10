@@ -2,6 +2,10 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  TEST_ISOLATION_EVIDENCE_POLICY,
+} from "./claim-decision-policy.js";
 import { buildRuleFile, deriveRepoConventions, serializeRuleFile } from "./rule-file.js";
 import { loadReviewProfile } from "../config/profile.js";
 import { sanitizeFindingBody } from "../publish/sanitize.js";
@@ -148,6 +152,8 @@ describe("buildRuleFile", () => {
       "Validate the token in full, not by prefix.\n\nWhen a caller sends a token sharing its first eight characters with a valid one, the comparison accepts it.",
       "Close the handle after reading.\n\nIf the read throws, this path returns without closing, leaking the handle:\n\n```js\n// no close on this path\nreturn handle.readFile();\n```",
       "Pin this action to a full commit SHA.\n\nOn every run, a tag is resolved fresh, so the reviewed bytes and the executed bytes stop being the same bytes.",
+      "Restore the per-test module reset.\n\nWhen the reset is removed, the second case reuses the first case's memoized module state.",
+      "Restore the immutable action pin.\n\nWhen the workflow resolves `actions/setup-node@v4`, the executed bytes can move after review.",
     ];
     for (const example of examples) {
       expect(sanitizeFindingBody(example).ok).toBe(true);
@@ -349,12 +355,8 @@ describe("buildRuleFile", () => {
         // (`clearCache`, `resetCache`) the module never exports — observed 3/3 in the v0.18.0
         // qualification and reproduced isolated; the full record is
         // corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md.
-        name: "requires the suite's own setup to be read before an isolation claim, and bans invented helpers",
-        phrases: [
-          "before claiming a test's reset, isolation, or fresh-state setup fails to do its job",
-          "as if that setup were absent",
-          "helper the module does not export",
-        ],
+        name: "distinguishes a fresh dynamic import from removed or bypassed reset setup",
+        phrases: [TEST_ISOLATION_EVIDENCE_POLICY],
       },
     ];
 
@@ -371,6 +373,15 @@ describe("buildRuleFile", () => {
         for (const phrase of phrases) expect(rule).toContain(phrase);
       },
     );
+  });
+
+  it("binds both canonical claim-decision policies exactly once in the serialized rule", () => {
+    const file = buildRuleFile(profileWith({}));
+    const rule = file.rules[0]?.rule ?? "";
+    for (const policy of [TEST_ISOLATION_EVIDENCE_POLICY, REFERENCE_TRANSITION_EVIDENCE_POLICY]) {
+      expect(rule.split(policy)).toHaveLength(2);
+      expect(serializeRuleFile(file).split(policy)).toHaveLength(2);
+    }
   });
 
   describe("path-scoped instructions", () => {

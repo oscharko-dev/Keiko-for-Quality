@@ -70,6 +70,106 @@
 const CHECKOUT_V4_2_0 = "d632683dd7b4114ad314bca15554477dd762a938";
 const CHECKOUT_V4_2_2 = "11bd71901bbe5b1630ceea73d27597364c9af683";
 
+const CACHE_MODULE_SOURCE = `export interface CacheEntry {
+  readonly key: string;
+}
+
+// Memoized at module scope: this map lives as long as the module instance does, so only a fresh
+// module instance — a new import after a module-registry reset — starts from an empty cache.
+const memo = new Map<string, CacheEntry>();
+
+/** How many keys this module instance has memoized so far. */
+export function entryCount(): number {
+  return memo.size;
+}
+
+/** Returns the same entry object for every lookup of a given key. */
+export function lookup(key: string): CacheEntry {
+  const existing = memo.get(key);
+  if (existing !== undefined) return existing;
+  const created = { key };
+  memo.set(key, created);
+  return created;
+}
+`;
+
+const RESET_ISOLATION_SINGLE_TEST_SOURCE = `import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// The module under test memoizes at module scope, so each case needs a fresh copy of it.
+beforeEach(() => {
+  vi.resetModules();
+});
+
+describe("cache", () => {
+  it("memoizes the first answer", async () => {
+    const { lookup } = await import("./cache.js");
+    expect(lookup("a")).toBe(lookup("a"));
+  });
+});
+`;
+
+const RESET_ISOLATION_CLEAN_SUITE_SOURCE = `import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// The module under test memoizes at module scope, so each case needs a fresh copy of it.
+beforeEach(() => {
+  vi.resetModules();
+});
+
+describe("cache", () => {
+  it("memoizes the first answer", async () => {
+    const { lookup } = await import("./cache.js");
+    expect(lookup("a")).toBe(lookup("a"));
+  });
+
+  it("does not carry a memoized answer across cases", async () => {
+    // The beforeEach above reset the module registry, so this import re-evaluates the module.
+    const { entryCount, lookup } = await import("./cache.js");
+    expect(entryCount()).toBe(0);
+    lookup("b");
+    expect(entryCount()).toBe(1);
+  });
+});
+`;
+
+const RESET_ISOLATION_REMOVED_SUITE_SOURCE = `import { describe, expect, it } from "vitest";
+
+describe("cache", () => {
+  it("memoizes the first answer", async () => {
+    const { lookup } = await import("./cache.js");
+    expect(lookup("a")).toBe(lookup("a"));
+  });
+
+  it("does not carry a memoized answer across cases", async () => {
+    const { entryCount, lookup } = await import("./cache.js");
+    expect(entryCount()).toBe(0);
+    lookup("b");
+    expect(entryCount()).toBe(1);
+  });
+});
+`;
+
+const RESET_ISOLATION_STATIC_IMPORT_SUITE_SOURCE = `import { beforeEach, describe, expect, it, vi } from "vitest";
+
+import { entryCount, lookup } from "./cache.js";
+
+// The module under test memoizes at module scope, so each case needs a fresh copy of it.
+beforeEach(() => {
+  vi.resetModules();
+});
+
+describe("cache", () => {
+  it("memoizes the first answer", () => {
+    expect(lookup("a")).toBe(lookup("a"));
+  });
+
+  it("does not carry a memoized answer across cases", () => {
+    expect(entryCount()).toBe(0);
+    lookup("b");
+    expect(entryCount()).toBe(1);
+  });
+});
+`;
+
 export const CASES = [
   {
     id: "auth-prefix-compare",
@@ -1487,89 +1587,75 @@ export function schemaVersion(): string {
     files: [
       {
         path: "src/cache.ts",
-        base: `export interface CacheEntry {
-  readonly key: string;
-}
-
-// Memoized at module scope: this map lives as long as the module instance does, so only a fresh
-// module instance — a new import after a module-registry reset — starts from an empty cache.
-const memo = new Map<string, CacheEntry>();
-
-/** How many keys this module instance has memoized so far. */
-export function entryCount(): number {
-  return memo.size;
-}
-
-/** Returns the same entry object for every lookup of a given key. */
-export function lookup(key: string): CacheEntry {
-  const existing = memo.get(key);
-  if (existing !== undefined) return existing;
-  const created = { key };
-  memo.set(key, created);
-  return created;
-}
-`,
-        head: `export interface CacheEntry {
-  readonly key: string;
-}
-
-// Memoized at module scope: this map lives as long as the module instance does, so only a fresh
-// module instance — a new import after a module-registry reset — starts from an empty cache.
-const memo = new Map<string, CacheEntry>();
-
-/** How many keys this module instance has memoized so far. */
-export function entryCount(): number {
-  return memo.size;
-}
-
-/** Returns the same entry object for every lookup of a given key. */
-export function lookup(key: string): CacheEntry {
-  const existing = memo.get(key);
-  if (existing !== undefined) return existing;
-  const created = { key };
-  memo.set(key, created);
-  return created;
-}
-`,
+        base: CACHE_MODULE_SOURCE,
+        head: CACHE_MODULE_SOURCE,
       },
       {
         path: "src/cache.test.ts",
-        base: `import { beforeEach, describe, expect, it, vi } from "vitest";
+        base: RESET_ISOLATION_SINGLE_TEST_SOURCE,
+        head: RESET_ISOLATION_CLEAN_SUITE_SOURCE,
+      },
+    ],
+  },
 
-// The module under test memoizes at module scope, so each case needs a fresh copy of it.
-beforeEach(() => {
-  vi.resetModules();
-});
+  {
+    id: "reset-modules-removed-state-bleeds",
+    defect: { file: "src/cache.test.ts", category: "test", severity: "high" },
+    about:
+      "removing the per-case module-registry reset makes the second test reuse the first test's memoized module state",
+    anchors: [
+      "reset",
+      "isolation",
+      "fresh module",
+      "state bleed*",
+      "shared state",
+      "module cache",
+      "module registry",
+      "cross-test",
+      "cross-case",
+    ],
+    files: [
+      {
+        path: "src/cache.ts",
+        base: CACHE_MODULE_SOURCE,
+        head: CACHE_MODULE_SOURCE,
+      },
+      {
+        path: "src/cache.test.ts",
+        base: RESET_ISOLATION_CLEAN_SUITE_SOURCE,
+        head: RESET_ISOLATION_REMOVED_SUITE_SOURCE,
+      },
+    ],
+  },
 
-describe("cache", () => {
-  it("memoizes the first answer", async () => {
-    const { lookup } = await import("./cache.js");
-    expect(lookup("a")).toBe(lookup("a"));
-  });
-});
-`,
-        head: `import { beforeEach, describe, expect, it, vi } from "vitest";
-
-// The module under test memoizes at module scope, so each case needs a fresh copy of it.
-beforeEach(() => {
-  vi.resetModules();
-});
-
-describe("cache", () => {
-  it("memoizes the first answer", async () => {
-    const { lookup } = await import("./cache.js");
-    expect(lookup("a")).toBe(lookup("a"));
-  });
-
-  it("does not carry a memoized answer across cases", async () => {
-    // The beforeEach above reset the module registry, so this import re-evaluates the module.
-    const { entryCount, lookup } = await import("./cache.js");
-    expect(entryCount()).toBe(0);
-    lookup("b");
-    expect(entryCount()).toBe(1);
-  });
-});
-`,
+  {
+    id: "reset-modules-static-import-bypasses-reset",
+    defect: { file: "src/cache.test.ts", category: "test", severity: "high" },
+    about:
+      "hoisting the cache to a static import bypasses the retained registry reset and shares memoized state across tests",
+    anchors: [
+      "static import",
+      "top-level import",
+      "hoist*",
+      "bypass*",
+      "isolation",
+      "state bleed*",
+      "shared state",
+      "module cache",
+      "module registry",
+      "cross-test",
+      "cross-case",
+    ],
+    files: [
+      {
+        path: "src/cache.ts",
+        base: CACHE_MODULE_SOURCE,
+        head: CACHE_MODULE_SOURCE,
+      },
+      {
+        path: "src/cache.test.ts",
+        base: RESET_ISOLATION_CLEAN_SUITE_SOURCE,
+        head: RESET_ISOLATION_STATIC_IMPORT_SUITE_SOURCE,
       },
     ],
   },
@@ -1582,8 +1668,8 @@ describe("cache", () => {
     // single-file clean case above passes at full budget, yet production published its false
     // positives — "import missing" with the import on line 1, "literal not in the union" with the
     // union two lines up — under settlement.incomplete.budget_exceeded across 38 files. Five
-    // files, every one correct, every one a bait for a published false-positive class, under a
-    // 25k budget.
+    // changed files, every one correct, every one a bait for a published false-positive class,
+    // under a 25k budget. A sixth file is unchanged context for the test module below.
     //
     // What calibrating this case MEASURED about the pinned engine (v1.8.4, gpt-oss-120b, two runs
     // plus a discriminating third) — recorded here because the flag's own help text
@@ -1598,16 +1684,23 @@ describe("cache", () => {
     // recovered from the engine, and the real spend can overshoot the flag by an order of
     // magnitude (production's +21% on Keiko#2970 was the same mechanism at a larger budget).
     //
-    // The case therefore measures exactly one thing, and keeps measuring it: under call blockade
+    // The case therefore intends to measure exactly one thing: under call blockade
     // — some tasks mid-reasoning, some starved — the reviewer must stay silent on correct code.
-    // Both calibration runs passed. It stays in the corpus as the precision guard for that
-    // condition; the cost half of the finding is the adapter's to fix (tranche dispatch), not a
-    // property this fixture can assert.
+    // Both original calibration runs passed. A 2026-08-10 qualification later failed this case
+    // with one published finding, but its redacted evidence retained neither the finding path nor
+    // its claim. Deterministic audit still found that silence was not defensible: the fixture did
+    // not commit the module imported by the added test, and the unchanged trace factory created an
+    // identifier from only eight UUID hex characters. This revision makes that module readable as
+    // unchanged context and uses full UUID entropy at both revisions. It therefore re-cuts this
+    // case's measurement basis; results before and after this repair are not directly comparable.
+    // The cost half of the case remains the adapter's to fix (tranche dispatch), not a property
+    // this fixture can assert.
     //
-    // Strictly additive, like the five cases above and for the recorded reason: base and head are
-    // byte-identical except for one appended hunk per file, so silence is the only defensible
-    // answer, and any finding under pressure is the failure this case exists to catch. An
-    // incomplete, budget-stopped settlement is the EXPECTED outcome, not an error.
+    // The five graded files remain strictly additive: base and head differ by one appended hunk in
+    // their existing order. `src/redact-model-id.ts` is byte-identical context at both revisions,
+    // so it adds no sixth hunk while making the fifth hunk decidable. Silence is therefore the only
+    // defensible answer, and any finding under pressure is the failure this case exists to catch.
+    // An incomplete, budget-stopped settlement is the EXPECTED outcome, not an error.
     about: "five correct files under a budget that tears mid-run",
     files: [
       {
@@ -1631,7 +1724,7 @@ export function traceContext(subsystem: string, nowMs: number): TraceContext {
   if (!isKnownSubsystem(subsystem)) {
     throw new RangeError("unknown subsystem");
   }
-  return { id: subsystem + "-" + randomUUID().slice(0, 8), subsystem, startedAtMs: nowMs };
+  return { id: subsystem + "-" + randomUUID(), subsystem, startedAtMs: nowMs };
 }
 
 export function ageMs(context: TraceContext, nowMs: number): number {
@@ -1674,7 +1767,7 @@ export function traceContext(subsystem: string, nowMs: number): TraceContext {
   if (!isKnownSubsystem(subsystem)) {
     throw new RangeError("unknown subsystem");
   }
-  return { id: subsystem + "-" + randomUUID().slice(0, 8), subsystem, startedAtMs: nowMs };
+  return { id: subsystem + "-" + randomUUID(), subsystem, startedAtMs: nowMs };
 }
 
 export function ageMs(context: TraceContext, nowMs: number): number {
@@ -1963,6 +2056,21 @@ describe("redactModelId on empty input", () => {
     expect(redactModelId("")).toBe("");
   });
 });
+`,
+      },
+      {
+        path: "src/redact-model-id.ts",
+        base: `/** Remove the operator-private deployment suffix while preserving the model family. */
+export function redactModelId(modelId: string): string {
+  const separator = modelId.indexOf("#");
+  return separator === -1 ? modelId : modelId.slice(0, separator);
+}
+`,
+        head: `/** Remove the operator-private deployment suffix while preserving the model family. */
+export function redactModelId(modelId: string): string {
+  const separator = modelId.indexOf("#");
+  return separator === -1 ? modelId : modelId.slice(0, separator);
+}
 `,
       },
     ],

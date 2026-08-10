@@ -2974,6 +2974,24 @@ async function auditClassification(findings, deps, maxTokens) {
 // src/engine/rule-identity.ts
 import { createHash as createHash6 } from "node:crypto";
 
+// src/engine/claim-decision-policy.ts
+var TEST_ISOLATION_EVIDENCE_POLICY = [
+  "Treat a dynamic import after a shown `beforeEach` module-registry reset as fresh; leave it silent.",
+  "Report only a missing, removed, late, wrong, or bypassed reset after tracing suite setup,",
+  "import timing, and shared state. Never invent an unshown reset helper."
+].join(" ");
+var REFERENCE_TRANSITION_EVIDENCE_POLICY = [
+  "At one action/dependency coordinate, one full 40-hex SHA to another remains immutable and is",
+  "clean by itself; shown local counterevidence still applies. Version comments do not prove remote",
+  "tag mapping. Review changed coordinates; report only SHA-to-tag/branch, repo-proven pin mismatch,",
+  "or shown sync-contract desync. Mutable references are `security`/`high`, including first-party",
+  "actions; never critical. Never invent remote mapping, validity, staleness, or cadence."
+].join(" ");
+var EXAMINER_CLAIM_DECISION_POLICY = [
+  `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
+  `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`
+].join("\n");
+
 // src/engine/rule-file.ts
 var CATCH_ALL_RULE = [
   "Review this change for defects that automated gates cannot catch.",
@@ -3064,15 +3082,7 @@ var CATCH_ALL_RULE = [
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
   "  or termination can recommend a fix that weakens correct code instead of improving it.",
-  "- **before claiming a test's reset, isolation, or fresh-state setup fails to do its job** \u2014 read",
-  "  the suite's own setup first. A reset the file already performs (a module-registry reset in a",
-  "  `beforeEach`, a restored mock, a cleared timer) is part of the behavior under review, and a",
-  "  finding that reasons about module caching or shared state as if that setup were absent is",
-  "  wrong before it starts. A documented framework facility doing exactly what it documents is",
-  "  the default, not a finding: claim the opposite only with evidence from this repository, never",
-  "  from general recollection about how modules are cached. And a proposed fix may only call what",
-  "  exists \u2014 recommending a reset or cleanup helper the module does not export is the loudest",
-  "  sign the claim was never checked against the code it names.",
+  `- **test isolation and fresh state** \u2014 ${TEST_ISOLATION_EVIDENCE_POLICY}`,
   "",
   "A `<repository_context>` block may follow the diff. It holds deterministic `git grep` results,",
   "precomputed at the head commit, for identifiers this change touches \u2014 the same lookups you",
@@ -3164,6 +3174,8 @@ var CATCH_ALL_RULE = [
   "",
   "## Workflow and pipeline files",
   "",
+  REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  "",
   "In a CI workflow diff, check every action `uses:` reference and container image reference the",
   "change touches \u2014 tool VERSION settings (a Node or Python version field) have no SHA form and are",
   "not this rule. A reference that is not an immutable pin \u2014 a full 40-hex commit SHA or a digest \u2014",
@@ -3173,12 +3185,6 @@ var CATCH_ALL_RULE = [
   "surrounding update looks. One changed `uses:` line is a one-line diff \u2014 smallness is not innocence",
   "here. Write every action or image reference you cite inside backticks (`actions/setup-node@v4`):",
   "an unfenced @tag reads as a user mention and the publisher discards the whole finding.",
-  "",
-  'You may have learned the convention "first-party `actions/*` pinned to a tag is acceptable".',
-  "In this repository it is not: `actions/checkout@v4` or `actions/setup-node@v4` is exactly the",
-  "defect, vendor notwithstanding. If a full SHA became a tag anywhere in the diff, report it as",
-  "`security` at `high` \u2014 the check outranks your instincts; the severity does not escalate with",
-  "them. Movable-reference exposure is real but indirect: high, never critical.",
   "",
   "## Untrusted input",
   "",
@@ -3611,7 +3617,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v3";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v4";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;
@@ -3715,9 +3721,7 @@ var EXAMINER_EVIDENCE_CONTRACT = [
   "state as their current contract unless shown evidence exposes a boundary that can violate it.",
   "A member actually added to a union, private state actually exported or leaked, or a caller-selected",
   "key shown reaching a prototype is evidence; a hypothetical future member or mutation is not.",
-  "A syntactically complete 40-hex action or dependency SHA is immutable for this review. Report a",
-  "shown SHA-to-tag/branch regression or visible in-repository pin mismatch, but do not invent remote",
-  "commit validity, tag-to-SHA identity, staleness, or a periodic-update requirement."
+  EXAMINER_CLAIM_DECISION_POLICY
 ].join("\n");
 function renderAnchorRanges(lines) {
   const sorted = [...new Set(lines)].sort((left, right) => left - right);

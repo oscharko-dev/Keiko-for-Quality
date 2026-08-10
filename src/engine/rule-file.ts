@@ -1,5 +1,9 @@
 import type { CompiledProfile, ContractPair, PathInstruction } from "../config/profile.js";
 import type { GuidelineIndex } from "../config/guidelines.js";
+import {
+  REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  TEST_ISOLATION_EVIDENCE_POLICY,
+} from "./claim-decision-policy.js";
 
 /**
  * The rule document handed to the engine with `--rule`.
@@ -122,15 +126,7 @@ const CATCH_ALL_RULE = [
   "- **before stating how an encoding, format, or algorithm behaves** — verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
   "  or termination can recommend a fix that weakens correct code instead of improving it.",
-  "- **before claiming a test's reset, isolation, or fresh-state setup fails to do its job** — read",
-  "  the suite's own setup first. A reset the file already performs (a module-registry reset in a",
-  "  `beforeEach`, a restored mock, a cleared timer) is part of the behavior under review, and a",
-  "  finding that reasons about module caching or shared state as if that setup were absent is",
-  "  wrong before it starts. A documented framework facility doing exactly what it documents is",
-  "  the default, not a finding: claim the opposite only with evidence from this repository, never",
-  "  from general recollection about how modules are cached. And a proposed fix may only call what",
-  "  exists — recommending a reset or cleanup helper the module does not export is the loudest",
-  "  sign the claim was never checked against the code it names.",
+  `- **test isolation and fresh state** — ${TEST_ISOLATION_EVIDENCE_POLICY}`,
   "",
   "A `<repository_context>` block may follow the diff. It holds deterministic `git grep` results,",
   "precomputed at the head commit, for identifiers this change touches — the same lookups you",
@@ -222,6 +218,8 @@ const CATCH_ALL_RULE = [
   "",
   "## Workflow and pipeline files",
   "",
+  REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  "",
   "In a CI workflow diff, check every action `uses:` reference and container image reference the",
   "change touches — tool VERSION settings (a Node or Python version field) have no SHA form and are",
   "not this rule. A reference that is not an immutable pin — a full 40-hex commit SHA or a digest —",
@@ -231,12 +229,6 @@ const CATCH_ALL_RULE = [
   "surrounding update looks. One changed `uses:` line is a one-line diff — smallness is not innocence",
   "here. Write every action or image reference you cite inside backticks (`actions/setup-node@v4`):",
   "an unfenced @tag reads as a user mention and the publisher discards the whole finding.",
-  "",
-  'You may have learned the convention "first-party `actions/*` pinned to a tag is acceptable".',
-  "In this repository it is not: `actions/checkout@v4` or `actions/setup-node@v4` is exactly the",
-  "defect, vendor notwithstanding. If a full SHA became a tag anywhere in the diff, report it as",
-  "`security` at `high` — the check outranks your instincts; the severity does not escalate with",
-  "them. Movable-reference exposure is real but indirect: high, never critical.",
   "",
   "## Untrusted input",
   "",

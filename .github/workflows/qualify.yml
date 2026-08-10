@@ -28,7 +28,7 @@ jobs:
   corpus:
     name: corpus
     runs-on: ubuntu-latest
-    # The current corpus has 40 cases and 48 changed files; OCR_LLM_TIMEOUT (180 s) is a per-file
+    # The current corpus has 42 cases and 50 changed files; OCR_LLM_TIMEOUT (180 s) is a per-file
     # request boundary, and the harness's single resume can carry a failing case past its first
     # attempt. The latest full-population staged attempt took 10m17s, but serving variance is real
     # and measuring a tighter ceiling itself costs tokens. A scheduled job has nothing waiting on

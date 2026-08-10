@@ -23,22 +23,23 @@ import { CASES } from "./cases.mjs";
  */
 
 /**
- * The five cases that carry the shape and are left alone on purpose. Their verdict is decidable from
+ * The four cases that carry the shape and are left alone on purpose. Their verdict is decidable from
  * the diff itself — every seeded one hides its defect INSIDE the test file — so none has ever
  * spiralled the way `clean-added-test` did. They stay listed rather than fixed because a fixture is
- * a recorded measurement basis: re-cutting five of them on suspicion, with no failing run to point
+ * a recorded measurement basis: re-cutting four of them on suspicion, with no failing run to point
  * at, would discard comparability against every qualification already in `corpus/evidence/` and buy
  * nothing. A case that starts failing here earns its fix with evidence, exactly as this one did —
  * and `clean-reset-modules-is-load-bearing` left this list on 2026-08-06 with exactly that
  * evidence (3/3 false positives in the v0.18.0 qualification; see the case's own comment and
- * corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md for the record).
+ * corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md for the record). The budget-starved
+ * clean case left the list after its 2026-08-10 qualification failure exposed that the clean verdict
+ * was not decidable while the implementation imported by its added test was absent.
  */
 const MODULE_OMITTED_ON_PURPOSE = new Set([
   "weakened-assertion",
   "redaction-assertion-loosened",
   "stale-session-after-refresh",
   "clean-test-asserts-the-opposite",
-  "budget-starved-clean-neighbours",
 ]);
 
 function modulesMissingFrom(testCase) {
@@ -323,20 +324,126 @@ function headSource(id, path) {
   return file.head;
 }
 
+test("qualification corpus keeps the 42-case seeded/clean population contract", () => {
+  assert.equal(CASES.length, 42);
+  assert.equal(CASES.filter((entry) => entry.defect !== null).length, 31);
+  assert.equal(CASES.filter((entry) => entry.defect === null).length, 11);
+});
+
 /**
- * The v0.23 qualification exposed a fixture defect rather than reviewer noise: both supposedly
- * clean additions created a fresh identifier from only eight UUID hex characters. A collision
- * warning against newly introduced 32-bit identifiers is defensible, so those cases cannot grade
- * silence until the additions keep the complete UUID. The authentication-prefix case remains the
- * positive twin: truncating a secret comparison is still the seeded defect the reviewer must find.
+ * The clean reset case and its two recall twins share one real module-state mechanism. The first
+ * twin deletes the reset. The second keeps the reset but hoists the module to a static import, so
+ * the tests retain bindings to the pre-reset instance. Neither twin uses a cached import Promise:
+ * that would add a race-shaped alternative explanation instead of isolating import timing.
+ */
+test("reset-isolation cases distinguish fresh dynamic imports from removed and bypassed resets", () => {
+  const ids = [
+    "clean-reset-modules-is-load-bearing",
+    "reset-modules-removed-state-bleeds",
+    "reset-modules-static-import-bypasses-reset",
+  ];
+  const fixtures = ids.map((id) => {
+    const testCase = caseById(id);
+    const moduleFile = testCase.files.find((entry) => entry.path === "src/cache.ts");
+    const testFile = testCase.files.find((entry) => entry.path === "src/cache.test.ts");
+    assert.ok(moduleFile !== undefined, `${id} must carry the cache module as context`);
+    assert.ok(testFile !== undefined, `${id} must carry the cache test`);
+    assert.equal(moduleFile.base, moduleFile.head, `${id}'s cache module must stay unchanged`);
+    assert.match(moduleFile.head, /const memo = new Map/u);
+    return { testCase, testFile };
+  });
+
+  const clean = fixtures[0];
+  const removed = fixtures[1];
+  const bypassed = fixtures[2];
+  assert.ok(clean !== undefined && removed !== undefined && bypassed !== undefined);
+
+  assert.match(clean.testFile.head, /beforeEach\(\(\) => \{\s+vi\.resetModules\(\);/u);
+  assert.ok(
+    clean.testFile.head.indexOf("vi.resetModules();") <
+      clean.testFile.head.indexOf('await import("./cache.js")'),
+    "the clean suite must reset the registry before importing the fresh module",
+  );
+  assert.equal(clean.testFile.head.includes('from "./cache.js";'), false);
+
+  assert.equal(removed.testFile.base, clean.testFile.head);
+  assert.doesNotMatch(removed.testFile.head, /resetModules/u);
+  assert.equal(removed.testFile.head.match(/await import\("\.\/cache\.js"\)/gu)?.length, 2);
+
+  assert.equal(bypassed.testFile.base, clean.testFile.head);
+  assert.match(bypassed.testFile.head, /vi\.resetModules\(\);/u);
+  assert.match(bypassed.testFile.head, /^import \{ entryCount, lookup \} from "\.\/cache\.js";/mu);
+  assert.doesNotMatch(bypassed.testFile.head, /await import|Promise/u);
+
+  for (const seeded of [removed.testCase, bypassed.testCase]) {
+    assert.deepEqual(seeded.defect, {
+      file: "src/cache.test.ts",
+      category: "test",
+      severity: "high",
+    });
+  }
+});
+
+/**
+ * The 2026-08-10 failure earned a ground-truth repair, not a reviewer prompt exception. The
+ * imported implementation has to be readable without becoming a sixth changed hunk, and its
+ * behavior must make every old assertion plus the new empty-input assertion true. The budget and
+ * ordered five-hunk shape are the pressure contract; changing either would turn the repaired case
+ * into a different experiment for a second, unrelated reason.
+ */
+test("budget-starved clean case keeps its pressure shape and readable redaction context", () => {
+  const testCase = caseById("budget-starved-clean-neighbours");
+  const changedFiles = testCase.files.filter((file) => file.base !== file.head);
+  const changedPaths = changedFiles.map((file) => file.path);
+  const moduleFile = testCase.files.find((file) => file.path === "src/redact-model-id.ts");
+
+  assert.equal(testCase.budgetTokens, 25_000, "the pressure budget is part of the case contract");
+  assert.deepEqual(changedPaths, [
+    "src/trace-context.ts",
+    "src/trust-mode.ts",
+    "src/event-envelope.ts",
+    "src/workspace-layout.ts",
+    "src/redact-model-id.test.ts",
+  ]);
+  for (const file of changedFiles) {
+    assert.ok(file.head.startsWith(file.base), `${file.path} must remain a single appended hunk`);
+  }
+  assert.ok(moduleFile !== undefined, "the module imported by the added test must be readable");
+  assert.equal(moduleFile.base, moduleFile.head, "the module must remain unchanged context");
+  assert.match(
+    moduleFile.head,
+    /export function redactModelId\(modelId: string\): string \{\s+const separator = modelId\.indexOf\("#"\);\s+return separator === -1 \? modelId : modelId\.slice\(0, separator\);\s+\}/u,
+    "the unchanged implementation must satisfy the existing suffix cases and the added empty-input case",
+  );
+});
+
+/**
+ * The v0.23 qualification exposed fixture defects rather than proven reviewer noise. The clean
+ * identifier addition originally truncated its new UUID; the budgeted fixture's new `hopId` was
+ * repaired to keep the full UUID, but deterministic follow-up found its unchanged `traceContext`
+ * still created identifiers from only eight UUID hex characters. A collision warning against the
+ * current file was therefore defensible even though that truncation predated the hunk. Both
+ * revisions must now be clean while the authentication-prefix case remains the positive twin:
+ * truncating a secret comparison is still the seeded defect the reviewer must find.
  */
 test("clean UUID additions retain full entropy while the prefix-auth defect remains seeded", () => {
   assert.match(
     headSource("clean-import-present-above", "src/ids.ts"),
     /export function traceId\(\): string \{\s+return "trace-" \+ randomUUID\(\);/u,
   );
+  const budgetedTrace = caseById("budget-starved-clean-neighbours").files.find(
+    (file) => file.path === "src/trace-context.ts",
+  );
+  assert.ok(budgetedTrace !== undefined, "the budgeted case must retain its trace fixture");
+  for (const source of [budgetedTrace.base, budgetedTrace.head]) {
+    assert.match(
+      source,
+      /return \{ id: subsystem \+ "-" \+ randomUUID\(\), subsystem, startedAtMs: nowMs \};/u,
+    );
+    assert.doesNotMatch(source, /randomUUID\(\)\.slice\(0, 8\)/u);
+  }
   assert.match(
-    headSource("budget-starved-clean-neighbours", "src/trace-context.ts"),
+    budgetedTrace.head,
     /export function hopId\(context: TraceContext\): string \{\s+return context\.id \+ "\." \+ randomUUID\(\);/u,
   );
   assert.match(
@@ -353,18 +460,32 @@ test("clean UUID additions retain full entropy while the prefix-auth defect rema
  * question instead of teaching the examiner to distinguish it.
  */
 test("precision counterexamples retain their visible true-positive twins", () => {
-  const cleanPinUpdate = changedSource("clean-workflow-pin-update");
+  const cleanPinCase = caseById("clean-workflow-pin-update");
+  const cleanPinFile = cleanPinCase.files[0];
+  assert.ok(cleanPinFile !== undefined);
+  const cleanPinUpdate = changedSource(cleanPinCase.id);
   assert.match(
     cleanPinUpdate,
     /actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4\.2\.2/u,
     "the clean pin update must bind the real v4.2.2 tag commit",
   );
   assert.match(
-    caseById("clean-workflow-pin-update").files[0]?.base ?? "",
+    cleanPinFile.base,
     /actions\/checkout@d632683dd7b4114ad314bca15554477dd762a938 # v4\.2\.0/u,
     "the clean pin update must begin at the real v4.2.0 tag commit",
   );
-  assert.match(changedSource("workflow-unpinned-action"), /actions\/setup-node@v4/u);
+  for (const source of [cleanPinFile.base, cleanPinFile.head]) {
+    assert.match(
+      source,
+      /actions\/checkout@[0-9a-f]{40}/u,
+      "both clean revisions must keep the same action coordinate fully pinned",
+    );
+  }
+
+  const loosenedPin = caseById("workflow-unpinned-action").files[0];
+  assert.ok(loosenedPin !== undefined);
+  assert.match(loosenedPin.base, /actions\/setup-node@[0-9a-f]{40}/u);
+  assert.match(loosenedPin.head, /actions\/setup-node@v4/u);
 
   assert.match(changedSource("clean-literal-is-in-union"), /type Mode = "strict" \| "lenient"/u);
   assert.match(
@@ -382,6 +503,7 @@ test("precision counterexamples retain their visible true-positive twins", () =>
   );
 
   const desynchronized = changedSource("pinned-reference-duplicate-desync");
+  assert.match(desynchronized, /ADVANCE BOTH TOGETHER/u);
   const visiblePins = [
     ...desynchronized.matchAll(/(?:ACTION_PIN:\s*|actions\/checkout@)([0-9a-f]{40})/gu),
   ].map((match) => match[1]);

@@ -9,6 +9,11 @@ import type { RuntimeConfig } from "../config/runtime.js";
 import { commitSha } from "../core/brands.js";
 import { createSilentDiagnostics } from "../diagnostics/sink.js";
 import { buildInventory, type ReviewPair } from "../inventory/inventory.js";
+import {
+  EXAMINER_CLAIM_DECISION_POLICY,
+  REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  TEST_ISOLATION_EVIDENCE_POLICY,
+} from "./claim-decision-policy.js";
 import { GENERATION_COMPLETION_LIMIT, generationRequestUpperBound } from "./generation-workflow.js";
 import { parseEngineResult } from "./result.js";
 import type { EngineRunOptions } from "./run.js";
@@ -377,6 +382,20 @@ describe("runSingleShotEngine staged generation", () => {
     expect(seen.every((body) => body.max_completion_tokens === GENERATION_COMPLETION_LIMIT)).toBe(
       true,
     );
+    for (const body of seen) {
+      const system = body.messages?.[0]?.content ?? "";
+      const user = body.messages?.[1]?.content ?? "";
+      const role = stage(system);
+      for (const policy of [TEST_ISOLATION_EVIDENCE_POLICY, REFERENCE_TRANSITION_EVIDENCE_POLICY]) {
+        expect(system.split(policy)).toHaveLength(2);
+        expect(user).not.toContain(policy);
+      }
+      if (role === "planner") {
+        expect(system).not.toContain(EXAMINER_CLAIM_DECISION_POLICY);
+      } else {
+        expect(system.split(EXAMINER_CLAIM_DECISION_POLICY)).toHaveLength(2);
+      }
+    }
     const planner = seen.find((body) => stage(body.messages?.[0]?.content ?? "") === "planner");
     expect(planner?.messages?.[0]?.content).toContain("## What to report");
     expect(planner?.messages?.[0]?.content).toContain('"include"');

@@ -834,23 +834,23 @@ describe("per-path context digests (single-shot, v0.20.1)", () => {
     expect(moved.contextInvalidated).toBe(1);
   });
 
-  it("invalidates an empty staged-v2 verdict under the staged-v3 workflow identity", () => {
+  it("invalidates an empty staged-v3 verdict under the staged-v4 workflow identity", () => {
     const identity = {
       renderedChangeIntent: "same intent",
       contextPack: "same context pack",
       guidelineContextIdentity: "same guidelines",
     };
-    const stagedV2 = singleShotContextDigest([], () => undefined, {
-      ...identity,
-      workflowIdentity: "staged-v2",
-    });
     const stagedV3 = singleShotContextDigest([], () => undefined, {
       ...identity,
       workflowIdentity: "staged-v3",
     });
+    const stagedV4 = singleShotContextDigest([], () => undefined, {
+      ...identity,
+      workflowIdentity: "staged-v4",
+    });
 
-    expect(stagedV3).not.toBe(stagedV2);
-    const moved = lookupEmpty(emptyEntry(stagedV2), PATH_SET_DIGEST, stagedV3);
+    expect(stagedV4).not.toBe(stagedV3);
+    const moved = lookupEmpty(emptyEntry(stagedV3), PATH_SET_DIGEST, stagedV4);
     expect(moved.hits.size).toBe(0);
     expect(moved.contextInvalidated).toBe(1);
   });
