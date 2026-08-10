@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -56,8 +56,13 @@ function sha256Bytes(bytes) {
 
 function isFile(path) {
   try {
-    return statSync(path).isFile();
-  } catch {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) {
+      throw new TypeError("qualification source must not be a symbolic link");
+    }
+    return stat.isFile();
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
     return false;
   }
 }

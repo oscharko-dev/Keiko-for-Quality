@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -168,6 +168,28 @@ test("staged engine manifest is checkout-independent, ordered, and fail-closed",
   } finally {
     rmSync(left, { recursive: true, force: true });
     rmSync(right, { recursive: true, force: true });
+  }
+});
+
+test("staged engine manifest refuses a source symlink before reading outside the checkout", () => {
+  const root = fixture();
+  const outside = mkdtempSync(join(tmpdir(), "kfq-engine-binding-outside-"));
+  try {
+    write(outside, "policy.ts", 'export const policy = "outside";\n');
+    write(
+      root,
+      "src/prompt.ts",
+      'import { policy } from "./linked-policy.js";\nexport const prompt = policy;\n',
+    );
+    symlinkSync(join(outside, "policy.ts"), join(root, "src/linked-policy.ts"));
+
+    assert.throws(
+      () => qualificationEngineDigest(sourceIdentity(root)),
+      /qualification source must not be a symbolic link/u,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   }
 });
 
