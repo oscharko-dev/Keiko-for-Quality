@@ -323,10 +323,17 @@ function tokenOverlap(
  * that composition breaks a test here instead of silently letting composition noise back into the
  * score.
  */
+const LEGACY_CATEGORY_LABELS =
+  "SECURITY|CORRECTNESS|PERFORMANCE|MAINTAINABILITY|TESTS|DOCUMENTATION|REVIEW";
+const LEGACY_SEVERITY_LABELS = "CRITICAL|MAJOR|MINOR|NIT";
+const LEGACY_CLASSIFICATION_TEXT = `(?:${LEGACY_CATEGORY_LABELS}) · (?:${LEGACY_SEVERITY_LABELS})`;
+const LEGACY_CODE_SPAN_HEADER = new RegExp(`^\`${LEGACY_CLASSIFICATION_TEXT}\`[ \\t]*\\n?`, "u");
+const LEGACY_BOLD_HEADER = new RegExp(`^\\*\\*${LEGACY_CLASSIFICATION_TEXT}\\*\\*[ \\t]*\\n?`, "u");
+
 function stripComposedArtifacts(body: string): string {
   return clip(body)
-    .replace(/^`[A-Z]+ · [A-Z]+`[ \t]*\n?/, "") // the code-span header line (v0.23.0 comments)
-    .replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "") // the bold header line (v0.21.0 comments)
+    .replace(LEGACY_CODE_SPAN_HEADER, "") // the code-span header line (v0.23.0 comments)
+    .replace(LEGACY_BOLD_HEADER, "") // the bold header line (v0.21.0 comments)
     .replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "") // the pre-design-system label line
     .replace(/<img[^>\n]*>/g, " ") // product-composed asset chips (finding/summary/notice surfaces)
     .replace(/<details>[\s\S]*?<\/details>/g, " ") // the collapsed repair-prompt block

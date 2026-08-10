@@ -7299,8 +7299,13 @@ function tokenOverlap(a, b) {
   const smaller = Math.min(a.size, b.size);
   return { score: smaller === 0 ? 0 : shared / smaller, shared };
 }
+var LEGACY_CATEGORY_LABELS = "SECURITY|CORRECTNESS|PERFORMANCE|MAINTAINABILITY|TESTS|DOCUMENTATION|REVIEW";
+var LEGACY_SEVERITY_LABELS = "CRITICAL|MAJOR|MINOR|NIT";
+var LEGACY_CLASSIFICATION_TEXT = `(?:${LEGACY_CATEGORY_LABELS}) \xB7 (?:${LEGACY_SEVERITY_LABELS})`;
+var LEGACY_CODE_SPAN_HEADER = new RegExp(`^\`${LEGACY_CLASSIFICATION_TEXT}\`[ \\t]*\\n?`, "u");
+var LEGACY_BOLD_HEADER = new RegExp(`^\\*\\*${LEGACY_CLASSIFICATION_TEXT}\\*\\*[ \\t]*\\n?`, "u");
 function stripComposedArtifacts(body) {
-  return clip2(body).replace(/^`[A-Z]+ · [A-Z]+`[ \t]*\n?/, "").replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "").replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<img[^>\n]*>/g, " ").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
+  return clip2(body).replace(LEGACY_CODE_SPAN_HEADER, "").replace(LEGACY_BOLD_HEADER, "").replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "").replace(/<img[^>\n]*>/g, " ").replace(/<details>[\s\S]*?<\/details>/g, " ").replace(/<!--[\s\S]*?-->/g, " ");
 }
 function similarByContent(a, b) {
   if (shareCodeBlock(a, b)) return true;
