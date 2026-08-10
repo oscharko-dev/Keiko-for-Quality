@@ -111,7 +111,7 @@ var CLOSED_RUNTIME_FACT_IDS = Object.freeze(
 
 // src/cache/review-cache.ts
 var SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
-var PUBLICATION_SEMANTICS = `v0.23.0-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}`;
+var PUBLICATION_SEMANTICS = `v0.23.0-finding-badges-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}`;
 var CACHE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 var PROTOCOLS = /* @__PURE__ */ new Set(["openai", "anthropic"]);
 var FIELD_SEPARATOR = "\0";

@@ -4119,7 +4119,8 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("complete");
       expect(created).toHaveLength(1);
-      expect(created[0]?.body).toContain("`SECURITY · CRITICAL`");
+      expect(created[0]?.body).toContain('/cat-security.svg" height="24" alt="Security">');
+      expect(created[0]?.body).toContain('/sev-critical.svg" height="24" alt="Critical">');
       expect(callCount()).toBe(5);
 
       const records = diagnostics.drain();
@@ -4215,10 +4216,10 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(report.outcome).toBe("complete");
       expect(created).toHaveLength(1);
       // The audit RAN: the published body carries the audit's reclassification ("SECURITY" is
-      // "security"'s rendered text-grammar label in `composeFindingBody`'s CATEGORIES table), not
+      // "security"'s rendered design-system badge in `composeFindingBody`'s CATEGORIES table), not
       // the engine's original "bug".
       expect(callCount()).toBeGreaterThan(0);
-      expect(created[0]?.body).toContain("SECURITY");
+      expect(created[0]?.body).toContain('/cat-security.svg" height="24" alt="Security">');
 
       const records = diagnostics.drain();
       expect(records.find((r) => r.code === "classify.skipped_budget")).toBeUndefined();

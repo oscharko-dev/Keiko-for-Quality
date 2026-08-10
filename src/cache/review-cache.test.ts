@@ -103,6 +103,7 @@ function entryFor(
 const EMPTY_STORE: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
 
 it("binds cached publication semantics to the closed runtime-fact catalog", () => {
+  expect(PUBLICATION_SEMANTICS).toContain("finding-badges");
   expect(PUBLICATION_SEMANTICS).toContain(
     `runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}`,
   );

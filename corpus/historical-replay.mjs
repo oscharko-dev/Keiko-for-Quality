@@ -70,6 +70,25 @@ const FULL_OBJECT_ID = /^[0-9a-f]{40}$/u;
 const CURRENT_HEADER = /^`[A-Z]+ · [A-Z]+`[ \t]*\n+/u;
 const BOLD_HEADER = /^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n+/u;
 const LEGACY_HEADER = /^_[^_\n]+_ \| _[^_\n]+_[ \t]*\n+/u;
+const BADGE_HEADER =
+  /^<img src="([^"\n]+)" height="24" alt="([^"\n]+)"> <img src="([^"\n]+)" height="24" alt="([^"\n]+)">[ \t]*\n+/u;
+const FINDING_BADGE_ASSET_BASE =
+  "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/6b59f533afef15820991b3a0470ddc22c6c6d436/.github/assets/kq";
+const FINDING_CATEGORY_ASSETS = new Map([
+  ["Security", "cat-security"],
+  ["Correctness", "cat-correctness"],
+  ["Performance", "cat-performance"],
+  ["Maintainability", "cat-maintainability"],
+  ["Tests", "cat-tests"],
+  ["Documentation", "cat-docs"],
+  ["Review", "cat-review"],
+]);
+const FINDING_SEVERITY_ASSETS = new Map([
+  ["Critical", "sev-critical"],
+  ["Major", "sev-major"],
+  ["Minor", "sev-minor"],
+  ["Nit", "sev-nit"],
+]);
 const TRAILING_MARKER = /<!-- keiko-for-quality:v1:[0-9a-f]{32} -->[ \t\n]*$/u;
 const DETAILS_OPEN = "<details>";
 const DETAILS_CLOSE = "</details>";
@@ -274,6 +293,28 @@ function stripFencedCode(content) {
   return prose;
 }
 
+function stripPublishedFindingHeader(content) {
+  const badge = BADGE_HEADER.exec(content);
+  if (badge !== null) {
+    const categoryAsset = FINDING_CATEGORY_ASSETS.get(badge[2]);
+    const severityAsset = FINDING_SEVERITY_ASSETS.get(badge[4]);
+    if (
+      categoryAsset !== undefined &&
+      severityAsset !== undefined &&
+      badge[1] === `${FINDING_BADGE_ASSET_BASE}/${categoryAsset}.svg` &&
+      badge[3] === `${FINDING_BADGE_ASSET_BASE}/${severityAsset}.svg`
+    ) {
+      return content.slice(badge[0].length);
+    }
+    return undefined;
+  }
+  for (const header of [CURRENT_HEADER, BOLD_HEADER, LEGACY_HEADER]) {
+    const withoutHeader = content.replace(header, "");
+    if (withoutHeader !== content) return withoutHeader;
+  }
+  return undefined;
+}
+
 /**
  * Reconstructs the sanitized model prose from the product-authored publication wrapper.
  *
@@ -293,11 +334,8 @@ export function extractPublishedFindingContent(body) {
   }
   if (!TRAILING_MARKER.test(body)) return undefined;
   let content = body.replace(TRAILING_MARKER, "").trimEnd();
-  const withoutHeader = content
-    .replace(CURRENT_HEADER, "")
-    .replace(BOLD_HEADER, "")
-    .replace(LEGACY_HEADER, "");
-  if (withoutHeader === content) return undefined;
+  const withoutHeader = stripPublishedFindingHeader(content);
+  if (withoutHeader === undefined) return undefined;
   const withoutDetails = stripTrailingDetails(withoutHeader);
   if (withoutDetails === undefined) return undefined;
   content = withoutDetails.trim();

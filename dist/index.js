@@ -109,7 +109,7 @@ var CLOSED_RUNTIME_FACT_IDS = Object.freeze(
 
 // src/cache/review-cache.ts
 var SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
-var PUBLICATION_SEMANTICS = `v0.23.0-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}`;
+var PUBLICATION_SEMANTICS = `v0.23.0-finding-badges-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}`;
 var CACHE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 var PROTOCOLS = /* @__PURE__ */ new Set(["openai", "anthropic"]);
 var FIELD_SEPARATOR = "\0";
@@ -1616,29 +1616,37 @@ function escapeInline(text3) {
 
 // src/publish/presentation.ts
 var CATEGORIES = {
-  security: "Security",
-  bug: "Correctness",
-  performance: "Performance",
-  maintainability: "Maintainability",
-  test: "Tests",
-  documentation: "Documentation",
-  other: "Review"
+  security: { asset: "cat-security", label: "Security" },
+  bug: { asset: "cat-correctness", label: "Correctness" },
+  performance: { asset: "cat-performance", label: "Performance" },
+  maintainability: { asset: "cat-maintainability", label: "Maintainability" },
+  test: { asset: "cat-tests", label: "Tests" },
+  documentation: { asset: "cat-docs", label: "Documentation" },
+  other: { asset: "cat-review", label: "Review" }
 };
 var SEVERITIES = {
-  critical: "Critical",
-  high: "Major",
-  medium: "Minor",
-  low: "Nit"
+  critical: { asset: "sev-critical", label: "Critical" },
+  high: { asset: "sev-major", label: "Major" },
+  medium: { asset: "sev-minor", label: "Minor" },
+  low: { asset: "sev-nit", label: "Nit" }
 };
-function label(table, key, fallback) {
+function classificationChip(table, key, fallback) {
   if (key === void 0) return fallback;
   return table[key.toLowerCase()] ?? fallback;
 }
-var FALLBACK_CATEGORY = "Review";
-var FALLBACK_SEVERITY = "Minor";
+var FALLBACK_CATEGORY = { asset: "cat-review", label: "Review" };
+var FALLBACK_SEVERITY = { asset: "sev-minor", label: "Minor" };
 var ASSET_BASE = "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/6b59f533afef15820991b3a0470ddc22c6c6d436/.github/assets/kq";
 function assetChip(name, height, alt) {
   return `<img src="${ASSET_BASE}/${name}.svg" height="${String(height)}" alt="${alt}">`;
+}
+var COMMENT_CHIP_HEIGHT = 24;
+function classificationLine(category, severity) {
+  return `${assetChip(category.asset, COMMENT_CHIP_HEIGHT, category.label)} ${assetChip(
+    severity.asset,
+    COMMENT_CHIP_HEIGHT,
+    severity.label
+  )}`;
 }
 var MAX_TITLE_CHARS = 120;
 function splitTitle(prose2) {
@@ -1671,10 +1679,10 @@ function repairPrompt(context, title) {
   ].join("\n");
 }
 function composeFindingBody(sanitizedProse, marker, context) {
-  const category = label(CATEGORIES, context.category, FALLBACK_CATEGORY);
-  const severity = label(SEVERITIES, context.severity, FALLBACK_SEVERITY);
+  const category = classificationChip(CATEGORIES, context.category, FALLBACK_CATEGORY);
+  const severity = classificationChip(SEVERITIES, context.severity, FALLBACK_SEVERITY);
   const { title, body } = splitTitle(sanitizedProse);
-  const parts = [`\`${category.toUpperCase()} \xB7 ${severity.toUpperCase()}\``, ""];
+  const parts = [classificationLine(category, severity), ""];
   if (title !== "") parts.push(`**${title}**`, "");
   parts.push(
     body,
@@ -1711,10 +1719,13 @@ function gapLine(counts) {
 }
 function composeIncompleteNotice(reasonCode, marker, counts) {
   return [
-    // Specimen ③'s chip pair. "COVERAGE" is deliberately outside the CATEGORIES vocabulary
-    // above, and no finding opens with an image, so the two composers can never collide on
-    // their opening line — the invariant `isIncompleteNoticeBody` documents.
-    `${assetChip("coverage", 22, "Coverage")} ${assetChip("sev-major", 22, "Major")}`,
+    // Specimen ③'s chip pair. "COVERAGE" is deliberately outside the CATEGORIES vocabulary;
+    // the fixed notice sentence and marker keep this surface distinct from a defect finding.
+    `${assetChip("coverage", COMMENT_CHIP_HEIGHT, "Coverage")} ${assetChip(
+      "sev-major",
+      COMMENT_CHIP_HEIGHT,
+      "Major"
+    )}`,
     "",
     "**This change was not fully reviewed.**",
     "",
@@ -1784,7 +1795,7 @@ function countRows(counts) {
     ["Read-back failures", counts.readbackFailures],
     ["API failures", counts.apiFailures]
   ];
-  return rows.map(([label2, value]) => `| ${label2} | ${String(value)} |`);
+  return rows.map(([label, value]) => `| ${label} | ${String(value)} |`);
 }
 function budgetLine(budget) {
   if (budget.allotted === void 0) return void 0;
@@ -6554,10 +6565,10 @@ function escapeForCodeSpan2(text3) {
 }
 function formatLineList(sites) {
   const lines = [...new Set(sites.map((site) => site.line))].sort((a, b) => a - b);
-  const label2 = lines.length === 1 ? "line" : "lines";
-  if (lines.length <= 1) return `${label2} ${String(lines[0] ?? "?")}`;
+  const label = lines.length === 1 ? "line" : "lines";
+  if (lines.length <= 1) return `${label} ${String(lines[0] ?? "?")}`;
   const last = lines.at(-1) ?? "?";
-  return `${label2} ${lines.slice(0, -1).join(", ")} and ${String(last)}`;
+  return `${label} ${lines.slice(0, -1).join(", ")} and ${String(last)}`;
 }
 function describePinDesync(desync, path) {
   const movedText = formatLineList(desync.movedSites);
@@ -8327,8 +8338,8 @@ function renderRepositoryCandidate(headCommit, entries) {
     ""
   ];
   const rows = displayed.map((entry) => {
-    const label2 = labels.get(entry.path) ?? "H1";
-    return `${label2}:${String(entry.line)}| ${defuseCandidateData(entry.content)}`;
+    const label = labels.get(entry.path) ?? "H1";
+    return `${label}:${String(entry.line)}| ${defuseCandidateData(entry.content)}`;
   });
   return [...header2, ...rows, "END CANDIDATE REPOSITORY DATA", "</repository_evidence>"].join("\n");
 }
@@ -8343,8 +8354,8 @@ function renderRepositoryEvidence(context, maximumChars = MAX_REPOSITORY_EVIDENC
   }
   return "";
 }
-function labelledEvidence(label2, evidence) {
-  return evidence.text === "" ? evidence : { ...evidence, text: `${label2}:
+function labelledEvidence(label, evidence) {
+  return evidence.text === "" ? evidence : { ...evidence, text: `${label}:
 ${evidence.text}` };
 }
 function validLineRange(range) {
@@ -11026,7 +11037,7 @@ function runtimeFactEvidenceSource(row) {
   if (match === null) return void 0;
   const fields = runtimeFactSourceMatch(match);
   if (fields === void 0) return void 0;
-  const [label2, version, id, side, displayPath, lineText] = fields;
+  const [label, version, id, side, displayPath, lineText] = fields;
   if (Number(version) !== CLOSED_RUNTIME_FACT_CATALOG_VERSION) return void 0;
   if (!Object.hasOwn(CLOSED_RUNTIME_FACT_CATALOG, id)) return void 0;
   const path = decodeEvidenceSourcePath(displayPath);
@@ -11034,7 +11045,7 @@ function runtimeFactEvidenceSource(row) {
   const line = Number(lineText);
   if (!Number.isSafeInteger(line) || line < 1) return void 0;
   return {
-    label: label2,
+    label,
     catalogVersion: CLOSED_RUNTIME_FACT_CATALOG_VERSION,
     id,
     path,
@@ -11064,9 +11075,9 @@ function directRefProvenance(reference, findingPath, basePath) {
   const base = /^(?:B|D:B):([1-9]\d*)(?:@H:[1-9]\d*)?$/u.exec(reference)?.[1];
   return base === void 0 ? void 0 : evidenceProvenanceKey(basePath, "B", base);
 }
-function sourceRefProvenance(label2, line, expectedSide, sources) {
-  if (label2 === void 0 || line === void 0) return void 0;
-  const source = sources.get(label2);
+function sourceRefProvenance(label, line, expectedSide, sources) {
+  if (label === void 0 || line === void 0) return void 0;
+  const source = sources.get(label);
   if (source === void 0 || expectedSide !== void 0 && expectedSide !== source.side)
     return void 0;
   return evidenceProvenanceKey(source.path, source.side, line);
@@ -11441,22 +11452,22 @@ function renderRetrievedSources(chunks, facts, firstReferenceNumber) {
   let sourceIndex = 0;
   for (const fact of facts) {
     lineCount += 1;
-    const label2 = `R${String(sourceIndex + firstReferenceNumber)}`;
+    const label = `R${String(sourceIndex + firstReferenceNumber)}`;
     rows.push(
-      `${label2} = CLOSED_RUNTIME_FACT v${String(fact.catalogVersion)} ${fact.id} AT ${fact.source.side === "H" ? "HEAD" : "BASE"} ${encodeEvidenceSourcePath(fact.source.path)} LINE ${String(fact.source.line)}`,
-      `${label2}:T:1| ${fact.statement}`
+      `${label} = CLOSED_RUNTIME_FACT v${String(fact.catalogVersion)} ${fact.id} AT ${fact.source.side === "H" ? "HEAD" : "BASE"} ${encodeEvidenceSourcePath(fact.source.path)} LINE ${String(fact.source.line)}`,
+      `${label}:T:1| ${fact.statement}`
     );
     sourceIndex += 1;
   }
   for (const chunk of chunks) {
     lineCount += chunk.lines.length;
     if (lineCount > MAX_RETRIEVAL_LINES) return void 0;
-    const label2 = `R${String(sourceIndex + firstReferenceNumber)}`;
+    const label = `R${String(sourceIndex + firstReferenceNumber)}`;
     rows.push(
-      `${label2} = ${chunk.side === "H" ? "HEAD" : "BASE"} ${encodeEvidenceSourcePath(chunk.path)}`
+      `${label} = ${chunk.side === "H" ? "HEAD" : "BASE"} ${encodeEvidenceSourcePath(chunk.path)}`
     );
     for (const line of chunk.lines)
-      rows.push(`${label2}:${chunk.side}:${String(line.line)}| ${line.text}`);
+      rows.push(`${label}:${chunk.side}:${String(line.line)}| ${line.text}`);
     sourceIndex += 1;
   }
   const rendered = rows.join("\n");
