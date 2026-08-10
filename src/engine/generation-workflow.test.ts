@@ -56,7 +56,7 @@ function occurrenceCount(value: string, needle: string): number {
 
 describe("risk planner", () => {
   it("pins the manually bumped cache identity", () => {
-    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v7");
+    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v8");
   });
 
   it("sees the complete qualified rule but never receives the whole file", () => {

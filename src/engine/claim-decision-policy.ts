@@ -9,8 +9,9 @@ export const TEST_ISOLATION_EVIDENCE_POLICY = [
   "immediately before its awaited dynamic import, whether directly in the test or through shown",
   "per-case setup. That sequence loads a fresh module instance; never call its reset redundant or",
   "insufficient, and never demand or invent a module clear/reset helper. REPORT: the reset is shown",
-  "missing, removed, late, or wrong after tracing suite setup and shared state. BYPASS (report): a",
-  "static/top-level import or cached import promise was established before the reset.",
+  "missing, removed, late, or wrong after tracing suite setup and shared state. BYPASS (report): the",
+  "module under test or a shared-state dependency was imported at top level or cached before the",
+  "reset; unrelated framework or helper imports are not bypass evidence.",
 ].join(" ");
 
 export const REFERENCE_TRANSITION_EVIDENCE_POLICY = [
@@ -38,4 +39,4 @@ export const EXAMINER_CLAIM_DECISION_POLICY = [
 ].join("\n");
 
 /** Prevent a focused examiner fix from silently becoming another copy of the complete rule. */
-export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 1_550;
+export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 1_650;

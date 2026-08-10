@@ -2980,8 +2980,9 @@ var TEST_ISOLATION_EVIDENCE_POLICY = [
   "immediately before its awaited dynamic import, whether directly in the test or through shown",
   "per-case setup. That sequence loads a fresh module instance; never call its reset redundant or",
   "insufficient, and never demand or invent a module clear/reset helper. REPORT: the reset is shown",
-  "missing, removed, late, or wrong after tracing suite setup and shared state. BYPASS (report): a",
-  "static/top-level import or cached import promise was established before the reset."
+  "missing, removed, late, or wrong after tracing suite setup and shared state. BYPASS (report): the",
+  "module under test or a shared-state dependency was imported at top level or cached before the",
+  "reset; unrelated framework or helper imports are not bypass evidence."
 ].join(" ");
 var REFERENCE_TRANSITION_EVIDENCE_POLICY = [
   "Reference-transition decision \u2014 SILENT (emit no claim): at the same action/dependency coordinate,",
@@ -3626,7 +3627,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v7";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v8";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;

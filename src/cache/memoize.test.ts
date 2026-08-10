@@ -834,7 +834,7 @@ describe("per-path context digests (single-shot, v0.20.1)", () => {
     expect(moved.contextInvalidated).toBe(1);
   });
 
-  it("invalidates an empty staged-v6 verdict under the staged-v7 workflow identity", () => {
+  it("invalidates an empty staged-v7 verdict under the staged-v8 workflow identity", () => {
     const identity = {
       renderedChangeIntent: "same intent",
       contextPack: "same context pack",
@@ -842,11 +842,11 @@ describe("per-path context digests (single-shot, v0.20.1)", () => {
     };
     const stagedV5 = singleShotContextDigest([], () => undefined, {
       ...identity,
-      workflowIdentity: "staged-v6",
+      workflowIdentity: "staged-v7",
     });
     const stagedV6 = singleShotContextDigest([], () => undefined, {
       ...identity,
-      workflowIdentity: "staged-v7",
+      workflowIdentity: "staged-v8",
     });
 
     expect(stagedV6).not.toBe(stagedV5);

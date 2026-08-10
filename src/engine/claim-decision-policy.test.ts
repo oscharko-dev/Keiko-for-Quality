@@ -34,7 +34,10 @@ describe("shared claim-decision policy", () => {
       "REPORT: the reset is shown missing, removed, late, or wrong",
     );
     expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
-      "BYPASS (report): a static/top-level import or cached import promise was established before the reset",
+      "BYPASS (report): the module under test or a shared-state dependency was imported at top level or cached before the reset",
+    );
+    expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
+      "unrelated framework or helper imports are not bypass evidence",
     );
 
     expect(REFERENCE_TRANSITION_EVIDENCE_POLICY).toContain(
