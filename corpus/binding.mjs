@@ -14,6 +14,7 @@ import {
   isCallExpression,
   isExternalModuleReference,
   isExportDeclaration,
+  isIdentifier,
   isImportDeclaration,
   isImportEqualsDeclaration,
   isNamedImports,
@@ -114,6 +115,18 @@ function dynamicImportSpecifier(node) {
   return stringSpecifier(node.arguments[0]);
 }
 
+function commonJsRequireSpecifier(node) {
+  if (
+    !isCallExpression(node) ||
+    !isIdentifier(node.expression) ||
+    node.expression.text !== "require" ||
+    node.arguments.length !== 1
+  ) {
+    return undefined;
+  }
+  return stringSpecifier(node.arguments[0]);
+}
+
 function runtimeSpecifier(node) {
   const imported = importDeclarationSpecifier(node);
   if (imported !== undefined) return imported;
@@ -121,7 +134,9 @@ function runtimeSpecifier(node) {
   if (exported !== undefined) return exported;
   const importEquals = importEqualsSpecifier(node);
   if (importEquals !== undefined) return importEquals;
-  return dynamicImportSpecifier(node);
+  const dynamicImport = dynamicImportSpecifier(node);
+  if (dynamicImport !== undefined) return dynamicImport;
+  return commonJsRequireSpecifier(node);
 }
 
 function isLocalSpecifier(specifier) {

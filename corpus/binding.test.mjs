@@ -53,8 +53,14 @@ function fixture() {
   write(
     root,
     "corpus/context-runner.mjs",
-    'export async function load() { return import("../src/context-pack.js"); }\n',
+    [
+      'export async function load() { await import("../src/context-pack.js");',
+      'return import("./commonjs-runner.cjs"); }',
+      "",
+    ].join("\n"),
   );
+  write(root, "corpus/commonjs-runner.cjs", 'module.exports = require("./commonjs-policy.cjs");\n');
+  write(root, "corpus/commonjs-policy.cjs", 'module.exports = "strict";\n');
   write(root, "src/context-pack.ts", "export const contextPack = 1;\n");
   return root;
 }
@@ -68,6 +74,8 @@ test("staged engine digest follows runtime prompt and context dependencies trans
     assert.deepEqual(
       manifest.sources.map(({ path }) => path),
       [
+        "corpus/commonjs-policy.cjs",
+        "corpus/commonjs-runner.cjs",
         "corpus/context-runner.mjs",
         "src/context-pack.ts",
         "src/entry.ts",
@@ -87,6 +95,10 @@ test("staged engine digest follows runtime prompt and context dependencies trans
 
     write(root, "src/context-pack.ts", "export const contextPack = 2;\n");
     assert.notEqual(qualificationEngineDigest(identity), policyChanged);
+
+    const contextChanged = qualificationEngineDigest(identity);
+    write(root, "corpus/commonjs-policy.cjs", 'module.exports = "paranoid";\n');
+    assert.notEqual(qualificationEngineDigest(identity), contextChanged);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
