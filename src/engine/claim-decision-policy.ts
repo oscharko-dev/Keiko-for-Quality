@@ -5,10 +5,10 @@
  * so keeping it a leaf prevents a policy-sharing fix from creating an engine import cycle.
  */
 export const TEST_ISOLATION_EVIDENCE_POLICY = [
-  "Test-isolation table — SILENT: a shown `beforeEach` module-registry reset precedes each dynamic",
-  "import. REPORT: the reset is missing, removed, late, or wrong after tracing suite setup and shared",
-  "state. BYPASS (report): a static/top-level import or cached import promise was established before",
-  "the reset. Never demand a module clear/reset helper; never invent one.",
+  "Test-isolation table — SILENT: a shown per-case `vi.resetModules()` in `beforeEach` or the test",
+  "precedes every dynamic import. REPORT: the reset is missing, removed, late, or wrong after tracing",
+  "suite setup and shared state. BYPASS (report): a static/top-level import or cached import promise",
+  "was established before the reset. Never demand a module clear/reset helper; never invent one.",
 ].join(" ");
 
 export const REFERENCE_TRANSITION_EVIDENCE_POLICY = [

@@ -93,36 +93,31 @@ export function lookup(key: string): CacheEntry {
 }
 `;
 
-const RESET_ISOLATION_SINGLE_TEST_SOURCE = `import { beforeEach, describe, expect, it, vi } from "vitest";
-
-// The module under test memoizes at module scope, so each case needs a fresh copy of it.
-beforeEach(() => {
-  vi.resetModules();
-});
+const RESET_ISOLATION_SINGLE_TEST_SOURCE = `import { describe, expect, it, vi } from "vitest";
 
 describe("cache", () => {
   it("memoizes the first answer", async () => {
+    // Reset immediately before the dynamic import so this case owns a fresh module instance.
+    vi.resetModules();
     const { lookup } = await import("./cache.js");
     expect(lookup("a")).toBe(lookup("a"));
   });
 });
 `;
 
-const RESET_ISOLATION_CLEAN_SUITE_SOURCE = `import { beforeEach, describe, expect, it, vi } from "vitest";
-
-// The module under test memoizes at module scope, so each case needs a fresh copy of it.
-beforeEach(() => {
-  vi.resetModules();
-});
+const RESET_ISOLATION_CLEAN_SUITE_SOURCE = `import { describe, expect, it, vi } from "vitest";
 
 describe("cache", () => {
   it("memoizes the first answer", async () => {
+    // Reset immediately before the dynamic import so this case owns a fresh module instance.
+    vi.resetModules();
     const { lookup } = await import("./cache.js");
     expect(lookup("a")).toBe(lookup("a"));
   });
 
   it("does not carry a memoized answer across cases", async () => {
-    // The beforeEach above reset the module registry, so this import re-evaluates the module.
+    // Reset immediately before the dynamic import so the prior case's module cannot be reused.
+    vi.resetModules();
     const { entryCount, lookup } = await import("./cache.js");
     expect(entryCount()).toBe(0);
     lookup("b");
@@ -131,10 +126,12 @@ describe("cache", () => {
 });
 `;
 
-const RESET_ISOLATION_REMOVED_SUITE_SOURCE = `import { describe, expect, it } from "vitest";
+const RESET_ISOLATION_REMOVED_SUITE_SOURCE = `import { describe, expect, it, vi } from "vitest";
 
 describe("cache", () => {
   it("memoizes the first answer", async () => {
+    // Reset immediately before the dynamic import so this case owns a fresh module instance.
+    vi.resetModules();
     const { lookup } = await import("./cache.js");
     expect(lookup("a")).toBe(lookup("a"));
   });
@@ -148,21 +145,18 @@ describe("cache", () => {
 });
 `;
 
-const RESET_ISOLATION_STATIC_IMPORT_SUITE_SOURCE = `import { beforeEach, describe, expect, it, vi } from "vitest";
+const RESET_ISOLATION_STATIC_IMPORT_SUITE_SOURCE = `import { describe, expect, it, vi } from "vitest";
 
 import { entryCount, lookup } from "./cache.js";
 
-// The module under test memoizes at module scope, so each case needs a fresh copy of it.
-beforeEach(() => {
-  vi.resetModules();
-});
-
 describe("cache", () => {
   it("memoizes the first answer", () => {
+    vi.resetModules();
     expect(lookup("a")).toBe(lookup("a"));
   });
 
   it("does not carry a memoized answer across cases", () => {
+    vi.resetModules();
     expect(entryCount()).toBe(0);
     lookup("b");
     expect(entryCount()).toBe(1);
@@ -1560,9 +1554,9 @@ export function schemaVersion(): string {
     id: "clean-reset-modules-is-load-bearing",
     defect: null,
     // Published as "remove the redundant vi.resetModules()". Removing it produces exactly the
-    // test bleeding the call prevents — the suite mutates a module-level cache, and the comment
-    // above the call says so. A finding that proposes deleting a guard must account for what the
-    // guard is guarding.
+    // test bleeding the call prevents — the suite mutates a module-level cache, and each test now
+    // resets immediately before its dynamic import. A finding that proposes deleting a guard must
+    // account for what the guard is guarding.
     //
     // Recalibrated 2026-08-06 in three layers, each on its own failing evidence (the full record:
     // corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md). The v0.18.0 qualification
@@ -1584,16 +1578,15 @@ export function schemaVersion(): string {
     // one lookup. That also makes the reset mechanically load-bearing: remove it and this test
     // fails, which is precisely the guard-versus-guarded relationship the published false positive
     // ("remove the redundant reset") got wrong. Layer three, forced by two more validation runs:
-    // the `beforeEach` reset sits at the top of the file, OUTSIDE the added hunk's diff context,
-    // and both post-fix false positives reasoned about module caching without ever mentioning it —
-    // the draws where the model judges the hunk without opening the file. The added test now
-    // states its own premise in an author comment inside the hunk ("the beforeEach above reset the
-    // module registry"), which is what a real author writes when a reviewer misreads isolation,
-    // and which moves the case from measuring tool-use propensity (serving-side variance) to
-    // measuring the judgement it names: respecting a stated, correct isolation mechanism. All
-    // three layers re-cut the measurement basis, so this case's history is not comparable across
-    // 2026-08-06, and the recalibration rides the next full qualification wave rather than any
-    // point release.
+    // the original `beforeEach` reset sat outside the added hunk and repeated false positives
+    // reasoned about module caching without accounting for it. An in-hunk author comment improved
+    // the rate but did not close it: the 2026-08-10 staged-v5 wave still published one finding.
+    // The final shape therefore makes the mechanism local and executable in both tests: each
+    // `vi.resetModules()` is immediately followed by the dynamic import it protects. The two
+    // seeded twins below retain the opposing mechanics — one removes the second reset, the other
+    // establishes static bindings before both retained resets — so precision cannot improve by
+    // erasing the corresponding recall pressure. This re-cuts the measurement basis and must ride
+    // a fresh full qualification wave.
     about: "a test reset whose removal would reintroduce state bleeding",
     files: [
       {

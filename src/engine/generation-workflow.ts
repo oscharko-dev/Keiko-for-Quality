@@ -19,7 +19,7 @@ import { EXAMINER_CLAIM_DECISION_POLICY } from "./claim-decision-policy.js";
 
 export const GENERATION_COMPLETION_LIMIT = 4_096;
 /** Bump whenever a stage prompt, parser, renderer, or routing rule changes review semantics. */
-export const GENERATION_WORKFLOW_IDENTITY = "staged-v5";
+export const GENERATION_WORKFLOW_IDENTITY = "staged-v6";
 const REQUEST_FRAMING_TOKENS = 512;
 const MAX_RISK_HYPOTHESES = 6;
 const MAX_CLAIMS_PER_EXAMINER = 4;

@@ -24,7 +24,7 @@ describe("shared claim-decision policy", () => {
 
   it("keeps clean reset and full-SHA transitions explicit beside their recall boundaries", () => {
     expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
-      "SILENT: a shown `beforeEach` module-registry reset precedes each dynamic import",
+      "SILENT: a shown per-case `vi.resetModules()` in `beforeEach` or the test precedes every dynamic import",
     );
     expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
       "REPORT: the reset is missing, removed, late, or wrong",

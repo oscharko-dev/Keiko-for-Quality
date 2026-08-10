@@ -3198,10 +3198,10 @@ import { createHash as createHash6 } from "node:crypto";
 
 // src/engine/claim-decision-policy.ts
 var TEST_ISOLATION_EVIDENCE_POLICY = [
-  "Test-isolation table \u2014 SILENT: a shown `beforeEach` module-registry reset precedes each dynamic",
-  "import. REPORT: the reset is missing, removed, late, or wrong after tracing suite setup and shared",
-  "state. BYPASS (report): a static/top-level import or cached import promise was established before",
-  "the reset. Never demand a module clear/reset helper; never invent one."
+  "Test-isolation table \u2014 SILENT: a shown per-case `vi.resetModules()` in `beforeEach` or the test",
+  "precedes every dynamic import. REPORT: the reset is missing, removed, late, or wrong after tracing",
+  "suite setup and shared state. BYPASS (report): a static/top-level import or cached import promise",
+  "was established before the reset. Never demand a module clear/reset helper; never invent one."
 ].join(" ");
 var REFERENCE_TRANSITION_EVIDENCE_POLICY = [
   "At one action/dependency coordinate, one full 40-hex SHA to another remains immutable and is",
@@ -3844,7 +3844,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v5";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v6";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;

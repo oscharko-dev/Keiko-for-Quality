@@ -403,10 +403,11 @@ test("off-by-one carries a visible contract and a concrete just-outside witness"
 });
 
 /**
- * The clean reset case and its two recall twins share one real module-state mechanism. The first
- * twin deletes the reset. The second keeps the reset but hoists the module to a static import, so
- * the tests retain bindings to the pre-reset instance. Neither twin uses a cached import Promise:
- * that would add a race-shaped alternative explanation instead of isolating import timing.
+ * The clean reset case and its two recall twins share one real module-state mechanism. Each clean
+ * test resets immediately before its dynamic import. The first twin deletes the second reset. The
+ * second keeps both resets but hoists the module to a static import, so the tests retain bindings
+ * to the pre-reset instance. Neither twin uses a cached import Promise: that would add a
+ * race-shaped alternative explanation instead of isolating import timing.
  */
 test("reset-isolation cases distinguish fresh dynamic imports from removed and bypassed resets", () => {
   const ids = [
@@ -432,20 +433,36 @@ test("reset-isolation cases distinguish fresh dynamic imports from removed and b
   assert.ok(removed !== undefined);
   assert.ok(bypassed !== undefined);
 
-  assert.match(clean.testFile.head, /beforeEach\(\(\) => \{\s+vi\.resetModules\(\);/u);
-  assert.ok(
-    clean.testFile.head.indexOf("vi.resetModules();") <
-      clean.testFile.head.indexOf('await import("./cache.js")'),
-    "the clean suite must reset the registry before importing the fresh module",
+  const cleanResets = [...clean.testFile.head.matchAll(/vi\.resetModules\(\);/gu)].map(
+    (match) => match.index,
   );
+  const cleanImports = [...clean.testFile.head.matchAll(/await import\("\.\/cache\.js"\)/gu)].map(
+    (match) => match.index,
+  );
+  assert.equal(cleanResets.length, 2, "each clean test must own one registry reset");
+  assert.equal(cleanImports.length, 2, "each clean test must own one dynamic import");
+  assert.ok(cleanResets.every((reset, index) => reset < cleanImports[index]));
+  assert.equal(
+    clean.testFile.head.match(/vi\.resetModules\(\);\s+const \{[^}]+\} = await import/gu)?.length,
+    2,
+    "each clean reset must be immediately coupled to the dynamic import it protects",
+  );
+  assert.doesNotMatch(clean.testFile.head, /beforeEach/u);
   assert.equal(clean.testFile.head.includes('from "./cache.js";'), false);
 
   assert.equal(removed.testFile.base, clean.testFile.head);
-  assert.doesNotMatch(removed.testFile.head, /resetModules/u);
+  assert.equal(removed.testFile.head.match(/vi\.resetModules\(\);/gu)?.length, 1);
   assert.equal(removed.testFile.head.match(/await import\("\.\/cache\.js"\)/gu)?.length, 2);
+  assert.ok(
+    removed.testFile.head.lastIndexOf("vi.resetModules();") <
+      removed.testFile.head.indexOf('await import("./cache.js")') &&
+      removed.testFile.head.indexOf('await import("./cache.js")') <
+        removed.testFile.head.lastIndexOf('await import("./cache.js")'),
+    "the second import must reuse the first test's module after its own reset is removed",
+  );
 
   assert.equal(bypassed.testFile.base, clean.testFile.head);
-  assert.match(bypassed.testFile.head, /vi\.resetModules\(\);/u);
+  assert.equal(bypassed.testFile.head.match(/vi\.resetModules\(\);/gu)?.length, 2);
   assert.match(bypassed.testFile.head, /^import \{ entryCount, lookup \} from "\.\/cache\.js";/mu);
   assert.doesNotMatch(bypassed.testFile.head, /await import|Promise/u);
 
