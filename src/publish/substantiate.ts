@@ -2210,10 +2210,11 @@ async function continueTruthWithContext<T extends JudgeableFinding>(
     });
   }
   if (context.kind === "insufficient") {
-    return decidedResult<T>(undefined, "insufficient_evidence", run.metrics, {
-      stage: "truth_retrieval",
-      reasonCode: context.reasonCode,
-    });
+    // A failed bounded lookup does not prove the original claim false. Give the smaller terminal
+    // role the existing evidence once more: it can still confirm direct proof, agree that evidence
+    // is insufficient, or refute the claim. This is the same independent negative-decision check
+    // used below when initial Truth says refuted, and it stays inside the four-call ceiling.
+    return await verifyTerminalTruthRound(run, evidence);
   }
   return await verifyTerminalTruthRound(run, context.evidence);
 }
@@ -2390,11 +2391,11 @@ async function applyTruthDecision<T extends JudgeableFinding>(
   decision: TruthDecision,
 ): Promise<JudgedOne<T>> {
   if (decision.verdict === "refuted") {
-    run.metrics.truthRefuted += 1;
-    return decidedResult<T>(undefined, "refuted", run.metrics, {
-      stage: "truth_initial",
-      reasonCode: decision.reasonCode,
-    });
+    // Confirmation already receives an adversarial challenge and, when needed, a Referee. A
+    // negative decision deserves the same protection against one serving call misreading shown
+    // source: the reduced terminal Truth role independently confirms or overturns it without
+    // seeing this verdict. A confirmed claim still proceeds through normal falsification.
+    return await verifyTerminalTruthRound(run, evidence);
   }
   if (decision.verdict === "needs_context") {
     return await continueTruthWithContext(run, evidence, decision);

@@ -864,6 +864,7 @@ export function buildEligibilityUpdate(selected: readonly string[]): Eligibility
   return { workflowEligibleModelIds: selected };
 }
 
+/** Omission preserves the current IDs; an explicit empty array clears them. */
 export function applyEligibilityUpdate(
   current: readonly string[],
   update: EligibilityUpdate,
@@ -880,6 +881,7 @@ export function buildEligibilityUpdate(selected: readonly string[]): Eligibility
   return { workflowEligibleModelIds: selected };
 }
 
+/** Omission preserves the current IDs; an explicit empty array clears them. */
 export function applyEligibilityUpdate(
   current: readonly string[],
   update: EligibilityUpdate,
@@ -1054,40 +1056,27 @@ export function describeImport(response: ImportResponse): string {
   },
   {
     id: "audit-validator-drift",
-    // The production validator requires authRef, schemaVersion, and provider; the audit script is
-    // loosened to accept authRef alone, so it now passes objects production would reject. The
-    // validator it is supposed to mirror is untouched by this diff.
+    // The production validator requires authRef, schemaVersion, and provider; the audit mirror is
+    // loosened to accept authRef alone, so it now passes objects production would reject. Both
+    // implementations deliberately live in the changed file's complete view: a separate unchanged
+    // module is not visible for this small diff under production's context-pack threshold.
     defect: { file: "scripts/audit-metadata.mjs", category: "bug", severity: "high" },
     about:
       "audit script loosened to accept any object with authRef, so it now passes metadata the production validator rejects for missing schemaVersion and provider",
     anchors: ["schemaversion", "production", "reject*", "loosen*", "accept*", "authref"],
     files: [
       {
-        // Present in both commits, byte-identical — the production validator this audit script is
-        // supposed to mirror never appears in the diff.
-        path: "src/metadata-store.ts",
-        base: `/** The production metadata store's validator. Every write path funnels through this. */
-export function validateMetadata(candidate: Record<string, unknown>): boolean {
-  return (
-    typeof candidate.authRef === "string" &&
-    typeof candidate.schemaVersion === "string" &&
-    typeof candidate.provider === "string"
-  );
-}
-`,
-        head: `/** The production metadata store's validator. Every write path funnels through this. */
-export function validateMetadata(candidate: Record<string, unknown>): boolean {
-  return (
-    typeof candidate.authRef === "string" &&
-    typeof candidate.schemaVersion === "string" &&
-    typeof candidate.provider === "string"
-  );
-}
-`,
-      },
-      {
         path: "scripts/audit-metadata.mjs",
-        base: `/** Audits a stored metadata object against the shape production requires. */
+        base: `/** The production metadata validator. Every write path funnels through this. */
+export function validateMetadata(candidate) {
+  return (
+    typeof candidate.authRef === "string" &&
+    typeof candidate.schemaVersion === "string" &&
+    typeof candidate.provider === "string"
+  );
+}
+
+/** Audits a stored metadata object against the exact shape production requires. */
 export function isValidMetadata(candidate) {
   return (
     typeof candidate.authRef === "string" &&
@@ -1096,7 +1085,16 @@ export function isValidMetadata(candidate) {
   );
 }
 `,
-        head: `/** Audits a stored metadata object against the shape production requires. */
+        head: `/** The production metadata validator. Every write path funnels through this. */
+export function validateMetadata(candidate) {
+  return (
+    typeof candidate.authRef === "string" &&
+    typeof candidate.schemaVersion === "string" &&
+    typeof candidate.provider === "string"
+  );
+}
+
+/** Audits a stored metadata object against the exact shape production requires. */
 export function isValidMetadata(candidate) {
   return typeof candidate.authRef === "string";
 }

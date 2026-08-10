@@ -10824,10 +10824,7 @@ async function continueTruthWithContext(run2, evidence, decision) {
     });
   }
   if (context.kind === "insufficient") {
-    return decidedResult(void 0, "insufficient_evidence", run2.metrics, {
-      stage: "truth_retrieval",
-      reasonCode: context.reasonCode
-    });
+    return await verifyTerminalTruthRound(run2, evidence);
   }
   return await verifyTerminalTruthRound(run2, context.evidence);
 }
@@ -10952,11 +10949,7 @@ async function falsifyConfirmed(run2, evidence, truth) {
 }
 async function applyTruthDecision(run2, evidence, decision) {
   if (decision.verdict === "refuted") {
-    run2.metrics.truthRefuted += 1;
-    return decidedResult(void 0, "refuted", run2.metrics, {
-      stage: "truth_initial",
-      reasonCode: decision.reasonCode
-    });
+    return await verifyTerminalTruthRound(run2, evidence);
   }
   if (decision.verdict === "needs_context") {
     return await continueTruthWithContext(run2, evidence, decision);

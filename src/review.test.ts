@@ -3177,6 +3177,34 @@ describe("performReview: review-cache memoization end to end", () => {
     }): { impl: typeof fetch; callCount: () => number } {
       let calls = 0;
       const tokens = opts.tokensPerCall ?? 10;
+      const truthReply = (terminal: boolean): string => {
+        const verdict = opts.judgeVerdict ?? "grounded";
+        const stateRef = opts.judgeEvidenceRef ?? "H:1";
+        const line = /:([1-9]\d*)$/u.exec(stateRef)?.[1] ?? "1";
+        const changeRef = opts.judgeChangeRef ?? `D:H:${line}`;
+        if (verdict === "vague") {
+          return JSON.stringify({
+            verdict: terminal ? "insufficient_evidence" : "needs_context",
+            reason_code: "missing_definition",
+            evidence_refs: [stateRef],
+            ...(terminal ? {} : { lookup_terms: ["missingDefinition"] }),
+          });
+        }
+        if (verdict === "unsupported") {
+          return JSON.stringify({
+            verdict: "refuted",
+            reason_code: "contradicted",
+            evidence_refs: [stateRef],
+            ...(terminal ? {} : { lookup_terms: [] }),
+          });
+        }
+        return JSON.stringify({
+          verdict: "confirmed",
+          reason_code: "direct_proof",
+          evidence_refs: [stateRef, changeRef, ...(opts.judgeAdditionalRefs ?? [])],
+          ...(terminal ? {} : { lookup_terms: [] }),
+        });
+      };
       const impl = ((_url: string, init?: { body?: string }) => {
         calls += 1;
         const parsedBody = JSON.parse(init?.body ?? "{}") as { messages?: { content?: string }[] };
@@ -3263,6 +3291,23 @@ describe("performReview: review-cache memoization end to end", () => {
             ),
           );
         }
+        if (prompt.includes("Make the final truth decision")) {
+          opts.onJudgePrompt?.(prompt);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                choices: [
+                  {
+                    finish_reason: "stop",
+                    message: { content: truthReply(true) },
+                  },
+                ],
+                usage: { total_tokens: tokens },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
         if (prompt.includes("Verify the truth of one AI-generated")) {
           opts.onJudgePrompt?.(prompt);
           if (opts.judgeTransportFailure === true) {
@@ -3274,36 +3319,7 @@ describe("performReview: review-cache memoization end to end", () => {
                 choices: [
                   {
                     finish_reason: "stop",
-                    message: {
-                      content: ((): string => {
-                        const verdict = opts.judgeVerdict ?? "grounded";
-                        const stateRef = opts.judgeEvidenceRef ?? "H:1";
-                        const line = /:([1-9]\d*)$/u.exec(stateRef)?.[1] ?? "1";
-                        const changeRef = opts.judgeChangeRef ?? `D:H:${line}`;
-                        if (verdict === "vague") {
-                          return JSON.stringify({
-                            verdict: "needs_context",
-                            reason_code: "missing_definition",
-                            evidence_refs: [stateRef],
-                            lookup_terms: ["missingDefinition"],
-                          });
-                        }
-                        if (verdict === "unsupported") {
-                          return JSON.stringify({
-                            verdict: "refuted",
-                            reason_code: "contradicted",
-                            evidence_refs: [stateRef],
-                            lookup_terms: [],
-                          });
-                        }
-                        return JSON.stringify({
-                          verdict: "confirmed",
-                          reason_code: "direct_proof",
-                          evidence_refs: [stateRef, changeRef, ...(opts.judgeAdditionalRefs ?? [])],
-                          lookup_terms: [],
-                        });
-                      })(),
-                    },
+                    message: { content: truthReply(false) },
                   },
                 ],
                 usage: { total_tokens: tokens },
@@ -3706,6 +3722,13 @@ describe("performReview: review-cache memoization end to end", () => {
             evidence_refs: ["H:1"],
             lookup_terms: ["missingDefinition"],
           });
+        } else if (prompt.includes("Make the final truth decision")) {
+          truthCalls += 1;
+          content = JSON.stringify({
+            verdict: "insufficient_evidence",
+            reason_code: "missing_definition",
+            evidence_refs: ["H:1"],
+          });
         } else {
           if (prompt.includes("Audit the classification")) auditPrompt = prompt;
           content = JSON.stringify({ category: "bug", severity: "medium" });
@@ -3727,7 +3750,7 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("complete");
       expect(report.publish).toMatchObject({ published: 0 });
-      expect(truthCalls).toBe(1);
+      expect(truthCalls).toBe(2);
       expect(auditPrompt).toBe("");
       expect(created).toEqual([]);
     });
@@ -3880,7 +3903,7 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(acquireEngineMock).not.toHaveBeenCalled();
       expect(runEngineMock).not.toHaveBeenCalled();
       expect(first.publish).toMatchObject({ published: 0 });
-      expect(callCount()).toBe(1);
+      expect(callCount()).toBe(2);
       expect(first.updatedCacheStore?.entries.some((entry) => entry.key === key)).toBe(false);
       if (first.updatedCacheStore === undefined)
         throw new Error("expected cache eviction write-back");
@@ -3900,7 +3923,7 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(secondInvocation.mechanicallyCleanPaths).toContain("src/b.ts");
       expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/a.ts");
       // The stale prose never reappears from the store; the second run has no model claim to verify.
-      expect(callCount()).toBe(1);
+      expect(callCount()).toBe(2);
     });
 
     it("evicts a ranked-out cache hit and keeps a path with a ranked-out fresh finding uncached", async () => {

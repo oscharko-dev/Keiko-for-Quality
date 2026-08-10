@@ -308,6 +308,10 @@ test("cleared-list-omitted-from-update shows how omission preserves stale state"
     /workflowEligibleModelIds\?:/u,
     "the field has to be optional — otherwise `return {}` is a type error, not the seeded bug",
   );
+  const receiverContract =
+    "/** Omission preserves the current IDs; an explicit empty array clears them. */";
+  assert.equal(source.base.split(receiverContract).length - 1, 1);
+  assert.equal(source.head.split(receiverContract).length - 1, 1);
   const receiver = [
     "export function applyEligibilityUpdate(",
     "  current: readonly string[],",
@@ -342,6 +346,30 @@ test("cleared-list-omitted-from-update shows how omission preserves stale state"
     applyUpdate(before),
     [],
     "the base's explicit empty array must clear the receiver's current list",
+  );
+});
+
+test("audit-validator-drift keeps both compared validators in the changed complete file", () => {
+  const testCase = CASES.find((entry) => entry.id === "audit-validator-drift");
+  const source = testCase.files.find((file) => file.path === "scripts/audit-metadata.mjs");
+
+  assert.ok(source !== undefined, "the audit case must carry its changed script");
+  assert.equal(testCase.files.length, 1, "no invisible unchanged module may decide this verdict");
+  for (const revision of [source.base, source.head]) {
+    assert.equal(revision.match(/export function validateMetadata\(/gu)?.length, 1);
+    assert.equal(revision.match(/export function isValidMetadata\(/gu)?.length, 1);
+    assert.match(revision, /typeof candidate\.schemaVersion === "string"/u);
+    assert.match(revision, /typeof candidate\.provider === "string"/u);
+  }
+  assert.match(
+    source.base,
+    /export function isValidMetadata[\s\S]*typeof candidate\.schemaVersion === "string"[\s\S]*typeof candidate\.provider === "string"/u,
+    "the base mirror must enforce every shown production predicate",
+  );
+  assert.match(
+    source.head,
+    /export function isValidMetadata\(candidate\) \{\n[ ]{2}return typeof candidate\.authRef === "string";\n\}/u,
+    "the changed mirror must visibly omit the production schemaVersion and provider checks",
   );
 });
 

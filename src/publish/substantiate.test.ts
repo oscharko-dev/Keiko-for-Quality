@@ -922,7 +922,15 @@ describe("truth then adversarial falsification", () => {
   });
 
   it("drops behavior proved unchanged between BASE and HEAD before falsification", async () => {
-    const endpoint = endpointReplying([NOT_INTRODUCED, SURVIVES]);
+    const endpoint = endpointReplying([
+      NOT_INTRODUCED,
+      terminalTruth({
+        verdict: "refuted",
+        reason_code: "not_introduced",
+        evidence_refs: ["H:3", "B:3"],
+      }),
+      SURVIVES,
+    ]);
     const out = await substantiate(
       [finding("When ready is true, this calls run().")],
       () => CHANGE_EVIDENCE,
@@ -936,6 +944,26 @@ describe("truth then adversarial falsification", () => {
     expect(out.droppedRefuted).toBe(1);
     expect(out.droppedUnsupported).toBe(1);
     expect(endpoint.remaining()).toBe(1);
+    expect(endpoint.prompts()[1]).toContain("Make the final truth decision");
+  });
+
+  it("does not let one initial refutation discard a claim that terminal Truth proves", async () => {
+    const candidate = finding("When the list is just outside its bound, the slice drops items.");
+    const endpoint = endpointReplying([NOT_INTRODUCED, terminalTruth()]);
+    const out = await substantiate(
+      [candidate],
+      () => CHANGE_EVIDENCE,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      () => ({ chunks: [] }),
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(out.truthRefuted).toBe(0);
+    expect(out.confirmed).toBe(1);
+    expect(out.challengeNoMatches).toBe(1);
+    expect(endpoint.prompts()).toHaveLength(2);
   });
 
   it("lets the adversarial role defeat a plausible high-impact claim", async () => {
@@ -1007,7 +1035,15 @@ describe("truth then adversarial falsification", () => {
 
 describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
   it("treats a merely consistent claim as insufficient when no follow-up source exists", async () => {
-    const endpoint = endpointReplying([NEEDS_CALLER, "must not become a rewrite"]);
+    const endpoint = endpointReplying([
+      NEEDS_CALLER,
+      terminalTruth({
+        verdict: "insufficient_evidence",
+        reason_code: "missing_caller",
+        evidence_refs: ["H:3"],
+      }),
+      "must not become a rewrite",
+    ]);
     const out = await substantiate(
       [finding("This looks consistent with a caller contract that is not shown.")],
       () => CHANGE_EVIDENCE,
@@ -1122,6 +1158,30 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     expect(out.retrievalPerformed).toBe(1);
     expect(retrievalCalls).toBe(1);
     expect(endpoint.remaining()).toBe(1);
+  });
+
+  it("lets terminal Truth decide when a requested lookup returns no matching source", async () => {
+    const candidate = finding("When the list is empty, omitting it preserves stale state.");
+    const endpoint = endpointReplying([NEEDS_CALLER, terminalTruth()]);
+    let retrievalCalls = 0;
+    const out = await substantiate(
+      [candidate],
+      () => CHANGE_EVIDENCE,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      () => {
+        retrievalCalls += 1;
+        return { chunks: [] };
+      },
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(out.retrievalNoMatches).toBe(1);
+    expect(out.challengeNoMatches).toBe(1);
+    expect(out.confirmed).toBe(1);
+    expect(retrievalCalls).toBe(2);
+    expect(endpoint.prompts()).toHaveLength(2);
   });
 
   it("requires a retriever after deterministic planning and records its absence as challenge failure", async () => {
@@ -1456,7 +1516,14 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     const noMatch = await substantiate(
       [finding("When an unseen caller passes seconds, the wait is short.")],
       () => CHANGE_EVIDENCE,
-      endpointReplying([NEEDS_CALLER]).deps,
+      endpointReplying([
+        NEEDS_CALLER,
+        terminalTruth({
+          verdict: "insufficient_evidence",
+          reason_code: "missing_caller",
+          evidence_refs: ["H:3"],
+        }),
+      ]).deps,
       "paranoid",
       undefined,
       () => ({ chunks: [] }),
@@ -1777,7 +1844,14 @@ describe("hard shared request budget", () => {
     const candidate = finding("When x is zero, compute throws.");
     const truthBound = truthRequestUpperBound(candidate);
     const admissionBound = substantiationOnePathTokenUpperBound(candidate, CHANGE_EVIDENCE);
-    const endpoint = endpointReplying([{ text: REFUTED, totalTokens: truthBound }, REFUTED]);
+    const endpoint = endpointReplying([
+      { text: REFUTED, totalTokens: truthBound },
+      terminalTruth({
+        verdict: "refuted",
+        reason_code: "contradicted",
+        evidence_refs: ["H:3"],
+      }),
+    ]);
     const out = await substantiate(
       [candidate, candidate],
       () => CHANGE_EVIDENCE,
@@ -1786,11 +1860,11 @@ describe("hard shared request budget", () => {
       admissionBound,
     );
 
-    expect(endpoint.remaining()).toBe(1);
+    expect(endpoint.remaining()).toBe(0);
     expect(out.truthRefuted).toBe(1);
     expect(out.undecided).toBe(1);
     expect(out.budgetBlocked).toBe(1);
-    expect(out.tokens).toBe(truthBound);
+    expect(out.tokens).toBe(truthBound + 100);
   });
 
   it("fails closed and conservatively charges missing or invalid provider usage", async () => {
