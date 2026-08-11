@@ -439,13 +439,19 @@ test("Windows helper twins distinguish terminal failure from an invalid spawn va
 
   for (const source of [cleanFile.head, seededFile.base, seededFile.head]) {
     assert.match(source, /^import \{ spawn \} from "node:child_process";/mu);
+    assert.match(source, /^import \{ existsSync \} from "node:fs";/mu);
     assert.match(source, /if \(process\.platform !== "win32"\) return;/u);
     assert.match(source, /spawn\(windowsToolFromPath\(pathValue, "cl\.exe"\)/u);
+    assert.match(
+      source,
+      /for \(const directory of pathValue\?\.split\(";"\)\.filter\(Boolean\) \?\? \[\]\)/u,
+    );
+    assert.match(source, /if \(existsSync\(candidate\)\) return candidate;/u);
   }
-  assert.match(cleanFile.head, /if \(directory === undefined\) throw new Error/u);
+  assert.match(cleanFile.head, /throw new Error\("Windows tool is unavailable"\)/u);
   assert.equal(cleanFile.head.includes("return undefined"), false);
   assert.equal(seededFile.base, cleanFile.head, "the seeded base must be the clean head exactly");
-  assert.match(seededFile.head, /if \(directory === undefined\) return undefined;/u);
+  assert.match(seededFile.head, /return undefined;/u);
   assert.equal(
     seededFile.base.replace(
       /throw new Error\("Windows tool is unavailable"\)/u,

@@ -2113,18 +2113,25 @@ export function redactModelId(modelId: string): string {
     files: [
       {
         path: "src/windows-compiler.mjs",
-        base: `export function windowsToolFromPath(pathValue, toolName) {
-  const directory = pathValue?.split(";").find(Boolean);
-  if (directory === undefined) throw new Error("Windows tool is unavailable");
-  return \`${"${directory}"}\\\\${"${toolName}"}\`;
+        base: `import { existsSync } from "node:fs";
+
+export function windowsToolFromPath(pathValue, toolName) {
+  for (const directory of pathValue?.split(";").filter(Boolean) ?? []) {
+    const candidate = \`${"${directory}"}\\\\${"${toolName}"}\`;
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("Windows tool is unavailable");
 }
 `,
         head: `import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 
 export function windowsToolFromPath(pathValue, toolName) {
-  const directory = pathValue?.split(";").find(Boolean);
-  if (directory === undefined) throw new Error("Windows tool is unavailable");
-  return \`${"${directory}"}\\\\${"${toolName}"}\`;
+  for (const directory of pathValue?.split(";").filter(Boolean) ?? []) {
+    const candidate = \`${"${directory}"}\\\\${"${toolName}"}\`;
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("Windows tool is unavailable");
 }
 
 export function runWindowsCompiler(pathValue) {
@@ -2152,11 +2159,14 @@ export function runWindowsCompiler(pathValue) {
       {
         path: "src/windows-compiler.mjs",
         base: `import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 
 export function windowsToolFromPath(pathValue, toolName) {
-  const directory = pathValue?.split(";").find(Boolean);
-  if (directory === undefined) throw new Error("Windows tool is unavailable");
-  return \`${"${directory}"}\\\\${"${toolName}"}\`;
+  for (const directory of pathValue?.split(";").filter(Boolean) ?? []) {
+    const candidate = \`${"${directory}"}\\\\${"${toolName}"}\`;
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("Windows tool is unavailable");
 }
 
 export function runWindowsCompiler(pathValue) {
@@ -2165,11 +2175,14 @@ export function runWindowsCompiler(pathValue) {
 }
 `,
         head: `import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 
 export function windowsToolFromPath(pathValue, toolName) {
-  const directory = pathValue?.split(";").find(Boolean);
-  if (directory === undefined) return undefined;
-  return \`${"${directory}"}\\\\${"${toolName}"}\`;
+  for (const directory of pathValue?.split(";").filter(Boolean) ?? []) {
+    const candidate = \`${"${directory}"}\\\\${"${toolName}"}\`;
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
 }
 
 export function runWindowsCompiler(pathValue) {

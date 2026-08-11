@@ -9,13 +9,21 @@ import { CASES } from "../corpus/cases.mjs";
  * `OCR_REPORT` a release-gate failure rather than a documentation mistake.
  */
 export const QUALIFICATION_EVIDENCE_ARTIFACT = "keiko-for-quality/qualification-evidence";
-export const QUALIFICATION_EVIDENCE_SCHEMA_VERSION = 2;
+export const QUALIFICATION_EVIDENCE_SCHEMA_VERSION = 3;
 
 const VERSION = /^\d+\.\d+\.\d+$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const SAFE_MODEL_ID = /^[A-Za-z0-9._:/-]{1,128}$/u;
 const RESULT_KINDS = new Set(["recall", "precision", "publishability", "error"]);
+const ERROR_STAGES = new Set([
+  "repository",
+  "engine",
+  "repair",
+  "deterministic_gate",
+  "publication",
+  "scoring",
+]);
 const REASONS = new Set(["measured", "no_cases", "model_unreached"]);
 const PROTOCOLS = new Set(["openai", "anthropic"]);
 const STRICTNESS_LEVELS = new Set(["lenient", "default", "strict", "paranoid"]);
@@ -107,6 +115,10 @@ function resultFrom(rawResult, seen) {
   if (!RESULT_KINDS.has(result.kind)) {
     throw new TypeError(`qualification evidence: result kind is invalid for ${id}`);
   }
+  const errorStage = result.kind === "error" ? result.errorStage : null;
+  if (result.kind === "error" && !ERROR_STAGES.has(errorStage)) {
+    throw new TypeError(`qualification evidence: error stage is invalid for ${id}`);
+  }
   if (!Array.isArray(result.findings) || !Array.isArray(result.rejected)) {
     throw new TypeError(`qualification evidence: result arrays are invalid for ${id}`);
   }
@@ -121,6 +133,7 @@ function resultFrom(rawResult, seen) {
   return {
     id,
     kind: result.kind,
+    errorStage,
     pass: boolean(result.pass, `${id}.pass`),
     classified: optionalBoolean(result.classified, `${id}.classified`),
     severityAdjacent: optionalBoolean(result.severityAdjacent, `${id}.severityAdjacent`),
@@ -210,6 +223,7 @@ const ROOT_KEYS = [
 const BINDING_KEYS = ["adapter", "corpus", "engine", "measuredAt", "model", "rule", "strictness"];
 const RESULT_KEYS = [
   "classified",
+  "errorStage",
   "findingCount",
   "id",
   "kind",
@@ -292,6 +306,12 @@ function validateResultValues(result, seen) {
   seen.add(id);
   if (!RESULT_KINDS.has(result.kind)) {
     throw new TypeError(`qualification evidence: result kind is invalid for ${id}`);
+  }
+  if (
+    (result.kind === "error" && !ERROR_STAGES.has(result.errorStage)) ||
+    (result.kind !== "error" && result.errorStage !== null)
+  ) {
+    throw new TypeError(`qualification evidence: error stage is invalid for ${id}`);
   }
   boolean(result.pass, `${id}.pass`);
   if (result.classified !== null) boolean(result.classified, `${id}.classified`);

@@ -117,6 +117,7 @@ for (const testCase of CASES) {
     const detail = isRedactedEvidence
       ? [
           `kind=${String(result.kind)}`,
+          ...(result.kind === "error" ? [`stage=${String(result.errorStage)}`] : []),
           `findings=${String(result.findingCount)}`,
           `tokens=${String(result.tokens)}`,
           `rejected=${String(result.rejectedCount)}`,

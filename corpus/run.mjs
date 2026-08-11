@@ -807,6 +807,12 @@ function scoreOne(testCase, result, plan) {
 const results = [];
 for (const testCase of cases) {
   let dir;
+  // A closed stage name survives redaction when a case throws. Raw error text stays private, but
+  // the public evidence can still distinguish a repository/setup failure from engine, repair,
+  // deterministic-gate, publication, or scoring work. Without this, the v0.24.0 qualification
+  // could report only `kind: error` after spending 32k tokens on one case, leaving the next fix to
+  // guess which half of the harness failed.
+  let errorStage = "repository";
   // Hoisted out of the try, not declared inside it: a throw in `computeGateFindings`,
   // `planCaseFindings`, or anything else after the model already ran must still leave the catch
   // block able to read the real spend `result.summary.total_tokens` already carries by that
@@ -818,14 +824,19 @@ for (const testCase of cases) {
     // in any of the four git calls, and a throw outside would abort the whole run and leak the
     // directory it had already created.
     dir = buildRepo(testCase);
+    errorStage = "engine";
     const execution = await runEngineWithOneResume(dir, testCase.budgetTokens);
     result = execution.result;
     let plan = execution.plan;
     if (plan === undefined) {
+      errorStage = "repair";
       await repairFindings(result);
+      errorStage = "deterministic_gate";
       result.comments = [...(result.comments ?? []), ...computeGateFindings(dir, testCase)];
+      errorStage = "publication";
       plan = await planCaseFindings(testCase, result.comments);
     }
+    errorStage = "scoring";
     const scored = scoreOne(testCase, result, plan);
     results.push(scored);
     const mark = scored.pass ? "PASS" : "FAIL";
@@ -880,6 +891,7 @@ for (const testCase of cases) {
       id: testCase.id,
       kind: "error",
       pass: false,
+      errorStage,
       detail: "the harness threw while running this case",
       findings: [],
       rejected: [],
