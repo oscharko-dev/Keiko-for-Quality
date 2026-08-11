@@ -347,6 +347,18 @@ describe("trusted closed claim proof", () => {
     ).toEqual({ evidenceRefs: ["D:H:6", "H:6", "B:6"] });
   });
 
+  it("accepts a nested first log argument and a defaulted primitive parameter", () => {
+    expect(
+      closedClaimRefutation(
+        finding("Remove the attempt field because logging it changes error handling.", 5),
+        diagnosticContextEvidence({
+          parameter: "attempt: number = 0",
+          baseMessage: "formatMessage(error)",
+        }),
+      ),
+    ).toEqual({ evidenceRefs: ["D:H:5", "H:5", "B:5"] });
+  });
+
   const rejectedDiagnosticContextShapes: readonly (readonly [string, DiagnosticContextOptions])[] =
     [
       ["a sensitive field", { parameter: "token: string", addedEntry: "token" }],

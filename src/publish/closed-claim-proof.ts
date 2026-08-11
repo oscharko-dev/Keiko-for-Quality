@@ -736,11 +736,21 @@ function soleObjectRange(code: string): readonly [number, number] | undefined {
   return [objectOpen, objectClose];
 }
 
+function leavesLogCallOpen(call: string, callOpen: number): boolean {
+  let depth = 1;
+  for (let index = callOpen + 1; index < call.length; index += 1) {
+    if (call[index] === "(") depth += 1;
+    if (call[index] === ")") depth -= 1;
+    if (depth <= 0) return false;
+  }
+  return depth === 1;
+}
+
 function opensQualifiedLogCall(beforeObject: string): boolean {
   if (!beforeObject.endsWith(",")) return false;
   const call = beforeObject.slice(0, -1).trimEnd();
   const callOpen = call.indexOf("(");
-  if (callOpen <= 0 || callOpen !== call.lastIndexOf("(")) return false;
+  if (callOpen <= 0 || !leavesLogCallOpen(call, callOpen)) return false;
   const calleeParts = call.slice(0, callOpen).trim().split(".");
   const method = calleeParts.at(-1);
   return (
@@ -816,7 +826,7 @@ function primitiveParameter(parameters: string, field: string): boolean {
     if (parts.length !== 2) return false;
     const rawName = (parts[0] ?? "").replace(/^readonly\s+/u, "");
     const name = rawName.endsWith("?") ? rawName.slice(0, -1) : rawName;
-    const type = parts[1];
+    const type = parts[1]?.split("=", 1)[0]?.trim();
     return name === field && type !== undefined && PRIMITIVE_TYPES.has(type);
   });
 }

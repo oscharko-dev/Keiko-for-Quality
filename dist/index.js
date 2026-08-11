@@ -11774,11 +11774,20 @@ function soleObjectRange(code) {
   }
   return [objectOpen, objectClose];
 }
+function leavesLogCallOpen(call, callOpen2) {
+  let depth = 1;
+  for (let index = callOpen2 + 1; index < call.length; index += 1) {
+    if (call[index] === "(") depth += 1;
+    if (call[index] === ")") depth -= 1;
+    if (depth <= 0) return false;
+  }
+  return depth === 1;
+}
 function opensQualifiedLogCall(beforeObject) {
   if (!beforeObject.endsWith(",")) return false;
   const call = beforeObject.slice(0, -1).trimEnd();
   const callOpen2 = call.indexOf("(");
-  if (callOpen2 <= 0 || callOpen2 !== call.lastIndexOf("(")) return false;
+  if (callOpen2 <= 0 || !leavesLogCallOpen(call, callOpen2)) return false;
   const calleeParts = call.slice(0, callOpen2).trim().split(".");
   const method = calleeParts.at(-1);
   return method !== void 0 && LOG_METHODS.has(method) && calleeParts.length >= 2 && calleeParts.every((part) => IDENTIFIER4.test(part));
@@ -11829,7 +11838,7 @@ function primitiveParameter(parameters, field) {
     if (parts.length !== 2) return false;
     const rawName = (parts[0] ?? "").replace(/^readonly\s+/u, "");
     const name = rawName.endsWith("?") ? rawName.slice(0, -1) : rawName;
-    const type = parts[1];
+    const type = parts[1]?.split("=", 1)[0]?.trim();
     return name === field && type !== void 0 && PRIMITIVE_TYPES.has(type);
   });
 }
