@@ -966,13 +966,13 @@ describe("truth then adversarial falsification", () => {
     expect(endpoint.prompts()).toHaveLength(2);
   });
 
-  it("lets the adversarial role defeat a plausible high-impact claim", async () => {
+  it("requires the independent Referee to confirm an adversarial defeat", async () => {
     const defeated = falsifier({
       verdict: "defeated",
       reason_code: "existing_guard",
       evidence_refs: ["R4:H:9"],
     });
-    const endpoint = endpointReplying([CONFIRMED, defeated, "no third call"]);
+    const endpoint = endpointReplying([CONFIRMED, defeated, referee({ verdict: "defeated" })]);
     const out = await substantiate(
       [finding("When submitted is undefined, spreading it crashes every production request.")],
       () => CHANGE_EVIDENCE,
@@ -986,8 +986,37 @@ describe("truth then adversarial falsification", () => {
     expect(out.truthRefuted).toBe(0);
     expect(out.falsifierDefeated).toBe(1);
     expect(out.droppedRefuted).toBe(1);
-    expect(endpoint.remaining()).toBe(1);
-    expect(endpoint.prompts()).toHaveLength(2);
+    expect(endpoint.remaining()).toBe(0);
+    expect(endpoint.prompts()).toHaveLength(3);
+  });
+
+  it("keeps a Truth-confirmed finding when the Referee overturns an adversarial defeat", async () => {
+    const endpoint = endpointReplying([
+      CONFIRMED,
+      falsifier({
+        verdict: "defeated",
+        reason_code: "existing_guard",
+        evidence_refs: ["R4:H:9"],
+      }),
+      REFEREE_SURVIVES,
+    ]);
+    const candidate = finding(
+      "When submitted is undefined, spreading it crashes every production request.",
+    );
+    const out = await substantiate(
+      [candidate],
+      () => CHANGE_EVIDENCE,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      () => retrievedCaller(),
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(out.confirmed).toBe(1);
+    expect(out.falsifierDefeated).toBe(0);
+    expect(out.droppedRefuted).toBe(0);
+    expect(endpoint.prompts()).toHaveLength(3);
   });
 
   it("drops when the mandatory Referee defeats a Falsifier survive", async () => {
@@ -1289,6 +1318,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
         reason_code: "counterexample",
         evidence_refs: ["R4:T:1"],
       }),
+      referee({ verdict: "defeated", evidence_refs: ["R4:T:1"] }),
     ]);
     const candidate = finding(
       "When `maybe` is undefined, the object spread throws before the fallback can run.",
@@ -1357,6 +1387,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
           reason_code: "counterexample",
           evidence_refs: ["R4:B:9"],
         }),
+        referee({ verdict: "defeated", evidence_refs: ["R4:B:9"] }),
       ]).deps,
       "paranoid",
       undefined,
@@ -1397,6 +1428,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
             reason_code: "counterexample",
             evidence_refs: ["R4:H:9"],
           }),
+          referee({ verdict: "defeated", evidence_refs: ["R4:H:9"] }),
         ]).deps,
         "paranoid",
         undefined,
@@ -1411,7 +1443,11 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
 
   it("turns a terminal post-challenge insufficient reply into a drop without another loop", async () => {
     let retrievalCalls = 0;
-    const endpoint = endpointReplying([CONFIRMED, FALSIFIER_INSUFFICIENT, "unused"]);
+    const endpoint = endpointReplying([
+      CONFIRMED,
+      FALSIFIER_INSUFFICIENT,
+      referee({ verdict: "insufficient_evidence", evidence_refs: ["R4:H:9"] }),
+    ]);
     const out = await substantiate(
       [finding("When a caller passes seconds, the wait is short.")],
       () => CHANGE_EVIDENCE,
@@ -1427,7 +1463,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     expect(out.droppedInsufficientEvidence).toBe(1);
     expect(out.undecided).toBe(0);
     expect(retrievalCalls).toBe(1);
-    expect(endpoint.remaining()).toBe(1);
+    expect(endpoint.remaining()).toBe(0);
   });
 
   it("accepts a 374084-style reduced Referee shape after semantic Falsifier failure", async () => {

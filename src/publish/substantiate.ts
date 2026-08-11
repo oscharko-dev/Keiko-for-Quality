@@ -11,8 +11,8 @@
  * A confirmation never flows straight to publication: a deterministic contract challenge chooses
  * one closed disproof axis and searches for a counterexample or guard outside Truth's proof. A
  * successful search with no novel evidence is itself the terminal no-defeater result; when it does
- * expand the evidence, the terminal Falsifier decides and every surviving claim receives an
- * independent Referee decision. A semantically invalid Falsifier shape may use that same final
+ * expand the evidence, the terminal Falsifier proposes a verdict and every closed proposal receives
+ * an independent Referee decision. A semantically invalid Falsifier shape may use that same final
  * round without exposing the rejected response. The complete workflow remains capped structurally
  * at four model calls and every role spends from one whole-review hard budget.
  */
@@ -2326,15 +2326,21 @@ async function settleFalsifierCall<T extends JudgeableFinding>(
     readonly failure: RoleCallFailure;
   },
 ): Promise<JudgedOne<T>> {
-  if (call.decision !== undefined && call.decision.verdict !== "survives") {
-    return applyFalsifierDecision(run, call.decision);
-  }
+  // A Falsifier is an adversarial proposal, not a terminal authority. Previously one `defeated`
+  // response discarded a Truth-confirmed finding immediately, while `survives` still had to pass
+  // the independent Referee. That asymmetry compounded false negatives: the role most strongly
+  // prompted to find a defeater needed no corroboration for doing so. Every closed Falsifier
+  // verdict now receives the same independent Referee decision when the four-call ceiling permits.
   const mayReferee =
-    (call.decision?.verdict === "survives" ||
+    (call.decision !== undefined ||
       call.failure === "semantic_shape_invalid" ||
       call.failure === "json_or_envelope_invalid") &&
     run.budget.calls - run.callsAtStart < 4;
-  if (!mayReferee) return undecidedFalsifier(run, call.failure);
+  if (!mayReferee) {
+    return call.decision === undefined
+      ? undecidedFalsifier(run, call.failure)
+      : applyFalsifierDecision(run, call.decision);
+  }
 
   const referee = await callReferee(run.finding, evidence, challenge, truth, run.deps, run.budget);
   return referee.decision === undefined
@@ -2542,9 +2548,9 @@ function tallyJudgement<T extends JudgeableFinding>(
 }
 
 /**
- * The direct path is Truth -> deterministic Challenge -> Falsifier -> mandatory Referee after a
- * survive or semantic-shape failure (at most three calls). Truth's optional retrieval and terminal
- * decision add one earlier call, keeping the longest path at four calls under the shared budget.
+ * The direct path is Truth -> deterministic Challenge -> Falsifier -> mandatory Referee after any
+ * closed proposal or eligible semantic-shape failure (at most three calls). Truth's optional
+ * retrieval and terminal decision add one earlier call, keeping the longest path at four calls.
  */
 export async function substantiate<T extends JudgeableFinding>(
   findings: readonly T[],

@@ -3280,7 +3280,7 @@ describe("performReview: review-cache memoization end to end", () => {
                     finish_reason: "stop",
                     message: {
                       content: JSON.stringify({
-                        verdict: "survives",
+                        verdict: opts.consequence === "nitpick" ? "defeated" : "survives",
                         evidence_refs: [
                           opts.refereeEvidenceRef ?? opts.falsifierEvidenceRef ?? "R4:H:1",
                         ],
@@ -3388,7 +3388,7 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("complete");
       expect(report.publish?.published).toBe(0);
-      expect(callCount()).toBe(2);
+      expect(callCount()).toBe(3);
       expect(collectClosedRuntimeFactsAtCommitMock).toHaveBeenCalledTimes(1);
       expect(collectClosedRuntimeFactsAtCommitMock.mock.calls[0]?.[0]).toMatchObject({
         commit: headSha,
