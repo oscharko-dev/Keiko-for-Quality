@@ -1343,7 +1343,7 @@ async function attemptHistoricalVerification({
 }) {
   const traceSlot = { value: undefined };
   try {
-    const boundEvidence = bindHistoricalHunkEvidence({
+    const boundEvidence = dependencies.bindTrustedHunkEvidence({
       text: prepared.evidence,
       headSource: sources.headSource,
       baseSource: sources.baseSource,
@@ -1532,11 +1532,13 @@ export async function runHistoricalReplayVerification({
   collectClosedRuntimeFactsAtCommit,
   requestsClosedRuntimeFacts,
   toRetrievedEvidence,
+  bindTrustedHunkEvidence = bindHistoricalHunkEvidence,
   substantiate,
   captureDiagnosticTrace = false,
 }) {
   const { caseIds } = assertDecisionInputs(databaseIds, cases);
   const verificationDependencies = {
+    bindTrustedHunkEvidence,
     buildChangeEvidence,
     mappedBaseRangeFromUnifiedDiff,
     collectInitialRepositoryContext,
@@ -1680,12 +1682,14 @@ async function productionVerificationDependencies() {
     { requestsClosedRuntimeFacts, toRetrievedEvidence },
     { collectClosedRuntimeFactsAtCommit },
     { substantiate },
+    { bindTrustedHunkEvidence },
   ] = await Promise.all([
     import("../src/publish/evidence.ts"),
     import("../src/publish/repository-context.ts"),
     import("../src/publish/retrieved-evidence.ts"),
     import("../src/publish/runtime-facts.ts"),
     import("../src/publish/substantiate.ts"),
+    import("../src/publish/closed-claim-proof.ts"),
   ]);
   return {
     buildChangeEvidence,
@@ -1695,6 +1699,7 @@ async function productionVerificationDependencies() {
     collectClosedRuntimeFactsAtCommit,
     requestsClosedRuntimeFacts,
     toRetrievedEvidence,
+    bindTrustedHunkEvidence,
     substantiate,
   };
 }
@@ -1856,6 +1861,7 @@ export async function runHistoricalReplayCommand(argv, env = process.env, depend
       collectClosedRuntimeFactsAtCommit: loaded.collectClosedRuntimeFactsAtCommit,
       requestsClosedRuntimeFacts: loaded.requestsClosedRuntimeFacts,
       toRetrievedEvidence: loaded.toRetrievedEvidence,
+      bindTrustedHunkEvidence: loaded.bindTrustedHunkEvidence,
       substantiate: loaded.substantiate,
       captureDiagnosticTrace: diagnosticReservation !== undefined,
     });

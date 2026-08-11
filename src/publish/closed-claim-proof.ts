@@ -5,7 +5,7 @@ export interface ClosedClaimProof {
   readonly evidenceRefs: readonly VerificationEvidenceRef[];
 }
 
-declare const TRUSTED_HUNK_EVIDENCE: unique symbol;
+const TRUSTED_HUNK_EVIDENCE: unique symbol = Symbol("keiko-for-quality.trusted-hunk-evidence");
 
 /**
  * Exact source plus the bounded dossier rendered from it. Production constructs this only after
@@ -91,7 +91,11 @@ export function bindTrustedHunkEvidence(input: {
   const head = sourceRows(input.headSource);
   const base = sourceRows(input.baseSource);
   if (input.text === "" || !dossierMatchesSources(input.text, head, base)) return undefined;
-  return Object.freeze({ ...input }) as TrustedHunkEvidence;
+  return Object.freeze({ ...input, [TRUSTED_HUNK_EVIDENCE]: true }) as TrustedHunkEvidence;
+}
+
+function carriesTrustedEvidenceBrand(value: object): boolean {
+  return Reflect.get(value, TRUSTED_HUNK_EVIDENCE) === true;
 }
 
 function changedHeadLines(evidence: string): ReadonlySet<number> {
@@ -466,6 +470,7 @@ export function closedClaimProof(
   finding: JudgeableFinding,
   evidence: TrustedHunkEvidence,
 ): ClosedClaimProof | undefined {
+  if (!carriesTrustedEvidenceBrand(evidence)) return undefined;
   if (evidence.headSource === undefined) return undefined;
   const lines = sourceLines(evidence.headSource, changedHeadLines(evidence.text));
   return (

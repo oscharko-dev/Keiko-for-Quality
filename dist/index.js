@@ -11297,6 +11297,7 @@ async function collectRepositoryContextFollowUp(request, retrieveTerms, dependen
 }
 
 // src/publish/closed-claim-proof.ts
+var TRUSTED_HUNK_EVIDENCE = Symbol("keiko-for-quality.trusted-hunk-evidence");
 var HEAD_ROW = /^H:([1-9]\d*)\| (.*)$/u;
 var BASE_ROW = /^B:([1-9]\d*)\| (.*)$/u;
 var CHANGED_HEAD_ROW = /^D:H:([1-9]\d*)\| \+(.*)$/u;
@@ -11340,7 +11341,10 @@ function bindTrustedHunkEvidence(input) {
   const head = sourceRows(input.headSource);
   const base = sourceRows(input.baseSource);
   if (input.text === "" || !dossierMatchesSources(input.text, head, base)) return void 0;
-  return Object.freeze({ ...input });
+  return Object.freeze({ ...input, [TRUSTED_HUNK_EVIDENCE]: true });
+}
+function carriesTrustedEvidenceBrand(value) {
+  return Reflect.get(value, TRUSTED_HUNK_EVIDENCE) === true;
 }
 function changedHeadLines(evidence) {
   const changed = /* @__PURE__ */ new Set();
@@ -11609,6 +11613,7 @@ function duplicateMapProof(finding, lines, baseSource) {
   return { evidenceRefs: refsAt(write.line.line) };
 }
 function closedClaimProof(finding, evidence) {
+  if (!carriesTrustedEvidenceBrand(evidence)) return void 0;
   if (evidence.headSource === void 0) return void 0;
   const lines = sourceLines(evidence.headSource, changedHeadLines(evidence.text));
   return catchDisclosureProof(finding, lines, evidence.baseSource) ?? duplicateMapProof(finding, lines, evidence.baseSource);
