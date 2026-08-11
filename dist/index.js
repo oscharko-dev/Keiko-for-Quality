@@ -11325,13 +11325,13 @@ function insideFinding(line, finding) {
   return line >= finding.startLine && line <= finding.endLine;
 }
 function escaped(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
 }
 function sinkUsesCaughtBinding(text3, binding) {
   const argument = escaped(binding);
   const sink = [
     String.raw`(?:window\.)?reportError`,
-    String.raw`(?:captureException|captureError|reportException|recordException)`,
+    "(?:captureException|captureError|reportException|recordException)",
     String.raw`(?:console|logger|telemetry|diagnostics?)\.(?:error|exception|report|record)`
   ].join("|");
   return new RegExp(String.raw`\b(?:${sink})\s*\(\s*${argument}\s*(?:[,)]|$)`, "u").test(text3);
@@ -11366,12 +11366,14 @@ function catchDisclosureProof(finding, lines) {
 function mapWriteAtFinding(finding, lines) {
   for (const line of lines) {
     if (!line.changed || !insideFinding(line.line, finding)) continue;
-    const write = /\b([A-Za-z_$][\w$]*)\.set\(\s*([^,()]+(?:\.[A-Za-z_$][\w$]*)?)\s*,/u.exec(
-      line.text
-    );
-    if (write?.[1] !== void 0 && write[2] !== void 0) {
-      return { receiver: write[1], key: write[2].trim(), line };
-    }
+    const call = /\b([A-Za-z_$][\w$]*)\.set\(/u.exec(line.text);
+    if (call?.[1] === void 0) continue;
+    const argumentsText = line.text.slice(call.index + call[0].length);
+    const comma = argumentsText.indexOf(",");
+    if (comma < 0) continue;
+    const key = argumentsText.slice(0, comma).trim();
+    if (!/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/u.test(key)) continue;
+    return { receiver: call[1], key, line };
   }
   return void 0;
 }
@@ -11394,7 +11396,7 @@ function hasShownDuplicateGuard(lines, write) {
 }
 function duplicateMapProof(finding, lines) {
   const claim = finding.content.slice(0, MAX_CLAIM_CHARS);
-  if (!/\bduplicate(?:s|d)?\b/iu.test(claim)) return void 0;
+  if (!/\bduplicate[sd]?\b/iu.test(claim)) return void 0;
   if (!/\b(?:overwrit\w*|discard\w*|collision\w*|reject\w*)\b/iu.test(claim)) return void 0;
   const write = mapWriteAtFinding(finding, lines);
   if (write === void 0 || !isShownMap(lines, write) || hasShownDuplicateGuard(lines, write)) {
