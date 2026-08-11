@@ -47,7 +47,7 @@
  * round to outweigh the pack riding every turn.
  */
 
-import { run } from "../git/exec.js";
+import { ExecFailure, gitEnvironment, run } from "../git/exec.js";
 import type { ReviewPair } from "../inventory/inventory.js";
 
 /** The inputs `collectContextPacks` needs — a strict subset of what `runEngine` already holds. */
@@ -404,7 +404,7 @@ async function git(
       cwd: request.repositoryPath,
       timeoutMs: GIT_TIMEOUT_MS,
       maxBuffer: GIT_MAX_BUFFER,
-      env: { PATH: request.pathValue, LC_ALL: "C" },
+      env: gitEnvironment(request.pathValue),
     });
     return result.stdout.toString("utf8");
   } catch {
@@ -449,23 +449,45 @@ function planIdentifiers(
   return { perFile, searched };
 }
 
-/** Runs the one union grep over the head tree and parses what it found; `undefined` grep output
- *  (no matches anywhere, or any git failure) parses to an empty list on purpose — "found nothing"
- *  and "could not look" both render as the bounded negative, never as a claim. */
+/**
+ * Runs the one union grep over the head tree and preserves the difference between an empty search
+ * and a search that never completed. Exit 1 is Git's documented no-match result and may render a
+ * bounded negative. A timeout, buffer overflow, missing executable, or other error returns
+ * `undefined`, and the caller emits no pack: "could not look" must never become "no word match".
+ */
 async function grepMatches(
   request: ContextPackRequest,
   searched: ReadonlySet<string>,
-): Promise<readonly GrepMatch[]> {
-  const grepText = await git(request, [
-    "grep",
-    "-nIwF",
-    "--max-count",
-    String(GREP_MAX_COUNT_PER_FILE),
-    ...[...searched].flatMap((identifier) => ["-e", identifier]),
-    request.pair.head,
-  ]);
+): Promise<readonly GrepMatch[] | undefined> {
+  let grepText: string;
+  try {
+    const result = await run(
+      "git",
+      [
+        "--no-pager",
+        "grep",
+        // Repository configuration must not replace this read-only search with an executable.
+        "--no-ext-grep",
+        "-nIwF",
+        "--max-count",
+        String(GREP_MAX_COUNT_PER_FILE),
+        ...[...searched].flatMap((identifier) => ["-e", identifier]),
+        request.pair.head,
+      ],
+      {
+        cwd: request.repositoryPath,
+        timeoutMs: GIT_TIMEOUT_MS,
+        maxBuffer: GIT_MAX_BUFFER,
+        env: gitEnvironment(request.pathValue),
+      },
+    );
+    grepText = result.stdout.toString("utf8");
+  } catch (error) {
+    if (error instanceof ExecFailure && error.code === 1 && !error.timedOut) return [];
+    return undefined;
+  }
   const matches: GrepMatch[] = [];
-  for (const line of (grepText ?? "").split("\n")) {
+  for (const line of grepText.split("\n")) {
     const match = line === "" ? undefined : parseGrepLine(line);
     if (match !== undefined) matches.push(match);
   }
@@ -489,6 +511,11 @@ export async function collectContextPacks(
 
   const diffText = await git(request, [
     "diff",
+    // Local config and attributes are candidate-controlled inputs. Neither may execute a driver.
+    "--no-ext-diff",
+    "--no-textconv",
+    // Keep a gitlink change as one bounded pointer diff regardless of diff.submodule config.
+    "--submodule=short",
     "--no-color",
     "--unified=0",
     request.pair.mergeBase,
@@ -501,6 +528,7 @@ export async function collectContextPacks(
   const { perFile, searched } = planIdentifiers(request.paths, diffStatsByPath(diffText));
   if (searched.size === 0) return packs;
   const matches = await grepMatches(request, searched);
+  if (matches === undefined) return packs;
 
   for (const [path, identifiers] of perFile) {
     // Identifiers past the run-wide union cap were never searched; rendering them would show

@@ -62,6 +62,124 @@ function thread(overrides: Partial<ExistingConversation> = {}): ExistingConversa
   };
 }
 
+/**
+ * The live PR3054 misses that calibrate the disposition-only second band, including the first
+ * stable-bundle finding compared DIRECTLY to its third appearance: once the intermediate is
+ * correctly suppressed it cannot become future dedup memory. `candidateBody` is the sanitized prose
+ * the publisher compares before composition; `existingBody` is passed through the real composer
+ * below so the other side has exactly the wrapper a GitHub comment carries.
+ */
+const STABLE_BUNDLE_ORIGINAL =
+  "Re-introduce validation that a stable `latest` release includes the required portable asset bundle.\n\n" +
+  'When the tag is "latest" and no bundle input is provided, the previous implementation ' +
+  "called `validateStableLatestBundleRequirement` which failed the job. The change removes " +
+  "that check from `resolve-release-portable-assets.mjs` and only adds a comment claiming the " +
+  "requirement is now enforced elsewhere, but no corresponding validation is added in the " +
+  "referenced `release-publish.mjs`. If this script is invoked without going through " +
+  "`release-publish.mjs`, a stable latest release could be published without the four required " +
+  "downloads, violating release policy.";
+
+const DISPOSITION_REGRESSIONS = [
+  {
+    label: "stable-latest bundle requirement",
+    path: "scripts/resolve-release-portable-assets.mjs",
+    candidateStartLine: 179,
+    candidateEndLine: 190,
+    existingStartLine: 179,
+    existingEndLine: 184,
+    existingBody: STABLE_BUNDLE_ORIGINAL,
+    candidateBody:
+      "Re-introduce the stable-latest bundle requirement check.\n\n" +
+      'When `config.tag` is "latest" and no bundle input is provided, ' +
+      "`resolvePortableAssetsManifest` now returns the manifest without failing, allowing a stable " +
+      "`latest` release to be published without the required portable assets. This breaks the " +
+      "contract that a stable release must include all four downloads and can lead to incomplete " +
+      "releases.\n\nAdd back the validation (or an equivalent guard) after " +
+      "`validateBundleInputCompleteness(config)` to abort the process if the bundle is missing for " +
+      "a `latest` tag.",
+  },
+  {
+    label: "missing provenance guard",
+    path: "scripts/lib/portable-release-verification.mjs",
+    candidateStartLine: 128,
+    candidateEndLine: 141,
+    existingStartLine: 128,
+    existingEndLine: 141,
+    existingBody:
+      "Guard against missing provenance fields in runFailures.\n\n" +
+      "The function accesses `manifest.provenance.workflowRunId` and " +
+      "`manifest.provenance.repository` without verifying that `manifest.provenance` exists. If a " +
+      "malformed manifest lacks the `provenance` object, a TypeError is thrown, breaking the " +
+      "verification flow. Adding a check that `manifest.provenance` is a record before " +
+      "dereferencing prevents this crash.",
+    candidateBody:
+      "Add a guard for missing provenance before accessing its fields.\n\n" +
+      "When the evaluation manifest lacks a `provenance` object, `runFailures` accesses " +
+      "`manifest.provenance.workflowRunId` and other properties without checking for existence, " +
+      "causing a TypeError that aborts the verification process instead of returning a controlled " +
+      "failure message.\n\nGuard the presence of `manifest.provenance` (and its required fields) " +
+      "before using them, returning an appropriate failure string if absent.",
+  },
+  {
+    label: "stable-latest bundle requirement without a suppressed-intermediate bridge",
+    path: "scripts/resolve-release-portable-assets.mjs",
+    candidateStartLine: 179,
+    candidateEndLine: 184,
+    existingStartLine: 179,
+    existingEndLine: 184,
+    existingBody: STABLE_BUNDLE_ORIGINAL,
+    candidateBody:
+      "Re-introduce a check that a stable `latest` release includes a portable asset bundle.\n\n" +
+      'When `config.tag` is "latest" and no bundle input is provided, ' +
+      "`resolvePortableAssetsManifest` now returns `config.manifest` (which may be undefined) " +
+      "instead of failing. Other scripts that call this function may proceed with an undefined " +
+      "manifest, leading to runtime errors or publishing a release without the required downloads. " +
+      "The original validation was removed in this change, assuming `release-publish.mjs` will catch " +
+      "the issue, but that does not protect callers that use `resolvePortableAssetsManifest` " +
+      "directly.",
+  },
+] as const;
+
+type DispositionRegression = (typeof DISPOSITION_REGRESSIONS)[number];
+
+function composedRegressionBody(fixture: DispositionRegression): string {
+  return composeFindingBody(fixture.existingBody, markerComment("d".repeat(32)), {
+    path: fixture.path,
+    line: fixture.existingEndLine,
+    severity: "high",
+    category: "bug",
+  });
+}
+
+function regressionCandidate(
+  fixture: DispositionRegression,
+  overrides: Partial<SimilarityCandidate> = {},
+): SimilarityCandidate {
+  return {
+    path: fixture.path,
+    startLine: fixture.candidateStartLine,
+    endLine: fixture.candidateEndLine,
+    body: fixture.candidateBody,
+    ...overrides,
+  };
+}
+
+function regressionThread(
+  fixture: DispositionRegression,
+  overrides: Partial<ExistingConversation> = {},
+): ExistingConversation {
+  return {
+    path: fixture.path,
+    authorLogin: IDENTITY,
+    resolved: true,
+    dispositioned: true,
+    body: composedRegressionBody(fixture),
+    startLine: fixture.existingStartLine,
+    endLine: fixture.existingEndLine,
+    ...overrides,
+  };
+}
+
 describe("findsSimilarOpenConversation", () => {
   it("returns false for an empty existing-thread list", () => {
     expect(findsSimilarOpenConversation(candidate(), [], IDENTITY)).toBe(false);
@@ -278,6 +396,24 @@ describe("existing-side composition stripping", () => {
     );
     expect(found).toBe(true);
   });
+
+  it("strips only known legacy classification headers, not legitimate emphasized prose", () => {
+    const knownLegacy = "**CORRECTNESS · MAJOR**\nAlpha beta gamma delta epsilon";
+    const knownFound = findsSimilarOpenConversation(
+      candidate({ body: "Alpha beta gamma delta epsilon" }),
+      [thread({ body: knownLegacy })],
+      IDENTITY,
+    );
+    expect(knownFound).toBe(true);
+
+    const emphasizedProse = "**GENERAL · GUIDANCE**\nAlpha beta gamma";
+    const proseFound = findsSimilarOpenConversation(
+      candidate({ body: emphasizedProse }),
+      [thread({ body: emphasizedProse })],
+      IDENTITY,
+    );
+    expect(proseFound).toBe(true);
+  });
 });
 
 describe("zero-line anchors", () => {
@@ -361,6 +497,91 @@ describe("findsDispositionedConversation", () => {
       IDENTITY,
     );
     expect(found).toBe(true);
+  });
+
+  it.each(DISPOSITION_REGRESSIONS)(
+    "suppresses the PR3054 $label restatement after its substantive disposition",
+    (fixture) => {
+      expect(
+        findsDispositionedConversation(
+          regressionCandidate(fixture),
+          [regressionThread(fixture)],
+          IDENTITY,
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it("keeps a 0.48 overlap below the disposition band when only 13 tokens are shared", () => {
+    const shared = Array.from({ length: 13 }, (_, index) => `shared${String(index)}`);
+    const candidateOnly = Array.from({ length: 14 }, (_, index) => `candidate${String(index)}`);
+    const existingOnly = Array.from({ length: 14 }, (_, index) => `existing${String(index)}`);
+    const found = findsDispositionedConversation(
+      candidate({ body: [...shared, ...candidateOnly].join(" ") }),
+      [
+        thread({
+          resolved: true,
+          dispositioned: true,
+          body: [...shared, ...existingOnly].join(" "),
+        }),
+      ],
+      IDENTITY,
+    );
+    expect(found).toBe(false);
+  });
+
+  it("keeps 14 shared tokens below the disposition band when their overlap is only 0.42", () => {
+    const shared = Array.from({ length: 14 }, (_, index) => `shared${String(index)}`);
+    const candidateOnly = Array.from({ length: 19 }, (_, index) => `candidate${String(index)}`);
+    const existingOnly = Array.from({ length: 19 }, (_, index) => `existing${String(index)}`);
+    const found = findsDispositionedConversation(
+      candidate({ body: [...shared, ...candidateOnly].join(" ") }),
+      [
+        thread({
+          resolved: true,
+          dispositioned: true,
+          body: [...shared, ...existingOnly].join(" "),
+        }),
+      ],
+      IDENTITY,
+    );
+    expect(found).toBe(false);
+  });
+
+  it("does not apply the PR3054 band to a bare-resolved thread", () => {
+    const fixture = DISPOSITION_REGRESSIONS[0];
+    expect(
+      findsDispositionedConversation(
+        regressionCandidate(fixture),
+        [regressionThread(fixture, { dispositioned: false })],
+        IDENTITY,
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["another path", { path: "scripts/another-release-path.mjs" }],
+    ["another author", { authorLogin: "contributor" }],
+  ] as const)("does not apply the PR3054 band to %s", (_label, override) => {
+    const fixture = DISPOSITION_REGRESSIONS[0];
+    expect(
+      findsDispositionedConversation(
+        regressionCandidate(fixture),
+        [regressionThread(fixture, override)],
+        IDENTITY,
+      ),
+    ).toBe(false);
+  });
+
+  it("requires real interval overlap for the PR3054 band, not the ordinary line tolerance", () => {
+    const fixture = DISPOSITION_REGRESSIONS[0];
+    expect(
+      findsDispositionedConversation(
+        regressionCandidate(fixture, { startLine: 185, endLine: 190 }),
+        [regressionThread(fixture)],
+        IDENTITY,
+      ),
+    ).toBe(false);
   });
 
   // The exact case Keiko-for-Quality#38 protects and #64 must not regress: a resolved thread with

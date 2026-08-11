@@ -91,8 +91,9 @@ Summarize the expected consumer impact for the epic. Child issues and PRs own th
 - [ ] Required GitHub checks (`verify`, `engine pin`) are green on implementation PRs before merge.
 - [ ] Reuse, extension, or generalization decisions are recorded for every implemented child issue.
 - [ ] Final closure evidence is recorded in the epic or final child issue.
-- [ ] Known limitations and follow-ups are documented in the README's Known limitations section or
-      a follow-up issue.
+- [ ] Known limitations and follow-ups are documented in
+      [Operations](https://github.com/oscharko-dev/Keiko-for-Quality/blob/dev/docs/operations.md#known-limitations)
+      or a follow-up issue.
 
 ## Expected Verification
 

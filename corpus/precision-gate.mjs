@@ -45,7 +45,7 @@ function argValue(name) {
 }
 
 const repo = argValue("--repo");
-if (repo === undefined || !repo.includes("/")) usage("--repo <owner/name> is required");
+if (repo?.includes("/") !== true) usage("--repo <owner/name> is required");
 const [owner, name] = repo.split("/");
 const identity = argValue("--identity") ?? DEFAULT_IDENTITY;
 const thresholdRaw = argValue("--threshold");

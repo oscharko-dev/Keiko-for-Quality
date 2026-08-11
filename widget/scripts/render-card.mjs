@@ -20,17 +20,20 @@ if (!owner || !repo || !outDir || !token) {
   process.exit(2);
 }
 
-const { renderCard } = await import("../src/card.ts");
+const { formatPercentage, renderCard } = await import("../src/card.ts");
 const { collectCardData } = await import("../src/collect.ts");
+const { createGitHubRequestBudget } = await import("../src/request-budget.ts");
 
-const data = await collectCardData(owner, repo, token, fetch, Date.now());
+const requests = createGitHubRequestBudget(fetch);
+const data = await collectCardData(owner, repo, token, requests, Date.now());
 await mkdir(join(outDir, owner), { recursive: true });
 await writeFile(join(outDir, owner, `${repo}.svg`), renderCard(data, "dark"));
 await writeFile(join(outDir, owner, `${repo}-light.svg`), renderCard(data, "light"));
 
 const shown = (v) => (v === undefined ? "—" : String(v));
-const actedOn = data.actedOnPct === undefined ? "—" : `${Math.round(data.actedOnPct)}%`;
 console.log(
   `${owner}/${repo}: runs30d=${shown(data.runs30d)} findings=${shown(data.findings)} ` +
-    `actedOn=${actedOn} outcome=${shown(data.outcome)}`,
+    `resolved=${formatPercentage(data.resolvedPct)} openThreads=${shown(data.openThreads)} ` +
+    `prsWithFindings=${shown(data.prsWithFindings)} runsOk=${formatPercentage(data.runSuccessPct)} ` +
+    `runStatus=${shown(data.runStatus)}`,
 );

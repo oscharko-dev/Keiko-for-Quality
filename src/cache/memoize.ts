@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import type { RuntimeConfig } from "../config/runtime.js";
 import { repoPath, type Sha256 } from "../core/brands.js";
 import type { EngineFinding } from "../engine/result.js";
@@ -70,11 +72,12 @@ function pathSetToken(item: InventoryItem): string {
  * renamed-away neighbour can change an unrelated file's import surface regardless of whether that
  * neighbour was itself reviewed content. That reasoning proved too wide in practice: a lockfile
  * refresh, a generated-dist rebuild, or an excluded-docs edit invalidated every memoized verdict in
- * the store, even though none of those paths are ever shown to the model — not on the run that wrote
- * the cache entry, and not on the run that would replay it. A path the model never sees cannot be
- * the "unrelated file's import surface" this digest exists to catch (see `review-cache.ts`'s
- * top-of-file comment for that risk in full), so it is not review context and must not move the
- * bound.
+ * the store. Those paths are not members of the reviewable set and therefore must not widen this
+ * global set bound merely by existing. Single-shot generation can still receive one as a bounded
+ * companion: that exact prompt contribution is folded into the affected path's per-path context
+ * digest, and an empty verdict binds that digest together with this whole reviewable-set digest.
+ * Thus prompt context invalidates only entries that actually depended on it instead of repricing
+ * the entire store.
  *
  * `item.reviewable` is the same predicate `buildInventory` (`inventory/inventory.ts`) folds into
  * `Inventory.reviewablePaths` and `engine/settle.ts` measures coverage against — not a new,
@@ -94,10 +97,31 @@ function pathSetToken(item: InventoryItem): string {
  * schema bump (`SUPPORTED_STORE_SCHEMA` is unchanged). The store self-heals forward from there:
  * every entry written from this run on carries the new digest, and replay against those is sound
  * again immediately.
+ *
+ * `renderedChangeIntent` is the exact bounded, framed PR-purpose block the model receives.
+ * `guidelineContextIdentity` binds configured guideline contents read from the exact merge base.
+ * Their digests join the path tokens so identical code reviewed for a materially different purpose
+ * or repository rule cannot reuse the earlier generation verdict. Empty values keep the historical
+ * path-only identity for local reviews with neither contribution.
  */
-export function computePrPathSetDigest(inventory: Inventory): Sha256 {
+export function computePrPathSetDigest(
+  inventory: Inventory,
+  renderedChangeIntent = "",
+  guidelineContextIdentity = "",
+): Sha256 {
   const reviewable = inventory.items.filter((item) => item.reviewable);
-  return computePathSetDigest(reviewable.map(pathSetToken));
+  const tokens = reviewable.map(pathSetToken);
+  if (renderedChangeIntent !== "") {
+    const intentDigest = createHash("sha256").update(renderedChangeIntent, "utf8").digest("hex");
+    tokens.push(`@change-intent:${intentDigest}`);
+  }
+  if (guidelineContextIdentity !== "") {
+    const guidelineDigest = createHash("sha256")
+      .update(guidelineContextIdentity, "utf8")
+      .digest("hex");
+    tokens.push(`@guideline-context:${guidelineDigest}`);
+  }
+  return computePathSetDigest(tokens);
 }
 
 export interface MemoLookupResult {
@@ -130,21 +154,50 @@ const EMPTY_LOOKUP: MemoLookupResult = {
  * review itself. Memoization is a pure optimization layer; nothing about it may gate completeness.
  *
  * `pathSetDigest` (v0.10.0, issue #50) is this run's reviewed changed-path-set digest,
- * computed once by the caller via `computePrPathSetDigest` so every path in this loop is compared
- * against the exact same value. A stored entry only counts as a hit when its own `prPathSetDigest`
- * equals this one; otherwise it is a content match this run refuses to replay, counted in
- * `contextInvalidated` rather than `hits`.
+ * computed once by the caller via `computePrPathSetDigest`. It is the agentic replay stamp and one
+ * component of a staged empty-verdict stamp; staged positive findings instead use their per-path
+ * prompt-context digest. A stored entry only counts as a hit when `contextMatches` reconstructs
+ * the same stamp under this run's inputs; otherwise it is a content match this run refuses to
+ * replay, counted in `contextInvalidated` rather than `hits`.
  */
-/** Whether a stored entry's context stamp matches this run's expectation for `path` — the
- *  per-path override when one exists, the whole-set scalar otherwise. Split from `lookupMemoized`
- *  purely for its complexity budget. */
+/** Domain tag for the empty-verdict composite; prevents either scalar from sharing its namespace. */
+const EMPTY_VERDICT_CONTEXT_DOMAIN = "keiko-for-quality.cache.empty-verdict-context/v1";
+
+/**
+ * The replay stamp for one cache entry.
+ *
+ * A positive entry is a reusable hypothesis, so single-shot mode may bind it narrowly to the
+ * per-path prompt context that generated it: the current verifier can still overturn the finding.
+ * An empty entry has no hypothesis to verify. When single-shot supplies a per-path context, bind
+ * that negative verdict to BOTH the whole reviewable path set and the exact prompt context. The
+ * domain tag keeps this composite disjoint from either scalar even though all three values share
+ * the same `Sha256` shape. Agentic runs supply no per-path context and deliberately retain the
+ * historical whole-set scalar.
+ *
+ * Lookup and entry construction both call this function. Keeping the composition in one place is
+ * load-bearing: a write-only or lookup-only change would turn every affected entry into a silent
+ * permanent miss.
+ */
+function cacheContextDigest(
+  pathSetDigest: Sha256,
+  contextDigest: Sha256 | undefined,
+  findings: readonly EngineFinding[],
+): Sha256 {
+  if (findings.length > 0) return contextDigest ?? pathSetDigest;
+  if (contextDigest === undefined) return pathSetDigest;
+  const material = [EMPTY_VERDICT_CONTEXT_DOMAIN, pathSetDigest, contextDigest].join("\0");
+  return createHash("sha256").update(material, "utf8").digest("hex") as Sha256;
+}
+
+/** Whether a stored entry's context stamp matches this run's expectation for `path`. */
 function contextMatches(
   entry: CacheEntry,
   path: string,
   pathSetDigest: Sha256,
   contextDigests: ReadonlyMap<string, Sha256> | undefined,
 ): boolean {
-  return entry.prPathSetDigest === (contextDigests?.get(path) ?? pathSetDigest);
+  const expected = cacheContextDigest(pathSetDigest, contextDigests?.get(path), entry.findings);
+  return entry.prPathSetDigest === expected;
 }
 
 export function lookupMemoized(
@@ -157,8 +210,9 @@ export function lookupMemoized(
   // Per-path context expectation (v0.20.1): in single-shot mode a file's verdict depends on its
   // companion group's diff identity, not on the whole pull request's path-set shape — see
   // `companions.ts` for the measurement (89% of a live window's spend went into whole-set
-  // invalidations) and for why the agentic path keeps the conservative scalar. Absent path → the
-  // scalar `pathSetDigest` applies, so the agentic path is byte-identical to before.
+  // invalidations) and for why the agentic path keeps the conservative scalar. A staged empty
+  // verdict composes the per-path value with `pathSetDigest`; an absent map or path keeps the
+  // scalar, so the agentic path is byte-identical to before.
   contextDigests?: ReadonlyMap<string, Sha256>,
 ): MemoLookupResult {
   if (store === undefined || engineDigest === undefined) return EMPTY_LOOKUP;
@@ -212,8 +266,9 @@ export function combinedExcludes(
  * Merges cache-hit findings into the findings the engine itself produced this run.
  *
  * A hit's findings are exactly as untrusted on replay as they were the run they were first
- * produced: they still pass through the existing publisher path — sanitization and marker-based
- * deduplication run again — so nothing here treats a cached finding as pre-cleared for publication.
+ * produced: they still pass through the current truth/falsifier, sanitization, PR-wide ranking,
+ * and marker-based deduplication, so nothing here treats a cached finding as pre-cleared for
+ * publication. The cache saves generation only.
  *
  * Every replayed finding's `path` is remapped to the LOOKUP key — the current path `hits` is keyed
  * by (see `lookupMemoized`) — rather than trusted from the stored entry itself. This is required,
@@ -246,13 +301,14 @@ export interface NewEntryInputs {
   readonly engineDigest: Sha256;
   /**
    * This run's reviewed path-set digest (v0.10.0, issue #50), computed once by the caller
-   * via `computePrPathSetDigest` — the same value `lookupMemoized` was given, so an entry this run
-   * writes is stamped with exactly the digest a later run with an unchanged path set will match.
+   * via `computePrPathSetDigest` — the same value `lookupMemoized` was given, so write and lookup
+   * derive the same scalar or staged-empty composite under identical context.
    */
   readonly pathSetDigest: Sha256;
   /** Same per-path override as `lookupMemoized`'s parameter of this name, and it must be the SAME
-   *  map the lookup used: an entry written under one context definition and read under another
-   *  would never match itself. */
+   *  map the lookup used. Positive hypotheses use the narrow per-path value. Negative single-shot
+   *  entries bind its composite with the whole path set; negative agentic entries retain the
+   *  historical whole-set scalar. */
   readonly contextDigests?: ReadonlyMap<string, Sha256>;
   readonly config: RuntimeConfig;
 }
@@ -300,20 +356,28 @@ export function buildNewEntries(inputs: NewEntryInputs): CacheEntry[] {
       model,
       proto,
     );
+    const pathFindings = byPath.get(path) ?? [];
     entries.push({
       key,
       baseBlob: item.baseBlob,
       headBlob: item.headBlob,
       ruleDigest: inputs.ruleDigest,
       engineDigest: inputs.engineDigest,
-      prPathSetDigest: inputs.contextDigests?.get(path) ?? inputs.pathSetDigest,
+      // Positive hypotheses use their narrow prompt-context identity. Empty single-shot results
+      // cannot be reverified, so they bind that identity together with the whole reviewed path set;
+      // agentic results have no per-path identity and retain the historical scalar.
+      prPathSetDigest: cacheContextDigest(
+        inputs.pathSetDigest,
+        inputs.contextDigests?.get(path),
+        pathFindings,
+      ),
       // Stamped from the constant rather than passed in: only this build knows which publication
       // contract produced these findings, and an entry that lied about it would be replayed by a
       // build whose sanitizer disagrees with the body it stored.
       semantics: PUBLICATION_SEMANTICS,
       modelId: model,
       protocol: proto,
-      findings: byPath.get(path) ?? [],
+      findings: pathFindings,
     });
   }
   return entries;

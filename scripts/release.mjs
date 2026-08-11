@@ -2,6 +2,7 @@
 // The release procedure, as a program rather than as something to remember.
 //
 //   node scripts/release.mjs prep    --version 0.21.3
+//   node scripts/release.mjs attest  --version 0.21.3
 //   node scripts/release.mjs release --version 0.21.3
 //   node scripts/release.mjs publish --version 0.21.3 --sha <main-squash-sha>
 //   node scripts/release.mjs repin   --version 0.21.3 --sha <main-squash-sha>
@@ -24,11 +25,20 @@ import {
   bumpConsumerPin,
   bumpQuickstartPin,
   findGateEvidence,
+  gateEvidenceIdentity,
   notesFromCommitMessage,
   parseVersion,
+  planReleaseTag,
   reconcileTagsAndReleases,
+  releaseDevBindingMessage,
   sortVersionTags,
   tagFor,
+  validateCommittedEvidenceDelta,
+  validateGateEvidence,
+  validatePublishTarget,
+  validatePrepEvidenceChanges,
+  validateQualityEvidence,
+  validateRepinTarget,
 } from "./release-lib.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -95,6 +105,27 @@ function requireCleanWorktree() {
 }
 
 /**
+ * `attest` is the one phase that deliberately starts with new evidence files present. All four
+ * measurements run while HEAD is clean, then write only their public reports without changing
+ * that HEAD. This guard permits only those new, version-scoped artifacts before attestation.
+ */
+function requireOnlyReleaseEvidenceChanges(version) {
+  const changes = run("git", ["status", "--porcelain=v1", "--untracked-files=all"])
+    .split("\n")
+    .filter((line) => line !== "");
+  const validation = validatePrepEvidenceChanges(changes, version);
+  if (changes.length === 0) {
+    fail("attest requires freshly generated, uncommitted release evidence from the current HEAD");
+  }
+  if (!validation.valid) {
+    fail(
+      `attest permits only new v${version} evidence files before its commit (found ` +
+        `${validation.invalid.join(", ")})`,
+    );
+  }
+}
+
+/**
  * `npm run verify`, never piped.
  *
  * A shell pipeline exits with its LAST command's status, so `npm run verify | tail` reads a red
@@ -109,22 +140,92 @@ function verifyOrDie() {
   }
 }
 
-function requireGateEvidence(version) {
+function gateReportTexts(version) {
   const names = readdirSync(join(ROOT, "corpus", "evidence"));
   const found = findGateEvidence(names, version);
+  if (found.ambiguous.length > 0) {
+    fail(`gate evidence for v${version} is ambiguous: ${found.ambiguous.join("; ")}`);
+  }
   if (!found.complete) {
     fail(
       `gate evidence for v${version} is missing (seed: ${found.seed ?? "—"}, completion: ` +
-        `${found.completion ?? "—"}). Run both gates on this tree and commit their reports.`,
+        `${found.completion ?? "—"}, qualification: ${found.qualification ?? "—"}, historical: ` +
+        `${found.historicalReplay ?? "—"}). Run all four measurements on this tree.`,
     );
   }
-  return found;
+  return {
+    found,
+    seed: readFileSync(join(ROOT, "corpus", "evidence", found.seed), "utf8"),
+    completion: readFileSync(join(ROOT, "corpus", "evidence", found.completion), "utf8"),
+    qualificationPath: join(ROOT, "corpus", "evidence", found.qualification),
+    historicalReplayPath: join(ROOT, "corpus", "evidence", found.historicalReplay),
+  };
+}
+
+function packageVersion() {
+  const packageVersion = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
+  if (typeof packageVersion !== "string") fail("package.json has no valid version");
+  return packageVersion;
+}
+
+/** The version recorded by the commit being released, read from Git rather than the worktree. */
+function packageVersionAtCommit(sha) {
+  const manifest = tryRun("git", ["show", `${sha}:package.json`]);
+  if (manifest === undefined) return undefined;
+  try {
+    const version = JSON.parse(manifest).version;
+    return typeof version === "string" ? version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function requireGateEvidence(version, expectedHead) {
+  const reports = gateReportTexts(version);
+  const validation = validateGateEvidence(reports.seed, reports.completion, {
+    version: packageVersion(),
+    head: expectedHead,
+  });
+  if (!validation.valid) {
+    fail(`gate evidence for v${version} is not releasable: ${validation.failures.join(", ")}`);
+  }
+  return reports;
+}
+
+function readJsonEvidence(path, label) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    fail(`${label} evidence is not valid JSON`);
+  }
+}
+
+function requireQualityEvidence(reports, expectedHead) {
+  const expected = {
+    version: packageVersion(),
+    head: expectedHead,
+    tree: run("git", ["rev-parse", `${expectedHead}^{tree}`]).trim(),
+  };
+  const validation = validateQualityEvidence(
+    readJsonEvidence(reports.qualificationPath, "qualification"),
+    readJsonEvidence(reports.historicalReplayPath, "historical replay"),
+    expected,
+  );
+  if (!validation.valid) {
+    fail(`quality evidence is not releasable: ${validation.failures.join(", ")}`);
+  }
+  try {
+    run("node", [join(ROOT, "scripts", "check-qualification.mjs"), reports.qualificationPath], {
+      inherit: true,
+    });
+  } catch {
+    fail("qualification promotion thresholds are not green");
+  }
 }
 
 function phasePrep() {
   const version = requireVersion();
   requireCleanWorktree();
-  requireGateEvidence(version);
 
   run("npm", ["version", "--no-git-tag-version", version]);
   const readmePath = join(ROOT, "README.md");
@@ -140,20 +241,94 @@ function phasePrep() {
     "commit",
     "-S",
     "-m",
-    `release: v${version} prep — version, quickstart comment, release-shaped gate evidence`,
+    `release: v${version} candidate — version, quickstart comment, verified bundle`,
   ]);
-  console.log(`prep committed for v${version}. Open the prep PR into dev, then run: release`);
+  console.log(
+    `candidate committed for v${version}. Land it on dev, run all four measurements on that clean ` +
+      "commit, redact the private qualification OCR_REPORT with qualification:evidence, leave " +
+      "the four public reports uncommitted, then run: attest",
+  );
+}
+
+function phaseAttest() {
+  const version = requireVersion();
+  const candidateHead = run("git", ["rev-parse", "HEAD"]).trim();
+  const reports = requireGateEvidence(version, candidateHead);
+  requireQualityEvidence(reports, candidateHead);
+  requireOnlyReleaseEvidenceChanges(version);
+  verifyOrDie();
+  run("git", ["add", "-A"]);
+  run("git", [
+    "commit",
+    "-S",
+    "-m",
+    `release: v${version} evidence — gates bind ${candidateHead.slice(0, 12)}`,
+  ]);
+  console.log(
+    `evidence committed for v${version}. Land this evidence-only PR on dev, then run: release`,
+  );
+}
+
+function requireCommittedGateEvidence(version, targetRef, candidateAncestorRef = targetRef) {
+  const reports = gateReportTexts(version);
+  const seed = gateEvidenceIdentity(reports.seed).reviewer;
+  const completion = gateEvidenceIdentity(reports.completion).reviewer;
+  if (seed === undefined || completion === undefined || seed !== completion) {
+    fail("committed gate reports do not agree on one clean candidate commit");
+  }
+  const candidate = tryRun("git", ["rev-parse", "--verify", `${seed}^{commit}`])?.trim();
+  if (candidate?.startsWith(seed) !== true) {
+    fail(`gate candidate ${seed} is not an unambiguous commit in this repository`);
+  }
+  requireGateEvidence(version, candidate);
+  requireQualityEvidence(reports, candidate);
+  if (
+    tryRun("git", ["merge-base", "--is-ancestor", candidate, candidateAncestorRef]) === undefined
+  ) {
+    fail(`gate candidate ${candidate} is not an ancestor of ${candidateAncestorRef}`);
+  }
+  const delta = run("git", ["diff", "--name-only", candidate, targetRef])
+    .split("\n")
+    .filter((path) => path !== "");
+  const deltaValidation = validateCommittedEvidenceDelta(
+    delta,
+    [
+      reports.found.seed,
+      reports.found.completion,
+      reports.found.qualification,
+      reports.found.historicalReplay,
+    ],
+    version,
+  );
+  if (!deltaValidation.valid) {
+    fail(
+      `exactly the four selected v${version} evidence files may differ between gate candidate ` +
+        `${candidate} and ${targetRef}`,
+    );
+  }
 }
 
 function phaseRelease() {
   const version = requireVersion();
   requireCleanWorktree();
   run("git", ["fetch", "origin", "main", "dev"]);
+  const localTree = run("git", ["rev-parse", "HEAD^{tree}"]).trim();
+  const devCommit = run("git", ["rev-parse", "origin/dev^{commit}"]).trim();
+  const devTree = run("git", ["rev-parse", "origin/dev^{tree}"]).trim();
+  if (localTree !== devTree) fail("run release from the exact current origin/dev tree");
+  requireCommittedGateEvidence(version, "origin/dev");
   run("git", ["checkout", "-b", `release/v${version}`, "origin/main"]);
   run("git", ["rm", "-rq", "."]);
   run("git", ["checkout", "origin/dev", "--", "."]);
   run("git", ["add", "-A"]);
-  run("git", ["commit", "-S", "-m", `release: v${version}`]);
+  run("git", [
+    "commit",
+    "-S",
+    "-m",
+    `release: v${version}`,
+    "-m",
+    releaseDevBindingMessage({ commit: devCommit, tree: devTree }),
+  ]);
 
   // dev's tree, whole — asserted, never assumed. A release that is not byte-identical to what the
   // gates ran against is a release with no evidence.
@@ -167,21 +342,112 @@ function phaseRelease() {
   );
 }
 
+function localTagObject(tag) {
+  return tryRun("git", ["rev-parse", "--verify", `refs/tags/${tag}`])?.trim();
+}
+
+/** The remote tag object and its peeled commit, without changing any local ref. */
+function remoteTagIdentity(tag) {
+  const output = tryRun("git", [
+    "ls-remote",
+    "--tags",
+    "origin",
+    `refs/tags/${tag}`,
+    `refs/tags/${tag}^{}`,
+  ]);
+  if (output === undefined) fail(`could not inspect ${tag} on origin`);
+  let remoteTagObject;
+  let remoteTagCommit;
+  for (const line of output.split("\n")) {
+    const [oid, ref] = line.split("\t");
+    if (ref === `refs/tags/${tag}`) remoteTagObject = oid;
+    if (ref === `refs/tags/${tag}^{}`) remoteTagCommit = oid;
+  }
+  return { remoteTagObject, remoteTagCommit };
+}
+
+function requireSignedReleaseTag(tag, version, sha) {
+  const validation = validateRepinTarget({
+    version,
+    sha,
+    packageVersion: packageVersionAtCommit(sha),
+    tagType: tryRun("git", ["cat-file", "-t", `refs/tags/${tag}`])?.trim(),
+    tagCommit: tryRun("git", ["rev-parse", "--verify", `${tag}^{commit}`])?.trim(),
+    tagSignatureValid: tryRun("git", ["verify-tag", tag]) !== undefined,
+  });
+  if (!validation.valid) {
+    fail(`${tag} is not the signed release requested: ${validation.failures.join(", ")}`);
+  }
+}
+
+/**
+ * Creates the tag once, or safely resumes after either local creation or the remote push.
+ * A divergent/lightweight/unsigned tag is never repaired or replaced: it stops the release.
+ */
+function ensurePublishedTag(tag, version, sha) {
+  const remoteBefore = remoteTagIdentity(tag);
+  const localBefore = localTagObject(tag);
+  const plan = planReleaseTag({ sha, localTagObject: localBefore, ...remoteBefore });
+  if (!plan.valid) fail(`${tag} conflicts with the requested release: ${plan.failures.join(", ")}`);
+
+  if (plan.action === "fetch_existing") {
+    if (tryRun("git", ["fetch", "origin", `refs/tags/${tag}:refs/tags/${tag}`]) === undefined) {
+      fail(`could not fetch existing release tag ${tag}`);
+    }
+  } else if (plan.action === "create_and_push") {
+    run("git", ["tag", "-s", tag, sha, "-m", `${tag} — see the release notes`]);
+  }
+
+  requireSignedReleaseTag(tag, version, sha);
+  if (plan.action === "create_and_push" || plan.action === "push_existing") {
+    run("git", ["push", "origin", tag]);
+  }
+
+  const localAfter = localTagObject(tag);
+  const remoteAfter = remoteTagIdentity(tag);
+  const confirmed = planReleaseTag({ sha, localTagObject: localAfter, ...remoteAfter });
+  if (!confirmed.valid || confirmed.action !== "reuse_existing") {
+    fail(`${tag} was not confirmed byte-for-byte on origin after publication`);
+  }
+}
+
+function githubReleaseExists(tag) {
+  const raw = tryRun("gh", ["release", "view", tag, `--repo=${REPO}`, "--json=tagName"]);
+  if (raw === undefined) return false;
+  try {
+    return JSON.parse(raw).tagName === tag;
+  } catch {
+    fail(`gh returned malformed release metadata for ${tag}`);
+  }
+}
+
 function phasePublish() {
   const version = requireVersion();
   const sha = requireSha();
   const tag = tagFor(version);
-  run("git", ["fetch", "origin", "main"]);
+  requireCleanWorktree();
+  run("git", ["fetch", "origin", "main", "dev"]);
 
-  // Everything that can be checked is checked BEFORE the first write. A bad SHA used to reach
-  // `git tag` and abort there with a stack trace, which tells an operator about a spawn instead
-  // of about the argument they got wrong — and leaves the question of what was already written.
+  // Everything that can be checked is checked BEFORE the first write. The worktree may be the
+  // release branch or main, but its complete tree must be the squash commit's exact tree so the
+  // evidence read below comes from what is about to be tagged.
   if (tryRun("git", ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]) === undefined) {
     fail(`${sha} is not a commit this checkout can resolve — fetch it, or check the SHA`);
   }
-  if (tryRun("git", ["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`]) !== undefined) {
-    fail(`${tag} already exists here — a released version is never re-tagged`);
+  const targetValidation = validatePublishTarget({
+    version,
+    sha,
+    originMainSha: run("git", ["rev-parse", "origin/main"]).trim(),
+    packageVersion: packageVersionAtCommit(sha),
+  });
+  if (!targetValidation.valid) {
+    fail(`publish target is not releasable: ${targetValidation.failures.join(", ")}`);
   }
+  const localTree = run("git", ["rev-parse", "HEAD^{tree}"]).trim();
+  const releaseTree = run("git", ["rev-parse", `${sha}^{tree}`]).trim();
+  if (localTree !== releaseTree) fail("run publish from the exact release tree being tagged");
+  requireCommittedGateEvidence(version, sha, "origin/dev");
+
   const message = tryRun("git", ["log", "-1", "--format=%B", sha]);
   if (message === undefined) fail(`could not read the commit message of ${sha}`);
   const notes = notesFromCommitMessage(message);
@@ -189,22 +455,28 @@ function phasePublish() {
     fail(`the commit message of ${sha} has no subject line to title the release with`);
   }
 
-  run("git", ["tag", "-s", tag, sha, "-m", `${tag} — see the release notes`]);
-  run("git", ["push", "origin", tag]);
-  // The step nothing fails without, which is exactly why it is here and not in a checklist.
-  // `--flag=value` rather than `--flag value`: the joined form cannot be re-read as an option,
-  // whatever the commit subject starts with. `execFileSync` already keeps a shell out of it, so
-  // this is about gh's own argument parser, not about quoting.
-  run("gh", [
-    "release",
-    "create",
-    tag,
-    `--repo=${REPO}`,
-    "--verify-tag",
-    "--latest",
-    `--title=${notes.title}`,
-    `--notes=${notes.body}`,
-  ]);
+  ensurePublishedTag(tag, version, sha);
+  // The step nothing fails without. If tag publication succeeded and GitHub was transiently down,
+  // the next invocation reuses the verified tag and resumes here rather than attempting to retag.
+  if (!githubReleaseExists(tag)) {
+    try {
+      run("gh", [
+        "release",
+        "create",
+        tag,
+        `--repo=${REPO}`,
+        "--verify-tag",
+        "--latest",
+        `--title=${notes.title}`,
+        `--notes=${notes.body}`,
+      ]);
+    } catch {
+      fail(
+        `${tag} is safely published, but its GitHub Release could not be created; retry the same ` +
+          "publish command",
+      );
+    }
+  }
   phaseCheck();
   console.log(`${tag} tagged, released, and reconciled. Next: repin --sha ${sha}`);
 }
@@ -212,7 +484,20 @@ function phasePublish() {
 function phaseRepin() {
   const version = requireVersion();
   const sha = requireSha();
+  const tag = tagFor(version);
   requireCleanWorktree();
+  const remote = remoteTagIdentity(tag);
+  const plan = planReleaseTag({ sha, localTagObject: localTagObject(tag), ...remote });
+  if (!plan.valid || !["fetch_existing", "reuse_existing"].includes(plan.action)) {
+    fail(`${tag} is not the published remote release for ${sha}`);
+  }
+  if (
+    plan.action === "fetch_existing" &&
+    tryRun("git", ["fetch", "origin", `refs/tags/${tag}:refs/tags/${tag}`]) === undefined
+  ) {
+    fail(`could not fetch the published ${tag} tag from origin`);
+  }
+  requireSignedReleaseTag(tag, version, sha);
   const workflowPath = join(ROOT, ".github", "workflows", "self-review.yml");
   const bumped = bumpConsumerPin(readFileSync(workflowPath, "utf8"), sha, version);
   if (bumped.uses === 0) fail("no pinned uses: line found in self-review.yml");
@@ -281,6 +566,7 @@ function phaseCheck() {
 
 const PHASES = {
   prep: phasePrep,
+  attest: phaseAttest,
   release: phaseRelease,
   publish: phasePublish,
   repin: phaseRepin,
@@ -290,7 +576,8 @@ const PHASES = {
 const phase = PHASES[process.argv[2] ?? ""];
 if (phase === undefined) {
   console.error(
-    "usage: node scripts/release.mjs prep|release|publish|repin|check [--version X.Y.Z] [--sha <40-hex>]",
+    "usage: node scripts/release.mjs prep|attest|release|publish|repin|check " +
+      "[--version X.Y.Z] [--sha <40-hex>]",
   );
   process.exit(2);
 }

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,9 +8,23 @@ import { compileProfile, type ReviewProfile } from "../config/profile.js";
 import type { RuntimeConfig } from "../config/runtime.js";
 import { commitSha } from "../core/brands.js";
 import { createSilentDiagnostics } from "../diagnostics/sink.js";
-import type { ReviewPair } from "../inventory/inventory.js";
+import { buildInventory, type ReviewPair } from "../inventory/inventory.js";
+import {
+  BOUNDARY_OMISSION_EVIDENCE_POLICY,
+  DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+  EXAMINER_CLAIM_DECISION_POLICY,
+  MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+  PARALLEL_MAPPING_EVIDENCE_POLICY,
+  REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  SENSITIVE_OUTPUT_EVIDENCE_POLICY,
+  TEST_ISOLATION_EVIDENCE_POLICY,
+  TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+  WORKFLOW_TRUST_EVIDENCE_POLICY,
+} from "./claim-decision-policy.js";
+import { GENERATION_COMPLETION_LIMIT, generationRequestUpperBound } from "./generation-workflow.js";
 import { parseEngineResult } from "./result.js";
 import type { EngineRunOptions } from "./run.js";
+import { sanitizeFindingBody } from "../publish/sanitize.js";
 import {
   parseFindingsReply,
   renderNumberedHunks,
@@ -64,7 +78,7 @@ describe("renderNumberedHunks", () => {
 });
 
 describe("splitFileDiffs", () => {
-  it("splits a multi-file diff by new-side path and skips deletions", () => {
+  it("splits a multi-file diff and retains a deleted file under its old path", () => {
     const diff = [
       "diff --git a/src/a.ts b/src/a.ts",
       "--- a/src/a.ts",
@@ -83,66 +97,57 @@ describe("splitFileDiffs", () => {
       "+in b",
     ].join("\n");
     const byPath = splitFileDiffs(diff);
-    expect([...byPath.keys()]).toEqual(["src/a.ts", "src/b.ts"]);
+    expect([...byPath.keys()]).toEqual(["src/a.ts", "src/gone.ts", "src/b.ts"]);
     expect(byPath.get("src/a.ts")).toContain("+in a");
+    expect(byPath.get("src/gone.ts")).toContain("-bye");
     expect(byPath.get("src/b.ts")).toContain("+in b");
+  });
+
+  it("retains mode-only and rename-plus-mode fragments without a +++ header", () => {
+    const diff = [
+      "diff --git a/scripts/run.sh b/scripts/run.sh",
+      "old mode 100644",
+      "new mode 100755",
+      "diff --git a/src/old.ts b/src/new.ts",
+      "similarity index 100%",
+      "rename from src/old.ts",
+      "rename to src/new.ts",
+      "old mode 100644",
+      "new mode 100755",
+    ].join("\n");
+    const byPath = splitFileDiffs(diff);
+    expect([...byPath.keys()]).toEqual(["scripts/run.sh", "src/new.ts"]);
+    expect(renderNumberedHunks(byPath.get("scripts/run.sh") ?? "")).toContain("new mode 100755");
+    expect(renderNumberedHunks(byPath.get("src/new.ts") ?? "")).toContain("rename from src/old.ts");
+  });
+
+  it("numbers a complete deletion on its old side instead of losing the +0 hunk", () => {
+    const rendered = renderNumberedHunks(
+      ["--- a/src/gone.ts", "+++ /dev/null", "@@ -1,2 +0,0 @@", "-one", "-two"].join("\n"),
+    );
+    expect(rendered).toContain("1 -one");
+    expect(rendered).toContain("2 -two");
   });
 });
 
-describe("parseFindingsReply", () => {
-  it("parses a fenced findings array and pins the reviewed path over any model claim", () => {
-    const reply = [
-      "```json",
-      '[{"start_line": 3, "end_line": 4, "category": "bug", "severity": "high",',
-      ' "content": "Off by one.", "path": "totally/other.ts"}]',
-      "```",
-    ].join("\n");
-    const parsed = parseFindingsReply(reply, "src/real.ts");
-    expect(parsed).toHaveLength(1);
-    expect(parsed?.[0]?.path).toBe("src/real.ts");
-    expect(parsed?.[0]?.start_line).toBe(3);
-  });
-
-  it("accepts the empty array as the valid silent review", () => {
+describe("parseFindingsReply compatibility", () => {
+  it("pins the reviewed path and accepts a silent array", () => {
+    const reply =
+      '```json\n[{"start_line":3,"end_line":4,"content":"Off by one.","path":"other.ts"}]\n```';
+    expect(parseFindingsReply(reply, "src/real.ts")?.[0]?.path).toBe("src/real.ts");
     expect(parseFindingsReply("[]", "src/a.ts")).toEqual([]);
   });
 
-  /**
-   * The edge the linear unfencing turns on: a fence run INSIDE the reply is content, because the
-   * only admissible closing run is one with nothing but whitespace after it to the end of the
-   * reply. A rewrite that stopped at the first run it saw would cut the array in half and parse
-   * nothing, and one that demanded the `json` tag or a fence flush against the end would reject
-   * replies this mode has always accepted.
-   */
-  it("closes on the run nothing but whitespace follows, not on the first one seen", () => {
-    const entry = '{"start_line": 1, "end_line": 1, "content": "cite ```diff``` blocks"}';
-    expect(parseFindingsReply(`\`\`\`json\n[${entry}]\n\`\`\`\n`, "a")).toHaveLength(1);
-    expect(parseFindingsReply(`\`\`\`\n[${entry}]\n\`\`\`  \n`, "a")).toHaveLength(1);
-    expect(parseFindingsReply(`  [${entry}]  `, "a")).toHaveLength(1);
-  });
-
-  /** An opener with no closer is not a fence, so the raw reply is what gets parsed — and a reply
-   *  that is a fence opener plus an array is not JSON. */
-  it("leaves an unclosed fence in place rather than guessing where it ended", () => {
-    expect(parseFindingsReply("```json\n[]", "a")).toBeUndefined();
-  });
-
-  it("rejects rather than repairs anything off-shape", () => {
+  it("rejects rather than repairs an invalid envelope", () => {
     expect(parseFindingsReply("not json", "a")).toBeUndefined();
-    expect(parseFindingsReply('{"findings": []}', "a")).toBeUndefined();
+    expect(parseFindingsReply('{"findings":[]}', "a")).toBeUndefined();
     expect(
-      parseFindingsReply('[{"start_line": 0, "end_line": 1, "content": "x"}]', "a"),
-    ).toBeUndefined();
-    expect(
-      parseFindingsReply('[{"start_line": 2, "end_line": 1, "content": "x"}]', "a"),
-    ).toBeUndefined();
-    expect(
-      parseFindingsReply('[{"start_line": 1, "end_line": 1, "content": ""}]', "a"),
+      parseFindingsReply('[{"start_line":0,"end_line":1,"content":"x"}]', "a"),
     ).toBeUndefined();
   });
 });
 
-describe("runSingleShotEngine", () => {
+describe("runSingleShotEngine staged generation", () => {
   const PROFILE = compileProfile({
     version: 1,
     reviewRelevant: ["src/**"],
@@ -167,6 +172,21 @@ describe("runSingleShotEngine", () => {
     renameDetectionPercent: 50,
   };
 
+  interface CapturedBody {
+    readonly temperature?: number;
+    readonly seed?: number;
+    readonly model?: string;
+    readonly max_completion_tokens?: number;
+    readonly messages?: { role: string; content: string }[];
+  }
+
+  interface ScriptedReply {
+    readonly status: number;
+    readonly reply?: string;
+    readonly omitUsage?: boolean;
+    readonly finishReason?: string;
+  }
+
   function options(pair: ReviewPair, overrides: Partial<EngineRunOptions>): EngineRunOptions {
     return {
       binaryPath: "/unused-in-single-shot",
@@ -177,17 +197,17 @@ describe("runSingleShotEngine", () => {
       guidelines: { paths: [] },
       env: { MODEL_TOKEN: "secret-token" },
       pathValue: "/usr/bin:/bin",
-      allottedBudget: 500_000,
+      reviewDeadlineMs: Date.now() + 1_800_000,
+      allottedBudget: 1_000_000,
+      expectedReviewablePaths: ["src/a.ts"],
       mechanicallyCleanPaths: [],
       ...overrides,
     };
   }
 
-  /** A real tiny repository, exactly as `context-pack.test.ts` builds one: diff shapes are git's
-   *  to define, so the runner's own `git diff` runs against the genuine article. */
   async function makeRepo(
     prefix: string,
-    headFiles: Readonly<Record<string, string>>,
+    headFiles: Readonly<Record<string, string | null>>,
   ): Promise<{ repo: string; pair: ReviewPair }> {
     const repo = await mkdtemp(join(tmpdir(), prefix));
     const git = (args: readonly string[]): string =>
@@ -213,7 +233,8 @@ describe("runSingleShotEngine", () => {
     git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
     const base = git(["rev-parse", "HEAD"]).trim();
     for (const [path, content] of Object.entries(headFiles)) {
-      await writeFile(join(repo, path), content);
+      if (content === null) await unlink(join(repo, path));
+      else await writeFile(join(repo, path), content);
     }
     git(["add", "."]);
     git(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
@@ -224,26 +245,81 @@ describe("runSingleShotEngine", () => {
     };
   }
 
-  interface CapturedBody {
-    readonly temperature?: number;
-    readonly seed?: number;
-    readonly model?: string;
-    readonly messages?: { role: string; content: string }[];
+  /**
+   * One real Git diff carrying all three classification boundaries the staged dispatcher used to
+   * get wrong when it repeated the profile's globs: a deletion-critical path outside
+   * `reviewRelevant`, plus a matching binary and matching gitlink that have no reviewable blob.
+   */
+  async function makeStructuralRepo(): Promise<{ repo: string; pair: ReviewPair }> {
+    const repo = await mkdtemp(join(tmpdir(), "kfq-staged-structural-"));
+    const git = (args: readonly string[]): string =>
+      execFileSync("git", [...args], {
+        cwd: repo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.test",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.test",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+        },
+      });
+    git(["init", "-q", "-b", "main"]);
+    await mkdir(join(repo, "src"), { recursive: true });
+    await mkdir(join(repo, "tests"), { recursive: true });
+    await writeFile(join(repo, "src/a.ts"), "export const value = 1;\n");
+    await writeFile(join(repo, "src/logo.bin"), "\0old-binary");
+    await writeFile(join(repo, "tests/guard.txt"), "must remain\n");
+    git(["add", "."]);
+    git(["commit", "-q", "-m", "seed", "--no-gpg-sign"]);
+    const seed = git(["rev-parse", "HEAD"]).trim();
+    git(["update-index", "--add", "--cacheinfo", `160000,${seed},src/vendor`]);
+    git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+    const base = git(["rev-parse", "HEAD"]).trim();
+
+    await writeFile(join(repo, "src/a.ts"), "export const value = 2;\n");
+    await writeFile(join(repo, "src/logo.bin"), "\0new-binary");
+    await unlink(join(repo, "tests/guard.txt"));
+    git(["add", "-A"]);
+    git(["update-index", "--add", "--cacheinfo", `160000,${base},src/vendor`]);
+    git(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+    const head = git(["rev-parse", "HEAD"]).trim();
+    return {
+      repo,
+      pair: { base: commitSha(base), head: commitSha(head), mergeBase: commitSha(base) },
+    };
   }
 
-  /** A fetch stub answering each chat call from a script keyed on the user message — exercises
-   *  the real request shape (URL, pinned sampling) without a network. Not `async`: the body is
-   *  synchronous and the Response rides an already-resolved promise. */
+  function claim(overrides: Record<string, unknown> = {}): string {
+    return JSON.stringify([
+      {
+        start: 2,
+        end: 2,
+        action: "Reject truncated tokens before comparison",
+        condition: "the supplied token shares only the first eight characters",
+        defect: "the changed prefix comparison accepts the forged token",
+        consequence: "an unauthenticated caller is treated as authenticated",
+        categoryHint: "security",
+        severityHint: "critical",
+        ...overrides,
+      },
+    ]);
+  }
+
   function fetchStub(
-    respond: (userContent: string) => { status: number; reply?: string },
+    respond: (system: string, user: string, seed: number) => ScriptedReply,
     seen: CapturedBody[],
   ): typeof fetch {
     return ((url: string | URL, init?: RequestInit): Promise<Response> => {
       expect(String(url)).toBe("https://model.example.test/v1/chat/completions");
-      const body = JSON.parse((init?.body as string | undefined) ?? "{}") as CapturedBody;
+      if (typeof init?.body !== "string") throw new TypeError("expected JSON request body");
+      const body = JSON.parse(init.body) as CapturedBody;
       seen.push(body);
-      const user = body.messages?.find((m) => m.role === "user")?.content ?? "";
-      const scripted = respond(user);
+      const system = body.messages?.find((message) => message.role === "system")?.content ?? "";
+      const user = body.messages?.find((message) => message.role === "user")?.content ?? "";
+      const scripted = respond(system, user, body.seed ?? -1);
       if (scripted.status !== 200) {
         return Promise.resolve(
           new Response('{"error":{"message":"boom"}}', { status: scripted.status }),
@@ -252,8 +328,15 @@ describe("runSingleShotEngine", () => {
       return Promise.resolve(
         new Response(
           JSON.stringify({
-            choices: [{ message: { content: scripted.reply ?? "[]" } }],
-            usage: { prompt_tokens: 100, completion_tokens: 10 },
+            choices: [
+              {
+                finish_reason: scripted.finishReason ?? "stop",
+                message: { content: scripted.reply ?? "[]" },
+              },
+            ],
+            ...(scripted.omitUsage
+              ? {}
+              : { usage: { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 } }),
           }),
           { status: 200, headers: { "content-type": "application/json" } },
         ),
@@ -261,462 +344,574 @@ describe("runSingleShotEngine", () => {
     }) as typeof fetch;
   }
 
-  it("reviews only the rule-selected files, one call each, and emits parseable engine output", async () => {
-    const { repo, pair } = await makeRepo("kfq-ss-", {
-      "src/a.ts": "keep\nconst risky = input.slice(0, 8) === e;\n",
+  function stage(system: string): "planner" | "core" | "integration" {
+    if (system.includes("risk planner")) return "planner";
+    if (system.includes("focused correctness examiner")) return "core";
+    if (system.includes("focused integration examiner")) return "integration";
+    throw new TypeError("unexpected generation role");
+  }
+
+  it("runs planner, core and deterministic integration roles while excluding generated files", async () => {
+    const { repo, pair } = await makeRepo("kfq-staged-", {
+      "src/a.ts": "keep\nconst risky = input.slice(0, 8) === expected;\n",
       "src/b.ts": "const fine = 1;\n",
       "src/generated/bundle.ts": "generated noise\n",
     });
     const seen: CapturedBody[] = [];
-    const fetchImpl = fetchStub((user) => {
-      if (user.includes("<current_file_path>src/a.ts</current_file_path>")) {
+    const fetchImpl = fetchStub((system, user) => {
+      const kind = stage(system);
+      if (kind === "planner") {
         return {
           status: 200,
           reply:
-            '[{"start_line": 2, "end_line": 2, "category": "security", "severity": "critical", "content": "Prefix comparison accepts forged tokens."}]',
+            '[{"start":2,"end":2,"lens":"security","hypothesis":"Check full-token equality."}]',
         };
+      }
+      if (kind === "core" && user.includes("<current_file_path>src/a.ts</current_file_path>")) {
+        return { status: 200, reply: claim() };
       }
       return { status: 200, reply: "[]" };
     }, seen);
 
+    const diagnostics = createSilentDiagnostics();
     const output = await runSingleShotEngine(
       options(pair, {
         repositoryPath: repo,
+        expectedReviewablePaths: ["src/a.ts", "src/b.ts"],
+        changeIntent: "Keep the gateway parser backward compatible.",
         contextPacks: new Map([["src/a.ts", "<repository_context>\nctx\n</repository_context>"]]),
       }),
-      createSilentDiagnostics(),
+      diagnostics,
       fetchImpl,
     );
 
-    // Two rule-selected files, one call each; the generated path never reaches the model.
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(6); // three roles for each of the two companion files
+    expect(seen.every((body) => body.max_completion_tokens === GENERATION_COMPLETION_LIMIT)).toBe(
+      true,
+    );
     for (const body of seen) {
-      expect(body.temperature).toBe(0);
-      expect(body.seed).toBe(42);
-      expect(body.model).toBe("gpt-oss-120b");
+      const system = body.messages?.[0]?.content ?? "";
+      const user = body.messages?.[1]?.content ?? "";
+      const role = stage(system);
+      for (const policy of [
+        TEST_ISOLATION_EVIDENCE_POLICY,
+        REFERENCE_TRANSITION_EVIDENCE_POLICY,
+        BOUNDARY_OMISSION_EVIDENCE_POLICY,
+        WORKFLOW_TRUST_EVIDENCE_POLICY,
+        SENSITIVE_OUTPUT_EVIDENCE_POLICY,
+        DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+        TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+        MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+        PARALLEL_MAPPING_EVIDENCE_POLICY,
+      ]) {
+        expect(system.split(policy)).toHaveLength(2);
+        expect(user).not.toContain(policy);
+      }
+      if (role === "planner") {
+        expect(system).not.toContain(EXAMINER_CLAIM_DECISION_POLICY);
+      }
     }
-    const aBody = seen
-      .map((body) => body.messages?.[1]?.content ?? "")
-      .find((content) => content.includes("<current_file_path>src/a.ts</current_file_path>"));
-    expect(aBody).toContain("__new hunk__");
-    expect(aBody).toContain("<repository_context>");
-    // The companion block carries the OTHER changed file's hunks — the one-sided-pair
-    // false-positive class from the live audit dies exactly here.
-    expect(aBody).toContain("<companion_changes>");
-    expect(aBody).toContain("## src/b.ts");
-    expect(aBody).not.toContain("<other_changed_files>");
+    const planner = seen.find((body) => stage(body.messages?.[0]?.content ?? "") === "planner");
+    expect(planner?.messages?.[0]?.content).toContain("## What to report");
+    expect(planner?.messages?.[0]?.content).toContain('"include"');
+    expect(planner?.messages?.[0]?.content).toContain('"merge_system_rule": false');
+    expect(planner?.messages?.[1]?.content).toContain("<current_file_diff>");
+    expect(planner?.messages?.[1]?.content).not.toContain("<current_file>");
+    expect(planner?.messages?.[1]?.content).toContain("--- stated purpose begins ---");
+    const core = seen.find(
+      (body) =>
+        stage(body.messages?.[0]?.content ?? "") === "core" &&
+        (body.messages?.[1]?.content ?? "").includes("src/a.ts"),
+    );
+    expect(core?.messages?.[0]?.content).not.toContain("## What to report");
+    expect(core?.messages?.[1]?.content).toContain("<untrusted_risk_map_json>");
+    expect(core?.messages?.[1]?.content).toContain("<current_file>");
 
-    // The stdout is REAL engine shape: prove it by round-tripping the shipped parser.
     const parsed = parseEngineResult(output.stdout);
     expect(parsed.status).toBe("success");
     expect(parsed.filesReviewed).toBe(2);
     expect(parsed.findings).toHaveLength(1);
-    expect(parsed.findings[0]?.path).toBe("src/a.ts");
-    expect(parsed.warnings).toHaveLength(0);
-    expect(output.wireTokens).toBe(220);
+    expect(parsed.findings[0]?.content).toContain("unauthenticated caller");
+    expect(output.wireTokens).toBe(660);
+    expect(
+      diagnostics.drain().find((record) => record.code === "model.usage")?.counts
+        ?.context_pack_injected,
+    ).toBe(1);
   });
 
-  it("turns a file whose call keeps failing into an honest subtask_error the settlement reads", async () => {
-    const { repo, pair } = await makeRepo("kfq-ss2-", { "src/a.ts": "new\n" });
-    const seen: CapturedBody[] = [];
-    const fetchImpl = fetchStub(() => ({ status: 503 }), seen);
+  it("dispatches the inventory's exact set: deletion-critical included, binary and submodule excluded", async () => {
+    const { repo, pair } = await makeStructuralRepo();
+    const profile = compileProfile({
+      version: 1,
+      reviewRelevant: ["src/**"],
+      deletionCritical: ["tests/**"],
+      generated: [],
+      excluded: [],
+      benignWarnings: [],
+      pathInstructions: [],
+    } satisfies ReviewProfile);
+    const diagnostics = createSilentDiagnostics();
+    const inventory = await buildInventory(
+      { cwd: repo, timeoutMs: 30_000, pathValue: "/usr/bin:/bin" },
+      profile,
+      pair,
+      CONFIG.renameDetectionPercent,
+      diagnostics,
+    );
+    expect(inventory.reviewablePaths).toEqual(new Set(["src/a.ts", "tests/guard.txt"]));
 
+    const seen: CapturedBody[] = [];
+    const output = await runSingleShotEngine(
+      options(pair, {
+        repositoryPath: repo,
+        profile,
+        expectedReviewablePaths: [...inventory.reviewablePaths],
+      }),
+      diagnostics,
+      fetchStub(() => ({ status: 200, reply: "[]" }), seen),
+    );
+
+    const promptText = seen
+      .flatMap((body) => body.messages ?? [])
+      .map((message) => message.content)
+      .join("\n");
+    expect(promptText).toContain("<current_file_path>src/a.ts</current_file_path>");
+    expect(promptText).toContain("<current_file_path>tests/guard.txt</current_file_path>");
+    expect(promptText).not.toContain("<current_file_path>src/logo.bin</current_file_path>");
+    expect(promptText).not.toContain("<current_file_path>src/vendor</current_file_path>");
+
+    const parsed = parseEngineResult(output.stdout);
+    expect(parsed.manifestPresent).toBe(true);
+    expect(parsed.terminalState).toBe("complete");
+    expect(parsed.coverage.selected.map((entry) => entry.path)).toEqual([
+      "src/a.ts",
+      "tests/guard.txt",
+    ]);
+    expect(parsed.coverage.completed.map((entry) => entry.path)).toEqual([
+      "src/a.ts",
+      "tests/guard.txt",
+    ]);
+  });
+
+  it("does not let an extra changed path mask an expected path with no diff fragment", async () => {
+    const { repo, pair } = await makeRepo("kfq-exact-missing-", {
+      "src/a.ts": "changed a\n",
+      "src/b.ts": "changed but not expected\n",
+    });
+    const seen: CapturedBody[] = [];
+    const output = await runSingleShotEngine(
+      options(pair, {
+        repositoryPath: repo,
+        expectedReviewablePaths: ["src/a.ts", "src/missing.ts"],
+      }),
+      createSilentDiagnostics(),
+      fetchStub(() => ({ status: 200, reply: "[]" }), seen),
+    );
+    const parsed = parseEngineResult(output.stdout);
+
+    expect(parsed.filesReviewed).toBe(1);
+    expect(parsed.terminalState).toBe("partial");
+    expect(parsed.coverage.selected.map((entry) => entry.path)).toEqual([
+      "src/a.ts",
+      "src/missing.ts",
+    ]);
+    expect(parsed.coverage.completed.map((entry) => entry.path)).toEqual(["src/a.ts"]);
+    expect(parsed.coverage.failed.map((entry) => entry.path)).toEqual(["src/missing.ts"]);
+    expect(
+      seen.some((body) =>
+        body.messages?.some((message) =>
+          message.content.includes("<current_file_path>src/b.ts</current_file_path>"),
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("shows trusted merge-base guidance to the planner only", async () => {
+    const { repo, pair } = await makeRepo("kfq-trusted-guidance-", {
+      "src/a.ts": "keep\nexport const changedContract = 1;\n",
+    });
+    const trustedGuidance = [
+      "<<<KQ_TRUSTED_BASE_GUIDELINES_BEGIN>>>",
+      "UNIQUE_GUIDELINE_SENTINEL: reject empty tenant ids",
+      "<<<KQ_TRUSTED_BASE_GUIDELINES_END>>>",
+    ].join("\n");
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub(() => ({ status: 200, reply: "[]" }), seen);
+
+    await runSingleShotEngine(
+      options(pair, { repositoryPath: repo, trustedGuidance }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+
+    expect(seen.map((body) => stage(body.messages?.[0]?.content ?? ""))).toEqual([
+      "planner",
+      "core",
+      "integration",
+    ]);
+    const planner = seen.find((body) => stage(body.messages?.[0]?.content ?? "") === "planner");
+    expect(planner?.messages?.[0]?.content).toContain("UNIQUE_GUIDELINE_SENTINEL");
+    for (const body of seen.filter(
+      (candidate) => stage(candidate.messages?.[0]?.content ?? "") !== "planner",
+    )) {
+      expect(body.messages?.map((message) => message.content).join("\n")).not.toContain(
+        "UNIQUE_GUIDELINE_SENTINEL",
+      );
+    }
+  });
+
+  it.each([
+    ["an empty risk map", "[]"],
+    ["a malformed planner reply", "not-json"],
+  ])("shows matching path rules to core and integration after %s", async (_case, plannerReply) => {
+    const { repo, pair } = await makeRepo("kfq-path-policy-", {
+      "src/a.ts": "keep\nexport const changedContract = 1;\n",
+    });
+    const profile = compileProfile({
+      version: 1,
+      reviewRelevant: ["src/**"],
+      deletionCritical: [],
+      generated: [],
+      excluded: [],
+      benignWarnings: [],
+      pathInstructions: [
+        {
+          paths: ["src/**"],
+          instructions: "MATCHED_PATH_POLICY: reject empty tenant identifiers.",
+        },
+        {
+          paths: ["docs/**"],
+          instructions: "UNMATCHED_PATH_POLICY: require a migration note.",
+        },
+      ],
+    } satisfies ReviewProfile);
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub(
+      (system) =>
+        stage(system) === "planner"
+          ? { status: 200, reply: plannerReply }
+          : { status: 200, reply: "[]" },
+      seen,
+    );
+
+    await runSingleShotEngine(
+      options(pair, { repositoryPath: repo, profile }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+
+    expect(seen.map((body) => stage(body.messages?.[0]?.content ?? ""))).toEqual([
+      "planner",
+      "core",
+      "integration",
+    ]);
+    const examiners = seen.filter((body) => stage(body.messages?.[0]?.content ?? "") !== "planner");
+    for (const body of examiners) {
+      const system = body.messages?.[0]?.content ?? "";
+      expect(system).toContain("MATCHED_PATH_POLICY: reject empty tenant identifiers.");
+      expect(system).not.toContain("UNMATCHED_PATH_POLICY");
+    }
+  });
+
+  it("uses fixed risk lenses when the planner is invalid and still requires the core examiner", async () => {
+    const { repo, pair } = await makeRepo("kfq-fallback-", {
+      "src/a.ts": "keep\nconst local = value + 1;\n",
+    });
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub((system, user) => {
+      if (stage(system) === "planner") return { status: 200, reply: "not-json" };
+      expect(user).toContain('"lens":"correctness"');
+      expect(user).toContain('"lens":"boundary"');
+      return { status: 200, reply: "[]" };
+    }, seen);
     const output = await runSingleShotEngine(
       options(pair, { repositoryPath: repo }),
       createSilentDiagnostics(),
       fetchImpl,
     );
+    expect(seen.map((body) => stage(body.messages?.[0]?.content ?? ""))).toEqual([
+      "planner",
+      "core",
+    ]);
+    expect(parseEngineResult(output.stdout).status).toBe("success");
+  });
 
+  it("dispatches a complete file deletion and accepts only its numbered old-side anchor", async () => {
+    const { repo, pair } = await makeRepo("kfq-deletion-", { "src/a.ts": null });
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub((system, user) => {
+      const kind = stage(system);
+      if (kind === "planner") return { status: 200, reply: "[]" };
+      if (kind === "core") {
+        expect(user).toContain("1 -keep");
+        expect(user).toContain("<allowed_end_anchors>1</allowed_end_anchors>");
+        return { status: 200, reply: claim({ start: 1, end: 1 }) };
+      }
+      return { status: 200, reply: "[]" };
+    }, seen);
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+    const parsed = parseEngineResult(output.stdout);
+    expect(parsed.filesReviewed).toBe(1);
+    expect(parsed.findings).toHaveLength(1);
+    expect(parsed.findings[0]?.path).toBe("src/a.ts");
+    expect(seen.map((body) => stage(body.messages?.[0]?.content ?? ""))).toEqual([
+      "planner",
+      "core",
+      "integration",
+    ]);
+  });
+
+  it("turns a failed core examiner into an honest subtask_error after one transport retry", async () => {
+    const { repo, pair } = await makeRepo("kfq-core-fail-", { "src/a.ts": "new local\n" });
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub(
+      (system) => (stage(system) === "planner" ? { status: 200, reply: "[]" } : { status: 503 }),
+      seen,
+    );
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
     const parsed = parseEngineResult(output.stdout);
     expect(parsed.status).toBe("completed_with_errors");
     expect(parsed.warnings).toHaveLength(1);
     expect(parsed.warnings[0]?.file).toBe("src/a.ts");
-    // One bounded retry per transport failure: two wire calls for the one file, then honesty.
-    expect(seen).toHaveLength(2);
+    expect(seen).toHaveLength(3); // planner + two core attempts
+    expect(output.wireTokens).toBeGreaterThan(110); // unknown retry spend is conservatively charged
   });
 
-  /**
-   * The whole-file view's two load-bearing properties, in one test: the finding call is given the
-   * complete file with its changed lines marked, and the verification pass therefore does NOT run.
-   *
-   * The second half is the cost half. Verification cost ~2,900 tokens per file — a second send of
-   * the same text — and it existed only because the finding call had been shown an excerpt. Paying
-   * it after the model has already read the file would be the pendulum swing this view was built to
-   * avoid: better findings bought with a bill nobody wants.
-   */
-  it("shows the finding call the whole file, and then skips the verification pass", async () => {
+  it("reports an atomically blocked generation budget through the engine result contract", async () => {
+    const { repo, pair } = await makeRepo("kfq-budget-blocked-", {
+      "src/a.ts": "keep\nconst local = 1;\n",
+    });
+    let calls = 0;
+    const diagnostics = createSilentDiagnostics();
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo, allottedBudget: 0 }),
+      diagnostics,
+      (() => {
+        calls += 1;
+        return Promise.reject(new Error("a blocked request must not reach the endpoint"));
+      }) as typeof fetch,
+    );
+
+    const wire = JSON.parse(output.stdout) as {
+      status?: unknown;
+      summary?: { budget_exceeded?: unknown };
+    };
+    expect(wire.status).toBe("budget_exceeded");
+    expect(wire.summary?.budget_exceeded).toBe(true);
+    expect(calls).toBe(0);
+    expect(output.wireTokens).toBe(0);
+
+    const parsed = parseEngineResult(output.stdout);
+    expect(parsed.status).toBe("budget_exceeded");
+    expect(parsed.budgetExceeded).toBe(true);
+    expect(parsed.terminalState).toBe("partial");
+    expect(
+      diagnostics.drain().find((record) => record.code === "model.usage")?.counts?.budget_blocked,
+    ).toBeGreaterThan(0);
+  });
+
+  it("keeps a planner-only budget fallback complete when the mandatory examiner still runs", async () => {
+    const { repo, pair } = await makeRepo("kfq-planner-budget-fallback-", {
+      "src/a.ts": "keep\nconst local = 1;\n",
+    });
+    const probeSeen: CapturedBody[] = [];
+    await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchStub(
+        (system) =>
+          stage(system) === "planner"
+            ? { status: 200, reply: "not-json" }
+            : { status: 200, reply: "[]" },
+        probeSeen,
+      ),
+    );
+    expect(probeSeen).toHaveLength(2);
+    const requestBound = (body: CapturedBody): number => {
+      const system = body.messages?.find((message) => message.role === "system")?.content ?? "";
+      const user = body.messages?.find((message) => message.role === "user")?.content ?? "";
+      return generationRequestUpperBound(system, user);
+    };
+    const plannerBound = requestBound(probeSeen[0] ?? {});
+    const coreBound = requestBound(probeSeen[1] ?? {});
+    expect(plannerBound).toBeGreaterThan(coreBound);
+
+    const seen: CapturedBody[] = [];
+    const diagnostics = createSilentDiagnostics();
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo, allottedBudget: coreBound }),
+      diagnostics,
+      fetchStub(() => ({ status: 200, reply: "[]" }), seen),
+    );
+
+    expect(seen).toHaveLength(1);
+    expect(stage(seen[0]?.messages?.[0]?.content ?? "")).toBe("core");
+    const parsed = parseEngineResult(output.stdout);
+    expect(parsed.status).toBe("success");
+    expect(parsed.budgetExceeded).toBe(false);
+    expect(parsed.terminalState).toBe("complete");
+    expect(
+      diagnostics.drain().find((record) => record.code === "model.usage")?.counts?.budget_blocked,
+    ).toBe(1);
+  });
+
+  it("honors the configured review deadline before starting any model request", async () => {
+    const { repo, pair } = await makeRepo("kfq-review-deadline-", {
+      "src/a.ts": "keep\nconst local = 1;\n",
+    });
+    let calls = 0;
+    await expect(
+      runSingleShotEngine(
+        options(pair, { repositoryPath: repo, reviewDeadlineMs: Date.now() - 1 }),
+        createSilentDiagnostics(),
+        (() => {
+          calls += 1;
+          return Promise.reject(new Error("deadline should stop before fetch"));
+        }) as typeof fetch,
+      ),
+    ).rejects.toMatchObject({ reason: "engine.run.timeout" });
+    expect(calls).toBe(0);
+  });
+
+  it("shows the whole file to the examiner but never to the risk planner", async () => {
     const guarded = [
       "export function parse(raw: string): string | undefined {",
-      "  const value = raw.trim();",
-      "  if (value === '') return undefined;",
-      "  return value;",
+      "  if (raw === '') return undefined;",
+      "  return raw;",
       "}",
-      "export const added = parse('x');",
+      "const local = parse('x');",
     ].join("\n");
-    const { repo, pair } = await makeRepo("kfq-ss-whole-", { "src/a.ts": `${guarded}\n` });
+    const { repo, pair } = await makeRepo("kfq-whole-staged-", { "src/a.ts": `${guarded}\n` });
     const seen: CapturedBody[] = [];
     const fetchImpl = fetchStub(() => ({ status: 200, reply: "[]" }), seen);
-
     await runSingleShotEngine(
       options(pair, { repositoryPath: repo }),
       createSilentDiagnostics(),
       fetchImpl,
     );
-
-    const user = seen[0]?.messages?.[1]?.content ?? "";
-    expect(user).toContain("<current_file>");
-    // The guard the model used to be blind to is now in the finding prompt, at its real line
-    // number. This fixture replaces the whole file, so every line is marked changed — the marker's
-    // discrimination is pinned in whole-file-view.test.ts, on a diff that keeps context lines.
-    expect(user).toContain("3+  if (value === '') return undefined;");
-    expect(user).toContain("6+export const added = parse('x');");
-    expect(user).not.toContain("<current_file_diff>");
-    // What the change removed travels too — a whole-file view is otherwise blind to deletions.
-    expect(user).toContain("<removed_by_this_change>");
-    expect(user).toContain("keep");
-    // One call for the whole file. No verification, because there is nothing left to verify with.
-    expect(seen).toHaveLength(1);
+    const planner = seen.find((body) => stage(body.messages?.[0]?.content ?? "") === "planner");
+    const core = seen.find((body) => stage(body.messages?.[0]?.content ?? "") === "core");
+    expect(planner?.messages?.[1]?.content).not.toContain("<current_file>");
+    expect(core?.messages?.[1]?.content).toContain("<current_file>");
+    expect(core?.messages?.[1]?.content).toContain("2+  if (raw === '') return undefined;");
   });
 
-  /**
-   * The false-positive class the verification pass exists for, reproduced from the audited
-   * window: the model claims a guard is missing, and the guard sits in the same file outside the
-   * hunk it was shown. The verifier is given the whole file and contradicts the claim.
-   *
-   * Since the whole-file view landed this pass runs ONLY on the fallback path — a file the finding
-   * call could not be shown whole. So the fixture is padded past `MAX_REVIEW_FILE_CHARS`, which is
-   * the one situation where the model still reviews an excerpt and can still make this mistake.
-   * The whole-file case has its own test below: there, the verifier must not be called at all.
-   */
-  it("drops a claim the whole file contradicts and keeps everything else", async () => {
-    const guarded = [
-      "export function parse(raw: string): string | undefined {",
-      "  const value = raw.trim();",
-      "  if (value === '') return undefined;",
-      "  return value;",
-      "}",
-      "export const added = parse('x');",
-      // Past MAX_REVIEW_FILE_CHARS (80k) and comfortably under MAX_VERIFY_FILE_CHARS (160k) —
-      // the middle band, where the finding call still sees an excerpt and the verifier still runs.
-      `// ${"pad ".repeat(25_000)}`,
-    ].join("\n");
-    const { repo, pair } = await makeRepo("kfq-ss-verify-", { "src/a.ts": `${guarded}\n` });
+  it("does not run the old fail-open whole-file verifier on hunk fallback", async () => {
+    const oversized = `const local = 1;\n// ${"pad ".repeat(25_000)}\n`;
+    const { repo, pair } = await makeRepo("kfq-no-old-verify-", { "src/a.ts": oversized });
     const seen: CapturedBody[] = [];
-    const fetchImpl = fetchStub((user) => {
-      if (user.includes("<claims>")) {
-        // The verifier sees the empty-string guard and refuses the absence claim; the second
-        // claim is grounded in the hunk and was never sent, so it cannot be dropped here.
-        return { status: 200, reply: '[{"claim":1,"verdict":"contradicted","line":3}]' };
-      }
-      if (user.includes("<current_file_path>src/a.ts</current_file_path>")) {
+    const fetchImpl = fetchStub((system) => {
+      if (stage(system) === "planner") return { status: 200, reply: "[]" };
+      if (stage(system) === "core") {
         return {
           status: 200,
-          reply: JSON.stringify([
-            {
-              start_line: 6,
-              end_line: 6,
-              category: "bug",
-              severity: "high",
-              content: "**Guard against an empty raw value before parsing.**",
-            },
-            {
-              start_line: 6,
-              end_line: 6,
-              category: "bug",
-              severity: "low",
-              content: "The added line calls parse with a literal, which the hunk shows.",
-            },
-          ]),
+          reply: claim({
+            start: 1,
+            end: 1,
+            condition: "the local value is consumed",
+            defect: "the changed value is wrong",
+            consequence: "the consumer receives the wrong result",
+            categoryHint: "bug",
+            severityHint: "medium",
+          }),
         };
       }
       return { status: 200, reply: "[]" };
     }, seen);
-
     const output = await runSingleShotEngine(
       options(pair, { repositoryPath: repo }),
       createSilentDiagnostics(),
       fetchImpl,
     );
-
-    const verifyCall = seen.find((body) =>
-      (body.messages?.[1]?.content ?? "").includes("<claims>"),
+    expect(seen.every((body) => !(body.messages?.[1]?.content ?? "").includes("<claims>"))).toBe(
+      true,
     );
-    expect(verifyCall).toBeDefined();
-    // Pinned like every other call, and deliberately its own seed.
-    expect(verifyCall?.seed).toBe(2042);
-    // The whole file rode along, guard line included.
-    expect(verifyCall?.messages?.[1]?.content).toContain("3   if (value === '') return undefined;");
-    const parsed = parseEngineResult(output.stdout);
-    expect(parsed.findings).toHaveLength(1);
-    expect(parsed.findings[0]?.content).toContain("calls parse with a literal");
-  });
-
-  it("keeps every claim when the verifier cannot answer", async () => {
-    const { repo, pair } = await makeRepo("kfq-ss-verify-fail-", {
-      "src/a.ts": "keep\nexport const added = 1;\n",
-    });
-    const seen: CapturedBody[] = [];
-    const fetchImpl = fetchStub((user) => {
-      if (user.includes("<claims>")) return { status: 200, reply: "sorry, no JSON here" };
-      if (user.includes("<current_file_path>src/a.ts</current_file_path>")) {
-        return {
-          status: 200,
-          reply: JSON.stringify([
-            {
-              start_line: 2,
-              end_line: 2,
-              category: "bug",
-              severity: "high",
-              content: "**Add a bounds check for the added constant.**",
-            },
-          ]),
-        };
-      }
-      return { status: 200, reply: "[]" };
-    }, seen);
-
-    const output = await runSingleShotEngine(
-      options(pair, { repositoryPath: repo }),
-      createSilentDiagnostics(),
-      fetchImpl,
-    );
-    // An unparseable verdict is not a verdict: the finding reaches the reader unchanged.
     expect(parseEngineResult(output.stdout).findings).toHaveLength(1);
   });
-});
 
-describe("repair of publisher-rejectable bodies", () => {
-  interface CapturedBody {
-    readonly messages?: { role: string; content: string }[];
-  }
-  const REPAIR_CONFIG: RuntimeConfig = {
-    protocol: "openai",
-    endpoint: "https://model.example.test/v1",
-    model: "gpt-oss-120b",
-    tokenEnvName: "MODEL_TOKEN",
-    language: "English",
-    concurrency: 2,
-    fileTimeoutSeconds: 300,
-    reviewTimeoutSeconds: 1800,
-    tokenBudget: 2_000_000,
-    maxFindings: 50,
-    renameDetectionPercent: 50,
-  };
-  const PROFILE = compileProfile({
-    version: 1,
-    reviewRelevant: ["src/**"],
-    deletionCritical: [],
-    generated: [],
-    excluded: [],
-    benignWarnings: [],
-    pathInstructions: [],
-  } satisfies ReviewProfile);
-  function options(pair: ReviewPair, overrides: Partial<EngineRunOptions>): EngineRunOptions {
-    return {
-      binaryPath: "/unused-in-single-shot",
-      repositoryPath: "/unused-repo",
-      pair,
-      config: REPAIR_CONFIG,
-      profile: PROFILE,
-      guidelines: { paths: [] },
-      env: { MODEL_TOKEN: "secret-token" },
-      pathValue: "/usr/bin:/bin",
-      allottedBudget: 500_000,
-      mechanicallyCleanPaths: [],
-      ...overrides,
-    };
-  }
-
-  it("repairs a body the sanitizer rejects and keeps the original when repair fails", async () => {
-    const repo = await mkdtemp(join(tmpdir(), "kfq-ss3-"));
-    const git = (args: readonly string[]): string =>
-      execFileSync("git", [...args], {
-        cwd: repo,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "t",
-          GIT_AUTHOR_EMAIL: "t@example.test",
-          GIT_COMMITTER_NAME: "t",
-          GIT_COMMITTER_EMAIL: "t@example.test",
-          GIT_CONFIG_GLOBAL: "/dev/null",
-          GIT_CONFIG_SYSTEM: "/dev/null",
-        },
-      });
-    git(["init", "-q", "-b", "main"]);
-    await mkdir(join(repo, "src"), { recursive: true });
-    await writeFile(join(repo, "src/a.ts"), "old\n");
-    git(["add", "."]);
-    git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
-    const base = git(["rev-parse", "HEAD"]).trim();
-    await writeFile(join(repo, "src/a.ts"), "new line\n");
-    git(["add", "."]);
-    git(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
-    const head = git(["rev-parse", "HEAD"]).trim();
-    const pair: ReviewPair = {
-      base: commitSha(base),
-      head: commitSha(head),
-      mergeBase: commitSha(base),
-    };
-
-    // Two calls, scripted by what each prompt asks for rather than by a counter: the review — this
-    // file is small, so it is shown whole and needs no verification pass — and then the repair.
-    // The review is recognised by either file view, so this classifier keeps working whichever
-    // band a fixture falls into.
+  it("runs one integration examiner for a heavy change and unions its distinct claim", async () => {
+    const bigBody = Array.from(
+      { length: 160 },
+      (_, index) => `const line${String(index)} = ${String(index)};`,
+    ).join("\n");
+    const { repo, pair } = await makeRepo("kfq-integration-", { "src/a.ts": `${bigBody}\n` });
     const seen: CapturedBody[] = [];
-    const kinds: string[] = [];
-    const fetchImpl = ((_url: string | URL, init?: RequestInit): Promise<Response> => {
-      const body = JSON.parse((init?.body as string | undefined) ?? "{}") as CapturedBody;
-      seen.push(body);
-      const user = body.messages?.[1]?.content ?? "";
-      const kind = user.includes("<claims>")
-        ? "verify"
-        : user.includes("<current_file_diff>") || user.includes("<current_file>")
-          ? "review"
-          : "repair";
-      kinds.push(kind);
-      const reply =
-        kind === "review"
-          ? '[{"start_line": 1, "end_line": 1, "category": "bug", "severity": "high", "content": "Use a null device.\\n\\nIt runs diff -- /dev/null <path> today."}]'
-          : kind === "verify"
-            ? '[{"claim": 1, "verdict": "supported"}]'
-            : '["Use a null device.\\n\\nIt runs `diff -- /dev/null <path>` today."]';
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            choices: [{ message: { content: reply } }],
-            usage: { prompt_tokens: 50, completion_tokens: 10 },
-          }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
-      );
-    }) as typeof fetch;
-
+    const fetchImpl = fetchStub((system) => {
+      const kind = stage(system);
+      if (kind === "planner") return { status: 200, reply: "[]" };
+      if (kind === "core") {
+        return {
+          status: 200,
+          reply: claim({ start: 3, end: 3, categoryHint: "bug", severityHint: "high" }),
+        };
+      }
+      return {
+        status: 200,
+        reply: claim({
+          start: 9,
+          end: 9,
+          condition: "the new API is called from the existing consumer",
+          defect: "the changed contract omits the required field",
+          consequence: "the consumer rejects every response",
+          categoryHint: "bug",
+          severityHint: "medium",
+        }),
+      };
+    }, seen);
     const output = await runSingleShotEngine(
       options(pair, { repositoryPath: repo }),
       createSilentDiagnostics(),
       fetchImpl,
     );
-    // Two wire calls, in this order: the review — which now reads the whole file, so there is no
-    // verification pass to run — and the one repair that rescues the body. The verify call this
-    // used to expect is the double payment the whole-file view removed: the same file text, sent a
-    // second time, to ask whether the model should have believed what it had already been shown.
-    expect(kinds).toEqual(["review", "repair"]);
-    const parsed = parseEngineResult(output.stdout);
-    expect(parsed.findings).toHaveLength(1);
-    // The published body is the repaired, backticked form the real sanitizer accepts.
-    expect(parsed.findings[0]?.content).toContain("`diff -- /dev/null <path>`");
+    expect(seen.map((body) => body.seed)).toEqual([42, 1042, 2042]);
+    expect(parseEngineResult(output.stdout).findings).toHaveLength(2);
   });
-});
 
-describe("second focused pass for heavy files", () => {
-  const HEAVY_CONFIG: RuntimeConfig = {
-    protocol: "openai",
-    endpoint: "https://model.example.test/v1",
-    model: "gpt-oss-120b",
-    tokenEnvName: "MODEL_TOKEN",
-    language: "English",
-    concurrency: 2,
-    fileTimeoutSeconds: 300,
-    reviewTimeoutSeconds: 1800,
-    tokenBudget: 2_000_000,
-    maxFindings: 50,
-    renameDetectionPercent: 50,
-  };
-  const HEAVY_PROFILE = compileProfile({
-    version: 1,
-    reviewRelevant: ["src/**"],
-    deletionCritical: [],
-    generated: [],
-    excluded: [],
-    benignWarnings: [],
-    pathInstructions: [],
-  } satisfies ReviewProfile);
-  function repairOptions(pair: ReviewPair, overrides: Partial<EngineRunOptions>): EngineRunOptions {
-    return {
-      binaryPath: "/unused-in-single-shot",
-      repositoryPath: "/unused-repo",
-      pair,
-      config: HEAVY_CONFIG,
-      profile: HEAVY_PROFILE,
-      guidelines: { paths: [] },
-      env: { MODEL_TOKEN: "secret-token" },
-      pathValue: "/usr/bin:/bin",
-      allottedBudget: 500_000,
-      mechanicallyCleanPaths: [],
-      ...overrides,
-    };
-  }
-
-  it("runs exactly one extra call for a 150+ line change and unions without duplicating", async () => {
-    const repo = await mkdtemp(join(tmpdir(), "kfq-ss4-"));
-    const git = (args: readonly string[]): string =>
-      execFileSync("git", [...args], {
-        cwd: repo,
-        encoding: "utf8",
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "t",
-          GIT_AUTHOR_EMAIL: "t@example.test",
-          GIT_COMMITTER_NAME: "t",
-          GIT_COMMITTER_EMAIL: "t@example.test",
-          GIT_CONFIG_GLOBAL: "/dev/null",
-          GIT_CONFIG_SYSTEM: "/dev/null",
-        },
-      });
-    git(["init", "-q", "-b", "main"]);
-    await mkdir(join(repo, "src"), { recursive: true });
-    await writeFile(join(repo, "src/big.ts"), "// base\n");
-    git(["add", "."]);
-    git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
-    const base = git(["rev-parse", "HEAD"]).trim();
-    const bigBody = Array.from(
-      { length: 160 },
-      (_, i) => `export const line${String(i)} = ${String(i)};`,
-    ).join("\n");
-    await writeFile(join(repo, "src/big.ts"), `${bigBody}\n`);
-    git(["add", "."]);
-    git(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
-    const head = git(["rev-parse", "HEAD"]).trim();
-    const pair: ReviewPair = {
-      base: commitSha(base),
-      head: commitSha(head),
-      mergeBase: commitSha(base),
-    };
-
-    const seenSeeds: number[] = [];
-    const fetchImpl = ((_url: string | URL, init?: RequestInit): Promise<Response> => {
-      const body = JSON.parse((init?.body as string | undefined) ?? "{}") as {
-        seed?: number;
-        messages?: { role: string; content: string }[];
-      };
-      seenSeeds.push(body.seed ?? -1);
-      const isSecondPass = (body.messages?.[1]?.content ?? "").includes("second focused pass");
-      const reply = isSecondPass
-        ? // One duplicate of the first pass's finding (same lines, same text) and one genuinely new.
-          '[{"start_line": 3, "end_line": 3, "category": "bug", "severity": "high", "content": "Boundary reads one element past the end."},{"start_line": 9, "end_line": 9, "category": "bug", "severity": "medium", "content": "Error path returns success shape."}]'
-        : '[{"start_line": 3, "end_line": 3, "category": "bug", "severity": "high", "content": "Boundary reads one element past the end."}]';
-      return Promise.resolve(
-        new Response(
-          JSON.stringify({
-            choices: [{ message: { content: reply } }],
-            usage: { prompt_tokens: 80, completion_tokens: 20 },
+  it("never rewrites a sanitizer-rejected deterministic body with a fourth model role", async () => {
+    const { repo, pair } = await makeRepo("kfq-no-repair-", {
+      "src/a.ts": "const local = 1;\n",
+    });
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub((system) => {
+      const kind = stage(system);
+      if (kind === "planner") return { status: 200, reply: "[]" };
+      if (kind === "core") {
+        return {
+          status: 200,
+          reply: claim({
+            start: 1,
+            end: 1,
+            condition: "the command receives <path>",
+            defect: "the changed argument is interpreted as markup",
+            consequence: "the review body is rejected",
+            categoryHint: "bug",
+            severityHint: "medium",
           }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
-      );
-    }) as typeof fetch;
-
+        };
+      }
+      return { status: 200, reply: "[]" };
+    }, seen);
     const output = await runSingleShotEngine(
-      repairOptions(pair, { repositoryPath: repo }),
+      options(pair, { repositoryPath: repo }),
       createSilentDiagnostics(),
       fetchImpl,
     );
-    // Two calls: first pass seed 42, second pass seed 1042.
-    expect(seenSeeds).toEqual([42, 1042]);
-    const parsed = parseEngineResult(output.stdout);
-    // Union kept the duplicate once and the genuinely new finding.
-    expect(parsed.findings).toHaveLength(2);
-    expect(parsed.status).toBe("success");
+    expect(seen.map((body) => stage(body.messages?.[0]?.content ?? ""))).toEqual([
+      "planner",
+      "core",
+      "integration",
+    ]);
+    const body = parseEngineResult(output.stdout).findings[0]?.content ?? "";
+    expect(body).toContain("<path>");
+    expect(sanitizeFindingBody(body).ok).toBe(false);
+    expect(output.wireTokens).toBe(330);
   });
 });

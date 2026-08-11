@@ -32,37 +32,41 @@ export interface FindingContext {
  * Deliberately coarse. A reader triaging a page of findings needs to know whether this is about
  * correctness or about tidiness; finer taxonomy buys nothing at a glance.
  */
-const CATEGORIES: Readonly<Record<string, string>> = {
-  security: "Security",
-  bug: "Correctness",
-  performance: "Performance",
-  maintainability: "Maintainability",
-  test: "Tests",
-  documentation: "Documentation",
-  other: "Review",
+interface ClassificationChip {
+  readonly asset: string;
+  readonly label: string;
+}
+
+const CATEGORIES: Readonly<Record<string, ClassificationChip>> = {
+  security: { asset: "cat-security", label: "Security" },
+  bug: { asset: "cat-correctness", label: "Correctness" },
+  performance: { asset: "cat-performance", label: "Performance" },
+  maintainability: { asset: "cat-maintainability", label: "Maintainability" },
+  test: { asset: "cat-tests", label: "Tests" },
+  documentation: { asset: "cat-docs", label: "Documentation" },
+  other: { asset: "cat-review", label: "Review" },
 };
 
-/** Severity labels. The word carries the meaning; the design system's text grammar carries it
- *  without colour on purpose — findings stay fully textual (design-system/, section 04). */
-const SEVERITIES: Readonly<Record<string, string>> = {
-  critical: "Critical",
-  high: "Major",
-  medium: "Minor",
-  low: "Nit",
+/** Severity labels and the matching rank glyphs from the Keiko design system. */
+const SEVERITIES: Readonly<Record<string, ClassificationChip>> = {
+  critical: { asset: "sev-critical", label: "Critical" },
+  high: { asset: "sev-major", label: "Major" },
+  medium: { asset: "sev-minor", label: "Minor" },
+  low: { asset: "sev-nit", label: "Nit" },
 };
 
-function label(
-  table: Readonly<Record<string, string>>,
+function classificationChip(
+  table: Readonly<Record<string, ClassificationChip>>,
   key: string | undefined,
-  fallback: string,
-): string {
+  fallback: ClassificationChip,
+): ClassificationChip {
   if (key === undefined) return fallback;
   return table[key.toLowerCase()] ?? fallback;
 }
 
 /** Used when the model omits a classification or invents one outside the vocabulary. */
-const FALLBACK_CATEGORY = "Review";
-const FALLBACK_SEVERITY = "Minor";
+const FALLBACK_CATEGORY: ClassificationChip = { asset: "cat-review", label: "Review" };
+const FALLBACK_SEVERITY: ClassificationChip = { asset: "sev-minor", label: "Minor" };
 
 /**
  * Comment assets are pinned to the full commit SHA the `kq-assets-v2` tag names — the SHA, not
@@ -72,18 +76,28 @@ const FALLBACK_SEVERITY = "Minor";
  * change that introduced the tag reference — Keiko-for-Quality#184.) The tag remains the
  * human-readable alias for the same commit.
  *
- * The assets are the design page's chip pills (asset rules, section 05): self-contained 22px
- * pills — 20px for outcome chips — on the ink tile, readable on any background, with the words
+ * The assets are the design page's chip pills (asset rules, section 05): self-contained SVG
+ * pills on the ink tile, readable on any background, with the words
  * inside the image. `alt` carries the same words, so screen readers and image-off clients read
- * "Coverage, Major" either way; that is the design's own fallback contract. Findings
- * deliberately do NOT use these assets: a finding is an argument, and it renders as text
- * everywhere — its classification line is the design's one-token text grammar.
+ * "Security, Critical" either way; that is the design's own fallback contract. Findings and
+ * incomplete notices use the same 24px category/severity grammar; summary outcomes stay at 20px
+ * because they sit inline with metadata rather than opening a comment.
  */
 const ASSET_BASE =
   "https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/6b59f533afef15820991b3a0470ddc22c6c6d436/.github/assets/kq";
 
 function assetChip(name: string, height: number, alt: string): string {
   return `<img src="${ASSET_BASE}/${name}.svg" height="${String(height)}" alt="${alt}">`;
+}
+
+const COMMENT_CHIP_HEIGHT = 24;
+
+function classificationLine(category: ClassificationChip, severity: ClassificationChip): string {
+  return `${assetChip(category.asset, COMMENT_CHIP_HEIGHT, category.label)} ${assetChip(
+    severity.asset,
+    COMMENT_CHIP_HEIGHT,
+    severity.label,
+  )}`;
 }
 
 const MAX_TITLE_CHARS = 120;
@@ -149,13 +163,11 @@ export function composeFindingBody(
   marker: string,
   context: FindingContext,
 ): string {
-  const category = label(CATEGORIES, context.category, FALLBACK_CATEGORY);
-  const severity = label(SEVERITIES, context.severity, FALLBACK_SEVERITY);
+  const category = classificationChip(CATEGORIES, context.category, FALLBACK_CATEGORY);
+  const severity = classificationChip(SEVERITIES, context.severity, FALLBACK_SEVERITY);
   const { title, body } = splitTitle(sanitizedProse);
 
-  // The design system's text grammar, exactly as specimen ① writes its fallback: one inline-code
-  // token. Chosen over chips for findings on purpose — see `ASSET_BASE`'s doc comment.
-  const parts = [`\`${category.toUpperCase()} · ${severity.toUpperCase()}\``, ""];
+  const parts = [classificationLine(category, severity), ""];
   if (title !== "") parts.push(`**${title}**`, "");
   parts.push(
     body,
@@ -211,10 +223,13 @@ export function composeIncompleteNotice(
   counts?: Readonly<Record<string, number>>,
 ): string {
   return [
-    // Specimen ③'s chip pair. "COVERAGE" is deliberately outside the CATEGORIES vocabulary
-    // above, and no finding opens with an image, so the two composers can never collide on
-    // their opening line — the invariant `isIncompleteNoticeBody` documents.
-    `${assetChip("coverage", 22, "Coverage")} ${assetChip("sev-major", 22, "Major")}`,
+    // Specimen ③'s chip pair. "COVERAGE" is deliberately outside the CATEGORIES vocabulary;
+    // the fixed notice sentence and marker keep this surface distinct from a defect finding.
+    `${assetChip("coverage", COMMENT_CHIP_HEIGHT, "Coverage")} ${assetChip(
+      "sev-major",
+      COMMENT_CHIP_HEIGHT,
+      "Major",
+    )}`,
     "",
     "**This change was not fully reviewed.**",
     "",
@@ -247,9 +262,7 @@ export function composeIncompleteNotice(
 /**
  * True for a comment body this exact function produced — a fixed, product-controlled sentence,
  * never model content, and never reachable from `composeFindingBody`: no entry in `CATEGORIES`
- * above maps to "Coverage", the header word every incomplete notice opens with, so the two
- * composers can never collide on their opening line, and the sentence checked here is stricter
- * still.
+ * above maps to "Coverage", and the fixed sentence checked here is stricter still.
  *
  * Exists so a later run can recognise its OWN past incomplete notices well enough to resolve the
  * ones a subsequent push has superseded (`github/client.ts`'s `resolveSupersededOwnNotices`),

@@ -80,7 +80,9 @@ export function parsePrList(raw) {
  * nearest ancestor that exists. `fs` is injectable so the whole thing is testable without touching
  * a real filesystem.
  */
-export function realLocation(path, fs = { existsSync, lstatSync, readlinkSync, realpathSync }) {
+const DEFAULT_FS = { existsSync, lstatSync, readlinkSync, realpathSync };
+
+export function realLocation(path, fs = DEFAULT_FS) {
   let candidate = path;
   for (let hops = 0; hops < 16; hops += 1) {
     let stats;
@@ -148,6 +150,63 @@ export const HARVEST_LABELS = [
   "unclassified",
 ];
 
+const FULL_COMMIT_OID = /^[0-9a-f]{40}$/u;
+const UNIFIED_DIFF_HUNK_HEADER = /^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@(?: .*)?(?:\n|$)/u;
+
+function parseRootCommitField(root, field, description) {
+  const commit = root?.[field];
+  if (commit === undefined || commit === null) return null;
+  if (typeof commit !== "object" || Array.isArray(commit)) {
+    throw new TypeError(`harvest root ${description} must be null or an object carrying an oid`);
+  }
+  const value = commit.oid;
+  if (typeof value !== "string" || !FULL_COMMIT_OID.test(value)) {
+    throw new Error(`harvest root ${description} oid must be exactly 40 lowercase hex characters`);
+  }
+  return value;
+}
+
+/**
+ * GitHub's current binding for a root review comment.
+ *
+ * GitHub may remap this field when a comment survives later pushes. It is retained for auditing,
+ * but it is never a valid historical replay source. `parseRootOriginalCommitOid` below owns that
+ * trust boundary.
+ */
+export function parseRootCommitOid(root) {
+  return parseRootCommitField(root, "commit", "commit");
+}
+
+/**
+ * The immutable tree against which GitHub originally created the review comment.
+ *
+ * An absent value is an honest `null`: replay marks the case unmeasured. A present value must be a
+ * full SHA-1 object id. It is never repaired and replay never falls back to the remappable `commit`
+ * field, because either choice can silently put a human-confirmed defect after its own fix.
+ */
+export function parseRootOriginalCommitOid(root) {
+  return parseRootCommitField(root, "originalCommit", "original commit");
+}
+
+/**
+ * The hunk GitHub attached to the root review comment, byte for byte.
+ *
+ * An absent hunk is measurable as `null` (file-level comments and old API fixtures legitimately
+ * have none). GitHub GraphQL returns the empty string, rather than null, for some outdated roots;
+ * that documented-by-observation absence sentinel is normalized to null. Every non-empty value
+ * must be an ordinary unified-diff hunk. Keeping it verbatim,
+ * rather than reconstructing it from a later PR head, is what lets an offline verifier see the
+ * same changed lines the original reviewer saw.
+ */
+export function parseRootDiffHunk(root) {
+  const value = root?.diffHunk;
+  if (value === undefined || value === null || value === "") return null;
+  if (typeof value !== "string" || !UNIFIED_DIFF_HUNK_HEADER.test(value)) {
+    throw new Error("harvest root diff hunk must be null or a non-empty unified-diff hunk");
+  }
+  return value;
+}
+
 /**
  * Normalizes raw GraphQL review threads into harvest records — the same walk as
  * `extractConversations`, keeping what that one deliberately drops: every reply, with its body,
@@ -184,6 +243,9 @@ export function extractHarvestRecords(rawThreads) {
       isResolved: thread.isResolved,
       isOutdated: thread.isOutdated,
       createdAt: root.createdAt,
+      commitOid: parseRootCommitOid(root),
+      originalCommitOid: parseRootOriginalCommitOid(root),
+      diffHunk: parseRootDiffHunk(root),
       arenaId: author.arenaId,
       rawLogin: author.rawLogin,
       isNotice: isIncompleteNotice(root.body) || isCoverageNotice(root.body),
@@ -338,6 +400,7 @@ export function buildHarvestDocument({ repo, generatedAt, prs, skipped = [] }) {
   const pullRequests = prs
     .map((pr) => ({
       number: pr.number,
+      ...(pr.baseSha === undefined ? {} : { baseCommitOid: pr.baseSha }),
       commitsAvailable: pr.commits.length > 0,
       findings: pr.records
         .filter((record) => !record.isNotice)
@@ -350,7 +413,9 @@ export function buildHarvestDocument({ repo, generatedAt, prs, skipped = [] }) {
   const allFindings = pullRequests.flatMap((pr) => pr.findings);
   const gapsMeasured = pullRequests.every((pr) => pr.recallGaps !== undefined);
   return {
-    schemaVersion: 1,
+    // v2 adds the immutable review-comment `originalCommitOid`. v1 carried only GitHub's
+    // remappable `commitOid` and is intentionally unusable for historical source replay.
+    schemaVersion: 2,
     unredacted: true,
     generatedAt,
     targetRepo: repo,

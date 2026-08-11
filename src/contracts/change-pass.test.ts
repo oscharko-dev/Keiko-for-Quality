@@ -20,10 +20,10 @@ interface RecordedCall {
   readonly body: { model: string; messages: readonly { content: string }[]; seed: number };
 }
 
-function chatBody(content: string, tokens: number): string {
+function chatBody(content: string, tokens?: number): string {
   return JSON.stringify({
     choices: [{ message: { content } }],
-    usage: { total_tokens: tokens },
+    ...(tokens === undefined ? {} : { usage: { total_tokens: tokens } }),
   });
 }
 
@@ -39,7 +39,7 @@ function fakeFetch(replies: readonly CannedReply[]): {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     const rawBody = typeof init?.body === "string" ? init.body : "{}";
     calls.push({ url, body: JSON.parse(rawBody) as RecordedCall["body"] });
-    const payload = reply.content === undefined ? "{}" : chatBody(reply.content, reply.tokens ?? 0);
+    const payload = reply.content === undefined ? "{}" : chatBody(reply.content, reply.tokens);
     return Promise.resolve(new Response(payload, { status: reply.status }));
   };
   return { fetchImpl, calls };
@@ -245,10 +245,16 @@ describe("runChangePass", () => {
     },
   ];
 
+  /** Mirrors the public preflight contract: UTF-8 prompt bytes plus framing and completion. */
+  function requestUpperBound(): number {
+    const prompt = buildChangePassPrompt(summarizeDeclarations(FILES));
+    return new TextEncoder().encode(prompt).byteLength + 512 + 4000;
+  }
+
   it("short-circuits without any fetch call for an empty file list", async () => {
     const { fetchImpl, calls } = fakeFetch([]);
     const outcome = await runChangePass([], { ...DEPS, fetchImpl });
-    expect(outcome).toEqual({ findings: [], tokens: 0 });
+    expect(outcome).toEqual({ findings: [], tokens: 0, budgetBlocked: false });
     expect(calls).toHaveLength(0);
   });
 
@@ -258,7 +264,7 @@ describe("runChangePass", () => {
       ...DEPS,
       fetchImpl,
     });
-    expect(outcome).toEqual({ findings: [], tokens: 0 });
+    expect(outcome).toEqual({ findings: [], tokens: 0, budgetBlocked: false });
     expect(calls).toHaveLength(0);
   });
 
@@ -272,6 +278,7 @@ describe("runChangePass", () => {
     const outcome = await runChangePass(FILES, { ...DEPS, fetchImpl });
 
     expect(outcome.tokens).toBe(456);
+    expect(outcome.budgetBlocked).toBe(false);
     expect(outcome.findings).toHaveLength(2);
     expect(outcome.findings[0]).toMatchObject({
       path: "src/consumer.ts",
@@ -308,7 +315,7 @@ describe("runChangePass", () => {
   it("treats the literal [] reply as no findings", async () => {
     const { fetchImpl } = fakeFetch([{ status: 200, content: "[]", tokens: 50 }]);
     const outcome = await runChangePass(FILES, { ...DEPS, fetchImpl });
-    expect(outcome).toEqual({ findings: [], tokens: 50 });
+    expect(outcome).toEqual({ findings: [], tokens: 50, budgetBlocked: false });
   });
 
   it("returns no findings but still counts tokens for a garbage reply", async () => {
@@ -316,14 +323,52 @@ describe("runChangePass", () => {
       { status: 200, content: "This is not JSON in any shape.", tokens: 123 },
     ]);
     const outcome = await runChangePass(FILES, { ...DEPS, fetchImpl });
-    expect(outcome).toEqual({ findings: [], tokens: 123 });
+    expect(outcome).toEqual({ findings: [], tokens: 123, budgetBlocked: false });
   });
+
+  it("does not send the request when one token less than the conservative upper bound remains", async () => {
+    const { fetchImpl, calls } = fakeFetch([{ status: 200, content: findingLine(), tokens: 1 }]);
+
+    const outcome = await runChangePass(FILES, { ...DEPS, fetchImpl }, requestUpperBound() - 1);
+
+    expect(outcome).toEqual({ findings: [], tokens: 0, budgetBlocked: true });
+    expect(calls).toHaveLength(0);
+  });
+
+  it("sends the request when the conservative upper bound remains exactly", async () => {
+    const { fetchImpl, calls } = fakeFetch([{ status: 200, content: findingLine(), tokens: 1 }]);
+
+    const outcome = await runChangePass(FILES, { ...DEPS, fetchImpl }, requestUpperBound());
+
+    expect(outcome.findings).toHaveLength(1);
+    expect(outcome.tokens).toBe(1);
+    expect(outcome.budgetBlocked).toBe(false);
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each(["missing", "invalid"] as const)(
+    "rejects a semantic reply with %s usage and charges the full bound under a cap",
+    async (usageKind) => {
+      const upperBound = requestUpperBound();
+      const reply: CannedReply =
+        usageKind === "missing"
+          ? { status: 200, content: findingLine() }
+          : { status: 200, content: findingLine(), tokens: upperBound + 1 };
+      const { fetchImpl, calls } = fakeFetch([reply]);
+
+      const outcome = await runChangePass(FILES, { ...DEPS, fetchImpl }, upperBound);
+
+      expect(outcome).toEqual({ findings: [], tokens: upperBound, budgetBlocked: false });
+      expect(calls).toHaveLength(1);
+    },
+  );
 
   it("never throws on a non-OK response, returning zero findings and zero tokens", async () => {
     const { fetchImpl } = fakeFetch([{ status: 500 }]);
     await expect(runChangePass(FILES, { ...DEPS, fetchImpl })).resolves.toEqual({
       findings: [],
       tokens: 0,
+      budgetBlocked: false,
     });
   });
 
@@ -334,6 +379,7 @@ describe("runChangePass", () => {
     await expect(runChangePass(FILES, { ...DEPS, fetchImpl: throwingFetch })).resolves.toEqual({
       findings: [],
       tokens: 0,
+      budgetBlocked: false,
     });
   });
 

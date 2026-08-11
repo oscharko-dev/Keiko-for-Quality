@@ -382,6 +382,8 @@ export interface ChangePassDeps {
   readonly endpoint: string;
   readonly token: string;
   readonly model: string;
+  /** Absolute whole-review boundary. Absent only for standalone callers. */
+  readonly deadlineMs?: number;
   /** Injection point for tests; production uses the platform fetch. */
   readonly fetchImpl?: typeof fetch;
 }
@@ -389,17 +391,82 @@ export interface ChangePassDeps {
 export interface ChangePassOutcome {
   readonly findings: readonly EngineFinding[];
   readonly tokens: number;
+  /** True only when the conservative preflight prevented the request from being sent. */
+  readonly budgetBlocked: boolean;
 }
 
 interface TransportResult {
   readonly content: string;
   readonly tokens: number;
+  readonly budgetBlocked: boolean;
+}
+
+/** The pass makes one request, with this fixed completion allowance on the wire. */
+const MAX_COMPLETION_TOKENS = 4000;
+
+/** Conservative allowance for chat framing and provider-added role tokens absent from the prompt. */
+const REQUEST_FRAMING_TOKENS = 512;
+
+/**
+ * Tokenizer-independent request ceiling: no token can consume fewer than one UTF-8 byte from the
+ * prompt. Adding the complete completion and framing allowances makes this safe before dispatch.
+ */
+function requestTokenUpperBound(prompt: string): number {
+  return (
+    new TextEncoder().encode(prompt).byteLength + REQUEST_FRAMING_TOKENS + MAX_COMPLETION_TOKENS
+  );
+}
+
+function budgetAllowsRequest(maxTokens: number | undefined, upperBound: number): boolean {
+  return maxTokens === undefined || (Number.isSafeInteger(maxTokens) && maxTokens >= upperBound);
+}
+
+function validReportedUsage(value: unknown, upperBound: number): value is number {
+  return (
+    typeof value === "number" && Number.isSafeInteger(value) && value > 0 && value <= upperBound
+  );
+}
+
+/** A sent request with untrustworthy usage cannot fund a semantic answer under a hard cap. */
+function unusableTransport(maxTokens: number | undefined, upperBound: number): TransportResult {
+  return {
+    content: "",
+    tokens: maxTokens === undefined ? 0 : upperBound,
+    budgetBlocked: false,
+  };
+}
+
+function transportFromBody(
+  body: {
+    readonly choices?: readonly { readonly message?: { readonly content?: string } }[];
+    readonly usage?: { readonly total_tokens?: number };
+  },
+  maxTokens: number | undefined,
+  upperBound: number,
+): TransportResult {
+  const reportedTokens = body.usage?.total_tokens;
+  if (!validReportedUsage(reportedTokens, upperBound)) {
+    return unusableTransport(maxTokens, upperBound);
+  }
+  return {
+    content: body.choices?.[0]?.message?.content ?? "",
+    tokens: reportedTokens,
+    budgetBlocked: false,
+  };
 }
 
 async function postChangePassRequest(
   prompt: string,
   deps: ChangePassDeps,
+  maxTokens: number | undefined,
 ): Promise<TransportResult> {
+  const upperBound = requestTokenUpperBound(prompt);
+  if (!budgetAllowsRequest(maxTokens, upperBound)) {
+    return { content: "", tokens: 0, budgetBlocked: true };
+  }
+  const remaining =
+    deps.deadlineMs === undefined ? 45_000 : Math.max(0, Math.trunc(deps.deadlineMs - Date.now()));
+  if (remaining === 0) return { content: "", tokens: 0, budgetBlocked: false };
   const doFetch = deps.fetchImpl ?? fetch;
   try {
     // `(?<!\/)`, not the plain `\/+$` this used to carry. Nothing anchored that pattern's start, so
@@ -425,22 +492,20 @@ async function postChangePassRequest(
         // starve the actual JSON reply.
         temperature: 0,
         seed: 42,
-        max_completion_tokens: 4000,
+        max_completion_tokens: MAX_COMPLETION_TOKENS,
       }),
+      signal: AbortSignal.timeout(Math.min(45_000, remaining)),
     });
-    if (!response.ok) return { content: "", tokens: 0 };
+    if (!response.ok) return unusableTransport(maxTokens, upperBound);
     const body = (await response.json()) as {
       choices?: readonly { message?: { content?: string } }[];
       usage?: { total_tokens?: number };
     };
-    return {
-      content: body.choices?.[0]?.message?.content ?? "",
-      tokens: body.usage?.total_tokens ?? 0,
-    };
+    return transportFromBody(body, maxTokens, upperBound);
   } catch {
     // A thrown fetch is a failed call, not a crash: the review this pass rides on top of already
     // has its own findings in hand, and this pass contributing nothing must never take it down.
-    return { content: "", tokens: 0 };
+    return unusableTransport(maxTokens, upperBound);
   }
 }
 
@@ -572,14 +637,15 @@ function validateCandidate(candidate: unknown): EngineFinding | undefined {
 export async function runChangePass(
   files: readonly ChangedFile[],
   deps: ChangePassDeps,
+  maxTokens?: number,
 ): Promise<ChangePassOutcome> {
   const summary = summarizeDeclarations(files);
-  if (summary === "") return { findings: [], tokens: 0 };
+  if (summary === "") return { findings: [], tokens: 0, budgetBlocked: false };
 
-  const result = await postChangePassRequest(buildChangePassPrompt(summary), deps);
+  const result = await postChangePassRequest(buildChangePassPrompt(summary), deps, maxTokens);
   const findings = extractJsonCandidates(result.content)
     .map(validateCandidate)
     .filter((f): f is EngineFinding => f !== undefined)
     .slice(0, MAX_PASS_FINDINGS);
-  return { findings, tokens: result.tokens };
+  return { findings, tokens: result.tokens, budgetBlocked: result.budgetBlocked };
 }

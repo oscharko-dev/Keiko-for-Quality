@@ -152,3 +152,39 @@ export function companionContextDigest(
     .sort((a, b) => a.localeCompare(b));
   return sha256(createHash("sha256").update(lines.join("\n")).digest("hex"));
 }
+
+/**
+ * Complete single-shot prompt-context identity for one reviewed path.
+ *
+ * Companion hunks are not the only cross-file input to the one-shot prompt: the pull request's
+ * stated purpose is repeated for every file too. Hashing the already-rendered, bounded block here
+ * means a cache hit can never replay a verdict produced for different stated requirements, while
+ * two raw descriptions that render identically retain the same key. The companion digest is fixed
+ * width, so the NUL separator is unambiguous even when candidate-authored intent contains control
+ * characters.
+ */
+export function singleShotContextDigest(
+  companions: readonly string[],
+  blobOf: (path: string) => string | undefined,
+  identity: {
+    readonly renderedChangeIntent: string;
+    readonly contextPack: string;
+    readonly guidelineContextIdentity: string;
+    readonly workflowIdentity: string;
+  },
+): Sha256 {
+  const companionDigest = companionContextDigest(companions, blobOf);
+  return sha256(
+    createHash("sha256")
+      .update(
+        JSON.stringify([
+          companionDigest,
+          identity.renderedChangeIntent,
+          identity.contextPack,
+          identity.guidelineContextIdentity,
+          identity.workflowIdentity,
+        ]),
+      )
+      .digest("hex"),
+  );
+}

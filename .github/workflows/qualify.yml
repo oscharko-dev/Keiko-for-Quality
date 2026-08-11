@@ -28,12 +28,13 @@ jobs:
   corpus:
     name: corpus
     runs-on: ubuntu-latest
-    # 32 cases — 35 changed files, and OCR_LLM_TIMEOUT (180 s) is a per-file budget — is 105
-    # minutes of worst-case model wait before any local work, and the harness's single resume
-    # can carry a failing case past that. The measured run was about six minutes when the corpus
-    # held 23 cases; it has not been re-measured since, and doing so costs real tokens. A
-    # scheduled job has nothing waiting on it, and a timeout that cuts a healthy run produces a
-    # drift issue about the runner rather than about the reviewer.
+    # The current corpus has 42 cases and 50 changed files; OCR_LLM_TIMEOUT (180 s) is a per-file
+    # request boundary, and the harness's single resume can carry a failing case past its first
+    # attempt. Generation-only staged attempts took about twelve minutes; qualification now also
+    # runs the shipped Truth/Challenge/Falsifier verification path, whose bounded follow-up calls
+    # make the wider job boundary load-bearing. A scheduled job has nothing waiting on it. A job
+    # timeout cancels the later escalation steps too, so it remains visible as a failed workflow
+    # and requires manual inspection; only a completed red threshold evaluation files a drift issue.
     timeout-minutes: 120
     # Arming switch, so this can be merged and reviewed before any credential exists. Until the
     # variable is set the job never starts and never consumes a token.
@@ -85,6 +86,10 @@ jobs:
           # The endpoint and token stay secrets: those are deployment facts, not the pairing.
           OCR_LLM_MODEL: gpt-oss-120b
           OCR_USE_ANTHROPIC: "false"
+          # Both shipped consumers select the bounded single-shot architecture. Qualification of
+          # the agentic default is qualification of a different reviewer, whatever model and rule
+          # text it shares with production.
+          KFQ_SINGLE_SHOT: "1"
         # A case can fail without the thresholds failing, so the runner's exit code is not the
         # verdict — `check-qualification.mjs` is. Exit 1 means exactly that and is tolerated;
         # anything else is the harness itself dying, and swallowing that would let the next step

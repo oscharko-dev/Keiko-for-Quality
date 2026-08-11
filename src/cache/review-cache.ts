@@ -19,6 +19,7 @@ import {
   requireKeys,
 } from "../core/validate.js";
 import type { EngineFinding } from "../engine/result.js";
+import { CLOSED_RUNTIME_FACT_CATALOG_VERSION } from "../publish/runtime-fact-catalog.js";
 
 /**
  * Cross-run memoization of per-file review findings.
@@ -36,10 +37,11 @@ import type { EngineFinding } from "../engine/result.js";
  * byte-identical instructions and byte-identical input on both occasions. The sixth, the model, is
  * not deterministic between calls even when everything else is held constant. That is exactly why
  * replay is the right move rather than the wrong one: a fresh call under identical conditions is
- * still a nondeterministic draw, not a more authoritative answer, so returning the finding list a
- * real, completed review already produced under those identical conditions is not a weaker result
- * than rolling the dice again — it is the same class of result, obtained without spending the
- * model budget or the wall-clock a second time.
+ * still a nondeterministic draw, not a more authoritative answer, so replaying the finding list a
+ * real, completed review already produced under those identical conditions is a valid generation
+ * optimization. It is not a publication shortcut: every replayed model claim passes the current
+ * repository Truth/Falsifier (including current structural retrieval) before it may publish, and a
+ * refuted or ranked-out replay is physically evicted from this store.
  *
  * **Why the store lives in the base-context Actions cache.** GitHub scopes cache writes by the
  * permissions of the token that requests them, and a workflow run triggered by a fork's pull
@@ -71,21 +73,14 @@ import type { EngineFinding } from "../engine/result.js";
  * content, rule text, and engine were byte-identical across two runs — they say nothing about the
  * *rest* of the pull request. Since v0.6.0 the reviewer verifies claims against the repository
  * before publishing, so a verdict for one file can depend on another file's import surface, a
- * caller, or configuration that changed while the first file's own bytes did not. Replaying it
- * without looking again is exactly that staleness, and this field bounds it: every entry also
- * carries a digest of the sorted set of changed path *names* across the whole pull request at the
- * time it was written, and a lookup additionally requires that digest to equal the current run's
- * (`computePathSetDigest`). Names, never blobs — a per-file content digest would already differ on
- * every touched file and defeat memoization outright, so this deliberately asks a coarser, cheaper
- * question instead: did the *shape* of the changed-file set move? A rename folds the path it moved
- * from into its token rather than contributing only its new name, because an old path silently
- * disappearing from the diff is exactly the kind of context change an unrelated file's cached
- * verdict cannot see for itself. This is a bound, not a fix: a push that only edits files already
- * in the diff still replays their untouched neighbours unconditionally, which is the same
- * staleness every content/commit-scoped incremental reviewer on the market accepts. Sound
- * dependency-closure invalidation is left to a later version; this is the cheap, O(1) mitigation
- * that kills the sharpest edge — a brand-new file introducing new import surface next to memoized
- * neighbours.
+ * caller, or configuration that changed while the first file's own bytes did not. This field binds
+ * the generation result to the sorted set of changed path *names* across the whole pull request at
+ * the time it was written, and lookup requires that digest to equal the current run's
+ * (`computePathSetDigest`). Names, never blobs — sibling content is intentionally left to the
+ * current-run verifier, because hashing it here would defeat generation reuse outright. A rename
+ * folds the path it moved from into its token rather than contributing only its new name, because a
+ * changed path shape also changes what the generator was asked to review. This digest therefore
+ * guards generation context; Truth/Falsifier guards current repository truth.
  */
 
 /**
@@ -106,10 +101,8 @@ export const SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
  *
  * The six key inputs prove a file's content, rule, engine and model were identical across two runs.
  * They say nothing about the wrapper that turns an engine finding into a published comment — and a
- * wrapper release can change that without touching one byte of the key material. v0.15.0's diff-echo
- * rejection is the worked example: replaying a v0.14.0 entry under v0.15.0 would publish a body the
- * current sanitizer refuses, which is exactly the "publish something no one reviewed" outcome
- * `src/publish/sanitize.ts` exists to prevent.
+ * wrapper release can change that without touching one byte of the key material. Sanitization and
+ * presentation are worked examples: they change the durable finding bytes, not generation input.
  *
  * The consumer used to solve this by folding the action's commit sha into the artifact name, which
  * is correct and far too coarse: it discards every entry on every release, whether or not anything
@@ -118,14 +111,15 @@ export const SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
  * belongs where the knowledge is: this product knows whether a release changed publication, and the
  * consumer cannot.
  *
- * **Bump this — and only this — when a release changes what a stored finding list would publish
- * today versus when it was written.** That means `src/publish/sanitize.ts` (a new or altered
- * rejection), `src/publish/presentation.ts` (the composed body), or `src/engine/settle.ts` (which
- * paths may be memoized at all). Everything else — dispatch, budgeting, diagnostics, the corpus,
- * this file's own bounds — leaves it alone, and a release that leaves it alone keeps every entry
- * every open pull request has accumulated.
+ * **Bump the human-readable base marker below when a release changes what a stored finding list
+ * would publish today versus when it was written.** That includes sanitization, presentation,
+ * and settlement. Ordinary verifier and retrieval dependencies stay out: cache hits save generation
+ * but pass through the current Truth/Falsifier and current pinned ast-grep retrieval on every run.
+ * The closed runtime catalog is named explicitly because changing its licensed semantics changes
+ * whether a stored claim can publish, and a retired catalog must be visible in serialized entries.
  */
-export const PUBLICATION_SEMANTICS = "v0.15.0-diff-echo";
+export const PUBLICATION_SEMANTICS =
+  `v0.23.0-finding-badges-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}` as const;
 
 declare const cacheBrand: unique symbol;
 type CacheBrand<T, B extends string> = T & { readonly [cacheBrand]: B };
@@ -479,6 +473,21 @@ export function entriesUnderCurrentSemantics(store: CacheStore): CacheStore {
 
 export function lookup(store: CacheStore, key: CacheKey): CacheEntry | undefined {
   return store.entries.find((entry) => entry.key === key);
+}
+
+/**
+ * Removes exact cache keys without changing the relative order of anything retained.
+ *
+ * Verification uses this when a replayed finding is refuted or loses a pull-request-wide rank
+ * decision. Removal is intentionally a first-class store operation rather than an empty
+ * replacement entry: an empty entry would turn "the cached claim is no longer trustworthy" into
+ * a durable clean verdict, and merely declining to touch the old entry would let it recur on the
+ * next run.
+ */
+export function removeEntriesByKey(store: CacheStore, keys: ReadonlySet<CacheKey>): CacheStore {
+  if (keys.size === 0) return store;
+  const entries = store.entries.filter((entry) => !keys.has(entry.key));
+  return entries.length === store.entries.length ? store : { ...store, entries };
 }
 
 export interface RetentionLimits {

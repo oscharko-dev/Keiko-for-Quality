@@ -107,9 +107,10 @@ const MAX_TEXT_BLOB_BYTES = 1024 * 1024;
  * content stays data exactly like everywhere else in this file.
  *
  * Returns `undefined` for anything the caller must not treat as source text: a path absent at that
- * commit, a blob past `MAX_TEXT_BLOB_BYTES`, or binary content (a NUL byte anywhere — git's own
- * text heuristic, applied here because a declared counterpart that is secretly binary is a
- * configuration mistake, and the only safe response of a no-false-positives gate is silence).
+ * commit, a blob past `MAX_TEXT_BLOB_BYTES`, malformed UTF-8, or binary content (a NUL byte
+ * anywhere — git's own text heuristic, applied here because a declared counterpart that is
+ * secretly binary is a configuration mistake, and the only safe response of a no-false-positives
+ * gate is silence).
  * Absence is an expected outcome, not an error: a profile may declare a counterpart that a given
  * branch simply does not carry yet.
  */
@@ -118,9 +119,14 @@ export async function readTextAtCommit(
   commit: CommitSha,
   path: string,
 ): Promise<string | undefined> {
-  let content: string;
+  let bytes: Buffer;
   try {
-    content = await git(ctx, ["cat-file", "blob", `${commit}:${path}`], MAX_TEXT_BLOB_BYTES);
+    const result = await run(
+      "git",
+      ["cat-file", "blob", `${commit}:${path}`],
+      options(ctx, MAX_TEXT_BLOB_BYTES),
+    );
+    bytes = result.stdout;
   } catch (error) {
     // Mirrors `engine/run.ts`'s own `failureReason` for the identical `ExecFailure` type: a timeout
     // is a systemic execution failure, not one of this function's own documented "absent" outcomes
@@ -131,7 +137,14 @@ export async function readTextAtCommit(
     if (error instanceof ExecFailure && error.timedOut) throw error;
     return undefined;
   }
-  if (content.includes("\u0000")) return undefined;
+  if (bytes.includes(0)) return undefined;
+  const content = bytes.toString("utf8");
+  // Buffer's UTF-8 decoder replaces malformed byte sequences with U+FFFD. Parsing that repaired
+  // string would make a syntax tool inspect bytes that do not exist in the immutable Git blob
+  // while still attributing its result to the original object. A byte-identical round trip is the
+  // closed boundary: valid UTF-8 (including a real BOM or U+FFFD) survives; malformed input does
+  // not become source text.
+  if (!Buffer.from(content, "utf8").equals(bytes)) return undefined;
   return content;
 }
 

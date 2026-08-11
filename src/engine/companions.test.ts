@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { companionContextDigest, companionsByPath, MAX_COMPANIONS } from "./companions.js";
+import {
+  companionContextDigest,
+  companionsByPath,
+  MAX_COMPANIONS,
+  singleShotContextDigest,
+} from "./companions.js";
 
 describe("companionsByPath", () => {
   it("groups a version twin with its package manifest and same-stem sibling first", () => {
@@ -62,5 +67,41 @@ describe("companionContextDigest", () => {
   it("hashes the empty set to a stable value distinct from any non-empty set", () => {
     expect(companionContextDigest([], blobOf)).toBe(companionContextDigest([], blobOf));
     expect(companionContextDigest([], blobOf)).not.toBe(companionContextDigest(["a.ts"], blobOf));
+  });
+
+  it("binds purpose, exact context pack, and staged-runner semantics", () => {
+    const identity = {
+      renderedChangeIntent: "purpose one",
+      contextPack: "definitions at this head",
+      guidelineContextIdentity: "base-guidelines-one",
+      workflowIdentity: "staged-v1",
+    };
+    const first = singleShotContextDigest(["a.ts"], blobOf, identity);
+    expect(singleShotContextDigest(["a.ts"], blobOf, identity)).toBe(first);
+    expect(
+      singleShotContextDigest(["a.ts"], blobOf, {
+        ...identity,
+        renderedChangeIntent: "purpose two",
+      }),
+    ).not.toBe(first);
+    expect(
+      singleShotContextDigest(["a.ts"], blobOf, {
+        ...identity,
+        contextPack: "a different definition",
+      }),
+    ).not.toBe(first);
+    expect(
+      singleShotContextDigest(["a.ts"], blobOf, {
+        ...identity,
+        guidelineContextIdentity: "base-guidelines-two",
+      }),
+    ).not.toBe(first);
+    expect(
+      singleShotContextDigest(["a.ts"], blobOf, {
+        ...identity,
+        workflowIdentity: "staged-v2",
+      }),
+    ).not.toBe(first);
+    expect(singleShotContextDigest(["b.ts"], blobOf, identity)).not.toBe(first);
   });
 });
