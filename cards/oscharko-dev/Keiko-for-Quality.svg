@@ -15,19 +15,19 @@
   <text x="75" y="32" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="13.5" font-weight="650" letter-spacing="-0.14" fill="#F2F5F3">Reviewed by Keiko for Quality</text>
   <text x="75" y="45" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="10" fill="#98A29C">oscharko-dev/Keiko-for-Quality</text>
   <text x="75" y="57" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="8.5" fill="#98A29C">last run &lt;1 h ago</text>
-  <text x="20" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#F2F5F3">134</text>
+  <text x="20" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#F2F5F3">142</text>
   <text x="20" y="109" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#98A29C">runs · 30 d</text>
-  <text x="95.9" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#F2F5F3">184</text>
+  <text x="95.9" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#F2F5F3">196</text>
   <text x="95.9" y="109" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#98A29C">findings</text>
-  <text x="157.10000000000002" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#4EBA87">94.6%</text>
+  <text x="157.10000000000002" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#4EBA87">95.9%</text>
   <text x="157.10000000000002" y="109" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#98A29C">resolved</text>
   <rect x="247.6" y="77.5" width="72.4" height="21" rx="10.5" fill="rgba(78,186,135,0.14)" stroke="rgba(78,186,135,0.4)"/><path d="M258.6 88 l2.8 2.8 l5.4 -5.6" fill="none" stroke="#5FB585" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><text x="272.6" y="91.5" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="9.5" letter-spacing="0.7" fill="#5FB585">RUN OK</text>
   <rect x="20" y="127" width="300" height="44" rx="8" fill="rgba(255,255,255,0.025)" stroke="rgba(255,255,255,0.1)"/>
   <text x="70" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#F2F5F3">100%</text>
   <text x="70" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#98A29C">RUN SUCCESS</text>
-  <text x="170" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#F2F5F3">10</text>
+  <text x="170" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#F2F5F3">8</text>
   <text x="170" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#98A29C">OPEN THREADS</text>
-  <text x="270" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#F2F5F3">28</text>
+  <text x="270" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#F2F5F3">29</text>
   <text x="270" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#98A29C">PRS W/ FINDINGS</text>
   <line x1="20" y1="203" x2="320" y2="203" stroke="rgba(255,255,255,0.1)"/><text x="20" y="218" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="9.5" letter-spacing="0.7" fill="#98A29C">EX EXPERIENTIA DISCO</text><text x="320" y="218" text-anchor="end" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="9.5" fill="#4EBA87">quality.keiko.dev →</text>
   </g>
