@@ -22,7 +22,7 @@ import {
 
 export const GENERATION_COMPLETION_LIMIT = 4_096;
 /** Bump whenever a stage prompt, parser, renderer, or routing rule changes review semantics. */
-export const GENERATION_WORKFLOW_IDENTITY = "staged-v11";
+export const GENERATION_WORKFLOW_IDENTITY = "staged-v12";
 const REQUEST_FRAMING_TOKENS = 512;
 const MAX_RISK_HYPOTHESES = 6;
 const MAX_CLAIMS_PER_EXAMINER = 4;
@@ -213,7 +213,7 @@ function examinerEvidenceContract(claimDecisionPolicy: string): string {
 export const EXAMINER_EVIDENCE_CONTRACT = examinerEvidenceContract(EXAMINER_CLAIM_DECISION_POLICY);
 
 /** Keeps the universal evidence contract compact enough for both mandatory examiner calls. */
-export const EXAMINER_EVIDENCE_CONTRACT_MAX_BYTES = 5_000;
+export const EXAMINER_EVIDENCE_CONTRACT_MAX_BYTES = 5_600;
 
 function visibleExaminerEvidence(context: GenerationContext, evidence: EvidenceView): string {
   return [

@@ -6,6 +6,7 @@ import {
   BOUNDARY_OMISSION_EVIDENCE_POLICY,
   DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+  PARALLEL_MAPPING_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   SENSITIVE_OUTPUT_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
@@ -166,6 +167,7 @@ describe("buildRuleFile", () => {
       "Restore the numeric Retry-After conversion.\n\nWhen the header is numeric, `parseRetryAfter` returns seconds, so passing it directly to `setTimeout` retries one thousand times too early.",
       "Restore the positive batch-size guard.\n\nWhen the shown digest caller supplies its zero fallback, the loop increment stays zero and never terminates.",
       "Keep the audit validator aligned with production.\n\nWhen metadata lacks `schemaVersion` or `provider`, the loosened audit accepts an object the shown production validator rejects.",
+      "Restore each capability's matching predicate.\n\nOn every config where flags differ, the `figma` member calls the Jira predicate while `jira` calls the Figma predicate, so each capability reports the other connector's authorization.",
     ];
     for (const example of examples) {
       expect(sanitizeFindingBody(example).ok).toBe(true);
@@ -394,6 +396,10 @@ describe("buildRuleFile", () => {
         name: "compares a declared mirror against every shown production predicate",
         phrases: [MIRRORED_VALIDATOR_EVIDENCE_POLICY],
       },
+      {
+        name: "compares parallel output keys with their matching sources",
+        phrases: [PARALLEL_MAPPING_EVIDENCE_POLICY],
+      },
     ];
 
     // Rows are spread as positional tuples with a `%s` title, not as objects with `$name`: `$key`
@@ -423,6 +429,7 @@ describe("buildRuleFile", () => {
       DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
       TRIGGER_AND_GUARD_EVIDENCE_POLICY,
       MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+      PARALLEL_MAPPING_EVIDENCE_POLICY,
     ]) {
       expect(rule.split(policy)).toHaveLength(2);
       expect(serializeRuleFile(file).split(policy)).toHaveLength(2);

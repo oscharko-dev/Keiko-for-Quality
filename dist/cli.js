@@ -3034,8 +3034,27 @@ var MIRRORED_VALIDATOR_EVIDENCE_POLICY = [
   "a loosened mirror that omits shown required fields and therefore accepts objects production",
   "rejects; do not infer parity or drift without both implementations in evidence."
 ].join(" ");
+var PARALLEL_MAPPING_EVIDENCE_POLICY = [
+  "Parallel-mapping decision \u2014 compare every changed output key, field, capability, or enum member",
+  "with the source field or helper named on that same entry and with its adjacent siblings. REPORT",
+  "`bug`/`high` when a keyed output visibly calls or reads a different sibling's source while that",
+  "sibling reads the first key's source; symmetric repetition is not evidence of correctness.",
+  "SILENT when a shown contract or explicit translation table proves the cross-map intentional."
+].join(" ");
 var OUTPUT_SINK_SIGNAL = /\b(?:console|diagnostic|error|log(?:ger)?|telemetry)\b/iu;
 var SENSITIVE_VALUE_SIGNAL = /\b(?:authorization|credential|password|secret|session(?:id|identifier)?|token)\b/iu;
+var IDENTIFIER_SIGNAL = /^[\w$]+$/u;
+var MAPPING_VALUE_SIGNAL = /\b(?:is|get|has|can|supports|resolve|select|summarise|summarize)[A-Z][\w$]*\s*\(/u;
+function mappingEntryVisible(evidence) {
+  return evidence.split("\n").some((line) => {
+    const normalized = line.trim().replace(/^\d+\s+/u, "").replace(/^[+-]\s*/u, "");
+    const separator = normalized.indexOf(":");
+    if (separator <= 0) return false;
+    const key = normalized.slice(0, separator).trim();
+    const value = normalized.slice(separator + 1);
+    return IDENTIFIER_SIGNAL.test(key) && MAPPING_VALUE_SIGNAL.test(value);
+  });
+}
 var POLICY_ROWS = [
   {
     label: "test-isolation",
@@ -3078,6 +3097,11 @@ var POLICY_ROWS = [
     label: "mirrored-validator",
     text: MIRRORED_VALIDATOR_EVIDENCE_POLICY,
     relevant: (evidence) => /\b(?:audit|compatibility|preflight|validat(?:e|es|ed|ing|ion|or))\b/iu.test(evidence)
+  },
+  {
+    label: "parallel-mapping",
+    text: PARALLEL_MAPPING_EVIDENCE_POLICY,
+    relevant: (evidence) => /\b(?:capabilit|mapping|mapper)\b/iu.test(evidence) || mappingEntryVisible(evidence)
   }
 ];
 function renderPolicyRows(rows) {
@@ -3176,6 +3200,7 @@ var CATCH_ALL_RULE = [
   `- **boundary and omitted-state transitions** \u2014 ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
   `- **unit-sensitive consumers and removed guards** \u2014 ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
   `- **mirrored validators** \u2014 ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`,
+  `- **parallel keyed mappings** \u2014 ${PARALLEL_MAPPING_EVIDENCE_POLICY}`,
   `- **sensitive values reaching output sinks** \u2014 ${SENSITIVE_OUTPUT_EVIDENCE_POLICY}`,
   `- **diagnostic context in error paths** \u2014 ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
@@ -3718,7 +3743,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v11";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v12";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;

@@ -6,6 +6,7 @@ import {
   EXAMINER_CLAIM_DECISION_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
   MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+  PARALLEL_MAPPING_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
   SENSITIVE_OUTPUT_EVIDENCE_POLICY,
   TEST_ISOLATION_EVIDENCE_POLICY,
@@ -26,6 +27,7 @@ describe("shared claim-decision policy", () => {
         `- diagnostic-context: ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
         `- trigger-guard: ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
         `- mirrored-validator: ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`,
+        `- parallel-mapping: ${PARALLEL_MAPPING_EVIDENCE_POLICY}`,
       ].join("\n"),
     );
     expect(new TextEncoder().encode(EXAMINER_CLAIM_DECISION_POLICY).byteLength).toBeLessThanOrEqual(
@@ -51,6 +53,11 @@ describe("shared claim-decision policy", () => {
         evidence: "setTimeout(resolve, parseRetryAfter(header));",
         first: TRIGGER_AND_GUARD_EVIDENCE_POLICY,
       },
+      {
+        evidence:
+          "figma: isJiraConnectorAuthorized(config),\njira: isFigmaConnectorAuthorized(config),",
+        first: PARALLEL_MAPPING_EVIDENCE_POLICY,
+      },
     ];
     for (const sample of samples) {
       const rendered = renderExaminerClaimDecisionPolicy(sample.evidence);
@@ -64,6 +71,7 @@ describe("shared claim-decision policy", () => {
         DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
         TRIGGER_AND_GUARD_EVIDENCE_POLICY,
         MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+        PARALLEL_MAPPING_EVIDENCE_POLICY,
       ]) {
         expect(rendered.split(policy)).toHaveLength(2);
       }
@@ -147,6 +155,15 @@ describe("shared claim-decision policy", () => {
       "compare every required predicate in both",
     );
     expect(MIRRORED_VALIDATOR_EVIDENCE_POLICY).toContain("accepts objects production rejects");
+    expect(PARALLEL_MAPPING_EVIDENCE_POLICY).toContain(
+      "compare every changed output key, field, capability, or enum member",
+    );
+    expect(PARALLEL_MAPPING_EVIDENCE_POLICY).toContain(
+      "calls or reads a different sibling's source",
+    );
+    expect(PARALLEL_MAPPING_EVIDENCE_POLICY).toContain(
+      "explicit translation table proves the cross-map intentional",
+    );
     expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
       "A removed per-case reset before a later dynamic import is reportable",
     );

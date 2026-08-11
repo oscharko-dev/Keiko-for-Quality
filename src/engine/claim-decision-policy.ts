@@ -71,6 +71,14 @@ export const MIRRORED_VALIDATOR_EVIDENCE_POLICY = [
   "rejects; do not infer parity or drift without both implementations in evidence.",
 ].join(" ");
 
+export const PARALLEL_MAPPING_EVIDENCE_POLICY = [
+  "Parallel-mapping decision — compare every changed output key, field, capability, or enum member",
+  "with the source field or helper named on that same entry and with its adjacent siblings. REPORT",
+  "`bug`/`high` when a keyed output visibly calls or reads a different sibling's source while that",
+  "sibling reads the first key's source; symmetric repetition is not evidence of correctness.",
+  "SILENT when a shown contract or explicit translation table proves the cross-map intentional.",
+].join(" ");
+
 interface ClaimDecisionPolicyRow {
   readonly label: string;
   readonly text: string;
@@ -80,6 +88,23 @@ interface ClaimDecisionPolicyRow {
 const OUTPUT_SINK_SIGNAL = /\b(?:console|diagnostic|error|log(?:ger)?|telemetry)\b/iu;
 const SENSITIVE_VALUE_SIGNAL =
   /\b(?:authorization|credential|password|secret|session(?:id|identifier)?|token)\b/iu;
+const IDENTIFIER_SIGNAL = /^[\w$]+$/u;
+const MAPPING_VALUE_SIGNAL =
+  /\b(?:is|get|has|can|supports|resolve|select|summarise|summarize)[A-Z][\w$]*\s*\(/u;
+
+function mappingEntryVisible(evidence: string): boolean {
+  return evidence.split("\n").some((line) => {
+    const normalized = line
+      .trim()
+      .replace(/^\d+\s+/u, "")
+      .replace(/^[+-]\s*/u, "");
+    const separator = normalized.indexOf(":");
+    if (separator <= 0) return false;
+    const key = normalized.slice(0, separator).trim();
+    const value = normalized.slice(separator + 1);
+    return IDENTIFIER_SIGNAL.test(key) && MAPPING_VALUE_SIGNAL.test(value);
+  });
+}
 
 const POLICY_ROWS: readonly ClaimDecisionPolicyRow[] = [
   {
@@ -132,6 +157,12 @@ const POLICY_ROWS: readonly ClaimDecisionPolicyRow[] = [
     relevant: (evidence) =>
       /\b(?:audit|compatibility|preflight|validat(?:e|es|ed|ing|ion|or))\b/iu.test(evidence),
   },
+  {
+    label: "parallel-mapping",
+    text: PARALLEL_MAPPING_EVIDENCE_POLICY,
+    relevant: (evidence) =>
+      /\b(?:capabilit|mapping|mapper)\b/iu.test(evidence) || mappingEntryVisible(evidence),
+  },
 ];
 
 function renderPolicyRows(rows: readonly ClaimDecisionPolicyRow[]): string {
@@ -153,4 +184,4 @@ export function renderExaminerClaimDecisionPolicy(visibleEvidence: string): stri
 export const EXAMINER_CLAIM_DECISION_POLICY = renderExaminerClaimDecisionPolicy("");
 
 /** Prevent a focused examiner fix from silently becoming another copy of the complete rule. */
-export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 4_200;
+export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 4_800;
