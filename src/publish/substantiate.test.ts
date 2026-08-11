@@ -406,6 +406,9 @@ describe("role prompts", () => {
     expect(terminalTruthPrompt).toContain("Do not require proof of impact");
     expect(truthPrompt).toContain("guard in one caller does not make a missing invariant");
     expect(terminalTruthPrompt).toContain("shown catch-to-sink flow is sufficient");
+    expect(terminalTruthPrompt).toContain("request the parser or sink implementation");
+    expect(falsifierPrompt).toContain("writes each computed key with Map.set");
+    expect(falsifierPrompt).toContain("citing a shown pre-write rejection");
     expect(truthPrompt).toContain("D:H");
     expect(truthPrompt).toContain("needs_context");
     expect(plannerPrompt).toContain("same_file_contract");
@@ -1962,7 +1965,7 @@ describe("hard shared request budget", () => {
     expect(substantiationOnePathTokenUpperBound(candidate, evidence)).toBe(
       MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
     );
-    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(976_767);
+    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(978_283);
   });
 
   it("shares the same hard ceiling across later findings", async () => {

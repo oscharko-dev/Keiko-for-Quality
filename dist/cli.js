@@ -10361,8 +10361,13 @@ var VERIFICATION_CLAIM_DECISION_POLICY = [
   "dominates every relevant entry to that boundary.",
   "When a user-input parser runs inside a try block and its caught error is passed directly to an",
   "error, diagnostic, logging, or telemetry sink, that shown catch-to-sink flow is sufficient",
-  "disclosure evidence. Do not require the parser implementation to prove what an unexpected error",
-  "contains; a static body-free replacement is the relevant shown guard.",
+  "disclosure evidence. The catch binding used as the sink argument is the claimed flow: do not",
+  "request the parser or sink implementation, or demand a particular leaked value. A static",
+  "body-free replacement is the relevant shown guard.",
+  "When shown code iterates input records and writes each computed key with Map.set, a duplicate",
+  "key overwrites the earlier value unless shown evidence rejects it before that write. This",
+  "Map contract is self-contained: do not invent a duplicate guard or defeat the claim without",
+  "citing a shown pre-write rejection.",
   EXAMINER_CLAIM_DECISION_POLICY
 ].join("\n");
 function followedByVerificationPolicy(text) {
