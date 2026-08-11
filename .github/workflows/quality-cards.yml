@@ -1,272 +1,61 @@
-name: targeted historical replay r26
+# Renders the review-record cards the READMEs embed and commits them to the `quality-cards`
+# data branch. GitHub-only delivery for the card widget: same renderer and collector as the
+# quality.keiko.dev service (widget/), numbers read from this host's own API with the workflow
+# token — no external infrastructure, no secrets. When quality.keiko.dev is deployed, the README
+# URLs swap to the live endpoint and this workflow retires with the branch.
+name: quality-cards
 
-# One-shot, text-free diagnostic for the 13-case historical cohort. Raw harvests, model output,
-# reports, traces, and command logs remain under RUNNER_TEMP and are deleted unconditionally.
 on:
+  schedule:
+    - cron: "17 */3 * * *"
   workflow_dispatch:
 
-run-name: Historical verifier diagnostic r26 on 51b1aca
-
-permissions: {}
+permissions:
+  contents: write
 
 concurrency:
-  group: historical-verifier-diagnostic-51b1aca-r26
+  group: quality-cards
   cancel-in-progress: false
 
 jobs:
-  replay:
-    name: targeted historical verifier diagnostic
-    if: >-
-      github.repository == 'oscharko-dev/Keiko-for-Quality' &&
-      github.ref == 'refs/heads/ci/historical-diagnostic-v0.23.0-51b1aca-r26' &&
-      github.run_attempt == 1
+  render:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    environment: self-review
-    permissions:
-      contents: read
-    env:
-      CANDIDATE_SHA: 51b1acaf4fd687337fd7e68670e15da38feab8f2
-      CANDIDATE_TREE: 9e98de32e503303e9f84b48add225f13268572a3
-      CANDIDATE_PARENT: 0cf9e92517294fe82039f7535a2478eac0d336dd
-      FINDING_IDS: 3740363530,3740721453,3740844490,3740855222,3740961163,3741289682,3740917469,3740985037,3741026530,3741170439,3741214381,3741289718,3741463707
-      SNAPSHOT_GENERATED_AT: 2026-08-11T03:23:10.924Z
-      EXPECTED_SHA256: 1e70bef778ce16c3366425563210c6868c6bdb9f24b23c79957b6159438f3c25
-      MAX_TOKENS: "12000000"
+    timeout-minutes: 10
     steps:
-      - name: Establish private runner paths
-        shell: bash
-        run: |
-          set -euo pipefail
-          umask 077
-          private_dir=$(mktemp -d "${RUNNER_TEMP}/kfq-historical-r26.XXXXXX")
-          {
-            echo "PRIVATE_DIR=${private_dir}"
-            echo "HARVEST_PATH=${private_dir}/harvest.json"
-            echo "FILTERED_PATH=${private_dir}/filtered.json"
-            echo "REPORT_PATH=${private_dir}/report.json"
-            echo "TRACE_PATH=${private_dir}/trace.json"
-            echo "PRIVATE_LOG=${private_dir}/run.log"
-            echo "CONSUMER_REPO=${private_dir}/keiko.git"
-          } >> "${GITHUB_ENV}"
-
-      - name: Check out the exact verifier candidate
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # The renderer's source, read-only.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          path: reviewer
-          ref: 51b1acaf4fd687337fd7e68670e15da38feab8f2
-          fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove candidate identity before setup
-        working-directory: reviewer
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${CANDIDATE_SHA}"
-          test "$(git rev-parse 'HEAD^{tree}')" = "${CANDIDATE_TREE}"
-          test "$(git rev-parse HEAD^)" = "${CANDIDATE_PARENT}"
-          test -z "$(git status --short)"
-          test "$(git ls-remote origin refs/heads/dev | cut -f1)" = "${CANDIDATE_PARENT}"
-
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      # The data branch, with credentials retained: this checkout is what the job pushes to,
+      # scoped by the workflow's own contents: write and the unprotected quality-cards branch.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: reviewer/package-lock.json
+          ref: quality-cards
+          path: cards-branch
+          persist-credentials: true
 
-      - name: Install without lifecycle scripts
-        working-directory: reviewer
-        run: npm ci --ignore-scripts
-
-      - name: Fetch immutable Keiko history without a checkout
-        shell: bash
-        run: |
-          set -euo pipefail
-          git init --quiet "${CONSUMER_REPO}"
-          git -C "${CONSUMER_REPO}" remote add origin https://github.com/oscharko-dev/Keiko.git
-          git -C "${CONSUMER_REPO}" fetch --no-tags origin \
-            +refs/heads/dev:refs/remotes/origin/dev \
-            +refs/pull/3003/head:refs/remotes/origin/replay-pr-3003 \
-            +refs/pull/3005/head:refs/remotes/origin/replay-pr-3005 \
-            +refs/pull/3006/head:refs/remotes/origin/replay-pr-3006 \
-            +refs/pull/3028/head:refs/remotes/origin/replay-pr-3028 \
-            +refs/pull/3031/head:refs/remotes/origin/replay-pr-3031 \
-            +refs/pull/3032/head:refs/remotes/origin/replay-pr-3032 \
-            +refs/pull/3037/head:refs/remotes/origin/replay-pr-3037 \
-            +refs/pull/3040/head:refs/remotes/origin/replay-pr-3040 \
-            +refs/pull/3041/head:refs/remotes/origin/replay-pr-3041
-
-      - name: Mint a read-only Keiko token
-        id: keiko-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          app-id: ${{ secrets.KFQ_REVIEW_APP_ID }}
-          private-key: ${{ secrets.KFQ_REVIEW_APP_PRIVATE_KEY }}
-          owner: oscharko-dev
-          repositories: Keiko
-          permission-pull-requests: read
+          node-version: "24"
 
-      - name: Harvest and bind the reviewed private subset
-        working-directory: reviewer
+      # No npm install: renderer and collector are dependency-free by design (widget/README.md).
+      - name: Render cards
         env:
-          GH_TOKEN: ${{ steps.keiko-token.outputs.token }}
-        shell: bash
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          umask 077
-          npm run corpus:harvest -- \
-            --repo oscharko-dev/Keiko \
-            --prs 3003,3005,3006,3028,3031,3032,3037,3040,3041 \
-            --out "${HARVEST_PATH}" > "${PRIVATE_DIR}/harvest.log" 2>&1
-          jq \
-            --arg generated_at "${SNAPSHOT_GENERATED_AT}" \
-            --argjson wanted "[${FINDING_IDS}]" \
-            '.generatedAt = $generated_at |
-             .pullRequests |= [
-               .[] |
-               .findings |= [
-                 .[] | select(.databaseId as $id | $wanted | index($id))
-               ] |
-               select(.findings | length > 0)
-             ]' \
-            "${HARVEST_PATH}" > "${FILTERED_PATH}"
-          actual_sha256=$(sha256sum "${FILTERED_PATH}")
-          actual_sha256=${actual_sha256%% *}
-          test "${actual_sha256}" = "${EXPECTED_SHA256}"
-          node --input-type=module <<'NODE'
-          import { readFileSync } from "node:fs";
+          node widget/scripts/render-card.mjs oscharko-dev Keiko-for-Quality cards-branch/cards
+          node widget/scripts/render-card.mjs oscharko-dev Keiko cards-branch/cards
 
-          const requested = process.env.FINDING_IDS.split(",").map(Number);
-          const wanted = new Set(requested);
-          const harvest = JSON.parse(readFileSync(process.env.FILTERED_PATH, "utf8"));
-          const findings = harvest.pullRequests.flatMap((pullRequest) => pullRequest.findings ?? []);
-          if (requested.length !== 13 || wanted.size !== 13 || findings.length !== 13) {
-            throw new Error("the diagnostic cohort must contain exactly 13 unique findings");
-          }
-          if (
-            findings.some(
-              (finding) =>
-                !wanted.has(finding.databaseId) ||
-                finding.arenaId !== "kfq" ||
-                !["fixed_confirmed", "refuted_confirmed"].includes(finding.label),
-            )
-          ) {
-            throw new Error("the diagnostic cohort contains an ineligible finding");
-          }
-          const fixed = findings.filter((finding) => finding.label === "fixed_confirmed").length;
-          const refuted = findings.filter((finding) => finding.label === "refuted_confirmed").length;
-          if (fixed !== 6 || refuted !== 7) throw new Error("unexpected diagnostic label balance");
-          console.log("private diagnostic cohort bound: 13 records (6 fixed, 7 refuted)");
-          NODE
-
-      - name: Prove the zero-token execution plan
-        working-directory: reviewer
-        env:
-          OCR_LLM_MODEL: gpt-oss-120b
-        shell: bash
+      - name: Commit when changed
+        working-directory: cards-branch
         run: |
-          set -euo pipefail
-          node --input-type=module <<'NODE'
-          import { runHistoricalReplayCommand } from "./corpus/historical-replay.mjs";
-
-          const result = await runHistoricalReplayCommand([
-            "--dry-run",
-            "--harvest", process.env.FILTERED_PATH,
-            "--repo", process.env.CONSUMER_REPO,
-            "--holdout-from-pr", "3037",
-            "--max-tokens", process.env.MAX_TOKENS,
-          ]);
-          const expected = {
-            populationRecords: 13,
-            corroboratedCases: 13,
-            locallyBoundCases: 12,
-            estimatedAffordableCases: 12,
-            estimatedCostExcessCases: 0,
-            estimatedMaximumEndpointRequests: 48,
-          };
-          for (const [key, value] of Object.entries(expected)) {
-            if (result.plan[key] !== value) throw new Error(`unexpected plan value for ${key}`);
-          }
-          console.log("zero-token plan verified: 13 records, 12 locally bound, at most 48 requests");
-          NODE
-
-      - name: Re-prove candidate identity before model access
-        working-directory: reviewer
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "${CANDIDATE_SHA}"
-          test "$(git rev-parse 'HEAD^{tree}')" = "${CANDIDATE_TREE}"
-          test -z "$(git status --short)"
-          test "$(git ls-remote origin refs/heads/dev | cut -f1)" = "${CANDIDATE_PARENT}"
-
-      - name: Execute exactly one targeted historical replay
-        working-directory: reviewer
-        env:
-          OCR_LLM_MODEL: gpt-oss-120b
-          OCR_LLM_URL: ${{ secrets.KFQ_MODEL_ENDPOINT }}
-          OCR_LLM_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
-          OCR_USE_ANTHROPIC: "false"
-        shell: bash
-        run: |
-          set -euo pipefail
-          timeout --signal=TERM --kill-after=30s 95m \
-            node corpus/historical-replay.mjs \
-              --execute \
-              --harvest "${FILTERED_PATH}" \
-              --repo "${CONSUMER_REPO}" \
-              --holdout-from-pr 3037 \
-              --max-tokens "${MAX_TOKENS}" \
-              --out "${REPORT_PATH}" \
-              --diagnostic-trace-out "${TRACE_PATH}" \
-            > "${PRIVATE_LOG}" 2>&1
-
-      - name: Print aggregate result and text-free trace
-        working-directory: reviewer
-        shell: bash
-        run: |
-          set -euo pipefail
-          node --input-type=module <<'NODE'
-          import { readFileSync } from "node:fs";
-          import { validateHistoricalReplayDiagnostic } from "./corpus/historical-replay-diagnostic-lib.mjs";
-
-          const report = JSON.parse(readFileSync(process.env.REPORT_PATH, "utf8"));
-          const diagnostic = JSON.parse(readFileSync(process.env.TRACE_PATH, "utf8"));
-          if (!validateHistoricalReplayDiagnostic(diagnostic)) {
-            throw new Error("the historical diagnostic trace failed strict validation");
-          }
-          const requested = process.env.FINDING_IDS.split(",").map(Number);
-          const traced = diagnostic.cases.map((entry) => entry.databaseId);
-          if (
-            traced.length !== requested.length ||
-            new Set(traced).size !== traced.length ||
-            requested.some((databaseId) => !traced.includes(databaseId))
-          ) {
-            throw new Error("the trace does not cover the exact requested cohort");
-          }
-          const result = {
-            reviewerTree: report.binding.reviewerTree,
-            accountedTokens: report.execution.accountedTokens,
-            decisions: report.execution.corroboratedDecisions,
-            stageCounters: report.execution.stageCounters,
-            overall: report.score.all.after,
-            holdout: report.score.chronological.holdout.after,
-            diagnosticCases: diagnostic.cases,
-          };
-          console.log(JSON.stringify(result, null, 2));
-          NODE
-
-      - name: Preserve only the redacted aggregate report
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: historical-diagnostic-51b1aca-r26
-          path: ${{ env.REPORT_PATH }}
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Remove all private measurement material
-        if: always()
-        shell: bash
-        run: rm -rf -- "${PRIVATE_DIR}"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "cards unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "quality-cards: scheduled render"
+          git push origin HEAD:quality-cards
