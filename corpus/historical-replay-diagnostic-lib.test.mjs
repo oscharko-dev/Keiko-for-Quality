@@ -62,6 +62,31 @@ test("builds the exact text-free per-case diagnostic and never passes as release
   );
 });
 
+test("a negative challenge search is a kept trace but a negative truth search is not", () => {
+  const challengeNoMatch = {
+    databaseId: 21,
+    stage: "challenge_retrieval",
+    disposition: "kept",
+    reasonCode: "retrieval_no_match",
+    usage: { callCount: 2, tokens: 200 },
+  };
+  const diagnostic = buildHistoricalReplayDiagnostic({
+    databaseIds: [21],
+    cases: [challengeNoMatch],
+    attemptedCases: 1,
+    accountedTokens: 200,
+  });
+
+  assert.equal(validateHistoricalReplayDiagnostic(diagnostic), true);
+  assert.equal(
+    validateHistoricalReplayDiagnostic({
+      ...diagnostic,
+      cases: [{ ...challengeNoMatch, stage: "truth_retrieval" }],
+    }),
+    false,
+  );
+});
+
 test("rejects extra text, open vocabularies, reordered ids, and accounting mismatches", () => {
   const extra = {
     schemaVersion: 1,

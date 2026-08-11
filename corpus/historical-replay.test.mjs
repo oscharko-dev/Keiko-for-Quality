@@ -1462,11 +1462,20 @@ test("a negative contract search remains a valid confirmed historical decision",
     databaseIds: [1],
     cases: [boundReplayCase(1)],
     maxTokens: 1_000,
-    ...replayVerificationDependencies(async (findings) =>
-      substantiationOutcome(findings, {
-        challengeExpanded: 0,
-        challengeNoMatches: 1,
-      }),
+    captureDiagnosticTrace: true,
+    ...replayVerificationDependencies(
+      async (findings, _read, _endpoint, _strictness, _maximum, _retrieve, trace) => {
+        trace({
+          stage: "challenge_retrieval",
+          disposition: "kept",
+          reasonCode: "retrieval_no_match",
+          usage: { callCount: 2, tokens: 100 },
+        });
+        return substantiationOutcome(findings, {
+          challengeExpanded: 0,
+          challengeNoMatches: 1,
+        });
+      },
     ),
   });
 
@@ -1476,6 +1485,15 @@ test("a negative contract search remains a valid confirmed historical decision",
   assert.equal(result.report.stageCounters.confirmed, 1);
   assert.equal(result.report.stageCounters.challengeExpanded, 0);
   assert.equal(result.report.stageCounters.challengeNoMatches, 1);
+  assert.deepEqual(result.diagnosticCases, [
+    {
+      databaseId: 1,
+      stage: "challenge_retrieval",
+      disposition: "kept",
+      reasonCode: "retrieval_no_match",
+      usage: { callCount: 2, tokens: 100 },
+    },
+  ]);
 });
 
 test("invalid budget accounting exhausts the local ledger before another verifier call", async () => {
