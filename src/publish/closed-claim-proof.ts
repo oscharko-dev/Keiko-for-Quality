@@ -92,7 +92,10 @@ export function bindTrustedHunkEvidence(input: {
 }
 
 function carriesTrustedEvidenceBrand(value: object): boolean {
-  return Reflect.get(value, TRUSTED_HUNK_EVIDENCE) === true;
+  return (
+    Object.hasOwn(value, TRUSTED_HUNK_EVIDENCE) &&
+    Reflect.get(value, TRUSTED_HUNK_EVIDENCE) === true
+  );
 }
 
 function changedHeadLines(evidence: string): ReadonlySet<number> {
@@ -457,6 +460,20 @@ function enclosingInputLoop(
   return undefined;
 }
 
+function skipsBeforeWrite(
+  lines: readonly SourceLine[],
+  loop: { readonly opening: number },
+  write: MapWrite,
+): boolean {
+  const writeIndex = lines.indexOf(write.line);
+  return (
+    writeIndex >= 0 &&
+    lines
+      .slice(loop.opening + 1, writeIndex)
+      .some((candidate) => /\bcontinue\b/u.test(candidate.code))
+  );
+}
+
 function receiverBindingIsStable(
   lines: readonly SourceLine[],
   declaration: SourceLine,
@@ -499,6 +516,21 @@ function hasDuplicateGuard(
   );
 }
 
+function writesEveryInputToStableNativeMap(
+  lines: readonly SourceLine[],
+  declaration: SourceLine,
+  write: MapWrite,
+): boolean {
+  if (!nativeMapIsUnshadowed(lines)) return false;
+  const loop = enclosingInputLoop(lines, declaration, write);
+  return (
+    loop !== undefined &&
+    !skipsBeforeWrite(lines, loop, write) &&
+    receiverBindingIsStable(lines, declaration, write) &&
+    !hasDuplicateGuard(lines, declaration, write)
+  );
+}
+
 function duplicateMapProof(
   finding: JudgeableFinding,
   lines: readonly SourceLine[],
@@ -509,13 +541,7 @@ function duplicateMapProof(
   const write = mapWriteAtFinding(finding, lines);
   if (write === undefined) return undefined;
   const declaration = mapDeclaration(lines, write);
-  if (
-    declaration === undefined ||
-    !nativeMapIsUnshadowed(lines) ||
-    enclosingInputLoop(lines, declaration, write) === undefined ||
-    !receiverBindingIsStable(lines, declaration, write) ||
-    hasDuplicateGuard(lines, declaration, write)
-  ) {
+  if (declaration === undefined || !writesEveryInputToStableNativeMap(lines, declaration, write)) {
     return undefined;
   }
   return { evidenceRefs: refsAt(write.line.line) };

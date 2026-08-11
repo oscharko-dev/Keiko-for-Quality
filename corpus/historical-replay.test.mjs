@@ -795,6 +795,7 @@ test("verification maps each paranoid outcome to keep/drop/unmeasured without se
       entries: [],
     }),
     toRetrievedEvidence: () => ({ chunks: [] }),
+    bindTrustedHunkEvidence: (input) => input,
     substantiate: async (findings, readEvidence, _endpoint, strictness, remainingTokens) => {
       assert.equal(findings.length, 1);
       assert.deepEqual(Object.keys(findings[0]), [
@@ -848,6 +849,27 @@ test("verification maps each paranoid outcome to keep/drop/unmeasured without se
     undecided: 1,
     budgetBlocked: 0,
   });
+});
+
+test("a failed trusted-evidence binding is unmeasured before model work", async () => {
+  let substantiateCalled = false;
+  const dependencies = replayVerificationDependencies(async () => {
+    substantiateCalled = true;
+    throw new Error("must not run");
+  });
+  const result = await runHistoricalReplayVerification({
+    databaseIds: [1],
+    cases: [boundReplayCase(1)],
+    maxTokens: 1_000,
+    ...dependencies,
+    bindTrustedHunkEvidence: () => undefined,
+  });
+
+  assert.equal(substantiateCalled, false);
+  assert.equal(result.report.attemptedCases, 0);
+  assert.equal(result.report.accountedTokens, 0);
+  assert.equal(result.report.unmeasuredByReason.evidenceUnavailable, 1);
+  assert.deepEqual(result.decisions, [{ databaseId: 1, decision: "unmeasured" }]);
 });
 
 test("verification binds one text-free terminal trace to every requested database id", async () => {
@@ -971,6 +993,7 @@ test("verification uses the production diff, initial context, and one follow-up 
         ],
       };
     },
+    bindTrustedHunkEvidence: (input) => input,
     substantiate: async (findings, readEvidence, _endpoint, strictness, maximum, retrieve) => {
       assert.equal(strictness, "paranoid");
       assert.equal(maximum, 500);
@@ -1171,6 +1194,7 @@ test("verification routes the closed base challenge through the immutable derive
         ],
       };
     },
+    bindTrustedHunkEvidence: (input) => input,
     substantiate: async (findings, readEvidence, _endpoint, _strictness, _maximum, retrieve) => {
       assert.equal(findings[0].basePath, sources.oldPath);
       const knownProvenance = new Set(["src/new-name.ts\u0000H\u00001"]);
@@ -1255,6 +1279,7 @@ test("an unmapped BASE anchor withholds runtime facts without retiring later rep
       ],
       facts,
     }),
+    bindTrustedHunkEvidence: (input) => input,
     substantiate: async (findings, readEvidence, _endpoint, _strictness, _maximum, retrieve) => {
       substantiationCalls += 1;
       if (substantiationCalls === 1) {
@@ -1335,6 +1360,7 @@ test("verification routes a deleted-file same-file challenge through immutable B
         },
       ],
     }),
+    bindTrustedHunkEvidence: (input) => input,
     substantiate: async (findings, readEvidence, _endpoint, _strictness, _maximum, retrieve) => {
       const retrieved = await retrieve({
         finding: findings[0],
@@ -1877,6 +1903,7 @@ test("a successful verification fails closed when another file replaces its rese
               entries: [],
             }),
             toRetrievedEvidence: () => ({ chunks: [] }),
+            bindTrustedHunkEvidence: (input) => input,
             substantiate: async (findings) => {
               verificationCalls += 1;
               return substantiationOutcome(findings);
@@ -1950,6 +1977,7 @@ test("the private trace is exclusively reserved and rejects a pathname replaceme
               entries: [],
             }),
             toRetrievedEvidence: () => ({ chunks: [] }),
+            bindTrustedHunkEvidence: (input) => input,
             substantiate: async (
               findings,
               _read,
@@ -2111,7 +2139,7 @@ test("durable evidence is aggregate-only and binds every implementation slice by
     classificationAndPrWideRanking: "not measured",
     endToEndRecall: "not measured",
   });
-  assert.equal(report.schemaVersion, 5);
+  assert.equal(report.schemaVersion, 6);
   assert.deepEqual(Object.keys(report.binding.sourceSha256), [
     "driver",
     "scorer",
@@ -2169,6 +2197,7 @@ test("execute joins fake verifier decisions, scores them, and writes only the re
           entries: [],
         }),
         toRetrievedEvidence: () => ({ chunks: [] }),
+        bindTrustedHunkEvidence: (input) => input,
         substantiate: async (
           findings,
           _read,

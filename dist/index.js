@@ -11337,7 +11337,7 @@ function bindTrustedHunkEvidence(input) {
   return Object.freeze({ ...input, [TRUSTED_HUNK_EVIDENCE]: true });
 }
 function carriesTrustedEvidenceBrand(value) {
-  return Reflect.get(value, TRUSTED_HUNK_EVIDENCE) === true;
+  return Object.hasOwn(value, TRUSTED_HUNK_EVIDENCE) && Reflect.get(value, TRUSTED_HUNK_EVIDENCE) === true;
 }
 function changedHeadLines(evidence) {
   const changed = /* @__PURE__ */ new Set();
@@ -11609,6 +11609,10 @@ function enclosingInputLoop(lines, declaration, write) {
   }
   return void 0;
 }
+function skipsBeforeWrite(lines, loop, write) {
+  const writeIndex = lines.indexOf(write.line);
+  return writeIndex >= 0 && lines.slice(loop.opening + 1, writeIndex).some((candidate) => /\bcontinue\b/u.test(candidate.code));
+}
 function receiverBindingIsStable(lines, declaration, write) {
   const receiver = escaped(write.receiver);
   const redeclared = new RegExp(
@@ -11633,6 +11637,11 @@ function hasDuplicateGuard(lines, declaration, write) {
     (line) => line.line > declaration.line && line.line < write.line.line && (directGuard.test(line.code) || readGuard.test(line.code))
   );
 }
+function writesEveryInputToStableNativeMap(lines, declaration, write) {
+  if (!nativeMapIsUnshadowed(lines)) return false;
+  const loop = enclosingInputLoop(lines, declaration, write);
+  return loop !== void 0 && !skipsBeforeWrite(lines, loop, write) && receiverBindingIsStable(lines, declaration, write) && !hasDuplicateGuard(lines, declaration, write);
+}
 function duplicateMapProof(finding, lines) {
   const claim = finding.content.slice(0, MAX_CLAIM_CHARS);
   if (!/\bduplicate[sd]?\b/iu.test(claim)) return void 0;
@@ -11640,7 +11649,7 @@ function duplicateMapProof(finding, lines) {
   const write = mapWriteAtFinding(finding, lines);
   if (write === void 0) return void 0;
   const declaration = mapDeclaration(lines, write);
-  if (declaration === void 0 || !nativeMapIsUnshadowed(lines) || enclosingInputLoop(lines, declaration, write) === void 0 || !receiverBindingIsStable(lines, declaration, write) || hasDuplicateGuard(lines, declaration, write)) {
+  if (declaration === void 0 || !writesEveryInputToStableNativeMap(lines, declaration, write)) {
     return void 0;
   }
   return { evidenceRefs: refsAt(write.line.line) };

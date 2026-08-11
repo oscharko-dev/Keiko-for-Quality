@@ -103,6 +103,14 @@ function mapEvidence(
   return evidence(head, options.changed === false ? [] : [writeLine], base);
 }
 
+function mapProof(
+  options: Parameters<typeof mapEvidence>[0] = {},
+): ReturnType<typeof closedClaimProof> {
+  const beforeWrite = options.beforeWrite ?? [];
+  const writeLine = 4 + (options.arrayGuard === false ? 0 : 1) + beforeWrite.length;
+  return closedClaimProof(finding(DUPLICATE_CLAIM.content, writeLine), mapEvidence(options));
+}
+
 describe("trusted closed claim proof", () => {
   it("rejects dossier rows that do not match the bound source", () => {
     expect(
@@ -180,9 +188,14 @@ describe("trusted closed claim proof", () => {
   });
 
   it("proves a changed duplicate write on a stable native Map inside an input loop", () => {
-    expect(closedClaimProof(DUPLICATE_CLAIM, mapEvidence())).toEqual({
+    expect(mapProof()).toEqual({
       evidenceRefs: ["D:H:5", "H:5"],
     });
+  });
+
+  it("requires the trusted brand to be an own property", () => {
+    const inherited = Object.create(mapEvidence()) as TrustedHunkEvidence;
+    expect(closedClaimProof(DUPLICATE_CLAIM, inherited)).toBeUndefined();
   });
 
   it.each([
@@ -200,6 +213,10 @@ describe("trusted closed claim proof", () => {
     ["a non-repeated write", { loop: false }],
     ["an iterable not proven to be an array", { arrayGuard: false }],
     ["a loop that can break before the write", { beforeWrite: ["if (byId.size !== 0) break;"] }],
+    [
+      "a loop that can skip before the write",
+      { beforeWrite: ["if (byId.has(id.value)) continue;"] },
+    ],
     ["behavior already present in BASE", { prior: true }],
     ["a shadowed receiver", { beforeWrite: ["const byId = createCapabilityIndex();"] }],
     ["a reassigned receiver", { beforeWrite: ["byId = createCapabilityIndex();"] }],
@@ -247,6 +264,6 @@ describe("trusted closed claim proof", () => {
       ).toBeUndefined();
       return;
     }
-    expect(closedClaimProof(DUPLICATE_CLAIM, mapEvidence(options))).toBeUndefined();
+    expect(mapProof(options)).toBeUndefined();
   });
 });

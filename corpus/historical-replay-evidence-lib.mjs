@@ -392,7 +392,7 @@ function validateExecution(value, plan, failures) {
     stageCounters.retrievalNoMatches > stageCounters.droppedInsufficientEvidence ||
     stageCounters.retrievalRequested - stageCounters.retrievalPerformed >
       stageCounters.droppedInsufficientEvidence ||
-    stageCounters.challengePlanned > validatedOutcomes ||
+    stageCounters.challengePlanned > validatedOutcomes - stageCounters.directProved ||
     stageCounters.challengeRetrievalPerformed > stageCounters.challengePlanned ||
     stageCounters.challengeExpanded + stageCounters.challengeNoMatches >
       stageCounters.challengeRetrievalPerformed ||
@@ -596,7 +596,7 @@ function validateScore(value, holdoutFromPullRequest, plan, execution, failures)
 }
 
 /**
- * Validates one release-grade schema-v5 historical replay artifact.
+ * Validates one release-grade schema-v6 historical replay artifact.
  *
  * The return shape mirrors the qualification evidence validator so release code can fail closed
  * without learning this schema's internals.
@@ -605,7 +605,7 @@ export function validateHistoricalReplayEvidence(report) {
   const failures = [];
   const root = exactRecord(report, ROOT_KEYS);
   if (root === undefined) return { valid: false, failures: ["root_shape"] };
-  if (root.schemaVersion !== 5 || root.artifact !== HISTORICAL_REPLAY_EVIDENCE_ARTIFACT) {
+  if (root.schemaVersion !== 6 || root.artifact !== HISTORICAL_REPLAY_EVIDENCE_ARTIFACT) {
     mark(failures, "identity");
   }
   if (

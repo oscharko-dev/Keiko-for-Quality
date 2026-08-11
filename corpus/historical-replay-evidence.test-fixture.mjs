@@ -68,7 +68,7 @@ function reasonCounts(overrides = {}) {
   };
 }
 
-/** Production-shaped, aggregate-only v5 evidence over the calibrated 92/66 historical cohort. */
+/** Production-shaped, aggregate-only v6 evidence over the calibrated 92/66 historical cohort. */
 export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".repeat(40) } = {}) {
   const sourceRecords = calibratedRecords();
   const decisions = calibratedDecisions(sourceRecords);

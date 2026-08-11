@@ -70,6 +70,17 @@ test("accounts for zero-call direct proofs outside the challenge path", () => {
 
   assert.deepEqual(validateHistoricalReplayEvidence(evidence), { valid: true, failures: [] });
 
+  const challengedDirectProof = productionHistoricalReplayEvidenceFixture();
+  challengedDirectProof.execution.stageCounters.directProved = 2;
+  challengedDirectProof.execution.stageCounters.challengePlanned = 60;
+  challengedDirectProof.execution.stageCounters.challengeRetrievalPerformed = 60;
+  challengedDirectProof.execution.stageCounters.challengeExpanded = 58;
+  assert.ok(
+    validateHistoricalReplayEvidence(challengedDirectProof).failures.includes(
+      "execution_stage_arithmetic",
+    ),
+  );
+
   evidence.execution.stageCounters.directProved = evidence.execution.stageCounters.confirmed + 1;
   assert.ok(
     validateHistoricalReplayEvidence(evidence).failures.includes("execution_stage_arithmetic"),
@@ -160,7 +171,7 @@ test("rejects digest, aggregate arithmetic, population-floor, and extra-field ta
   assert.ok(validateHistoricalReplayEvidence(stageExtra).failures.includes("execution_shape"));
 
   const oldSchema = productionHistoricalReplayEvidenceFixture();
-  oldSchema.schemaVersion = 4;
+  oldSchema.schemaVersion = 5;
   assert.ok(validateHistoricalReplayEvidence(oldSchema).failures.includes("identity"));
 
   const missingStages = productionHistoricalReplayEvidenceFixture();

@@ -818,39 +818,6 @@ function sourceLines(source, startLine, endLine) {
   return lines.slice(startLine - 1, endLine).join("\n");
 }
 
-function historicalSourceRows(source) {
-  if (source === undefined) return undefined;
-  return (source.endsWith("\n") ? source.slice(0, -1) : source).split("\n");
-}
-
-function historicalEvidenceRowMatches(row, source) {
-  const line = Number(row[1]);
-  return source !== undefined && row[2] !== undefined && source[line - 1] === row[2];
-}
-
-/** Bind the dossier to the immutable blobs before the zero-call proof path can see it. */
-function bindHistoricalHunkEvidence({ text, headSource, baseSource }) {
-  const head = historicalSourceRows(headSource);
-  const base = historicalSourceRows(baseSource);
-  let sourceRowsSeen = 0;
-  for (const row of text.split("\n")) {
-    const headRow = /^H:([1-9]\d*)\| (.*)$/u.exec(row);
-    const baseRow = /^B:([1-9]\d*)\| (.*)$/u.exec(row);
-    const changed = /^D:H:([1-9]\d*)\| \+(.*)$/u.exec(row);
-    if (headRow !== null) {
-      if (!historicalEvidenceRowMatches(headRow, head)) return undefined;
-      sourceRowsSeen += 1;
-    } else if (baseRow !== null) {
-      if (!historicalEvidenceRowMatches(baseRow, base)) return undefined;
-      sourceRowsSeen += 1;
-    } else if (changed !== null) {
-      if (!historicalEvidenceRowMatches(changed, head)) return undefined;
-      sourceRowsSeen += 1;
-    }
-  }
-  return sourceRowsSeen === 0 ? undefined : Object.freeze({ text, headSource, baseSource });
-}
-
 async function inspectCase(replayCase, repo, readChangeAtCommits) {
   const structural = structuralCaseReason(replayCase);
   if (structural !== undefined) return structural;
@@ -1017,7 +984,7 @@ function validSubstantiationOutcome(outcome, finding) {
     outcome.retrievalNoMatches <= outcome.droppedInsufficientEvidence &&
     outcome.retrievalRequested - outcome.retrievalPerformed <=
       outcome.droppedInsufficientEvidence &&
-    outcome.challengePlanned <= 1 &&
+    outcome.challengePlanned <= 1 - outcome.directProved &&
     outcome.challengeRetrievalPerformed <= outcome.challengePlanned &&
     outcome.challengeExpanded + outcome.challengeNoMatches <= outcome.challengeRetrievalPerformed &&
     outcome.challengePlanned ===
@@ -1072,6 +1039,7 @@ function historicalTraceEntry(databaseId, reason, usage = EMPTY_HISTORICAL_TRACE
 
 function assertHistoricalVerificationDependencies(dependencies) {
   const required = [
+    dependencies.bindTrustedHunkEvidence,
     dependencies.buildChangeEvidence,
     dependencies.mappedBaseRangeFromUnifiedDiff,
     dependencies.collectInitialRepositoryContext,
@@ -1336,6 +1304,7 @@ async function attemptHistoricalVerification({
   replayCase,
   sources,
   prepared,
+  boundEvidence,
   remainingTokens,
   judgeEndpoint,
   dependencies,
@@ -1344,14 +1313,9 @@ async function attemptHistoricalVerification({
 }) {
   const traceSlot = { value: undefined };
   try {
-    const boundEvidence = dependencies.bindTrustedHunkEvidence({
-      text: prepared.evidence,
-      headSource: sources.headSource,
-      baseSource: sources.baseSource,
-    });
     const outcome = await dependencies.substantiate(
       [prepared.judgeable],
-      () => boundEvidence ?? "",
+      () => boundEvidence,
       judgeEndpoint,
       HISTORICAL_REPLAY_STRICTNESS,
       remainingTokens,
@@ -1454,6 +1418,20 @@ async function processHistoricalReplayCase({
     recordHistoricalUnmeasured(state, replayCase, prepared.reason);
     return;
   }
+  let boundEvidence;
+  try {
+    boundEvidence = dependencies.bindTrustedHunkEvidence({
+      text: prepared.evidence,
+      headSource: resolved.sources.headSource,
+      baseSource: resolved.sources.baseSource,
+    });
+  } catch {
+    boundEvidence = undefined;
+  }
+  if (boundEvidence === undefined) {
+    recordHistoricalUnmeasured(state, replayCase, "evidenceUnavailable");
+    return;
+  }
   const remainingTokens = maxTokens - state.accountedTokens;
   if (remainingTokens <= 0) {
     recordHistoricalUnmeasured(state, replayCase, "budget");
@@ -1464,6 +1442,7 @@ async function processHistoricalReplayCase({
     replayCase,
     sources: resolved.sources,
     prepared,
+    boundEvidence,
     remainingTokens,
     judgeEndpoint,
     dependencies,
@@ -1533,7 +1512,7 @@ export async function runHistoricalReplayVerification({
   collectClosedRuntimeFactsAtCommit,
   requestsClosedRuntimeFacts,
   toRetrievedEvidence,
-  bindTrustedHunkEvidence = bindHistoricalHunkEvidence,
+  bindTrustedHunkEvidence,
   substantiate,
   captureDiagnosticTrace = false,
 }) {
@@ -1582,7 +1561,7 @@ export function buildRedactedHistoricalReplayEvidence({
     throw new Error("reviewer tree binding is malformed");
   }
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     artifact: HISTORICAL_REPLAY_EVIDENCE_ARTIFACT,
     generatedAt,
     scope: {
