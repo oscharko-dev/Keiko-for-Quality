@@ -177,6 +177,7 @@ function dispositionMatches(stage, disposition, reason) {
   if (["contradicted", "already_handled", "not_introduced"].includes(reason)) {
     return disposition === "refuted";
   }
+  if (reason === "direct_proof") return disposition === "kept";
   if (
     ["counterexample", "existing_guard", "unchanged_base", "causality_unproven"].includes(reason)
   ) {

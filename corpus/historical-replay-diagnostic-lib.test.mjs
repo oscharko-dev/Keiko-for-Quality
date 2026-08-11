@@ -87,6 +87,31 @@ test("a negative challenge search is a kept trace but a negative truth search is
   );
 });
 
+test("accepts a zero-token closed direct proof as an attempted kept case", () => {
+  const directProof = {
+    databaseId: 22,
+    stage: "truth_initial",
+    disposition: "kept",
+    reasonCode: "direct_proof",
+    usage: { callCount: 0, tokens: 0 },
+  };
+  const diagnostic = buildHistoricalReplayDiagnostic({
+    databaseIds: [22],
+    cases: [directProof],
+    attemptedCases: 1,
+    accountedTokens: 0,
+  });
+
+  assert.equal(validateHistoricalReplayDiagnostic(diagnostic), true);
+  assert.equal(
+    validateHistoricalReplayDiagnostic({
+      ...diagnostic,
+      cases: [{ ...directProof, disposition: "refuted" }],
+    }),
+    false,
+  );
+});
+
 test("rejects extra text, open vocabularies, reordered ids, and accounting mismatches", () => {
   const extra = {
     schemaVersion: 1,

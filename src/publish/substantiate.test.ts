@@ -374,6 +374,49 @@ describe("deterministic dossier", () => {
   });
 });
 
+describe("closed source proofs", () => {
+  it("keeps a closed direct proof without spending a probabilistic verifier call", async () => {
+    const candidate: JudgeableFinding = {
+      path: "src/parser.ts",
+      content: "Reject duplicate IDs instead of silently overwriting the previous entry.",
+      startLine: 12,
+      endLine: 12,
+    };
+    const evidence = [
+      "H:8|   const byId = new Map<string, Capability>();",
+      "H:9|   for (const entry of entries) {",
+      "H:10|     const id = readId(entry);",
+      "H:12|     byId.set(id.value, capability);",
+      "D:H:12| +    byId.set(id.value, capability);",
+    ].join("\n");
+    const endpoint = endpointReplying([]);
+    const traces: SubstantiationTerminalTrace[] = [];
+
+    const out = await substantiate(
+      [candidate],
+      () => evidence,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      undefined,
+      (trace) => traces.push(trace),
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(out.confirmed).toBe(1);
+    expect(out.tokens).toBe(0);
+    expect(endpoint.prompts()).toEqual([]);
+    expect(traces).toEqual([
+      {
+        stage: "truth_initial",
+        disposition: "kept",
+        reasonCode: "direct_proof",
+        usage: { callCount: 0, tokens: 0 },
+      },
+    ]);
+  });
+});
+
 describe("role prompts", () => {
   it("separates Truth, planning, and falsification without leaking Truth into later roles", () => {
     const candidate = finding("When the header is numeric, the wait is 1000× short.");

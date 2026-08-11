@@ -22,6 +22,7 @@
 
 import { EXAMINER_CLAIM_DECISION_POLICY } from "../engine/claim-decision-policy.js";
 import { LIMITS as ENGINE_RESULT_LIMITS } from "../engine/result.js";
+import { closedClaimProof } from "./closed-claim-proof.js";
 import { MAX_EVIDENCE_CHARS, extractEvidenceIdentifiers } from "./evidence.js";
 import { decodeEvidenceSourcePath, encodeEvidenceSourcePath } from "./evidence-path.js";
 import { validatedRetrieveTerms } from "./repository-context.js";
@@ -2506,6 +2507,19 @@ async function verifyEvidenceRound<T extends JudgeableFinding>(
   return await applyTruthDecision(run, evidence, call.decision);
 }
 
+function closedProofResult<T extends JudgeableFinding>(
+  finding: T,
+  evidence: string,
+  metrics: CandidateMetrics,
+): JudgedOne<T> | undefined {
+  if (closedClaimProof(finding, evidence) === undefined) return undefined;
+  metrics.confirmed += 1;
+  return decidedResult(finding, "kept", metrics, {
+    stage: "truth_initial",
+    reasonCode: "direct_proof",
+  });
+}
+
 async function judgeOne<T extends JudgeableFinding>(
   finding: T,
   readHunk: HunkReader,
@@ -2532,6 +2546,12 @@ async function judgeOne<T extends JudgeableFinding>(
       terminal: { stage: "preflight", reasonCode: "unreadable_hunk" },
     };
   }
+  // A closed source proof is stronger than another probabilistic restatement of the same runtime
+  // rule. It may keep only the finding already supplied: exact changed rows, claim semantics, and
+  // the absence of a shown guard all come from trusted evidence parsing above. Every other shape
+  // continues through the full independent model workflow below.
+  const proved = closedProofResult(finding, evidence, metrics);
+  if (proved !== undefined) return proved;
   if (!budgetAllows(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
     return undecidedResult(finding, strictness, metrics, true, {
       stage: "preflight",

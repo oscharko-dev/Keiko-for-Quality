@@ -5073,8 +5073,8 @@ function withoutPatchPrefix(path) {
   return path.startsWith("a/") || path.startsWith("b/") ? path.slice(2) : path;
 }
 function namedPath(part, marker) {
-  const escaped = marker.replaceAll("+", String.raw`\+`);
-  const raw = new RegExp(`^${escaped} (.+)$`, "mu").exec(part)?.[1];
+  const escaped2 = marker.replaceAll("+", String.raw`\+`);
+  const raw = new RegExp(`^${escaped2} (.+)$`, "mu").exec(part)?.[1];
   if (raw === void 0) return void 0;
   const decoded = decodedGitPath(raw);
   if (decoded === void 0) return void 0;
@@ -10122,8 +10122,8 @@ function relevantManifestLines(path, text, terms, termOnly = false) {
   return [...selected].slice(0, MAX_MANIFEST_LINES);
 }
 function manifestLineContainsTerm(line, term) {
-  const escaped = term.replace(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
-  return new RegExp(`(?:^|[^A-Za-z0-9_$])${escaped}(?:$|[^A-Za-z0-9_$])`, "u").test(line);
+  const escaped2 = term.replace(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
+  return new RegExp(`(?:^|[^A-Za-z0-9_$])${escaped2}(?:$|[^A-Za-z0-9_$])`, "u").test(line);
 }
 async function manifestEntriesAtPath(context, request, path, terms, termOnly, strict) {
   const text = await readTextAtCommit(
@@ -10294,6 +10294,117 @@ async function collectRepositoryContextFollowUp(request, retrieveTerms, dependen
     preferredManifests,
     dependencies
   );
+}
+
+// src/publish/closed-claim-proof.ts
+var HEAD_ROW = /^H:([1-9]\d*)\| (.*)$/u;
+var CHANGED_HEAD_ROW = /^D:H:([1-9]\d*)\| \+(.*)$/u;
+var IDENTIFIER4 = /^[A-Za-z_$][\w$]*$/u;
+var MAX_CLAIM_CHARS = 8192;
+function headLines(evidence) {
+  const source = /* @__PURE__ */ new Map();
+  const changed = /* @__PURE__ */ new Set();
+  for (const row of evidence.split("\n")) {
+    const head = HEAD_ROW.exec(row);
+    if (head?.[1] !== void 0 && head[2] !== void 0) {
+      source.set(Number(head[1]), head[2]);
+      continue;
+    }
+    const diff = CHANGED_HEAD_ROW.exec(row);
+    if (diff?.[1] !== void 0) changed.add(Number(diff[1]));
+  }
+  return [...source].sort(([left], [right]) => left - right).map(([line, text]) => ({ line, text, changed: changed.has(line) }));
+}
+function refsAt(line) {
+  return [
+    `D:H:${String(line)}`,
+    `H:${String(line)}`
+  ];
+}
+function insideFinding(line, finding) {
+  return line >= finding.startLine && line <= finding.endLine;
+}
+function escaped(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+function sinkUsesCaughtBinding(text, binding) {
+  const argument = escaped(binding);
+  const sink = [
+    String.raw`(?:window\.)?reportError`,
+    String.raw`(?:captureException|captureError|reportException|recordException)`,
+    String.raw`(?:console|logger|telemetry|diagnostics?)\.(?:error|exception|report|record)`
+  ].join("|");
+  return new RegExp(String.raw`\b(?:${sink})\s*\(\s*${argument}\s*(?:[,)]|$)`, "u").test(text);
+}
+function disclosureClaim(content) {
+  const claim = content.slice(0, MAX_CLAIM_CHARS);
+  return /(?:saniti[sz]|redact|leak|expos|secret|sensitive)/iu.test(claim) && /(?:error|exception|report|log|telemetry|parser)/iu.test(claim);
+}
+function catchBindingNearFinding(finding, line) {
+  if (line.line < finding.startLine - 8 || line.line > finding.endLine) return void 0;
+  const caught = /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{/u.exec(line.text)?.[1];
+  return caught !== void 0 && IDENTIFIER4.test(caught) ? caught : void 0;
+}
+function caughtSinkAfter(finding, lines, startIndex, binding) {
+  for (const candidate of lines.slice(startIndex + 1, startIndex + 10)) {
+    if (/^\s*\}/u.test(candidate.text)) return void 0;
+    if (!candidate.changed || !insideFinding(candidate.line, finding)) continue;
+    if (sinkUsesCaughtBinding(candidate.text, binding)) return candidate;
+  }
+  return void 0;
+}
+function catchDisclosureProof(finding, lines) {
+  if (!disclosureClaim(finding.content)) return void 0;
+  for (const [index, line] of lines.entries()) {
+    const caught = catchBindingNearFinding(finding, line);
+    if (caught === void 0) continue;
+    const sink = caughtSinkAfter(finding, lines, index, caught);
+    if (sink !== void 0) return { evidenceRefs: refsAt(sink.line) };
+  }
+  return void 0;
+}
+function mapWriteAtFinding(finding, lines) {
+  for (const line of lines) {
+    if (!line.changed || !insideFinding(line.line, finding)) continue;
+    const write = /\b([A-Za-z_$][\w$]*)\.set\(\s*([^,()]+(?:\.[A-Za-z_$][\w$]*)?)\s*,/u.exec(
+      line.text
+    );
+    if (write?.[1] !== void 0 && write[2] !== void 0) {
+      return { receiver: write[1], key: write[2].trim(), line };
+    }
+  }
+  return void 0;
+}
+function isShownMap(lines, write) {
+  const receiver = escaped(write.receiver);
+  const declaration = new RegExp(
+    String.raw`\b(?:const|let|var)\s+${receiver}\s*=\s*new\s+Map(?:\s*<[^;]+>)?\s*\(`,
+    "u"
+  );
+  return lines.some((line) => line.line <= write.line.line && declaration.test(line.text));
+}
+function hasShownDuplicateGuard(lines, write) {
+  const receiver = escaped(write.receiver);
+  const key = escaped(write.key).replace(/\s+/gu, String.raw`\s*`);
+  const directGuard = new RegExp(String.raw`\b${receiver}\.has\(\s*${key}\s*\)`, "u");
+  const nearbyGuard = /\b(?:duplicate|unique|seen)\b.*\b(?:has|throw|return|reject)/iu;
+  return lines.some(
+    (line) => line.line < write.line.line && line.line >= write.line.line - 24 && (directGuard.test(line.text) || nearbyGuard.test(line.text))
+  );
+}
+function duplicateMapProof(finding, lines) {
+  const claim = finding.content.slice(0, MAX_CLAIM_CHARS);
+  if (!/\bduplicate(?:s|d)?\b/iu.test(claim)) return void 0;
+  if (!/\b(?:overwrit\w*|discard\w*|collision\w*|reject\w*)\b/iu.test(claim)) return void 0;
+  const write = mapWriteAtFinding(finding, lines);
+  if (write === void 0 || !isShownMap(lines, write) || hasShownDuplicateGuard(lines, write)) {
+    return void 0;
+  }
+  return { evidenceRefs: refsAt(write.line.line) };
+}
+function closedClaimProof(finding, evidence) {
+  const lines = headLines(evidence);
+  return catchDisclosureProof(finding, lines) ?? duplicateMapProof(finding, lines);
 }
 
 // src/publish/substantiate.ts
@@ -11707,6 +11818,14 @@ async function verifyEvidenceRound(run2, evidence) {
   }
   return await applyTruthDecision(run2, evidence, call.decision);
 }
+function closedProofResult(finding, evidence, metrics) {
+  if (closedClaimProof(finding, evidence) === void 0) return void 0;
+  metrics.confirmed += 1;
+  return decidedResult(finding, "kept", metrics, {
+    stage: "truth_initial",
+    reasonCode: "direct_proof"
+  });
+}
 async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) {
   const dossier = buildDossier(finding.content);
   const metrics = emptyMetrics();
@@ -11726,6 +11845,8 @@ async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) 
       terminal: { stage: "preflight", reasonCode: "unreadable_hunk" }
     };
   }
+  const proved = closedProofResult(finding, evidence, metrics);
+  if (proved !== void 0) return proved;
   if (!budgetAllows2(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
     return undecidedResult(finding, strictness, metrics, true, {
       stage: "preflight",
