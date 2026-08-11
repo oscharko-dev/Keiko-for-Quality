@@ -66,7 +66,6 @@ const MUTATION_SUFFIXES = [
   "&=",
   "|=",
   "^=",
-  "=",
 ];
 const MAX_CLAIM_CHARS = 8_192;
 function sourceRows(source: string | undefined): readonly string[] | undefined {
@@ -837,7 +836,8 @@ function mutatesIdentifier(code: string, field: string): boolean {
       if (
         prefix.endsWith("++") ||
         prefix.endsWith("--") ||
-        MUTATION_SUFFIXES.some((operator) => suffix.startsWith(operator))
+        MUTATION_SUFFIXES.some((operator) => suffix.startsWith(operator)) ||
+        (suffix.startsWith("=") && suffix[1] !== "=" && suffix[1] !== ">")
       ) {
         return true;
       }

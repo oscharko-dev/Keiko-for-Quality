@@ -338,6 +338,15 @@ describe("trusted closed claim proof", () => {
     ).toEqual({ evidenceRefs: ["D:H:5", "H:5", "B:5"] });
   });
 
+  it("does not mistake a primitive comparison for reassignment", () => {
+    expect(
+      closedClaimRefutation(
+        finding("Remove the attempt field because logging it changes error handling.", 6),
+        diagnosticContextEvidence({ setup: ["  if (attempt === 0) return;"] }),
+      ),
+    ).toEqual({ evidenceRefs: ["D:H:6", "H:6", "B:6"] });
+  });
+
   const rejectedDiagnosticContextShapes: readonly (readonly [string, DiagnosticContextOptions])[] =
     [
       ["a sensitive field", { parameter: "token: string", addedEntry: "token" }],

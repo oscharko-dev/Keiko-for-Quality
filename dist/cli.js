@@ -10318,8 +10318,7 @@ var MUTATION_SUFFIXES = [
   "%=",
   "&=",
   "|=",
-  "^=",
-  "="
+  "^="
 ];
 var MAX_CLAIM_CHARS = 8192;
 function sourceRows(source) {
@@ -10845,7 +10844,7 @@ function mutatesIdentifier(code, field) {
     if (!identifierCharacter(before) && !identifierCharacter(after)) {
       const prefix = code.slice(0, offset).trimEnd();
       const suffix = code.slice(offset + field.length).trimStart();
-      if (prefix.endsWith("++") || prefix.endsWith("--") || MUTATION_SUFFIXES.some((operator) => suffix.startsWith(operator))) {
+      if (prefix.endsWith("++") || prefix.endsWith("--") || MUTATION_SUFFIXES.some((operator) => suffix.startsWith(operator)) || suffix.startsWith("=") && suffix[1] !== "=" && suffix[1] !== ">") {
         return true;
       }
     }
