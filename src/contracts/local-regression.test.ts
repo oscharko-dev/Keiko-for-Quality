@@ -65,6 +65,20 @@ expect(before.value).toBeGreaterThan(0);`;
     expect(detectLocalRegressions("src/session.test.ts", base, head)).toHaveLength(1);
   });
 
+  it("ignores braces inside comments when identifying the test scope", () => {
+    const base = `it("refreshes", async () => {
+  // } is documentation, not the end of this test
+  const before = await getSession(id);
+  const after = await getSession(id);
+  expect(after.value).toBeGreaterThan(before.value);
+});`;
+    const head = base
+      .replace("const after = ", "")
+      .replace("expect(after.value)", "expect(before.value)");
+
+    expect(detectLocalRegressions("src/session.test.ts", base, head)).toHaveLength(1);
+  });
+
   it("does not pair refresh evidence across separate tests", () => {
     const unchanged = `it("reads", async () => {
   const before = await getSession(id);

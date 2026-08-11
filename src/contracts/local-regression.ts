@@ -117,14 +117,22 @@ function braceDelta(line: string): number {
   return depth;
 }
 
+function maskNonCode(source: string): string {
+  return source.replace(/(["'`])(?:\\.|(?!\1)[\s\S])*\1|\/\/.*|\/\*[\s\S]*?\*\//gu, (match) =>
+    " ".repeat(match.length),
+  );
+}
+
 function sourceScopes(source: string): readonly SourceScope[] {
   const lines = source.split("\n");
+  const structuralLines = maskNonCode(source).split("\n");
   const scopes: SourceScope[] = [];
   let start: number | undefined;
   let depth = 0;
-  for (const [index, line] of lines.entries()) {
-    if (start === undefined && line.includes("{")) start = index;
-    depth += braceDelta(line);
+  for (const index of lines.keys()) {
+    const structural = structuralLines[index] ?? "";
+    if (start === undefined && structural.includes("{")) start = index;
+    depth += braceDelta(structural);
     if (start === undefined || depth !== 0) continue;
     scopes.push({ text: lines.slice(start, index + 1).join("\n"), startLine: start + 1 });
     start = undefined;

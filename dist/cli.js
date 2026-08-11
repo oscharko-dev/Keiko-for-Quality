@@ -6633,14 +6633,22 @@ function braceDelta(line) {
   }
   return depth;
 }
+function maskNonCode(source) {
+  return source.replace(
+    /(["'`])(?:\\.|(?!\1)[\s\S])*\1|\/\/.*|\/\*[\s\S]*?\*\//gu,
+    (match) => " ".repeat(match.length)
+  );
+}
 function sourceScopes(source) {
   const lines = source.split("\n");
+  const structuralLines = maskNonCode(source).split("\n");
   const scopes = [];
   let start;
   let depth = 0;
-  for (const [index, line] of lines.entries()) {
-    if (start === void 0 && line.includes("{")) start = index;
-    depth += braceDelta(line);
+  for (const index of lines.keys()) {
+    const structural = structuralLines[index] ?? "";
+    if (start === void 0 && structural.includes("{")) start = index;
+    depth += braceDelta(structural);
     if (start === void 0 || depth !== 0) continue;
     scopes.push({ text: lines.slice(start, index + 1).join("\n"), startLine: start + 1 });
     start = void 0;
@@ -6745,14 +6753,14 @@ function executablePath2(path) {
   const dot = path.lastIndexOf(".");
   return dot >= 0 && EXECUTABLE_EXTENSIONS3.has(path.slice(dot).toLowerCase());
 }
-function maskNonCode(text) {
+function maskNonCode2(text) {
   return text.replace(
     /(["'`])(?:\\.|(?!\1).)*\1|\/\/.*|\/\*.*?\*\//gu,
     (match) => " ".repeat(match.length)
   );
 }
 function matchingClose(text, open2, opening, closing) {
-  const structural = maskNonCode(text);
+  const structural = maskNonCode2(text);
   let depth = 0;
   for (let index = open2; index < structural.length; index += 1) {
     if (structural[index] === opening) depth += 1;
@@ -6861,7 +6869,7 @@ function callOpen(line, name, offset) {
   return void 0;
 }
 function splitArguments(source) {
-  const structural = maskNonCode(source);
+  const structural = maskNonCode2(source);
   const arguments_ = [];
   let start = 0;
   let depth = 0;
