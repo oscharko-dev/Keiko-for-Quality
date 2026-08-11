@@ -130,6 +130,15 @@ describe("trusted closed claim proof", () => {
     );
   });
 
+  it("masks a regex that starts inside a call before matching the catch scope", () => {
+    expect(
+      closedClaimProof(
+        DISCLOSURE_CLAIM,
+        catchEvidence("window.reportError(error);", { before: "consume(/\\{/u);" }),
+      ),
+    ).toEqual({ evidenceRefs: ["D:H:4", "H:4"] });
+  });
+
   it.each([
     ["a sanitized replacement", 'window.reportError(new Error("parse failed"));', {}],
     ["a different value", "window.reportError(result);", {}],
@@ -150,6 +159,12 @@ describe("trusted closed claim proof", () => {
       { before: 'error.message = "parse failed";' },
     ],
     ["an unqualified local helper", "reportError(error);", {}],
+    ["an unreachable sink after return", "window.reportError(error);", { before: "return;" }],
+    [
+      "an unreachable sink after throw",
+      "window.reportError(error);",
+      { before: 'throw new Error("stop");' },
+    ],
     ["behavior already present in BASE", "window.reportError(error);", { prior: true }],
     ["a comment", "// window.reportError(error);", {}],
     ["a string", 'const example = "window.reportError(error);";', {}],
@@ -173,6 +188,10 @@ describe("trusted closed claim proof", () => {
   it.each([
     ["a shown duplicate guard", { beforeWrite: ["if (byId.has(id.value)) return byId;"] }],
     [
+      "a shown duplicate guard using get",
+      { beforeWrite: ["if (byId.get(id.value) !== undefined) throw new Error('duplicate');"] },
+    ],
+    [
       "a distant shown duplicate guard",
       { beforeWrite: Array(30).fill("work();").concat("if (byId.has(id.value)) return byId;") },
     ],
@@ -184,6 +203,7 @@ describe("trusted closed claim proof", () => {
     ["behavior already present in BASE", { prior: true }],
     ["a shadowed receiver", { beforeWrite: ["const byId = createCapabilityIndex();"] }],
     ["a reassigned receiver", { beforeWrite: ["byId = createCapabilityIndex();"] }],
+    ["an overridden Map writer", { beforeWrite: ["byId.set = rejectDuplicateSet;"] }],
     [
       "a shadowed Map constructor",
       { beforeWrite: [], declaration: "const byId = new Map();", mapShadow: true },

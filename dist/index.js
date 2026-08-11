@@ -11353,7 +11353,7 @@ function changedHeadLines(evidence) {
   return changed;
 }
 function startsRegex(previous) {
-  return previous === "" || "=(:,[!&|?{};".includes(previous);
+  return previous === "" || "=(,:[,!&|?{};".includes(previous);
 }
 function closesMaskedState(state, current) {
   if (state === "single") return current === "'";
@@ -11502,6 +11502,7 @@ function changedSinkInCatch(finding, lines, catchIndex, binding) {
     if (sinkUsesCaughtBinding(candidate.code, binding)) {
       return candidate.changed && insideFinding(candidate.line, finding) ? candidate : void 0;
     }
+    if (/^\s*(?:return|throw)\b/u.test(candidate.code)) return void 0;
     if (mentionsBinding(candidate.code, binding)) return void 0;
   }
   return void 0;
@@ -11623,16 +11624,18 @@ function receiverBindingIsStable(lines, declaration, write) {
     String.raw`\b${receiver}\s*(?:\+\+|--|(?:&&|\|\||\?\?|[-+*/%&|^])?=(?!=))`,
     "u"
   );
+  const writerOverridden = new RegExp(String.raw`\b${receiver}\.set\s*=(?!=)`, "u");
   return !lines.some(
-    (line) => line.line > declaration.line && line.line < write.line.line && (redeclared.test(line.code) || reassigned.test(line.code))
+    (line) => line.line > declaration.line && line.line < write.line.line && (redeclared.test(line.code) || reassigned.test(line.code) || writerOverridden.test(line.code))
   );
 }
 function hasDuplicateGuard(lines, declaration, write) {
   const receiver = escaped(write.receiver);
   const key = escaped(write.key).replace(/\s+/gu, String.raw`\s*`);
   const directGuard = new RegExp(String.raw`\b${receiver}\.has\(\s*${key}\s*\)`, "u");
+  const readGuard = new RegExp(String.raw`\b${receiver}\.get\(\s*${key}\s*\)`, "u");
   return lines.some(
-    (line) => line.line > declaration.line && line.line < write.line.line && directGuard.test(line.code)
+    (line) => line.line > declaration.line && line.line < write.line.line && (directGuard.test(line.code) || readGuard.test(line.code))
   );
 }
 function duplicateMapProof(finding, lines) {

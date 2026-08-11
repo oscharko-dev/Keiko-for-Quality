@@ -119,7 +119,7 @@ interface MaskStep {
 }
 
 function startsRegex(previous: string): boolean {
-  return previous === "" || "=(:,[!&|?{};".includes(previous);
+  return previous === "" || "=(,:[,!&|?{};".includes(previous);
 }
 
 function closesMaskedState(state: LexicalState, current: string): boolean {
@@ -299,6 +299,7 @@ function changedSinkInCatch(
     if (sinkUsesCaughtBinding(candidate.code, binding)) {
       return candidate.changed && insideFinding(candidate.line, finding) ? candidate : undefined;
     }
+    if (/^\s*(?:return|throw)\b/u.test(candidate.code)) return undefined;
     if (mentionsBinding(candidate.code, binding)) return undefined;
   }
   return undefined;
@@ -470,11 +471,14 @@ function receiverBindingIsStable(
     String.raw`\b${receiver}\s*(?:\+\+|--|(?:&&|\|\||\?\?|[-+*/%&|^])?=(?!=))`,
     "u",
   );
+  const writerOverridden = new RegExp(String.raw`\b${receiver}\.set\s*=(?!=)`, "u");
   return !lines.some(
     (line) =>
       line.line > declaration.line &&
       line.line < write.line.line &&
-      (redeclared.test(line.code) || reassigned.test(line.code)),
+      (redeclared.test(line.code) ||
+        reassigned.test(line.code) ||
+        writerOverridden.test(line.code)),
   );
 }
 
@@ -486,9 +490,12 @@ function hasDuplicateGuard(
   const receiver = escaped(write.receiver);
   const key = escaped(write.key).replace(/\s+/gu, String.raw`\s*`);
   const directGuard = new RegExp(String.raw`\b${receiver}\.has\(\s*${key}\s*\)`, "u");
+  const readGuard = new RegExp(String.raw`\b${receiver}\.get\(\s*${key}\s*\)`, "u");
   return lines.some(
     (line) =>
-      line.line > declaration.line && line.line < write.line.line && directGuard.test(line.code),
+      line.line > declaration.line &&
+      line.line < write.line.line &&
+      (directGuard.test(line.code) || readGuard.test(line.code)),
   );
 }
 
