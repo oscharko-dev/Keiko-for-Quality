@@ -121,6 +121,46 @@ function mapProof(
   return closedClaimProof(finding(DUPLICATE_CLAIM.content, writeLine), mapEvidence(options));
 }
 
+const FILE_READ_CLAIM = finding(
+  "Add error handling because `file.text()` can reject and propagate an unhandled promise rejection.",
+  5,
+);
+
+function fileReadEvidence(
+  options: {
+    readonly caught?: boolean;
+    readonly caller?: string;
+    readonly secondUse?: string;
+    readonly changed?: boolean;
+    readonly prior?: boolean;
+    readonly inputBinding?: string;
+    readonly read?: string;
+  } = {},
+): TrustedHunkEvidence {
+  const caught = options.caught === true;
+  const head = [
+    "function Upload(): ReactNode {",
+    "  async function handleFile(event: ChangeEvent<HTMLInputElement>): Promise<void> {",
+    `    ${options.inputBinding ?? "const file = event.target.files?.[0];"}`,
+    "    if (file === undefined) return;",
+    ...(caught ? ["    try {"] : []),
+    `    ${options.read ?? "const serialized = await file.text();"}`,
+    ...(caught ? ["    } catch { showInvalid(); }"] : []),
+    "    apply(serialized);",
+    "  }",
+    `  ${options.caller ?? "return <input onChange={(event) => void handleFile(event)} />;"}`,
+    ...(options.secondUse === undefined ? [] : [`  ${options.secondUse}`]),
+    "}",
+  ];
+  const readLine = caught ? 6 : 5;
+  const callLine = caught ? 10 : 8;
+  return evidence(
+    head,
+    options.changed === false ? [] : [readLine, callLine],
+    options.prior ? head : undefined,
+  );
+}
+
 describe("trusted closed claim proof", () => {
   it("rejects dossier rows that do not match the bound source", () => {
     expect(
@@ -209,6 +249,47 @@ describe("trusted closed claim proof", () => {
     expect(mapProof()).toEqual({
       evidenceRefs: ["D:H:5", "H:5"],
     });
+  });
+
+  it("proves an awaited file read whose sole event-handler caller discards the rejection", () => {
+    expect(closedClaimProof(FILE_READ_CLAIM, fileReadEvidence())).toEqual({
+      evidenceRefs: ["D:H:5", "H:5", "D:H:8", "H:8"],
+    });
+  });
+
+  it.each([
+    ["a caught read", { caught: true }],
+    [
+      "a same-line caught read",
+      { read: "try { const serialized = await file.text(); } catch { showInvalid(); }" },
+    ],
+    [
+      "a caller that observes rejection",
+      {
+        caller: "return <input onChange={(event) => void handleFile(event).catch(showInvalid)} />;",
+      },
+    ],
+    [
+      "an awaited caller",
+      { caller: "return <input onChange={async (event) => await handleFile(event)} />;" },
+    ],
+    ["a call that can continue on the next line", { caller: "return void handleFile(event)" }],
+    ["multiple callers", { secondUse: "void handleFile(retryEvent);" }],
+    ["an unbound file-like receiver", { inputBinding: "const file = selected;" }],
+    ["a locally handled read", { read: "const serialized = await file.text().catch(readFailed);" }],
+    ["unchanged code", { changed: false }],
+    ["behavior already present in BASE", { prior: true }],
+  ])("does not license %s", (_name, options) => {
+    expect(closedClaimProof(FILE_READ_CLAIM, fileReadEvidence(options))).toBeUndefined();
+  });
+
+  it("requires unhandled file-read semantics in the claim", () => {
+    expect(
+      closedClaimProof(
+        finding("Rename the file upload handler for clarity.", 5),
+        fileReadEvidence(),
+      ),
+    ).toBeUndefined();
   });
 
   it("requires the trusted brand to be an own property", () => {

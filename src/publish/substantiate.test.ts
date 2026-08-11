@@ -434,6 +434,41 @@ describe("closed source proofs", () => {
       },
     ]);
   });
+
+  it("keeps a source-closed unhandled file-read rejection without a verifier call", async () => {
+    const candidate: JudgeableFinding = {
+      path: "src/GatewayConfigUpload.tsx",
+      content:
+        "Add error handling because `file.text()` can reject and propagate an unhandled promise rejection.",
+      startLine: 5,
+      endLine: 5,
+    };
+    const headSource = [
+      "function Upload(): ReactNode {",
+      "  async function handleFile(event: ChangeEvent<HTMLInputElement>): Promise<void> {",
+      "    const file = event.target.files?.[0];",
+      "    if (file === undefined) return;",
+      "    const serialized = await file.text();",
+      "    apply(serialized);",
+      "  }",
+      "  return <input onChange={(event) => void handleFile(event)} />;",
+      "}",
+    ].join("\n");
+    const text = [
+      ...headSource.split("\n").map((line, index) => `H:${String(index + 1)}| ${line}`),
+      "D:H:5| +    const serialized = await file.text();",
+      "D:H:8| +  return <input onChange={(event) => void handleFile(event)} />;",
+    ].join("\n");
+    const evidence = bindTrustedHunkEvidence({ text, headSource, baseSource: undefined });
+    expect(evidence).toBeDefined();
+    const endpoint = endpointReplying([]);
+
+    const out = await substantiate([candidate], () => evidence ?? "", endpoint.deps, "paranoid");
+
+    expect(out.findings).toEqual([candidate]);
+    expect(out).toMatchObject({ confirmed: 1, directProved: 1, tokens: 0 });
+    expect(endpoint.prompts()).toEqual([]);
+  });
 });
 
 describe("role prompts", () => {
