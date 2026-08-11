@@ -2560,6 +2560,7 @@ describe("performReview: review-cache memoization end to end", () => {
         compared: 1,
         findings: 1,
         pin_desync: 0,
+        mapping_crossover: 0,
       });
     });
 
