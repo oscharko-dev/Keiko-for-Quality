@@ -5,6 +5,7 @@ import {
   DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
+  HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
   MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   PARALLEL_MAPPING_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
@@ -28,6 +29,7 @@ describe("shared claim-decision policy", () => {
         `- trigger-guard: ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
         `- mirrored-validator: ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`,
         `- parallel-mapping: ${PARALLEL_MAPPING_EVIDENCE_POLICY}`,
+        `- helper-control-flow: ${HELPER_CONTROL_FLOW_EVIDENCE_POLICY}`,
       ].join("\n"),
     );
     expect(new TextEncoder().encode(EXAMINER_CLAIM_DECISION_POLICY).byteLength).toBeLessThanOrEqual(
@@ -58,6 +60,10 @@ describe("shared claim-decision policy", () => {
           "figma: isJiraConnectorAuthorized(config),\njira: isFigmaConnectorAuthorized(config),",
         first: PARALLEL_MAPPING_EVIDENCE_POLICY,
       },
+      {
+        evidence: 'const compiler = windowsToolFromPath(env.PATH, "cl.exe"); spawn(compiler);',
+        first: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
+      },
     ];
     for (const sample of samples) {
       const rendered = renderExaminerClaimDecisionPolicy(sample.evidence);
@@ -72,6 +78,7 @@ describe("shared claim-decision policy", () => {
         TRIGGER_AND_GUARD_EVIDENCE_POLICY,
         MIRRORED_VALIDATOR_EVIDENCE_POLICY,
         PARALLEL_MAPPING_EVIDENCE_POLICY,
+        HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
       ]) {
         expect(rendered.split(policy)).toHaveLength(2);
       }
@@ -167,5 +174,19 @@ describe("shared claim-decision policy", () => {
     expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
       "A removed per-case reset before a later dynamic import is reportable",
     );
+  });
+
+  it("distinguishes fail-closed helper exits and inert imports from real execution paths", () => {
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain(
+      "A terminal throw for the state prevents the call",
+    );
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain(
+      "invalid return, fallthrough, or catch-and-continue path",
+    );
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain("import does not execute exports");
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain(
+      "module evaluation runs unavailable platform code",
+    );
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain("guarded calls remain silent");
   });
 });

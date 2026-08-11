@@ -79,6 +79,14 @@ export const PARALLEL_MAPPING_EVIDENCE_POLICY = [
   "SILENT when a shown contract or explicit translation table proves the cross-map intentional.",
 ].join(" ");
 
+export const HELPER_CONTROL_FLOW_EVIDENCE_POLICY = [
+  "Helper/import decision — RETURN: trace exits before claiming invalid output reaches a call. A",
+  "terminal throw for the state prevents the call; report an invalid return, fallthrough, or",
+  "catch-and-continue path. IMPORT: import does not execute exports. Report load failure",
+  "only when module evaluation runs unavailable",
+  "platform code or dependency; guarded calls remain silent.",
+].join(" ");
+
 interface ClaimDecisionPolicyRow {
   readonly label: string;
   readonly text: string;
@@ -163,6 +171,12 @@ const POLICY_ROWS: readonly ClaimDecisionPolicyRow[] = [
     relevant: (evidence) =>
       /\b(?:capabilit|mapping|mapper)\b/iu.test(evidence) || mappingEntryVisible(evidence),
   },
+  {
+    label: "helper-control-flow",
+    text: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
+    relevant: (evidence) =>
+      /\b(?:import|spawn|throw|returns?|fallthrough|platform|win32)\b/iu.test(evidence),
+  },
 ];
 
 function renderPolicyRows(rows: readonly ClaimDecisionPolicyRow[]): string {
@@ -184,4 +198,4 @@ export function renderExaminerClaimDecisionPolicy(visibleEvidence: string): stri
 export const EXAMINER_CLAIM_DECISION_POLICY = renderExaminerClaimDecisionPolicy("");
 
 /** Prevent a focused examiner fix from silently becoming another copy of the complete rule. */
-export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 4_800;
+export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 5_100;

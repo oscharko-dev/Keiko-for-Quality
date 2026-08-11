@@ -134,6 +134,9 @@ import {
   type EvidenceRetriever,
   type JudgeableFinding,
   type SubstantiationOutcome,
+  type SubstantiationTerminalTrace,
+  type SubstantiationTraceReasonCode,
+  type SubstantiationTraceStage,
 } from "./publish/substantiate.js";
 import { bindTrustedHunkEvidence, type TrustedHunkEvidence } from "./publish/closed-claim-proof.js";
 
@@ -3166,9 +3169,44 @@ async function closedRuntimeFactsForChallenge(
   });
 }
 
+const UNDECIDED_STAGE_COUNT: Readonly<Record<SubstantiationTraceStage, string>> = {
+  preflight: "undecided_stage_preflight",
+  truth_initial: "undecided_stage_truth_initial",
+  truth_retrieval: "undecided_stage_truth_retrieval",
+  truth_followup: "undecided_stage_truth_followup",
+  challenge_planner: "undecided_stage_challenge_planner",
+  challenge_retrieval: "undecided_stage_challenge_retrieval",
+  falsifier: "undecided_stage_falsifier",
+};
+
+const UNDECIDED_REASON_COUNT: Readonly<Partial<Record<SubstantiationTraceReasonCode, string>>> = {
+  budget: "undecided_reason_budget",
+  request_transport_or_status: "undecided_reason_request",
+  usage_invalid: "undecided_reason_usage",
+  finish_reason_nonstop: "undecided_reason_finish",
+  json_or_envelope_invalid: "undecided_reason_json",
+  semantic_shape_invalid: "undecided_reason_shape",
+  retrieval_error: "undecided_reason_retrieval",
+};
+
+function incrementCount(counts: Record<string, number>, key: string): void {
+  counts[key] = (counts[key] ?? 0) + 1;
+}
+
+/** Closed stage/reason counters diagnose incomplete verification without logging reviewed text. */
+function captureUndecidedTrace(
+  counts: Record<string, number>,
+  trace: SubstantiationTerminalTrace,
+): void {
+  if (trace.disposition !== "undecided") return;
+  incrementCount(counts, UNDECIDED_STAGE_COUNT[trace.stage]);
+  incrementCount(counts, UNDECIDED_REASON_COUNT[trace.reasonCode] ?? "undecided_reason_other");
+}
+
 function recordSubstantiation(
   run: PipelineRun,
   outcome: SubstantiationOutcome<JudgeableOriginal>,
+  undecidedTraceCounts: Readonly<Record<string, number>>,
 ): void {
   run.ledger.classify += outcome.tokens;
   run.diagnostics.record("publish.substantiated", {
@@ -3191,6 +3229,7 @@ function recordSubstantiation(
       undecided: outcome.undecided,
       budget_blocked: outcome.budgetBlocked,
       tokens: outcome.tokens,
+      ...undecidedTraceCounts,
     },
   });
 }
@@ -3273,6 +3312,7 @@ async function substantiateModelSurvivors(
   const evidenceByJudgeable = new Map<JudgeableFinding, string | TrustedHunkEvidence>(
     judgeable.map((finding) => [finding, trustedFindingEvidence(evidence.get(finding.original))]),
   );
+  const undecidedTraceCounts: Record<string, number> = {};
 
   const outcome = await substantiate(
     judgeable,
@@ -3283,8 +3323,11 @@ async function substantiateModelSurvivors(
     resolveSubstantiationStrictness(run.request.env),
     remaining,
     evidenceRetriever(evidence, run),
+    (trace) => {
+      captureUndecidedTrace(undecidedTraceCounts, trace);
+    },
   );
-  recordSubstantiation(run, outcome);
+  recordSubstantiation(run, outcome, undecidedTraceCounts);
   requireReviewTime(run.deadline);
 
   return partitionSubstantiated(judgeable, outcome);

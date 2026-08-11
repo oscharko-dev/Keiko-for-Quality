@@ -411,14 +411,49 @@ function headSource(id, path) {
   return file.head;
 }
 
-test("qualification corpus keeps the 42-case seeded/clean population contract", () => {
+test("qualification corpus keeps the 44-case seeded/clean population contract", () => {
   const changedFiles = CASES.flatMap((entry) =>
     entry.files.filter((file) => file.base !== file.head),
   );
-  assert.equal(CASES.length, 42);
-  assert.equal(CASES.filter((entry) => entry.defect !== null).length, 31);
-  assert.equal(CASES.filter((entry) => entry.defect === null).length, 11);
-  assert.equal(changedFiles.length, 50);
+  assert.equal(CASES.length, 44);
+  assert.equal(CASES.filter((entry) => entry.defect !== null).length, 32);
+  assert.equal(CASES.filter((entry) => entry.defect === null).length, 12);
+  assert.equal(changedFiles.length, 52);
+});
+
+test("Windows helper twins distinguish terminal failure from an invalid spawn value", () => {
+  const clean = caseById("clean-terminal-helper-before-guarded-spawn");
+  const seeded = caseById("helper-fallthrough-reaches-spawn");
+  const cleanFile = clean.files.find((entry) => entry.path === "src/windows-compiler.mjs");
+  const seededFile = seeded.files.find((entry) => entry.path === "src/windows-compiler.mjs");
+
+  assert.ok(cleanFile !== undefined, "the clean twin must carry its complete Windows flow");
+  assert.ok(seededFile !== undefined, "the recall twin must carry its complete Windows flow");
+  assert.equal(clean.defect, null);
+  assert.deepEqual(seeded.defect, {
+    file: "src/windows-compiler.mjs",
+    category: "bug",
+    severity: "high",
+    anchors: ["return undefined", "undefined", "spawn", "windowsToolFromPath", "fallthrough"],
+  });
+
+  for (const source of [cleanFile.head, seededFile.base, seededFile.head]) {
+    assert.match(source, /^import \{ spawn \} from "node:child_process";/mu);
+    assert.match(source, /if \(process\.platform !== "win32"\) return;/u);
+    assert.match(source, /spawn\(windowsToolFromPath\(pathValue, "cl\.exe"\)/u);
+  }
+  assert.match(cleanFile.head, /if \(directory === undefined\) throw new Error/u);
+  assert.equal(cleanFile.head.includes("return undefined"), false);
+  assert.equal(seededFile.base, cleanFile.head, "the seeded base must be the clean head exactly");
+  assert.match(seededFile.head, /if \(directory === undefined\) return undefined;/u);
+  assert.equal(
+    seededFile.base.replace(
+      /throw new Error\("Windows tool is unavailable"\)/u,
+      "return undefined",
+    ),
+    seededFile.head,
+    "only the terminal helper exit may change in the recall twin",
+  );
 });
 
 test("off-by-one carries a visible contract and a concrete just-outside witness", () => {

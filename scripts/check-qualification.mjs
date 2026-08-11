@@ -31,8 +31,8 @@ const THRESHOLDS = {
    * same candidate repeatedly landed at 86.7% while the identities of almost every miss rotated,
    * and the earlier v0.15.0 qualification recorded the same unreachable-single-run property. The
    * release still requires the real-consumer seed, historical replay, and completion gates; this
-   * threshold keeps one unlucky draw from overruling those independent measurements while 25/30
-   * or worse remains red.
+   * threshold keeps one unlucky draw from overruling those independent measurements while five
+   * misses (26/31 in the current population) or worse remains red.
    */
   severeRecall: 0.85,
   /** A reviewer that fires on clean changes trains its readers to ignore it. */

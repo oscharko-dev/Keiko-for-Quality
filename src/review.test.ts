@@ -3677,7 +3677,7 @@ describe("performReview: review-cache memoization end to end", () => {
       // see and cite the real repository line returned for the planner's bounded lookup.
       expect(challengePrompt).not.toContain('"verdict":"confirmed"');
       expect(falsifierPrompt).toContain("R4:H:1| export const challengeGuard = true;");
-      // Truth + planner + falsifier precede the one fast-path classification-audit vote.
+      // Truth + falsifier + referee precede the one fast-path classification-audit vote.
       expect(callCount()).toBe(4);
 
       const records = diagnostics.drain();
@@ -4106,6 +4106,41 @@ describe("performReview: review-cache memoization end to end", () => {
         challenge_failed: 0,
         undecided: 1,
         budget_blocked: 1,
+      });
+    });
+
+    it("records a closed verifier stage and reason when publication becomes undecidable", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY = withChallengeProbe(
+        "When the compiler lookup fails, this call passes an invalid command to spawn.",
+      );
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "high" }],
+          2,
+          100,
+        ),
+        ruleDigest: engineDigest,
+      });
+      const { impl, callCount } = classifyFetchMock({ refereeEvidenceRef: "R4:H:999" });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(auditRequest(client), diagnostics);
+
+      expect(report.outcome).toBe("incomplete");
+      expect(report.reason).toBe("settlement.incomplete.publication_degraded");
+      expect(created.some((comment) => comment.body.includes(BODY))).toBe(false);
+      expect(callCount()).toBe(3);
+      const substantiated = diagnostics
+        .drain()
+        .find((record) => record.code === "publish.substantiated");
+      expect(substantiated?.counts).toMatchObject({
+        undecided: 1,
+        undecided_stage_falsifier: 1,
+        undecided_reason_shape: 1,
       });
     });
 

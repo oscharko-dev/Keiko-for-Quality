@@ -3041,6 +3041,13 @@ var PARALLEL_MAPPING_EVIDENCE_POLICY = [
   "sibling reads the first key's source; symmetric repetition is not evidence of correctness.",
   "SILENT when a shown contract or explicit translation table proves the cross-map intentional."
 ].join(" ");
+var HELPER_CONTROL_FLOW_EVIDENCE_POLICY = [
+  "Helper/import decision \u2014 RETURN: trace exits before claiming invalid output reaches a call. A",
+  "terminal throw for the state prevents the call; report an invalid return, fallthrough, or",
+  "catch-and-continue path. IMPORT: import does not execute exports. Report load failure",
+  "only when module evaluation runs unavailable",
+  "platform code or dependency; guarded calls remain silent."
+].join(" ");
 var OUTPUT_SINK_SIGNAL = /\b(?:console|diagnostic|error|log(?:ger)?|telemetry)\b/iu;
 var SENSITIVE_VALUE_SIGNAL = /\b(?:authorization|credential|password|secret|session(?:id|identifier)?|token)\b/iu;
 var IDENTIFIER_SIGNAL = /^[\w$]+$/u;
@@ -3102,6 +3109,11 @@ var POLICY_ROWS = [
     label: "parallel-mapping",
     text: PARALLEL_MAPPING_EVIDENCE_POLICY,
     relevant: (evidence) => /\b(?:capabilit|mapping|mapper)\b/iu.test(evidence) || mappingEntryVisible(evidence)
+  },
+  {
+    label: "helper-control-flow",
+    text: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
+    relevant: (evidence) => /\b(?:import|spawn|throw|returns?|fallthrough|platform|win32)\b/iu.test(evidence)
   }
 ];
 function renderPolicyRows(rows) {
@@ -3206,6 +3218,7 @@ var CATCH_ALL_RULE = [
   `- **parallel keyed mappings** \u2014 ${PARALLEL_MAPPING_EVIDENCE_POLICY}`,
   `- **sensitive values reaching output sinks** \u2014 ${SENSITIVE_OUTPUT_EVIDENCE_POLICY}`,
   `- **diagnostic context in error paths** \u2014 ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
+  `- **helper exits and module evaluation** \u2014 ${HELPER_CONTROL_FLOW_EVIDENCE_POLICY}`,
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
   "  or termination can recommend a fix that weakens correct code instead of improving it.",
@@ -3746,7 +3759,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v13";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v14";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;
@@ -13750,7 +13763,33 @@ async function closedRuntimeFactsForChallenge(run2, prepared, finding, stage, ch
     deadlineMs: run2.deadline.expiresAtMs
   });
 }
-function recordSubstantiation(run2, outcome) {
+var UNDECIDED_STAGE_COUNT = {
+  preflight: "undecided_stage_preflight",
+  truth_initial: "undecided_stage_truth_initial",
+  truth_retrieval: "undecided_stage_truth_retrieval",
+  truth_followup: "undecided_stage_truth_followup",
+  challenge_planner: "undecided_stage_challenge_planner",
+  challenge_retrieval: "undecided_stage_challenge_retrieval",
+  falsifier: "undecided_stage_falsifier"
+};
+var UNDECIDED_REASON_COUNT = {
+  budget: "undecided_reason_budget",
+  request_transport_or_status: "undecided_reason_request",
+  usage_invalid: "undecided_reason_usage",
+  finish_reason_nonstop: "undecided_reason_finish",
+  json_or_envelope_invalid: "undecided_reason_json",
+  semantic_shape_invalid: "undecided_reason_shape",
+  retrieval_error: "undecided_reason_retrieval"
+};
+function incrementCount(counts, key) {
+  counts[key] = (counts[key] ?? 0) + 1;
+}
+function captureUndecidedTrace(counts, trace) {
+  if (trace.disposition !== "undecided") return;
+  incrementCount(counts, UNDECIDED_STAGE_COUNT[trace.stage]);
+  incrementCount(counts, UNDECIDED_REASON_COUNT[trace.reasonCode] ?? "undecided_reason_other");
+}
+function recordSubstantiation(run2, outcome, undecidedTraceCounts) {
   run2.ledger.classify += outcome.tokens;
   run2.diagnostics.record("publish.substantiated", {
     counts: {
@@ -13771,7 +13810,8 @@ function recordSubstantiation(run2, outcome) {
       challenge_failed: outcome.challengeFailed,
       undecided: outcome.undecided,
       budget_blocked: outcome.budgetBlocked,
-      tokens: outcome.tokens
+      tokens: outcome.tokens,
+      ...undecidedTraceCounts
     }
   });
 }
@@ -13809,6 +13849,7 @@ async function substantiateModelSurvivors(run2, context, modelFindings) {
   const evidenceByJudgeable = new Map(
     judgeable.map((finding) => [finding, trustedFindingEvidence(evidence.get(finding.original))])
   );
+  const undecidedTraceCounts = {};
   const outcome = await substantiate(
     judgeable,
     (finding) => evidenceByJudgeable.get(finding) ?? "",
@@ -13817,9 +13858,12 @@ async function substantiateModelSurvivors(run2, context, modelFindings) {
     // fail-closed (`paranoid`); explicit sweep stages may vary it without creating a second path.
     resolveSubstantiationStrictness(run2.request.env),
     remaining,
-    evidenceRetriever(evidence, run2)
+    evidenceRetriever(evidence, run2),
+    (trace) => {
+      captureUndecidedTrace(undecidedTraceCounts, trace);
+    }
   );
-  recordSubstantiation(run2, outcome);
+  recordSubstantiation(run2, outcome, undecidedTraceCounts);
   requireReviewTime(run2.deadline);
   return partitionSubstantiated(judgeable, outcome);
 }

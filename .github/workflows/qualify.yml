@@ -28,7 +28,7 @@ jobs:
   corpus:
     name: corpus
     runs-on: ubuntu-latest
-    # The current corpus has 42 cases and 50 changed files; OCR_LLM_TIMEOUT (180 s) is a per-file
+    # The current corpus has 44 cases and 52 changed files; OCR_LLM_TIMEOUT (180 s) is a per-file
     # request boundary, and the harness's single resume can carry a failing case past its first
     # attempt. Generation-only staged attempts took about twelve minutes; qualification now also
     # runs the shipped Truth/Challenge/Falsifier verification path, whose bounded follow-up calls

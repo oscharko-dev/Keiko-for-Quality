@@ -161,16 +161,16 @@ test("the normal promotion checker reads redacted evidence without private diagn
   }
 });
 
-test("the severe-recall floor tolerates four misses but rejects five of thirty", () => {
+test("the severe-recall floor tolerates four misses but rejects five of thirty-one", () => {
   const severe = CASES.filter(
     (testCase) =>
       testCase.defect !== null && ["critical", "high"].includes(testCase.defect.severity),
   );
-  assert.equal(severe.length, 30);
+  assert.equal(severe.length, 31);
 
   for (const [misses, expectedStatus, expectedRate] of [
-    [4, 0, "86.7%"],
-    [5, 1, "83.3%"],
+    [4, 0, "87.1%"],
+    [5, 1, "83.9%"],
   ]) {
     const directory = mkdtempSync(join(tmpdir(), "kfq-qualification-floor-test-"));
     const path = join(directory, "qualification.json");
