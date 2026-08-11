@@ -50,6 +50,24 @@ const CHANGED_HEAD_ROW = /^D:H:([1-9]\d*)\| \+(.*)$/u;
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/u;
 const SENSITIVE_CONTEXT_FIELD =
   /(?:authorization|body|content|credential|password|payload|secret|session|token)/iu;
+const LOG_METHODS = new Set(["debug", "error", "info", "log", "warn"]);
+const PRIMITIVE_TYPES = new Set(["bigint", "boolean", "number", "string"]);
+const MUTATION_SUFFIXES = [
+  "++",
+  "--",
+  "&&=",
+  "||=",
+  "??=",
+  "+=",
+  "-=",
+  "*=",
+  "/=",
+  "%=",
+  "&=",
+  "|=",
+  "^=",
+  "=",
+];
 const MAX_CLAIM_CHARS = 8_192;
 function sourceRows(source: string | undefined): readonly string[] | undefined {
   if (source === undefined) return undefined;
@@ -705,19 +723,52 @@ function soleSourceDifference(
   return index !== undefined && changed.has(index + 1) ? index : undefined;
 }
 
+function soleObjectRange(code: string): readonly [number, number] | undefined {
+  const objectOpen = code.indexOf("{");
+  const objectClose = code.indexOf("}", objectOpen + 1);
+  if (
+    objectOpen < 0 ||
+    objectClose < objectOpen ||
+    objectOpen !== code.lastIndexOf("{") ||
+    objectClose !== code.lastIndexOf("}")
+  ) {
+    return undefined;
+  }
+  return [objectOpen, objectClose];
+}
+
+function opensQualifiedLogCall(beforeObject: string): boolean {
+  if (!beforeObject.endsWith(",")) return false;
+  const call = beforeObject.slice(0, -1).trimEnd();
+  const callOpen = call.indexOf("(");
+  if (callOpen <= 0 || callOpen !== call.lastIndexOf("(")) return false;
+  const calleeParts = call.slice(0, callOpen).trim().split(".");
+  const method = calleeParts.at(-1);
+  return (
+    method !== undefined &&
+    LOG_METHODS.has(method) &&
+    calleeParts.length >= 2 &&
+    calleeParts.every((part) => IDENTIFIER.test(part))
+  );
+}
+
 function structuredLogParts(
   code: string,
 ): readonly [string, readonly string[], string] | undefined {
-  const call =
-    /^(\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.(?:debug|error|info|log|warn)\s*\([^{}]*,\s*\{)([^{}]*)(\}\s*\)\s*;?\s*)$/u.exec(
-      code,
-    );
-  if (call?.[1] === undefined || call[2] === undefined || call[3] === undefined) return undefined;
-  const entries = call[2]
+  const range = soleObjectRange(code);
+  if (range === undefined) return undefined;
+  const [objectOpen, objectClose] = range;
+  const beforeObject = code.slice(0, objectOpen).trimEnd();
+  const afterObject = code.slice(objectClose + 1).trim();
+  if (!opensQualifiedLogCall(beforeObject) || (afterObject !== ")" && afterObject !== ");")) {
+    return undefined;
+  }
+  const entries = code
+    .slice(objectOpen + 1, objectClose)
     .split(",")
     .map((entry) => entry.trim())
     .filter((entry) => entry !== "");
-  return [call[1], entries, call[3]];
+  return [code.slice(0, objectOpen + 1), entries, code.slice(objectClose)];
 }
 
 function appendedLogContextEntry(
@@ -733,6 +784,15 @@ function appendedLogContextEntry(
   return headEntries.at(-1);
 }
 
+function contextField(entry: string | undefined): string | undefined {
+  const parts = entry?.split(":").map((part) => part.trim()) ?? [];
+  if (parts.length === 1 && IDENTIFIER.test(parts[0] ?? "")) return parts[0];
+  if (parts.length === 2 && parts[0] === parts[1] && IDENTIFIER.test(parts[0] ?? "")) {
+    return parts[0];
+  }
+  return undefined;
+}
+
 function addedPrimitiveContext(
   head: readonly SourceLine[],
   base: readonly SourceLine[],
@@ -745,10 +805,46 @@ function addedPrimitiveContext(
     structuredLogParts(headLine.code),
     structuredLogParts(baseLine.code),
   );
-  const field = /^([A-Za-z_$][\w$]*)(?:\s*:\s*\1)?$/u.exec(added ?? "")?.[1];
+  const field = contextField(added);
   return field === undefined || SENSITIVE_CONTEXT_FIELD.test(field)
     ? undefined
     : { field, line: headLine, index };
+}
+
+function primitiveParameter(parameters: string, field: string): boolean {
+  return parameters.split(",").some((parameter) => {
+    const parts = parameter.split(":").map((part) => part.trim());
+    if (parts.length !== 2) return false;
+    const rawName = (parts[0] ?? "").replace(/^readonly\s+/u, "");
+    const name = rawName.endsWith("?") ? rawName.slice(0, -1) : rawName;
+    const type = parts[1];
+    return name === field && type !== undefined && PRIMITIVE_TYPES.has(type);
+  });
+}
+
+function identifierCharacter(character: string | undefined): boolean {
+  return character !== undefined && /[A-Za-z0-9_$]/u.test(character);
+}
+
+function mutatesIdentifier(code: string, field: string): boolean {
+  let offset = code.indexOf(field);
+  while (offset >= 0) {
+    const before = code[offset - 1];
+    const after = code[offset + field.length];
+    if (!identifierCharacter(before) && !identifierCharacter(after)) {
+      const prefix = code.slice(0, offset).trimEnd();
+      const suffix = code.slice(offset + field.length).trimStart();
+      if (
+        prefix.endsWith("++") ||
+        prefix.endsWith("--") ||
+        MUTATION_SUFFIXES.some((operator) => suffix.startsWith(operator))
+      ) {
+        return true;
+      }
+    }
+    offset = code.indexOf(field, offset + field.length);
+  }
+  return false;
 }
 
 function enclosingFunction(
@@ -776,17 +872,10 @@ function primitiveParameterIsStable(
   addition: DiagnosticContextAddition,
   fn: { readonly opening: number; readonly parameters: string },
 ): boolean {
-  const field = escaped(addition.field);
-  const declaration = new RegExp(
-    String.raw`(?:^|,)\s*(?:readonly\s+)?${field}\??\s*:\s*(?:bigint|boolean|number|string)\b`,
-    "u",
-  );
-  if (!declaration.test(fn.parameters)) return false;
-  const assignment = new RegExp(
-    String.raw`\b${field}\s*(?:\+\+|--|(?:&&|\|\||\?\?|[-+*/%&|^])?=(?!=))`,
-    "u",
-  );
-  return !lines.slice(fn.opening + 1, addition.index).some((line) => assignment.test(line.code));
+  if (!primitiveParameter(fn.parameters, addition.field)) return false;
+  return !lines
+    .slice(fn.opening + 1, addition.index)
+    .some((line) => mutatesIdentifier(line.code, addition.field));
 }
 
 function enclosingRethrowingCatch(
@@ -803,13 +892,9 @@ function enclosingRethrowingCatch(
     const body = lines.slice(index + 1, closing);
     const escapedBinding = escaped(binding);
     const rethrow = new RegExp(String.raw`^\s*throw\s+${escapedBinding}\s*;?\s*$`, "u");
-    const assignment = new RegExp(
-      String.raw`\b${escapedBinding}\s*(?:\+\+|--|(?:&&|\|\||\?\?|[-+*/%&|^])?=(?!=))`,
-      "u",
-    );
     return (
       body.filter((candidate) => rethrow.test(candidate.code)).length === 1 &&
-      !body.some((candidate) => assignment.test(candidate.code))
+      !body.some((candidate) => mutatesIdentifier(candidate.code, binding))
     );
   }
   return false;
