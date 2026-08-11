@@ -895,6 +895,44 @@ describe("truth then adversarial falsification", () => {
     expect(endpoint.prompts()[2]).toContain("final independent referee");
   });
 
+  it("focuses adversarial roles on cited proof windows and retrieved challenge evidence", async () => {
+    const paddedEvidence = [
+      "HEAD (proposed code):",
+      "H:1| // The caller supplies milliseconds.",
+      "H:2| export async function wait(delay: number) {",
+      "H:3|   await sleep(delay);",
+      ...Array.from(
+        { length: 9 },
+        (_value, index) => `H:${String(index + 4)}| unrelatedHeadLine${String(index + 4)}();`,
+      ),
+      ...Array.from({ length: 10 }, (_value, index) => `UNRELATED DISTRACTOR ${String(index + 1)}`),
+      "BASE (before change):",
+      "B:3|   await sleep(delay * 1000);",
+      "CHANGE (merge-base to HEAD):",
+      "D:B:3| -  await sleep(delay * 1000);",
+      "D:H:3| +  await sleep(delay);",
+    ].join("\n");
+    const candidate = finding("When the header is numeric, the wait is 1000× short.");
+    const endpoint = endpointReplying([CONFIRMED, SURVIVES, REFEREE_SURVIVES]);
+    const out = await substantiate(
+      [candidate],
+      () => paddedEvidence,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      () => retrievedCaller(),
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(endpoint.prompts()[0]).toContain("\nUNRELATED DISTRACTOR 1\n");
+    for (const prompt of endpoint.prompts().slice(1)) {
+      expect(prompt).toContain("H:1| // The caller supplies milliseconds.");
+      expect(prompt).toContain("R4:H:9| await wait(header.delay);");
+      expect(prompt).not.toContain("\nUNRELATED DISTRACTOR 1\n");
+      expect(prompt).not.toContain("H:12| unrelatedHeadLine12();");
+    }
+  });
+
   it("renders retrieved source identity with the reversible evidence-path encoding", async () => {
     const candidate = finding("When the header is numeric, the wait is 1000× short.");
     const endpoint = endpointReplying([CONFIRMED, SURVIVES, REFEREE_SURVIVES]);
@@ -966,13 +1004,13 @@ describe("truth then adversarial falsification", () => {
     expect(endpoint.prompts()).toHaveLength(2);
   });
 
-  it("lets the adversarial role defeat a plausible high-impact claim", async () => {
+  it("requires the independent Referee to confirm an adversarial defeat", async () => {
     const defeated = falsifier({
       verdict: "defeated",
       reason_code: "existing_guard",
       evidence_refs: ["R4:H:9"],
     });
-    const endpoint = endpointReplying([CONFIRMED, defeated, "no third call"]);
+    const endpoint = endpointReplying([CONFIRMED, defeated, referee({ verdict: "defeated" })]);
     const out = await substantiate(
       [finding("When submitted is undefined, spreading it crashes every production request.")],
       () => CHANGE_EVIDENCE,
@@ -986,8 +1024,37 @@ describe("truth then adversarial falsification", () => {
     expect(out.truthRefuted).toBe(0);
     expect(out.falsifierDefeated).toBe(1);
     expect(out.droppedRefuted).toBe(1);
-    expect(endpoint.remaining()).toBe(1);
-    expect(endpoint.prompts()).toHaveLength(2);
+    expect(endpoint.remaining()).toBe(0);
+    expect(endpoint.prompts()).toHaveLength(3);
+  });
+
+  it("keeps a Truth-confirmed finding when the Referee overturns an adversarial defeat", async () => {
+    const endpoint = endpointReplying([
+      CONFIRMED,
+      falsifier({
+        verdict: "defeated",
+        reason_code: "existing_guard",
+        evidence_refs: ["R4:H:9"],
+      }),
+      REFEREE_SURVIVES,
+    ]);
+    const candidate = finding(
+      "When submitted is undefined, spreading it crashes every production request.",
+    );
+    const out = await substantiate(
+      [candidate],
+      () => CHANGE_EVIDENCE,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      () => retrievedCaller(),
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(out.confirmed).toBe(1);
+    expect(out.falsifierDefeated).toBe(0);
+    expect(out.droppedRefuted).toBe(0);
+    expect(endpoint.prompts()).toHaveLength(3);
   });
 
   it("drops when the mandatory Referee defeats a Falsifier survive", async () => {
@@ -1005,6 +1072,23 @@ describe("truth then adversarial falsification", () => {
     expect(out.falsifierDefeated).toBe(1);
     expect(out.droppedRefuted).toBe(1);
     expect(endpoint.prompts()).toHaveLength(3);
+  });
+
+  it("fails closed without Referee when the Falsifier transport is unavailable", async () => {
+    const endpoint = endpointReplying([CONFIRMED, TRANSPORT_FAIL]);
+    const out = await substantiate(
+      [finding("When submitted is undefined, spreading it crashes every production request.")],
+      () => CHANGE_EVIDENCE,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      () => retrievedCaller(),
+    );
+
+    expect(out.findings).toHaveLength(0);
+    expect(out.undecided).toBe(1);
+    expect(endpoint.remaining()).toBe(0);
+    expect(endpoint.prompts()).toHaveLength(2);
   });
 
   it("does not call a rewrite or an importance scorer", async () => {
@@ -1289,6 +1373,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
         reason_code: "counterexample",
         evidence_refs: ["R4:T:1"],
       }),
+      referee({ verdict: "defeated", evidence_refs: ["R4:T:1"] }),
     ]);
     const candidate = finding(
       "When `maybe` is undefined, the object spread throws before the fallback can run.",
@@ -1357,6 +1442,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
           reason_code: "counterexample",
           evidence_refs: ["R4:B:9"],
         }),
+        referee({ verdict: "defeated", evidence_refs: ["R4:B:9"] }),
       ]).deps,
       "paranoid",
       undefined,
@@ -1397,6 +1483,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
             reason_code: "counterexample",
             evidence_refs: ["R4:H:9"],
           }),
+          referee({ verdict: "defeated", evidence_refs: ["R4:H:9"] }),
         ]).deps,
         "paranoid",
         undefined,
@@ -1411,7 +1498,11 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
 
   it("turns a terminal post-challenge insufficient reply into a drop without another loop", async () => {
     let retrievalCalls = 0;
-    const endpoint = endpointReplying([CONFIRMED, FALSIFIER_INSUFFICIENT, "unused"]);
+    const endpoint = endpointReplying([
+      CONFIRMED,
+      FALSIFIER_INSUFFICIENT,
+      referee({ verdict: "insufficient_evidence", evidence_refs: ["R4:H:9"] }),
+    ]);
     const out = await substantiate(
       [finding("When a caller passes seconds, the wait is short.")],
       () => CHANGE_EVIDENCE,
@@ -1427,7 +1518,7 @@ describe("bounded Truth retrieval and mandatory Contract Challenge", () => {
     expect(out.droppedInsufficientEvidence).toBe(1);
     expect(out.undecided).toBe(0);
     expect(retrievalCalls).toBe(1);
-    expect(endpoint.remaining()).toBe(1);
+    expect(endpoint.remaining()).toBe(0);
   });
 
   it("accepts a 374084-style reduced Referee shape after semantic Falsifier failure", async () => {

@@ -12558,9 +12558,30 @@ async function resolveContractChallenge(run2, evidence, challenge) {
     return { kind: "insufficient", reasonCode: "retrieval_no_match" };
   }
   run2.metrics.challengeExpanded += 1;
-  return { kind: "expanded", evidence: `${evidence}
+  return {
+    kind: "expanded",
+    evidence: focusedChallengeEvidence(evidence, challenge.evidenceRefs, rendered)
+  };
+}
+var CHALLENGE_PROOF_CONTEXT_RADIUS = 8;
+function addChallengeProofWindow(selected, centre, lineCount) {
+  const start = Math.max(0, centre - CHALLENGE_PROOF_CONTEXT_RADIUS);
+  const end = Math.min(lineCount - 1, centre + CHALLENGE_PROOF_CONTEXT_RADIUS);
+  for (let index = start; index <= end; index += 1) selected.add(index);
+}
+function focusedChallengeEvidence(evidence, proofRefs, renderedChallenge) {
+  const lines = evidence.split("\n");
+  const prefixes = proofRefs.map((reference) => `${reference}|`);
+  const selected = /* @__PURE__ */ new Set();
+  for (const [index, line] of lines.entries()) {
+    if (prefixes.some((prefix) => line.startsWith(prefix))) {
+      addChallengeProofWindow(selected, index, lines.length);
+    }
+  }
+  const proof = lines.filter((_line, index) => selected.has(index)).join("\n");
+  return `${proof}
 
-${rendered}` };
+${renderedChallenge}`;
 }
 function applyFalsifierDecision(run2, decision) {
   if (decision.verdict === "defeated") {
@@ -12589,11 +12610,8 @@ function undecidedFalsifier(run2, failure) {
   });
 }
 async function settleFalsifierCall(run2, evidence, challenge, truth, call) {
-  if (call.decision !== void 0 && call.decision.verdict !== "survives") {
-    return applyFalsifierDecision(run2, call.decision);
-  }
-  const mayReferee = (call.decision?.verdict === "survives" || call.failure === "semantic_shape_invalid" || call.failure === "json_or_envelope_invalid") && run2.budget.calls - run2.callsAtStart < 4;
-  if (!mayReferee) return undecidedFalsifier(run2, call.failure);
+  const shouldReferee = call.decision !== void 0 || call.failure === "semantic_shape_invalid" || call.failure === "json_or_envelope_invalid";
+  if (!shouldReferee) return undecidedFalsifier(run2, call.failure);
   const referee = await callReferee(run2.finding, evidence, challenge, truth, run2.deps, run2.budget);
   return referee.decision === void 0 ? undecidedFalsifier(run2, referee.failure) : applyFalsifierDecision(run2, referee.decision);
 }
@@ -12707,8 +12725,7 @@ async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) 
       strictness,
       budget,
       retriever,
-      metrics,
-      callsAtStart: budget.calls
+      metrics
     },
     evidence
   );

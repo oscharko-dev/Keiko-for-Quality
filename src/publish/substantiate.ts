@@ -11,10 +11,10 @@
  * A confirmation never flows straight to publication: a deterministic contract challenge chooses
  * one closed disproof axis and searches for a counterexample or guard outside Truth's proof. A
  * successful search with no novel evidence is itself the terminal no-defeater result; when it does
- * expand the evidence, the terminal Falsifier decides and every surviving claim receives an
- * independent Referee decision. A semantically invalid Falsifier shape may use that same final
- * round without exposing the rejected response. The complete workflow remains capped structurally
- * at four model calls and every role spends from one whole-review hard budget.
+ * expand the evidence, the terminal Falsifier proposes a verdict and every closed proposal receives
+ * an independent Referee decision. The bounded path reserves that final call; an eligible malformed
+ * Falsifier shape may use it without exposing the rejected response. The complete workflow remains
+ * capped structurally at four model calls and every role spends from one whole-review hard budget.
  */
 
 import { EXAMINER_CLAIM_DECISION_POLICY } from "../engine/claim-decision-policy.js";
@@ -2187,7 +2187,6 @@ interface CandidateRun<T extends JudgeableFinding> {
   readonly budget: CallBudget;
   readonly retriever: EvidenceRetriever<T> | undefined;
   readonly metrics: CandidateMetrics;
-  readonly callsAtStart: number;
 }
 
 async function continueTruthWithContext<T extends JudgeableFinding>(
@@ -2277,7 +2276,42 @@ async function resolveContractChallenge<T extends JudgeableFinding>(
     return { kind: "insufficient", reasonCode: "retrieval_no_match" };
   }
   run.metrics.challengeExpanded += 1;
-  return { kind: "expanded", evidence: `${evidence}\n\n${rendered}` };
+  return {
+    kind: "expanded",
+    evidence: focusedChallengeEvidence(evidence, challenge.evidenceRefs, rendered),
+  };
+}
+
+const CHALLENGE_PROOF_CONTEXT_RADIUS = 8;
+
+function addChallengeProofWindow(selected: Set<number>, centre: number, lineCount: number): void {
+  const start = Math.max(0, centre - CHALLENGE_PROOF_CONTEXT_RADIUS);
+  const end = Math.min(lineCount - 1, centre + CHALLENGE_PROOF_CONTEXT_RADIUS);
+  for (let index = start; index <= end; index += 1) selected.add(index);
+}
+
+/**
+ * Truth needs the complete dossier to establish the change. The adversarial roles do not: their
+ * job is to compare Truth's exact proof with one independently retrieved contract pack. Passing
+ * the entire dossier again buried a short counterexample among thousands of unrelated source
+ * lines in historical reviews. Keep each cited proof line with a small, deterministic neighbour
+ * window, then append the already bounded R4-R6 challenge evidence verbatim.
+ */
+function focusedChallengeEvidence(
+  evidence: string,
+  proofRefs: readonly VerificationEvidenceRef[],
+  renderedChallenge: string,
+): string {
+  const lines = evidence.split("\n");
+  const prefixes = proofRefs.map((reference) => `${reference}|`);
+  const selected = new Set<number>();
+  for (const [index, line] of lines.entries()) {
+    if (prefixes.some((prefix) => line.startsWith(prefix))) {
+      addChallengeProofWindow(selected, index, lines.length);
+    }
+  }
+  const proof = lines.filter((_line, index) => selected.has(index)).join("\n");
+  return `${proof}\n\n${renderedChallenge}`;
 }
 
 function applyFalsifierDecision<T extends JudgeableFinding>(
@@ -2326,15 +2360,17 @@ async function settleFalsifierCall<T extends JudgeableFinding>(
     readonly failure: RoleCallFailure;
   },
 ): Promise<JudgedOne<T>> {
-  if (call.decision !== undefined && call.decision.verdict !== "survives") {
-    return applyFalsifierDecision(run, call.decision);
-  }
-  const mayReferee =
-    (call.decision?.verdict === "survives" ||
-      call.failure === "semantic_shape_invalid" ||
-      call.failure === "json_or_envelope_invalid") &&
-    run.budget.calls - run.callsAtStart < 4;
-  if (!mayReferee) return undecidedFalsifier(run, call.failure);
+  // A Falsifier is an adversarial proposal, not a terminal authority. Previously one `defeated`
+  // response discarded a Truth-confirmed finding immediately, while `survives` still had to pass
+  // the independent Referee. That asymmetry compounded false negatives: the role most strongly
+  // prompted to find a defeater needed no corroboration for doing so. Every closed Falsifier
+  // verdict now receives the same independent Referee decision. Path construction reaches this
+  // point after at most three calls, so the fourth and final call is reserved for Referee.
+  const shouldReferee =
+    call.decision !== undefined ||
+    call.failure === "semantic_shape_invalid" ||
+    call.failure === "json_or_envelope_invalid";
+  if (!shouldReferee) return undecidedFalsifier(run, call.failure);
 
   const referee = await callReferee(run.finding, evidence, challenge, truth, run.deps, run.budget);
   return referee.decision === undefined
@@ -2493,7 +2529,6 @@ async function judgeOne<T extends JudgeableFinding>(
       budget,
       retriever,
       metrics,
-      callsAtStart: budget.calls,
     },
     evidence,
   );
@@ -2542,9 +2577,9 @@ function tallyJudgement<T extends JudgeableFinding>(
 }
 
 /**
- * The direct path is Truth -> deterministic Challenge -> Falsifier -> mandatory Referee after a
- * survive or semantic-shape failure (at most three calls). Truth's optional retrieval and terminal
- * decision add one earlier call, keeping the longest path at four calls under the shared budget.
+ * The direct path is Truth -> deterministic Challenge -> Falsifier -> mandatory Referee after any
+ * closed proposal or eligible semantic-shape failure (at most three calls). Truth's optional
+ * retrieval and terminal decision add one earlier call, keeping the longest path at four calls.
  */
 export async function substantiate<T extends JudgeableFinding>(
   findings: readonly T[],
