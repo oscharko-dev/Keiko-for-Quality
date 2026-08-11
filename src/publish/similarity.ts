@@ -129,6 +129,26 @@ const SIMILARITY_THRESHOLD = 0.5;
 const MIN_SHARED_TOKENS = 4;
 
 /**
+ * A second, deliberately narrow band for an ANCHORED thread that a contributor already answered
+ * substantively and resolved.
+ *
+ * Keiko#3054 supplied three production misses at the ordinary band's boundary: the same rejected
+ * stable-bundle claim returned first with 19 shared tokens at 0.4419 overlap and then, measured
+ * directly against the original because a correctly suppressed intermediate cannot become future
+ * memory, with 20 at 0.4348; the same rejected provenance-guard claim returned with 14 at 0.4828.
+ * Lowering `SIMILARITY_THRESHOLD` globally would weaken open-thread, intra-run, file-level and
+ * outdated-recurrence precision for the sake of a stronger situation they do not have: a human
+ * disposition at the exact same changed lines.
+ *
+ * This band therefore exists only inside `findsDispositionedConversation`, requires real interval
+ * overlap (no line-tolerance or wide-drift admission), and trades the slightly lower ratio for
+ * a much higher absolute evidence floor. Both conditions must hold. The ordinary 0.50/4 band and
+ * every coordinate-free threshold remain unchanged.
+ */
+const DISPOSITION_SIMILARITY_THRESHOLD = 0.43;
+const MIN_DISPOSITION_SHARED_TOKENS = 14;
+
+/**
  * The bar every coordinate-free admission holds instead of a line anchor — `findsOutdatedRecurrence`,
  * and since 2026-08-06 `findsDispositionedConversation`'s anchor-less clause — and why it is higher.
  *
@@ -283,10 +303,10 @@ function tokenOverlap(
  * `classifySuppression` builds `SimilarityCandidate.body` straight from `sanitized.body` — the
  * model's raw sanitized prose for the finding under consideration right now, never composed — while
  * `toExistingConversation` reads `comment.body` straight off a comment that `publishComposedFinding`
- * (`publisher.ts`) already posted through `composeFindingBody`: a `**CATEGORY · SEVERITY**` header
- * line (comments published before the design-system grammar carry the older
- * `_<category>_ | _<severity>_` shape, and both are stripped — an existing conversation outlives
- * the release that composed it), the finding's own prose, a collapsed `<details>` repair-prompt
+ * (`publisher.ts`) already posted through `composeFindingBody`: a product-authored badge header
+ * (older comments carry code-span, bold, or italic label lines, and all shapes are stripped — an
+ * existing conversation outlives the release that composed it), the finding's own prose, a
+ * collapsed `<details>` repair-prompt
  * block, and a hidden marker comment (see `presentation.ts`). Three of those four parts are fixed product vocabulary
  * stamped on every single finding this reviewer ever publishes, never model content — the label
  * words, "details"/"summary"/"prompt"/"agents", the entire fixed repair-prompt template ("verify",
@@ -303,12 +323,26 @@ function tokenOverlap(
  * that composition breaks a test here instead of silently letting composition noise back into the
  * score.
  */
+const LEGACY_CATEGORY_LABELS =
+  "SECURITY|CORRECTNESS|PERFORMANCE|MAINTAINABILITY|TESTS|DOCUMENTATION|REVIEW";
+const LEGACY_SEVERITY_LABELS = "CRITICAL|MAJOR|MINOR|NIT";
+const LEGACY_CLASSIFICATION_TEXT = `(?:${LEGACY_CATEGORY_LABELS}) · (?:${LEGACY_SEVERITY_LABELS})`;
+const LEGACY_HEADER_END = String.raw`[ \t]*\n?`;
+const LEGACY_CODE_SPAN_HEADER = new RegExp(
+  ["^`", LEGACY_CLASSIFICATION_TEXT, "`", LEGACY_HEADER_END].join(""),
+  "u",
+);
+const LEGACY_BOLD_HEADER = new RegExp(
+  [String.raw`^\*\*`, LEGACY_CLASSIFICATION_TEXT, String.raw`\*\*`, LEGACY_HEADER_END].join(""),
+  "u",
+);
+
 function stripComposedArtifacts(body: string): string {
   return clip(body)
-    .replace(/^`[A-Z]+ · [A-Z]+`[ \t]*\n?/, "") // the code-span header line (the current grammar)
-    .replace(/^\*\*[A-Z]+ · [A-Z]+\*\*[ \t]*\n?/, "") // the bold header line (v0.21.0 comments)
+    .replace(LEGACY_CODE_SPAN_HEADER, "") // the code-span header line (v0.23.0 comments)
+    .replace(LEGACY_BOLD_HEADER, "") // the bold header line (v0.21.0 comments)
     .replace(/^_[^_\n]*_ \| _[^_\n]*_[ \t]*\n?/, "") // the pre-design-system label line
-    .replace(/<img[^>\n]*>/g, " ") // product-composed asset chips (summary/notice surfaces)
+    .replace(/<img[^>\n]*>/g, " ") // product-composed asset chips (finding/summary/notice surfaces)
     .replace(/<details>[\s\S]*?<\/details>/g, " ") // the collapsed repair-prompt block
     .replace(/<!--[\s\S]*?-->/g, " "); // the hidden marker comment
 }
@@ -336,6 +370,15 @@ function similarByContent(a: string, b: string): boolean {
  */
 function bodiesAreSimilar(candidateBody: string, existingBody: string): boolean {
   return similarByContent(candidateBody, stripComposedArtifacts(existingBody));
+}
+
+/** The calibrated, token-only second band for an anchored substantive disposition. */
+function bodiesMatchDispositionBand(candidateBody: string, existingBody: string): boolean {
+  const { score, shared } = tokenOverlap(
+    tokenize(candidateBody),
+    tokenize(stripComposedArtifacts(existingBody)),
+  );
+  return shared >= MIN_DISPOSITION_SHARED_TOKENS && score >= DISPOSITION_SIMILARITY_THRESHOLD;
 }
 
 /**
@@ -420,6 +463,26 @@ function isSameFindingAtSameLocation(
   return (
     linesOverlapWithin(candidate, thread, LINE_DRIFT_TOLERANCE) &&
     bodiesEffectivelyIdentical(candidate.body, thread.body)
+  );
+}
+
+/**
+ * The disposition-only production-calibrated admission.
+ *
+ * Unlike `isSameFindingAtSameLocation`, this does not inherit the two-line tolerance or the wide
+ * drift band. Its lower content ratio is justified only when the two real line intervals overlap;
+ * an absent, stale, merely-nearby or drifted coordinate must keep using the stricter existing rules.
+ */
+function isDispositionRestatementAtOverlappingLocation(
+  candidate: SimilarityCandidate,
+  thread: ExistingConversation,
+  identity: string,
+): boolean {
+  return (
+    thread.authorLogin === identity &&
+    thread.path === candidate.path &&
+    linesOverlapWithin(candidate, thread, 0) &&
+    bodiesMatchDispositionBand(candidate.body, thread.body)
   );
 }
 
@@ -509,6 +572,7 @@ export function findsDispositionedConversation(
       thread.resolved &&
       thread.dispositioned &&
       (isSameFindingAtSameLocation(candidate, thread, identity) ||
+        isDispositionRestatementAtOverlappingLocation(candidate, thread, identity) ||
         (carriesNoAnchor(thread) && isSameFindingOnSamePath(candidate, thread, identity))),
   );
 }

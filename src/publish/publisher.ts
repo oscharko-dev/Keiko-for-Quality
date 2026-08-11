@@ -36,6 +36,8 @@ export interface PublishContext {
   readonly client?: ReviewCommentApi;
   readonly ref: RepoRef;
   readonly pullNumber: number;
+  /** The merge base that defines the reviewed change and the verifier's before-change evidence. */
+  readonly baseSha: CommitSha;
   readonly headSha: CommitSha;
   /** The login this reviewer authors as, resolved at run time. */
   readonly identity: string;
@@ -82,6 +84,15 @@ export interface PublishOutcome {
   /** Suppressed against a resolved thread with a substantive disposition reply (Keiko-for-Quality#64) —
    *  never against a bare resolve, which must keep a genuinely recurred defect publishable. */
   readonly suppressedDispositioned: number;
+  /** Withheld by the independent evidence/consequence gate after generation. */
+  readonly suppressedEvidence?: number;
+  /** Verified fresh findings outside the PR-wide publication set. */
+  readonly suppressedRanked?: number;
+  /**
+   * Fresh candidates withheld because evidence or the independent judge was unavailable. Unlike a
+   * content rejection, any non-zero value degrades settlement so an outage cannot look clean.
+   */
+  readonly verificationUndecided?: number;
   /**
    * Suppressed as a restatement of a still-open conversation the anchored stages cannot reach:
    * one a push marked OUTDATED (its line anchor is stale), or — since 2026-08-06 — one that never
@@ -454,6 +465,12 @@ export interface PlanCounters {
   readonly suppressedExactDuplicate: number;
   readonly suppressedSimilar: number;
   readonly suppressedDispositioned: number;
+  /** See `PublishOutcome.suppressedEvidence`. */
+  readonly suppressedEvidence?: number;
+  /** See `PublishOutcome.suppressedRanked`. */
+  readonly suppressedRanked?: number;
+  /** See `PublishOutcome.verificationUndecided`. */
+  readonly verificationUndecided?: number;
   /** See `PublishOutcome.suppressedRecurrence` — optional for the identical reason. */
   readonly suppressedRecurrence?: number;
   readonly rejectedSanitization: number;
@@ -846,6 +863,9 @@ export async function executePublication(
   for (const survivor of plan.survivors) {
     await executeOne(context, survivor, plan.prefetch.markers, counters, diagnostics);
   }
+  const suppressedEvidence = plan.counters.suppressedEvidence ?? 0;
+  const suppressedRanked = plan.counters.suppressedRanked ?? 0;
+  const verificationUndecided = plan.counters.verificationUndecided ?? 0;
   return {
     published: counters.published,
     suppressed: plan.counters.suppressed + counters.suppressed,
@@ -859,6 +879,9 @@ export async function executePublication(
     suppressedSimilar: plan.counters.suppressedSimilar + counters.suppressedSimilar,
     suppressedDispositioned:
       plan.counters.suppressedDispositioned + counters.suppressedDispositioned,
+    ...(suppressedEvidence === 0 ? {} : { suppressedEvidence }),
+    ...(suppressedRanked === 0 ? {} : { suppressedRanked }),
+    ...(verificationUndecided === 0 ? {} : { verificationUndecided }),
     suppressedRecurrence: (plan.counters.suppressedRecurrence ?? 0) + counters.suppressedRecurrence,
     rejectedSanitization: plan.counters.rejectedSanitization + counters.rejectedSanitization,
     rejectedPlacement: counters.rejectedPlacement,

@@ -27,6 +27,11 @@ import {
   type ReviewCommentInput,
 } from "./github/client.js";
 import { fingerprint, markerComment } from "./publish/marker.js";
+import {
+  CLOSED_RUNTIME_FACT_CATALOG,
+  CLOSED_RUNTIME_FACT_CATALOG_VERSION,
+} from "./publish/runtime-fact-catalog.js";
+import { MAX_SUBSTANTIATION_TOKENS_PER_FINDING } from "./publish/substantiate.js";
 import type { ReviewRequest } from "./review.js";
 
 const acquireEngineMock = vi.fn();
@@ -36,6 +41,26 @@ const runEngineMock = vi.fn();
 vi.mock("./engine/run.js", async (importOriginal) => ({
   ...(await importOriginal()),
   runEngine: runEngineMock,
+}));
+
+// Repository-context and Git-grep stay real in this end-to-end suite. Only optional structural
+// enrichment is deterministic: otherwise a clean runner tries to acquire ast-grep through the
+// model endpoint's global fetch mock and makes the test depend on a pre-existing tool cache.
+const { findAstAnchorOwnerAtHeadMock, findAstCallerOwnerAtHeadMock } = vi.hoisted(() => ({
+  findAstAnchorOwnerAtHeadMock: vi.fn(),
+  findAstCallerOwnerAtHeadMock: vi.fn(),
+}));
+vi.mock("./publish/ast-grep-search.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  findAstAnchorOwnerAtHead: findAstAnchorOwnerAtHeadMock,
+  findAstCallerOwnerAtHead: findAstCallerOwnerAtHeadMock,
+  searchAstGrepAtHead: (): Promise<readonly []> => Promise.resolve([]),
+}));
+
+const collectClosedRuntimeFactsAtCommitMock = vi.fn();
+vi.mock("./publish/runtime-facts.js", async (importOriginal) => ({
+  ...(await importOriginal()),
+  collectClosedRuntimeFactsAtCommit: collectClosedRuntimeFactsAtCommitMock,
 }));
 
 const { computeAllottedBudget, performReview } = await import("./review.js");
@@ -54,6 +79,12 @@ const { EngineRunError } = await import("./engine/run.js");
  * that instance alone.
  */
 beforeEach(() => {
+  findAstAnchorOwnerAtHeadMock.mockReset();
+  findAstAnchorOwnerAtHeadMock.mockResolvedValue(undefined);
+  findAstCallerOwnerAtHeadMock.mockReset();
+  findAstCallerOwnerAtHeadMock.mockResolvedValue(undefined);
+  collectClosedRuntimeFactsAtCommitMock.mockReset();
+  collectClosedRuntimeFactsAtCommitMock.mockResolvedValue([]);
   vi.spyOn(GitHubClient.prototype, "resolveSupersededOwnNotices").mockResolvedValue({
     attempted: 0,
     resolved: 0,
@@ -203,6 +234,9 @@ describe("performReview: review-cache memoization end to end", () => {
     await mkdir(join(repo, "src"), { recursive: true });
     await writeFile(join(repo, "src/a.ts"), "export const a = 1;\n");
     await writeFile(join(repo, "src/b.ts"), "export const b = 1;\n");
+    // Independent, unchanged contract evidence for the mandatory post-Truth challenge. The
+    // planner names this symbol and production retrieval renders it in the reserved R4 namespace.
+    await writeFile(join(repo, "src/challenge.ts"), "export const challengeGuard = true;\n");
     git(["add", "-A"]);
     git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
     baseSha = git(["rev-parse", "HEAD"]).trim();
@@ -336,8 +370,11 @@ describe("performReview: review-cache memoization end to end", () => {
 
     // The engine was asked to skip exactly the hit path — proof the union reaches the real call,
     // not just a value threaded through settlement math.
-    const [calledOptions] = runEngineMock.mock.calls[0] as [{ mechanicallyCleanPaths: string[] }];
+    const [calledOptions] = runEngineMock.mock.calls[0] as [
+      { mechanicallyCleanPaths: string[]; expectedReviewablePaths: string[] },
+    ];
     expect(calledOptions.mechanicallyCleanPaths).toContain("src/a.ts");
+    expect(calledOptions.expectedReviewablePaths).toEqual(["src/b.ts"]);
 
     expect(report.outcome).toBe("complete");
     expect(report.cacheHits).toBe(1);
@@ -349,6 +386,21 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(report.mechanicallyClean).toBe(0);
     // src/a.ts's original entry survives untouched; src/b.ts is newly admitted.
     expect(report.updatedCacheStore?.entries).toHaveLength(2);
+
+    if (report.updatedCacheStore === undefined) throw new Error("expected cache write-back");
+    acquireEngineMock.mockClear();
+    runEngineMock.mockClear();
+    const secondDiagnostics = createSilentDiagnostics();
+    const second = await performReview(baseRequest(report.updatedCacheStore), secondDiagnostics);
+
+    expect(second.outcome).toBe("complete");
+    expect(second.cacheHits).toBe(2);
+    expect(second.cacheMisses).toBe(0);
+    expect(acquireEngineMock).not.toHaveBeenCalled();
+    expect(runEngineMock).not.toHaveBeenCalled();
+    expect(
+      secondDiagnostics.drain().some((record) => record.code === "settlement.mode.memoized"),
+    ).toBe(true);
   });
 
   it("treats a hit rejected by the path-set digest as an ordinary miss: the file is reviewed and never memoized (v0.10.0, issue #50)", async () => {
@@ -619,6 +671,35 @@ describe("performReview: review-cache memoization end to end", () => {
       // run reached the post-run guard rather than being short-circuited before it.
       expect(runEngineMock).toHaveBeenCalledTimes(1);
       expect(report.outcome).toBe("abandoned");
+      expect(createSpy).not.toHaveBeenCalled();
+    });
+
+    it("rechecks the head after quality planning and never publishes or caches a stale result", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: engineStdoutWithFinding(2),
+        ruleDigest: engineDigest,
+      });
+      const request = baseRequest(undefined);
+      const current = {
+        headSha: commitSha(headSha),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      };
+      const getPullRequestSpy = vi
+        .spyOn(request.client, "getPullRequest")
+        .mockResolvedValueOnce(current) // pre-engine
+        .mockResolvedValueOnce(current) // immediately before quality planning
+        .mockResolvedValue({ ...current, headSha: commitSha("f".repeat(40)) });
+      const createSpy = vi.spyOn(request.client, "createReviewComment");
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("abandoned");
+      expect(report.updatedCacheStore).toBeUndefined();
+      expect(getPullRequestSpy).toHaveBeenCalledTimes(3);
       expect(createSpy).not.toHaveBeenCalled();
     });
   });
@@ -1035,7 +1116,7 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(blobs).toContain(headBlobB);
     });
 
-    it("still writes back a complete review's real findings when the head moves just before publication", async () => {
+    it("does not cache unverified findings when the head moves before the evidence gate", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
@@ -1063,11 +1144,10 @@ describe("performReview: review-cache memoization end to end", () => {
       const report = await performReview(request, createSilentDiagnostics());
 
       expect(report.outcome).toBe("abandoned");
-      // A blob-content-keyed cache entry is exactly as replayable as if this run had reached
-      // publication — the head moving is a fact about the pull request, not about the blobs this
-      // run actually reviewed.
-      expect(report.cacheAppended).toBe(2);
-      expect(report.updatedCacheStore?.entries).toHaveLength(2);
+      // The engine output is blob-stable, but it has not passed the current publication-quality
+      // contract. Caching it under that semantics marker would bypass verification on replay.
+      expect(report.cacheAppended).toBe(0);
+      expect(report.updatedCacheStore).toBeUndefined();
     });
   });
 
@@ -1316,6 +1396,9 @@ describe("performReview: review-cache memoization end to end", () => {
       const secondOptions = runEngineMock.mock.calls[1]?.[0] as { samplingSeed?: number };
       expect(firstOptions.samplingSeed).toBeUndefined();
       expect(secondOptions.samplingSeed).toBe(43);
+      expect(
+        (runEngineMock.mock.calls[0]?.[0] as { reviewDeadlineMs: number }).reviewDeadlineMs,
+      ).toBe((runEngineMock.mock.calls[1]?.[0] as { reviewDeadlineMs: number }).reviewDeadlineMs);
       // A thrown first attempt spends nothing measured, so `remaining` stays the untouched full
       // allotment (see `runEngineWithOneResume`'s own comment) rather than being reduced by
       // anything the resume-floor formula computes — the second call's budget equals the first's.
@@ -1503,9 +1586,11 @@ describe("performReview: review-cache memoization end to end", () => {
       // the blanket skip was introduced to avoid.
       const second = runEngineMock.mock.calls[1]?.[0] as {
         mechanicallyCleanPaths: readonly string[];
+        expectedReviewablePaths: readonly string[];
       };
       expect(second.mechanicallyCleanPaths).toContain("src/a.ts");
       expect(second.mechanicallyCleanPaths).not.toContain("src/b.ts");
+      expect(second.expectedReviewablePaths).toEqual(["src/b.ts"]);
 
       const codes = diagnostics.drain().map((record) => record.code);
       expect(codes).toContain("engine.resumed_gap_targeted");
@@ -1773,8 +1858,10 @@ describe("performReview: review-cache memoization end to end", () => {
 
       const secondOptions = runEngineMock.mock.calls[1]?.[0] as {
         mechanicallyCleanPaths: readonly string[];
+        expectedReviewablePaths: readonly string[];
       };
       expect(secondOptions.mechanicallyCleanPaths).toContain("src/a.ts");
+      expect(secondOptions.expectedReviewablePaths).toEqual(["src/b.ts"]);
     });
 
     it("folds the first attempt's finding into the final result even though the resume never re-covers that path", async () => {
@@ -2473,6 +2560,9 @@ describe("performReview: review-cache memoization end to end", () => {
         compared: 1,
         findings: 1,
         pin_desync: 0,
+        mapping_crossover: 0,
+        local_regression: 0,
+        cross_file_regression: 0,
       });
     });
 
@@ -2913,6 +3003,26 @@ describe("performReview: review-cache memoization end to end", () => {
     beforeEach(() => {
       runEngineMock.mockReset();
       acquireEngineMock.mockReset();
+      // The immutable fixture contains one unchanged contract symbol. Model challenge planning is
+      // gone; the real deterministic follow-up reaches it through the bounded anchor-owner hop.
+      findAstAnchorOwnerAtHeadMock.mockImplementation(
+        ({
+          reviewPath,
+          findingAnchor,
+        }: {
+          reviewPath: string;
+          findingAnchor: { startLine: number };
+        }) =>
+          Promise.resolve({
+            name: "challengeGuard",
+            definition: {
+              path: reviewPath,
+              line: findingAnchor.startLine,
+              content: "export const challengeGuard = true;",
+              kind: "definition" as const,
+            },
+          }),
+      );
     });
 
     afterEach(() => {
@@ -2927,7 +3037,10 @@ describe("performReview: review-cache memoization end to end", () => {
      * property `ownMarkers`/`toExistingConversation` (`publisher.ts`) require to treat a marker as
      * this reviewer's own.
      */
-    function successfulClient(existing: readonly ReviewComment[] = []): {
+    function successfulClient(
+      existing: readonly ReviewComment[] = [],
+      currentHead = headSha,
+    ): {
       client: GitHubClient;
       created: ReviewCommentInput[];
     } {
@@ -2935,7 +3048,7 @@ describe("performReview: review-cache memoization end to end", () => {
       const createdComments: ReviewComment[] = [];
       const createdInputs: ReviewCommentInput[] = [];
       vi.spyOn(client, "getPullRequest").mockResolvedValue({
-        headSha: commitSha(headSha),
+        headSha: commitSha(currentHead),
         draft: false,
         baseRef: "dev",
         headRepoFullName: undefined,
@@ -3028,6 +3141,10 @@ describe("performReview: review-cache memoization end to end", () => {
       });
     }
 
+    function withChallengeProbe(content: string): string {
+      return `${content} The independent \`claimProbe\` branch must also hold.`;
+    }
+
     /**
      * A stand-in classify endpoint: answers `repairPair` to a repair prompt and `auditPair` to an
      * audit prompt. `classify.ts`'s `buildPrompt`/`buildAuditPrompt` preambles are disjoint text
@@ -3039,29 +3156,79 @@ describe("performReview: review-cache memoization end to end", () => {
       repairPair?: { category: string; severity: string };
       auditPair?: { category: string; severity: string };
       judgeVerdict?: "grounded" | "vague" | "unsupported";
+      judgeEvidenceRef?: string;
+      judgeChangeRef?: string;
+      judgeAdditionalRefs?: readonly string[];
+      judgeTransportFailure?: boolean;
+      onJudgePrompt?: (prompt: string) => void;
+      onChallengePrompt?: (prompt: string) => void;
+      onFalsifierPrompt?: (prompt: string) => void;
+      onRefereePrompt?: (prompt: string) => void;
+      challengeAxis?:
+        | "same_file_contract"
+        | "caller"
+        | "configuration"
+        | "runtime"
+        | "test"
+        | "base";
+      challengeEvidenceRef?: string;
+      challengeLookupTerm?: string;
+      falsifierEvidenceRef?: string;
+      refereeEvidenceRef?: string;
       consequence?: "actionable" | "nitpick";
       tokensPerCall?: number;
     }): { impl: typeof fetch; callCount: () => number } {
       let calls = 0;
       const tokens = opts.tokensPerCall ?? 10;
+      const truthReply = (terminal: boolean): string => {
+        const verdict = opts.judgeVerdict ?? "grounded";
+        const stateRef = opts.judgeEvidenceRef ?? "H:1";
+        const line = /:([1-9]\d*)$/u.exec(stateRef)?.[1] ?? "1";
+        const changeRef = opts.judgeChangeRef ?? `D:H:${line}`;
+        if (verdict === "vague") {
+          return JSON.stringify({
+            verdict: terminal ? "insufficient_evidence" : "needs_context",
+            reason_code: "missing_definition",
+            evidence_refs: [stateRef],
+            ...(terminal ? {} : { lookup_terms: ["missingDefinition"] }),
+          });
+        }
+        if (verdict === "unsupported") {
+          return JSON.stringify({
+            verdict: "refuted",
+            reason_code: "contradicted",
+            evidence_refs: [stateRef],
+            ...(terminal ? {} : { lookup_terms: [] }),
+          });
+        }
+        return JSON.stringify({
+          verdict: "confirmed",
+          reason_code: "direct_proof",
+          evidence_refs: [stateRef, changeRef, ...(opts.judgeAdditionalRefs ?? [])],
+          ...(terminal ? {} : { lookup_terms: [] }),
+        });
+      };
       const impl = ((_url: string, init?: { body?: string }) => {
         calls += 1;
         const parsedBody = JSON.parse(init?.body ?? "{}") as { messages?: { content?: string }[] };
         const prompt = parsedBody.messages?.[0]?.content ?? "";
-        // Substantiation (v0.17.0) shares this endpoint and runs BEFORE the audit, so it shares
-        // this mock too. It answers `grounded` unless a case asks otherwise: these cases exist to
-        // pin classification behaviour, and a judge that dropped their findings would make them
-        // assert the wrong stage's failure. `judgeVerdict` is how a case opts into the other side.
-        // The consequence axis shares the endpoint too, and answers `actionable` unless a case
-        // opts out — same reasoning as the judge branch below it.
-        if (prompt.includes("worth a maintainer's attention")) {
+        // Substantiation shares this endpoint and runs BEFORE the audit. Truth confirmation must
+        // pass through the strict planner envelope, real deterministic retrieval, and a falsifier
+        // citation from the retrieved R4-R6 pack before these classification fixtures can publish.
+        if (prompt.includes("Plan one independent contract trace")) {
+          opts.onChallengePrompt?.(prompt);
           return Promise.resolve(
             new Response(
               JSON.stringify({
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
-                      content: JSON.stringify({ verdict: opts.consequence ?? "actionable" }),
+                      content: JSON.stringify({
+                        axis: opts.challengeAxis ?? "caller",
+                        evidence_refs: [opts.challengeEvidenceRef ?? "H:1"],
+                        lookup_terms: [opts.challengeLookupTerm ?? "challengeGuard"],
+                      }),
                     },
                   },
                 ],
@@ -3071,15 +3238,91 @@ describe("performReview: review-cache memoization end to end", () => {
             ),
           );
         }
-        if (prompt.includes("Judge whether one code-review finding")) {
+        if (prompt.includes("Adversarially falsify")) {
+          opts.onFalsifierPrompt?.(prompt);
+          const defeated = opts.consequence === "nitpick";
           return Promise.resolve(
             new Response(
               JSON.stringify({
                 choices: [
                   {
+                    finish_reason: "stop",
                     message: {
-                      content: JSON.stringify({ verdict: opts.judgeVerdict ?? "grounded" }),
+                      content: JSON.stringify(
+                        defeated
+                          ? {
+                              verdict: "defeated",
+                              reason_code: "counterexample",
+                              evidence_refs: [opts.falsifierEvidenceRef ?? "R4:H:1"],
+                            }
+                          : {
+                              verdict: "survives",
+                              reason_code: "no_defeater_found",
+                              evidence_refs: [opts.falsifierEvidenceRef ?? "R4:H:1"],
+                            },
+                      ),
                     },
+                  },
+                ],
+                usage: { total_tokens: tokens },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (prompt.includes("final independent referee")) {
+          opts.onRefereePrompt?.(prompt);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                choices: [
+                  {
+                    finish_reason: "stop",
+                    message: {
+                      content: JSON.stringify({
+                        verdict: opts.consequence === "nitpick" ? "defeated" : "survives",
+                        evidence_refs: [
+                          opts.refereeEvidenceRef ?? opts.falsifierEvidenceRef ?? "R4:H:1",
+                        ],
+                      }),
+                    },
+                  },
+                ],
+                usage: { total_tokens: tokens },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (prompt.includes("Make the final truth decision")) {
+          opts.onJudgePrompt?.(prompt);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                choices: [
+                  {
+                    finish_reason: "stop",
+                    message: { content: truthReply(true) },
+                  },
+                ],
+                usage: { total_tokens: tokens },
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (prompt.includes("Verify the truth of one AI-generated")) {
+          opts.onJudgePrompt?.(prompt);
+          if (opts.judgeTransportFailure === true) {
+            return Promise.reject(new Error("judge transport failure"));
+          }
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                choices: [
+                  {
+                    finish_reason: "stop",
+                    message: { content: truthReply(false) },
                   },
                 ],
                 usage: { total_tokens: tokens },
@@ -3094,7 +3337,7 @@ describe("performReview: review-cache memoization end to end", () => {
         return Promise.resolve(
           new Response(
             JSON.stringify({
-              choices: [{ message: { content } }],
+              choices: [{ finish_reason: "stop", message: { content } }],
               usage: { total_tokens: tokens },
             }),
             { status: 200 },
@@ -3104,37 +3347,288 @@ describe("performReview: review-cache memoization end to end", () => {
       return { impl, callCount: () => calls };
     }
 
-    it("never calls the classify endpoint for a fresh finding suppressed at plan time by an exact marker", async () => {
-      const engineDigest = currentPlatformDigest();
+    it("binds a closed runtime fact to the exact reviewed commit and requires its T ref", async () => {
+      const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      const BODY =
-        "This handler swallows the write error and reports success to the caller regardless.";
       runEngineMock.mockResolvedValue({
         stdout: findingsStdout(
-          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
+          [
+            {
+              path: "src/a.ts",
+              content:
+                "When `maybe` is undefined, spreading it into this object throws before fallback.",
+              category: "bug",
+              severity: "medium",
+            },
+          ],
           2,
-          100,
         ),
         ruleDigest: engineDigest,
       });
-
-      const { impl, callCount } = classifyFetchMock({});
+      collectClosedRuntimeFactsAtCommitMock.mockResolvedValue([
+        {
+          catalogVersion: CLOSED_RUNTIME_FACT_CATALOG_VERSION,
+          id: "ecmascript.object_spread.nullish_source_is_noop",
+          statement: CLOSED_RUNTIME_FACT_CATALOG["ecmascript.object_spread.nullish_source_is_noop"],
+          source: { path: "src/a.ts", side: "H", line: 1 },
+        },
+      ]);
+      let falsifierPrompt = "";
+      const { impl, callCount } = classifyFetchMock({
+        consequence: "nitpick",
+        falsifierEvidenceRef: "R4:T:1",
+        onFalsifierPrompt: (prompt) => {
+          falsifierPrompt = prompt;
+        },
+      });
       globalThis.fetch = impl;
-      const { client, created } = successfulClient([seededMarker("bug", BODY)]);
+      const client = successfulClient([]);
 
-      const diagnostics = createSilentDiagnostics();
-      const report = await performReview(auditRequest(client), diagnostics);
+      const report = await performReview(auditRequest(client.client), createSilentDiagnostics());
 
       expect(report.outcome).toBe("complete");
-      expect(report.publish).toMatchObject({
+      expect(report.publish?.published).toBe(0);
+      expect(callCount()).toBe(3);
+      expect(collectClosedRuntimeFactsAtCommitMock).toHaveBeenCalledTimes(1);
+      expect(collectClosedRuntimeFactsAtCommitMock.mock.calls[0]?.[0]).toMatchObject({
+        commit: headSha,
+        path: "src/a.ts",
+        side: "H",
+        findingAnchor: { startLine: 1, endLine: 1 },
+      });
+      expect(falsifierPrompt).toContain('"evidence_refs":["R4:T:1"]');
+      expect(falsifierPrompt).toContain(
+        CLOSED_RUNTIME_FACT_CATALOG["ecmascript.object_spread.nullish_source_is_noop"],
+      );
+    });
+
+    it("keeps BASE contract retrieval when an inserted finding has no BASE runtime anchor", async () => {
+      const unmappedRepo = await mkdtemp(join(tmpdir(), "kfq-review-unmapped-base-anchor-"));
+      try {
+        const unmappedGit = (args: readonly string[]): string => git(args, unmappedRepo);
+        unmappedGit(["init", "-q", "-b", "main"]);
+        await mkdir(join(unmappedRepo, "src"), { recursive: true });
+        await writeFile(join(unmappedRepo, "src/a.ts"), "export const challengeGuard = true;\n");
+        await writeFile(
+          join(unmappedRepo, "src/challenge.ts"),
+          "export const challengeGuard = true;\n",
+        );
+        unmappedGit(["add", "-A"]);
+        unmappedGit(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+        const unmappedBase = unmappedGit(["rev-parse", "HEAD"]).trim();
+
+        await writeFile(
+          join(unmappedRepo, "src/a.ts"),
+          ["export const copied = { ...maybe };", "export const challengeGuard = true;", ""].join(
+            "\n",
+          ),
+        );
+        unmappedGit(["add", "-A"]);
+        unmappedGit(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+        const unmappedHead = unmappedGit(["rev-parse", "HEAD"]).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        findAstAnchorOwnerAtHeadMock.mockResolvedValue(undefined);
+        runEngineMock.mockResolvedValue({
+          stdout: findingsStdout(
+            [
+              {
+                path: "src/a.ts",
+                content:
+                  "When `maybe` is undefined, this object spread throws before fallback. " +
+                  "The independent `challengeGuard` contract must still hold.",
+                category: "bug",
+                severity: "medium",
+              },
+            ],
+            1,
+          ),
+          ruleDigest: engineDigest,
+        });
+
+        let falsifierPrompt = "";
+        const endpoint = classifyFetchMock({
+          auditPair: { category: "bug", severity: "medium" },
+          judgeEvidenceRef: "H:1",
+          judgeChangeRef: "D:H:1",
+          judgeAdditionalRefs: ["B:1"],
+          falsifierEvidenceRef: "R4:B:1",
+          onFalsifierPrompt: (prompt) => {
+            falsifierPrompt = prompt;
+          },
+        });
+        globalThis.fetch = endpoint.impl;
+        const client = successfulClient([], unmappedHead);
+        const report = await performReview(
+          {
+            ...auditRequest(client.client),
+            base: commitSha(unmappedBase),
+            head: commitSha(unmappedHead),
+            repositoryPath: unmappedRepo,
+          },
+          createSilentDiagnostics(),
+        );
+
+        expect(report.outcome).toBe("complete");
+        expect(report.publish?.published).toBe(1);
+        expect(collectClosedRuntimeFactsAtCommitMock).not.toHaveBeenCalled();
+        expect(falsifierPrompt).toContain("R4 = BASE src/challenge.ts");
+        expect(falsifierPrompt).toContain("R4:B:1| export const challengeGuard = true;");
+      } finally {
+        await rm(unmappedRepo, { recursive: true, force: true });
+      }
+    });
+
+    it("routes a deleted-file same-file challenge through immutable BASE", async () => {
+      const deletionRepo = await mkdtemp(join(tmpdir(), "kfq-review-deleted-challenge-"));
+      try {
+        const deletionGit = (args: readonly string[]): string => git(args, deletionRepo);
+        deletionGit(["init", "-q", "-b", "main"]);
+        await mkdir(join(deletionRepo, "src"), { recursive: true });
+        const baseOnlyGuardLine = 1_502;
+        await writeFile(
+          join(deletionRepo, "src/deleted.ts"),
+          [
+            "removedContract();",
+            ...Array.from(
+              { length: baseOnlyGuardLine - 2 },
+              (_value, index) => `const filler${String(index)} = ${String(index)};`,
+            ),
+            "export function baseOnlyGuard(): boolean { return true; }",
+          ].join("\n"),
+        );
+        deletionGit(["add", "-A"]);
+        deletionGit(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+        const deletionBase = deletionGit(["rev-parse", "HEAD"]).trim();
+        await rm(join(deletionRepo, "src/deleted.ts"));
+        deletionGit(["add", "-A"]);
+        deletionGit(["commit", "-q", "-m", "delete", "--no-gpg-sign"]);
+        const deletionHead = deletionGit(["rev-parse", "HEAD"]).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        findAstAnchorOwnerAtHeadMock.mockResolvedValue({
+          name: "baseOnlyGuard",
+          definition: {
+            path: "src/deleted.ts",
+            line: 1,
+            content: "removedContract();",
+            kind: "definition" as const,
+          },
+        });
+        runEngineMock.mockResolvedValue({
+          stdout: findingsStdout(
+            [
+              {
+                path: "src/deleted.ts",
+                content: withChallengeProbe(
+                  "When this startup call is removed, initialization no longer installs its required guard.",
+                ),
+                category: "bug",
+                severity: "medium",
+              },
+            ],
+            1,
+          ),
+          ruleDigest: engineDigest,
+        });
+
+        let falsifierPrompt = "";
+        const endpoint = classifyFetchMock({
+          auditPair: { category: "bug", severity: "medium" },
+          judgeEvidenceRef: "B:1",
+          judgeChangeRef: "D:B:1",
+          challengeAxis: "same_file_contract",
+          challengeEvidenceRef: "B:1",
+          challengeLookupTerm: "baseOnlyGuard",
+          falsifierEvidenceRef: `R4:B:${String(baseOnlyGuardLine)}`,
+          onFalsifierPrompt: (prompt) => {
+            falsifierPrompt = prompt;
+          },
+        });
+        globalThis.fetch = endpoint.impl;
+        const client = successfulClient([], deletionHead);
+        const report = await performReview(
+          {
+            ...auditRequest(client.client),
+            base: commitSha(deletionBase),
+            head: commitSha(deletionHead),
+            repositoryPath: deletionRepo,
+          },
+          createSilentDiagnostics(),
+        );
+
+        expect(report.outcome).toBe("complete");
+        expect(report.publish?.published).toBe(1);
+        expect(falsifierPrompt).toContain("R4 = BASE src/deleted.ts");
+        expect(falsifierPrompt).toContain(`R4:B:${String(baseOnlyGuardLine)}|`);
+      } finally {
+        await rm(deletionRepo, { recursive: true, force: true });
+      }
+    });
+
+    it("never caches an exact-suppressed fresh path, so a later run verifies it instead of replaying it", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY = withChallengeProbe(
+        "This handler swallows the write error and reports success to the caller regardless.",
+      );
+      const finding = { path: "src/a.ts", content: BODY, category: "bug", severity: "medium" };
+      runEngineMock
+        .mockResolvedValueOnce({
+          stdout: findingsStdout([finding], 2, 100),
+          ruleDigest: engineDigest,
+        })
+        .mockResolvedValueOnce({
+          // The first run may cache src/b.ts, but src/a.ts must be dispatched again.
+          stdout: findingsStdout([finding], 1, 100),
+          ruleDigest: engineDigest,
+        });
+
+      const { impl, callCount } = classifyFetchMock({
+        auditPair: { category: "bug", severity: "medium" },
+      });
+      globalThis.fetch = impl;
+      const firstClient = successfulClient([seededMarker("bug", BODY)]);
+      const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+
+      const diagnostics = createSilentDiagnostics();
+      const first = await performReview(auditRequest(firstClient.client, empty), diagnostics);
+
+      expect(first.outcome).toBe("complete");
+      expect(first.publish).toMatchObject({
         published: 0,
         suppressed: 1,
         suppressedExactDuplicate: 1,
       });
-      expect(created).toHaveLength(0);
+      expect(firstClient.created).toHaveLength(0);
       // Already classified (no repair needed) and plan-suppressed (never a `fresh` survivor for the
       // audit) — the classify endpoint is never called at all.
       expect(callCount()).toBe(0);
+      const firstEntries = first.updatedCacheStore?.entries ?? [];
+      expect(firstEntries.some((entry) => String(entry.headBlob) === headBlobA)).toBe(false);
+
+      // Remove the marker on the next run. If src/a.ts had been stored under evidence-gate semantics,
+      // it would now replay as nonfresh and publish with zero verification calls. Instead only the
+      // genuinely clean sibling is a hit and the engine must produce this finding fresh again.
+      const secondClient = successfulClient([]);
+      const second = await performReview(
+        auditRequest(secondClient.client, first.updatedCacheStore),
+        createSilentDiagnostics(),
+      );
+
+      expect(second.outcome).toBe("complete");
+      expect(second.cacheHits).toBe(1);
+      expect(second.cacheMisses).toBe(1);
+      expect(second.publish).toMatchObject({ published: 1, suppressed: 0 });
+      expect(secondClient.created).toHaveLength(1);
+      expect(callCount()).toBeGreaterThan(0);
+      const secondInvocation = runEngineMock.mock.calls[1]?.[0] as {
+        mechanicallyCleanPaths: string[];
+      };
+      expect(secondInvocation.mechanicallyCleanPaths).toContain("src/b.ts");
+      expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/a.ts");
 
       const records = diagnostics.drain();
       expect(records.find((r) => r.code === "classify.audited")).toBeUndefined();
@@ -3145,8 +3639,9 @@ describe("performReview: review-cache memoization end to end", () => {
     it("audits a surviving fresh finding once via the fast path and publishes it with the audited classification", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      const BODY =
-        "This retry loop never resets its attempt counter, so it spins forever after one failure.";
+      const BODY = withChallengeProbe(
+        "This retry loop never resets its attempt counter, so it spins forever after one failure.",
+      );
       runEngineMock.mockResolvedValue({
         stdout: findingsStdout(
           [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
@@ -3158,34 +3653,112 @@ describe("performReview: review-cache memoization end to end", () => {
 
       // Vote 1 lands on the SAME pair the finding already carries — `classify.ts`'s fast path,
       // exactly one call, no escalation.
+      let challengePrompt = "";
+      let falsifierPrompt = "";
       const { impl, callCount } = classifyFetchMock({
         auditPair: { category: "bug", severity: "medium" },
         tokensPerCall: 37,
+        onChallengePrompt: (prompt) => {
+          challengePrompt = prompt;
+        },
+        onFalsifierPrompt: (prompt) => {
+          falsifierPrompt = prompt;
+        },
       });
       globalThis.fetch = impl;
       const { client, created } = successfulClient([]);
 
       const diagnostics = createSilentDiagnostics();
       const report = await performReview(auditRequest(client), diagnostics);
-
       expect(report.outcome).toBe("complete");
       expect(report.publish).toMatchObject({ published: 1, suppressed: 0 });
       expect(created).toHaveLength(1);
-      // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
-      // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(3);
+      // Truth cannot leak its verdict into the independent planner, while the later falsifier must
+      // see and cite the real repository line returned for the planner's bounded lookup.
+      expect(challengePrompt).not.toContain('"verdict":"confirmed"');
+      expect(falsifierPrompt).toContain("R4:H:1| export const challengeGuard = true;");
+      // Truth + planner + falsifier precede the one fast-path classification-audit vote.
+      expect(callCount()).toBe(4);
 
       const records = diagnostics.drain();
       const audited = records.find((r) => r.code === "classify.audited");
       expect(audited?.counts).toStrictEqual({ changed: 0, tokens: 37 });
+      const substantiated = records.find((r) => r.code === "publish.substantiated");
+      expect(substantiated?.counts).toMatchObject({
+        challenge_planned: 1,
+        challenge_retrieval_performed: 1,
+        challenge_expanded: 1,
+        challenge_no_matches: 0,
+        challenge_failed: 0,
+      });
       const spend = records.find((r) => r.code === "run.spend");
-      // `classify` now carries the substantiation judge's spend alongside the audit's: both are
-      // bounded side-calls on the same endpoint, and the ledger has one line for them. What the
-      // judge itself cost stays separately visible in the `publish.substantiated` diagnostic.
-      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 111, total: 211 });
+      // `classify` carries all three verifier roles alongside the audit: four metered calls total.
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 148, total: 248 });
     });
 
-    it("never audits a cache-replayed finding, even when it survives the plan and publishes", async () => {
+    it("never rewrites or audits a claim whose truth judge still needs missing context", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const ORIGINAL = "`a` can corrupt the downstream index.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: ORIGINAL, category: "bug", severity: "medium" }],
+          2,
+          100,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      let truthCalls = 0;
+      let auditPrompt = "";
+      globalThis.fetch = ((_url: string, init?: { body?: string }) => {
+        const parsedBody = JSON.parse(init?.body ?? "{}") as {
+          messages?: { content?: string }[];
+        };
+        const prompt = parsedBody.messages?.[0]?.content ?? "";
+        let content: string;
+        if (prompt.includes("Verify the truth of one AI-generated")) {
+          truthCalls += 1;
+          content = JSON.stringify({
+            verdict: "needs_context",
+            reason_code: "missing_definition",
+            evidence_refs: ["H:1"],
+            lookup_terms: ["missingDefinition"],
+          });
+        } else if (prompt.includes("Make the final truth decision")) {
+          truthCalls += 1;
+          content = JSON.stringify({
+            verdict: "insufficient_evidence",
+            reason_code: "missing_definition",
+            evidence_refs: ["H:1"],
+          });
+        } else {
+          if (prompt.includes("Audit the classification")) auditPrompt = prompt;
+          content = JSON.stringify({ category: "bug", severity: "medium" });
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              choices: [{ finish_reason: "stop", message: { content } }],
+              usage: { total_tokens: 10 },
+            }),
+            { status: 200 },
+          ),
+        );
+      }) as typeof fetch;
+      const { client, created } = successfulClient([]);
+      findAstAnchorOwnerAtHeadMock.mockResolvedValue(undefined);
+
+      const report = await performReview(auditRequest(client), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({ published: 0 });
+      expect(truthCalls).toBe(2);
+      expect(auditPrompt).toBe("");
+      expect(created).toEqual([]);
+    });
+
+    it("re-verifies a cache-replayed finding without re-running its classification audit", async () => {
       const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
       const engineDigest = requireEngineDigest();
       const model = modelId(AUDIT_CONFIG.model);
@@ -3194,7 +3767,12 @@ describe("performReview: review-cache memoization end to end", () => {
       const head = blobId(headBlobA);
       const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
       const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
-      const BODY = "This cached finding replays without ever asking the classify endpoint again.";
+      const BODY = withChallengeProbe(
+        "This cached finding is regenerated never, but its truth is checked again.",
+      );
+      const baseB = blobId(git(["rev-parse", `${baseSha}:src/b.ts`]).trim());
+      const headB = blobId(git(["rev-parse", `${headSha}:src/b.ts`]).trim());
+      const keyB = computeKey(baseB, headB, ruleDigest, engineDigest, model, proto);
       const store: CacheStore = {
         schemaVersion: SUPPORTED_STORE_SCHEMA,
         entries: [
@@ -3219,15 +3797,22 @@ describe("performReview: review-cache memoization end to end", () => {
               },
             ],
           },
+          {
+            key: keyB,
+            baseBlob: baseB,
+            headBlob: headB,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
+            modelId: model,
+            protocol: proto,
+            findings: [],
+          },
         ],
       };
 
-      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      // src/a.ts is a hit and excluded; only src/b.ts is dispatched, with nothing fresh to report.
-      runEngineMock.mockResolvedValue({
-        stdout: findingsStdout([], 1, 50),
-        ruleDigest: engineDigest,
-      });
+      acquireEngineMock.mockRejectedValue(new Error("a fully memoized run must not acquire"));
 
       const { impl, callCount } = classifyFetchMock({});
       globalThis.fetch = impl;
@@ -3237,15 +3822,235 @@ describe("performReview: review-cache memoization end to end", () => {
       const report = await performReview(auditRequest(client, store), diagnostics);
 
       expect(report.outcome).toBe("complete");
-      expect(report.cacheHits).toBe(1);
+      expect(report.cacheHits).toBe(2);
+      expect(acquireEngineMock).not.toHaveBeenCalled();
+      expect(runEngineMock).not.toHaveBeenCalled();
       // The replayed finding still goes through sanitization and dedup and publishes normally...
       expect(report.publish).toMatchObject({ published: 1, suppressed: 0 });
       expect(created).toHaveLength(1);
-      // ...but it was never a candidate for the audit — `freshEngineFindings` never contains it.
-      expect(callCount()).toBe(0);
+      // Truth, contract planning, and falsification all run again. Classification does not: the
+      // stored finding already carries the audited category/severity from the generation run.
+      expect(callCount()).toBe(3);
+      expect(
+        diagnostics.drain().find((record) => record.code === "classify.audited"),
+      ).toBeUndefined();
     });
 
-    it("skips the audit under a near-exhausted allotment, still publishes with pre-audit classification, and records classify.skipped_budget", async () => {
+    it("refutes and evicts a replayed finding, so the next run regenerates that path", async () => {
+      const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+      const engineDigest = requireEngineDigest();
+      const model = modelId(AUDIT_CONFIG.model);
+      const proto = protocol(AUDIT_CONFIG.protocol);
+      const base = blobId(baseBlobA);
+      const head = blobId(headBlobA);
+      const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+      const BODY = "This cached claim ignores an external guard that now rejects the input.";
+      const baseB = blobId(git(["rev-parse", `${baseSha}:src/b.ts`]).trim());
+      const headB = blobId(git(["rev-parse", `${headSha}:src/b.ts`]).trim());
+      const keyB = computeKey(baseB, headB, ruleDigest, engineDigest, model, proto);
+      const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+      const store: CacheStore = {
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
+        entries: [
+          {
+            key,
+            baseBlob: base,
+            headBlob: head,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
+            modelId: model,
+            protocol: proto,
+            findings: [
+              {
+                path: repoPath("src/a.ts"),
+                content: BODY,
+                startLine: 1,
+                endLine: 1,
+                severity: "medium",
+                category: "bug",
+              },
+            ],
+          },
+          {
+            key: keyB,
+            baseBlob: baseB,
+            headBlob: headB,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
+            modelId: model,
+            protocol: proto,
+            findings: [],
+          },
+        ],
+      };
+
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValueOnce({
+        stdout: findingsStdout([], 1, 50),
+        ruleDigest: engineDigest,
+      });
+      const { impl, callCount } = classifyFetchMock({ judgeVerdict: "unsupported" });
+      globalThis.fetch = impl;
+
+      const first = await performReview(
+        auditRequest(successfulClient([]).client, store),
+        createSilentDiagnostics(),
+      );
+
+      expect(first.outcome).toBe("complete");
+      expect(first.cacheHits).toBe(2);
+      expect(acquireEngineMock).not.toHaveBeenCalled();
+      expect(runEngineMock).not.toHaveBeenCalled();
+      expect(first.publish).toMatchObject({ published: 0 });
+      expect(callCount()).toBe(2);
+      expect(first.updatedCacheStore?.entries.some((entry) => entry.key === key)).toBe(false);
+      if (first.updatedCacheStore === undefined)
+        throw new Error("expected cache eviction write-back");
+
+      const second = await performReview(
+        auditRequest(successfulClient([]).client, first.updatedCacheStore),
+        createSilentDiagnostics(),
+      );
+
+      expect(second.outcome).toBe("complete");
+      expect(second.cacheHits).toBe(1);
+      expect(second.cacheMisses).toBe(1);
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
+      const secondInvocation = runEngineMock.mock.calls[0]?.[0] as {
+        mechanicallyCleanPaths: string[];
+      };
+      expect(secondInvocation.mechanicallyCleanPaths).toContain("src/b.ts");
+      expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/a.ts");
+      // The stale prose never reappears from the store; the second run has no model claim to verify.
+      expect(callCount()).toBe(2);
+    });
+
+    it("evicts a ranked-out cache hit and keeps a path with a ranked-out fresh finding uncached", async () => {
+      const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+      const engineDigest = requireEngineDigest();
+      const model = modelId(AUDIT_CONFIG.model);
+      const proto = protocol(AUDIT_CONFIG.protocol);
+      const base = blobId(baseBlobA);
+      const head = blobId(headBlobA);
+      const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+      const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+      const CACHED_BODY = withChallengeProbe(
+        "`cachedLease` skips its expiry check, so stale holders retain the resource.",
+      );
+      const store: CacheStore = {
+        schemaVersion: SUPPORTED_STORE_SCHEMA,
+        entries: [
+          {
+            key,
+            baseBlob: base,
+            headBlob: head,
+            ruleDigest,
+            engineDigest,
+            prPathSetDigest: currentPathSet,
+            semantics: PUBLICATION_SEMANTICS,
+            modelId: model,
+            protocol: proto,
+            findings: [
+              {
+                path: repoPath("src/a.ts"),
+                content: CACHED_BODY,
+                startLine: 1,
+                endLine: 1,
+                severity: "low",
+                category: "bug",
+              },
+            ],
+          },
+        ],
+      };
+      const freshBodies = [
+        "`alphaCursor` ignores its boundary, so pagination repeats the final invoice forever.",
+        "`bravoNonce` reuses the seed, so encrypted sessions receive identical keystreams.",
+        "`charlieQuota` omits tenant ownership, so one account consumes another account's limit.",
+        "`deltaLatch` misses the release branch, so shutdown waits indefinitely for the worker.",
+        "`echoLedger` rounds before aggregation, so monthly balances lose fractional payments.",
+        "`foxtrotParser` accepts the empty header, so malformed packets reach the dispatcher.",
+        "`golfSnapshot` stores the mutable reference, so later edits corrupt the saved revision.",
+        "`hotelRouter` drops the locale prefix, so translated links resolve to missing pages.",
+        "`indiaWriter` acknowledges before flushing, so a crash loses confirmed audit records.",
+      ].map((content) => withChallengeProbe(content));
+
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      // src/a.ts is the nonfresh cache hit. The engine reviews only src/b.ts and emits nine fresh,
+      // independently worded findings so the intra-run deduplicator correctly leaves all nine for
+      // the PR-wide selector.
+      const rankedStdout = (filesReviewed: number): string =>
+        findingsStdout(
+          freshBodies.map((content) => ({
+            path: "src/b.ts",
+            content,
+            category: "bug",
+            severity: "medium",
+          })),
+          filesReviewed,
+          100,
+        );
+      runEngineMock
+        .mockResolvedValueOnce({ stdout: rankedStdout(1), ruleDigest: engineDigest })
+        .mockResolvedValueOnce({ stdout: rankedStdout(2), ruleDigest: engineDigest });
+
+      const { impl } = classifyFetchMock({
+        auditPair: { category: "bug", severity: "medium" },
+      });
+      globalThis.fetch = impl;
+      const firstClient = successfulClient([]);
+
+      const first = await performReview(
+        auditRequest(firstClient.client, store),
+        createSilentDiagnostics(),
+      );
+
+      expect(first.outcome).toBe("complete");
+      expect(first.publish).toMatchObject({
+        published: 8,
+        suppressed: 2,
+        suppressedRanked: 2,
+      });
+      // Cached and fresh model claims share the same eight-slot cohort. The lower-severity cached
+      // claim loses the rank decision and is removed from the store, not touched back into it.
+      expect(firstClient.created.filter((comment) => comment.path === "src/a.ts")).toHaveLength(0);
+      expect(firstClient.created.filter((comment) => comment.path === "src/b.ts")).toHaveLength(8);
+
+      const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+      const bEntry = first.updatedCacheStore?.entries.find(
+        (entry) => String(entry.headBlob) === headBlobB,
+      );
+      // A partial eight-of-nine entry would turn a PR-global rank decision into a durable per-file
+      // verdict. Both unsafe paths are absent: b is not admitted and a's stale hit is evicted.
+      expect(bEntry).toBeUndefined();
+      expect(first.updatedCacheStore?.entries).toHaveLength(0);
+
+      const callsAfterFirst = runEngineMock.mock.calls.length;
+      const secondClient = successfulClient([]);
+      const second = await performReview(
+        auditRequest(secondClient.client, first.updatedCacheStore),
+        createSilentDiagnostics(),
+      );
+
+      expect(callsAfterFirst).toBe(1);
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      expect(second.cacheHits).toBe(0);
+      expect(second.cacheMisses).toBe(2);
+      const secondInvocation = runEngineMock.mock.calls[1]?.[0] as {
+        mechanicallyCleanPaths: string[];
+      };
+      expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/a.ts");
+      expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/b.ts");
+      expect(
+        second.updatedCacheStore?.entries.some((entry) => String(entry.headBlob) === headBlobB),
+      ).toBe(false);
+    });
+
+    it("fails closed when the remaining budget cannot finish verification and never audits or caches the finding", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       const BODY =
@@ -3265,32 +4070,153 @@ describe("performReview: review-cache memoization end to end", () => {
       });
       globalThis.fetch = impl;
       const { client, created } = successfulClient([]);
-      // tokenBudget below the formula's own floor: `computeAllottedBudget` returns exactly this
-      // value (`Math.min(tokenBudget, clamped)`), so the allotment is deterministic at 50_000.
-      const request = { ...auditRequest(client), config: { ...AUDIT_CONFIG, tokenBudget: 50_000 } };
+      // The mocked engine overshoots into the quality reserve, leaving only 1k. That cannot fund
+      // even the verifier's bounded first request, so the candidate must be withheld rather than
+      // published under its unchecked engine classification.
+      const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+      const request = {
+        ...auditRequest(client, empty),
+        config: { ...AUDIT_CONFIG, tokenBudget: 50_000 },
+      };
 
       const diagnostics = createSilentDiagnostics();
       const report = await performReview(request, diagnostics);
 
-      expect(report.outcome).toBe("complete");
-      expect(created).toHaveLength(1);
-      // Published under the classification the engine reported ("bug"), never the "security" the
-      // (unreached) audit mock was configured to answer with — "CORRECTNESS" is "bug"'s rendered
-      // text-grammar label in `composeFindingBody`'s CATEGORIES table (`publish/presentation.ts`).
-      expect(created[0]?.body).toContain("CORRECTNESS");
+      expect(report.outcome).toBe("incomplete");
+      expect(report.reason).toBe("settlement.incomplete.publication_degraded");
+      expect(report.publish).toMatchObject({
+        published: 0,
+        suppressedEvidence: 1,
+        verificationUndecided: 1,
+      });
+      // The path-anchored incomplete notice may be present, but the unverified finding may not.
+      expect(created.some((comment) => comment.body.includes(BODY))).toBe(false);
+      expect(report.cacheAppended).toBe(0);
+      expect(report.updatedCacheStore).toBeUndefined();
       expect(callCount()).toBe(0);
 
-      const skip = diagnostics.drain().find((r) => r.code === "classify.skipped_budget");
-      // tokenBudget(50_000) - engine(49_000) - classify(0) = 1_000, below the 2_000 reserve for
-      // the one fresh survivor.
-      expect(skip?.counts).toStrictEqual({ skipped: 1, remaining: 1_000 });
+      const records = diagnostics.drain();
+      expect(records.find((r) => r.code === "classify.audited")).toBeUndefined();
+      const substantiated = records.find((r) => r.code === "publish.substantiated");
+      expect(substantiated?.counts).toMatchObject({
+        challenge_planned: 0,
+        challenge_retrieval_performed: 0,
+        challenge_expanded: 0,
+        challenge_no_matches: 0,
+        challenge_failed: 0,
+        undecided: 1,
+        budget_blocked: 1,
+      });
+    });
+
+    it("releases unused atomic-admission headroom for the later classification audit", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY = withChallengeProbe(
+        "When the cache is empty, this fallback returns stale state instead of loading a value.",
+      );
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
+          2,
+          100,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      const { impl, callCount } = classifyFetchMock({
+        auditPair: { category: "security", severity: "critical" },
+        tokensPerCall: 10,
+      });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+      // Reserve exactly one maximum substantiation path after the engine. Admission is a check,
+      // not spend: the three actual 10-token role calls leave their unused headroom to the audit.
+      const request = {
+        ...auditRequest(client),
+        config: {
+          ...AUDIT_CONFIG,
+          tokenBudget: MAX_SUBSTANTIATION_TOKENS_PER_FINDING + 100,
+        },
+      };
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(request, diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(created).toHaveLength(1);
+      expect(created[0]?.body).toContain('/cat-security.svg" height="24" alt="Security">');
+      expect(created[0]?.body).toContain('/sev-critical.svg" height="24" alt="Critical">');
+      expect(callCount()).toBe(5);
+
+      const records = diagnostics.drain();
+      const audited = records.find((record) => record.code === "classify.audited");
+      expect(audited?.counts).toStrictEqual({ changed: 1, tokens: 20 });
+      const spend = records.find((record) => record.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 50, total: 150 });
+      expect((spend?.counts?.total ?? 0) <= request.config.tokenBudget).toBe(true);
+    });
+
+    it("withholds a repair-budget-blocked finding when evidence cannot fit either", async () => {
+      const engineDigest = currentPlatformDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY =
+        "When the cache is empty, this fallback returns stale state instead of loading a value.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout([{ path: "src/a.ts", content: BODY }], 2, 3_000),
+        ruleDigest: engineDigest,
+      });
+
+      const { impl, callCount } = classifyFetchMock({
+        repairPair: { category: "security", severity: "critical" },
+        tokensPerCall: 10,
+      });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+      const request = {
+        ...auditRequest(client),
+        config: { ...AUDIT_CONFIG, tokenBudget: 8_000 },
+      };
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(request, diagnostics);
+
+      // Neither classification repair nor the larger evidence request fits. The pipeline invents
+      // no classification, publishes no unverified claim, and reports incomplete instead of clean.
+      expect(report.outcome).toBe("incomplete");
+      expect(created.some((comment) => comment.body.includes(BODY))).toBe(false);
+      expect(report.cacheAppended).toBe(0);
+      expect(callCount()).toBe(0);
+
+      const records = diagnostics.drain();
+      const repaired = records.find((record) => record.code === "classify.repaired");
+      expect(repaired?.counts).toStrictEqual({
+        repaired: 0,
+        failed: 1,
+        budget_blocked: 1,
+        tokens: 0,
+      });
+      const substantiated = records.find((record) => record.code === "publish.substantiated");
+      expect(substantiated?.counts).toMatchObject({
+        challenge_planned: 0,
+        challenge_retrieval_performed: 0,
+        challenge_expanded: 0,
+        challenge_no_matches: 0,
+        challenge_failed: 0,
+        undecided: 1,
+        budget_blocked: 1,
+      });
+      const spend = records.find((record) => record.code === "run.spend");
+      expect(spend?.counts).toStrictEqual({ engine: 3_000, classify: 0, total: 3_000 });
+      expect((spend?.counts?.total ?? 0) <= request.config.tokenBudget).toBe(true);
     });
 
     it("still audits when the engine overshoots its allotment but the consumer ceiling has room", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      const BODY =
-        "This handler discards the parsed configuration and falls back to defaults silently.";
+      const BODY = withChallengeProbe(
+        "This handler discards the parsed configuration and falls back to defaults silently.",
+      );
       runEngineMock.mockResolvedValue({
         // Far above this one-file fixture's 80_000-token allotment floor, far below the consumer's
         // 2M ceiling — the first live v0.12.0 run's exact shape (998k reported against an 80k
@@ -3316,10 +4242,11 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(report.outcome).toBe("complete");
       expect(created).toHaveLength(1);
       // The audit RAN: the published body carries the audit's reclassification ("SECURITY" is
-      // "security"'s rendered text-grammar label in `composeFindingBody`'s CATEGORIES table), not
+      // "security"'s rendered design-system badge in `composeFindingBody`'s CATEGORIES table), not
       // the engine's original "bug".
       expect(callCount()).toBeGreaterThan(0);
-      expect(created[0]?.body).toContain("SECURITY");
+      expect(created[0]?.body).toContain('/cat-security.svg" height="24" alt="Security">');
+      expect(created[0]?.body).toContain('/sev-critical.svg" height="24" alt="Critical">');
 
       const records = diagnostics.drain();
       expect(records.find((r) => r.code === "classify.skipped_budget")).toBeUndefined();
@@ -3329,8 +4256,9 @@ describe("performReview: review-cache memoization end to end", () => {
     it("suppresses a reclassified survivor at the execute-time marker re-check, end to end through publishAudited", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      const BODY =
-        "This SQL string concatenates the caller-supplied filter directly into the WHERE clause.";
+      const BODY = withChallengeProbe(
+        "This SQL string concatenates the caller-supplied filter directly into the WHERE clause.",
+      );
       runEngineMock.mockResolvedValue({
         stdout: findingsStdout(
           [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
@@ -3360,17 +4288,17 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(created).toHaveLength(0);
       // Vote 1 disagrees with the finding's own "bug" ("security" != "bug"), so the audit escalates
       // to a second vote before two agreeing votes reach majority — two calls, not one.
-      // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
-      // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(4);
+      // Truth, planner, and falsifier precede the audit's two-vote majority.
+      expect(callCount()).toBe(5);
     });
 
-    it("stores the audited category for a published finding and the raw category for a plan-suppressed one", async () => {
+    it("stores the audited path but no entry for a plan-suppressed fresh path", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
 
-      const BODY_A =
-        "This function never releases the lock it acquires on the early-return branch.";
+      const BODY_A = withChallengeProbe(
+        "This function never releases the lock it acquires on the early-return branch.",
+      );
       const BODY_B =
         "This workflow step checks out the pull request's own head inside a privileged job.";
       runEngineMock.mockResolvedValue({
@@ -3406,11 +4334,9 @@ describe("performReview: review-cache memoization end to end", () => {
         suppressedExactDuplicate: 1,
       });
       expect(created).toHaveLength(1);
-      // 1 repair call (src/a.ts) + 2 audit calls (src/a.ts's vote 1 disagrees with the just-repaired
-      // "bug", escalating to a vote 2 that agrees) — src/b.ts never calls out at all.
-      // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
-      // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(5);
+      // 1 repair + Truth + planner + falsifier + 2 audit votes for src/a.ts. The marker-suppressed
+      // src/b.ts never reaches any of those publication-time calls.
+      expect(callCount()).toBe(6);
 
       const entries = report.updatedCacheStore?.entries ?? [];
       const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
@@ -3419,25 +4345,23 @@ describe("performReview: review-cache memoization end to end", () => {
       // Published under its audited category — the reader saw "maintainability", so that is what
       // must be replayed on a future cache hit.
       expect(aEntry?.findings[0]?.category).toBe("maintainability");
-      // Never audited (plan-suppressed before it could be): the store keeps its raw, as-emitted
-      // category, matching what the ALREADY-published twin it was compared against actually carries.
-      expect(bEntry?.findings[0]?.category).toBe("security");
+      // Never audited because the existing marker suppressed it before the evidence gate. That is
+      // not a publication-quality per-file verdict, so neither a raw finding nor an empty entry may
+      // claim this path was verified under the current cache semantics.
+      expect(bEntry).toBeUndefined();
 
-      // run.spend: engine(100) + repair(1 call) + audit(2 calls), all at the mock's default 10
-      // tokens/call — proof the total now covers audit spend incurred during publication, not just
-      // the engine and repair halves `executeEngine` alone used to record.
+      // run.spend: engine(100) + repair(1) + verifier(3) + audit(2), all at ten tokens/call.
       const spend = diagnostics.drain().find((r) => r.code === "run.spend");
-      // `classify` now carries the substantiation judge's spend alongside the audit's: both are
-      // bounded side-calls on the same endpoint, and the ledger has one line for them. What the
-      // judge itself cost stays separately visible in the `publish.substantiated` diagnostic.
-      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 50, total: 150 });
+      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 60, total: 160 });
     });
 
     it("keeps engine and classify spend correct across the bounded resume when the resumed run also triggers the audit", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
 
-      const BODY = "This cache key omits the tenant id, so two tenants can collide on one entry.";
+      const BODY = withChallengeProbe(
+        "This cache key omits the tenant id, so two tenants can collide on one entry.",
+      );
       const nonSuccess = JSON.stringify({
         status: "failed",
         summary: { files_reviewed: 0, total_tokens: 30, budget_exceeded: false },
@@ -3465,19 +4389,133 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("complete");
       expect(runEngineMock).toHaveBeenCalledTimes(2);
-      // Fast-path audit vote agrees with the finding's own classification — one call.
-      // One call more than the audit alone: substantiation (v0.17.0) judges each fresh
-      // survivor before the audit runs, on the same endpoint and through the same mock.
-      expect(callCount()).toBe(3);
+      // Truth + planner + falsifier + one agreeing fast-path audit vote.
+      expect(callCount()).toBe(4);
 
       const spend = diagnostics.drain().find((r) => r.code === "run.spend");
-      // 30 (the discarded first attempt) + 100 (the resume that stands) = 130 engine tokens, plus
-      // the audit's own 10 (default mock tokens) spent during publication — the ledger accumulates
-      // across BOTH the resume and publication, not just whichever happened to run last.
-      // `classify` now carries the substantiation judge's spend alongside the audit's: both are
-      // bounded side-calls on the same endpoint, and the ledger has one line for them. What the
-      // judge itself cost stays separately visible in the `publish.substantiated` diagnostic.
-      expect(spend?.counts).toStrictEqual({ engine: 130, classify: 30, total: 160 });
+      // 130 engine tokens plus three verifier roles and one audit vote at ten tokens each.
+      expect(spend?.counts).toStrictEqual({ engine: 130, classify: 40, total: 170 });
+    });
+
+    it("publishes on gpt-oss when the judge cites visible full-file and symbol evidence", async () => {
+      const contextBase = git(["rev-parse", "HEAD"]).trim();
+      const contextLines = [
+        "export const dispatchEnabled = true;",
+        ...Array.from(
+          { length: 78 },
+          (_value, index) => `const filler${String(index + 2)} = ${String(index + 2)};`,
+        ),
+        "export function distantGuard(): boolean { return dispatchEnabled; }",
+      ];
+      await writeFile(join(repo, "src/context.ts"), `${contextLines.join("\n")}\n`);
+      git(["add", "src/context.ts"]);
+      git(["commit", "-q", "-m", "evidence-context", "--no-gpg-sign"]);
+      const contextHead = git(["rev-parse", "HEAD"]).trim();
+
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY = "When `dispatchEnabled` is false, `distantGuard` still lets the dispatcher run.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/context.ts", content: BODY, category: "bug", severity: "medium" }],
+          1,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      let judgePrompt = "";
+      const { impl } = classifyFetchMock({
+        auditPair: { category: "bug", severity: "medium" },
+        judgeEvidenceRef: "H:1",
+        judgeChangeRef: "D:H:1",
+        judgeAdditionalRefs: ["H:80"],
+        onJudgePrompt: (prompt) => {
+          judgePrompt = prompt;
+        },
+      });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([], contextHead);
+      const request = {
+        ...auditRequest(client),
+        base: commitSha(contextBase),
+        head: commitSha(contextHead),
+        config: { ...AUDIT_CONFIG, model: "gpt-oss-120b" },
+      };
+
+      const report = await performReview(request, createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({ published: 1, suppressed: 0 });
+      expect(created.some((comment) => comment.body.includes(BODY))).toBe(true);
+      // This small file travels whole: the anchor, an unrelated middle line, and the distant cited
+      // symbol are all visible. Line 80 is therefore a real evidence citation, not model metadata.
+      expect(judgePrompt).toContain("1| export const dispatchEnabled = true;");
+      expect(judgePrompt).toContain("40| const filler40 = 40;");
+      expect(judgePrompt).toContain(
+        "80| export function distantGuard(): boolean { return dispatchEnabled; }",
+      );
+    });
+
+    it("fails closed without a cache write when evidence is invented or the verifier transport fails", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY =
+        "When `a` is negative, the assignment accepts it and corrupts the downstream index.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "medium" }],
+          2,
+        ),
+        ruleDigest: engineDigest,
+      });
+
+      for (const failure of ["invented-line", "transport"] as const) {
+        const { impl } = classifyFetchMock({
+          auditPair: { category: "bug", severity: "medium" },
+          ...(failure === "invented-line"
+            ? { judgeEvidenceRef: "H:999" }
+            : { judgeTransportFailure: true }),
+        });
+        globalThis.fetch = impl;
+        const { client, created } = successfulClient([]);
+        const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+        const diagnostics = createSilentDiagnostics();
+
+        const report = await performReview(
+          {
+            ...auditRequest(client, empty),
+            config: { ...AUDIT_CONFIG, model: "gpt-oss-120b" },
+          },
+          diagnostics,
+        );
+
+        expect(report.outcome, failure).toBe("incomplete");
+        expect(report.reason, failure).toBe("settlement.incomplete.publication_degraded");
+        expect(report.publish, failure).toMatchObject({
+          published: 0,
+          suppressed: 1,
+          suppressedEvidence: 1,
+          verificationUndecided: 1,
+        });
+        // `created` may contain the honest incomplete notice, but never the unverified finding.
+        expect(
+          created.some((comment) => comment.body.includes(BODY)),
+          failure,
+        ).toBe(false);
+        expect(report.cacheAppended, failure).toBe(0);
+        expect(report.updatedCacheStore, failure).toBeUndefined();
+        const substantiated = diagnostics
+          .drain()
+          .find((record) => record.code === "publish.substantiated");
+        expect(substantiated?.counts, failure).toMatchObject({
+          challenge_planned: 0,
+          challenge_retrieval_performed: 0,
+          challenge_expanded: 0,
+          challenge_no_matches: 0,
+          challenge_failed: 0,
+          undecided: 1,
+        });
+      }
     });
   });
 
@@ -3493,6 +4531,50 @@ describe("performReview: review-cache memoization end to end", () => {
     beforeEach(() => {
       runEngineMock.mockReset();
       acquireEngineMock.mockReset();
+    });
+
+    it("reserves proportional headroom for all four mandatory verification calls", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const request = baseRequest(undefined);
+      const report = await performReview(
+        {
+          ...request,
+          config: { ...request.config, tokenBudget: 1_500_000 },
+        },
+        createSilentDiagnostics(),
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect((runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number }).allottedBudget).toBe(
+        92_000,
+      );
+    });
+
+    it("floors a single candidate at one atomic path without multiplying it by all slots", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(2), ruleDigest: engineDigest });
+
+      const request = baseRequest(undefined);
+      const report = await performReview(
+        {
+          ...request,
+          config: {
+            ...request.config,
+            maxFindings: 1,
+            tokenBudget: MAX_SUBSTANTIATION_TOKENS_PER_FINDING + 2_000 + 92_000,
+          },
+        },
+        createSilentDiagnostics(),
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect((runEngineMock.mock.calls[0]?.[0] as { allottedBudget: number }).allottedBudget).toBe(
+        92_000,
+      );
     });
 
     it("prices a smaller allotment when a cache hit removes a file from dispatch", async () => {

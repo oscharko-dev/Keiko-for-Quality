@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { sha256, type Sha256 } from "../core/brands.js";
 import type { EngineFinding } from "../engine/result.js";
+import { CLOSED_RUNTIME_FACT_CATALOG_VERSION } from "../publish/runtime-fact-catalog.js";
 import {
   PARSE_LIMITS,
   SUPPORTED_STORE_SCHEMA,
@@ -15,6 +16,7 @@ import {
   entriesUnderCurrentSemantics,
   protocol,
   readStore,
+  removeEntriesByKey,
   serializeStore,
   type BlobId,
   type CacheEntry,
@@ -100,6 +102,13 @@ function entryFor(
 
 const EMPTY_STORE: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
 
+it("binds cached publication semantics to the closed runtime-fact catalog", () => {
+  expect(PUBLICATION_SEMANTICS).toContain("finding-badges");
+  expect(PUBLICATION_SEMANTICS).toContain(
+    `runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}`,
+  );
+});
+
 describe("computeKey", () => {
   it("is a 64-character lowercase hex digest", () => {
     const key = keyFor(baseline());
@@ -146,6 +155,33 @@ describe("lookup", () => {
     const store: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [entry] };
     const otherKey = keyFor({ ...baseline(), model: modelId("gpt-5") });
     expect(lookup(store, otherKey)).toBeUndefined();
+  });
+});
+
+describe("removeEntriesByKey", () => {
+  it("removes only the rejected keys and preserves survivor order", () => {
+    const a = entryFor({ ...baseline(), model: modelId("model-a") }, []);
+    const b = entryFor({ ...baseline(), model: modelId("model-b") }, []);
+    const c = entryFor({ ...baseline(), model: modelId("model-c") }, []);
+    const store: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [a, b, c],
+    };
+
+    const result = removeEntriesByKey(store, new Set([b.key]));
+
+    expect(result.entries).toEqual([a, c]);
+  });
+
+  it("returns the same store when no key matches", () => {
+    const entry = entryFor(baseline(), []);
+    const store: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [entry],
+    };
+    const missing = keyFor({ ...baseline(), model: modelId("missing") });
+
+    expect(removeEntriesByKey(store, new Set([missing]))).toBe(store);
   });
 });
 

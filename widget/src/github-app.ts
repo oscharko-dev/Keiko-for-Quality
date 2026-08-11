@@ -10,6 +10,8 @@
  * signed something it did not.
  */
 
+import type { GitHubRequestBudget } from "./request-budget.js";
+
 const encoder = new TextEncoder();
 
 function base64url(bytes: ArrayBuffer | Uint8Array): string {
@@ -67,7 +69,7 @@ export async function installationToken(
   privateKeyPem: string,
   owner: string,
   repo: string,
-  fetchImpl: typeof fetch,
+  requests: GitHubRequestBudget,
   nowSeconds: number,
 ): Promise<string | undefined> {
   try {
@@ -77,19 +79,20 @@ export async function installationToken(
       accept: "application/vnd.github+json",
       "user-agent": "keiko-quality-widget",
     };
-    const install = await fetchImpl(`https://api.github.com/repos/${owner}/${repo}/installation`, {
-      headers,
-    });
+    const install = await requests.fetch(
+      `https://api.github.com/repos/${owner}/${repo}/installation`,
+      { headers },
+    );
     if (!install.ok) return undefined;
     const { id } = (await install.json()) as { id?: number };
-    if (typeof id !== "number") return undefined;
-    const token = await fetchImpl(
+    if (!Number.isSafeInteger(id) || (id ?? 0) <= 0) return undefined;
+    const token = await requests.fetch(
       `https://api.github.com/app/installations/${String(id)}/access_tokens`,
       { method: "POST", headers },
     );
     if (!token.ok) return undefined;
     const { token: value } = (await token.json()) as { token?: string };
-    return typeof value === "string" ? value : undefined;
+    return typeof value === "string" && value.length > 0 ? value : undefined;
   } catch {
     return undefined;
   }

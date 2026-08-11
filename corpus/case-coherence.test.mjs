@@ -23,22 +23,22 @@ import { CASES } from "./cases.mjs";
  */
 
 /**
- * The five cases that carry the shape and are left alone on purpose. Their verdict is decidable from
+ * The four cases that carry the shape and are left alone on purpose. Their verdict is decidable from
  * the diff itself — every seeded one hides its defect INSIDE the test file — so none has ever
  * spiralled the way `clean-added-test` did. They stay listed rather than fixed because a fixture is
- * a recorded measurement basis: re-cutting five of them on suspicion, with no failing run to point
+ * a recorded measurement basis: re-cutting four of them on suspicion, with no failing run to point
  * at, would discard comparability against every qualification already in `corpus/evidence/` and buy
  * nothing. A case that starts failing here earns its fix with evidence, exactly as this one did —
  * and `clean-reset-modules-is-load-bearing` left this list on 2026-08-06 with exactly that
  * evidence (3/3 false positives in the v0.18.0 qualification; see the case's own comment and
- * corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md for the record).
+ * corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md for the record). The budget-starved
+ * clean case left the list after its 2026-08-10 qualification failure exposed that the clean verdict
+ * was not decidable while the implementation imported by its added test was absent.
  */
 const MODULE_OMITTED_ON_PURPOSE = new Set([
   "weakened-assertion",
   "redaction-assertion-loosened",
   "stale-session-after-refresh",
-  "clean-test-asserts-the-opposite",
-  "budget-starved-clean-neighbours",
 ]);
 
 function modulesMissingFrom(testCase) {
@@ -62,6 +62,26 @@ test("a test file's module is committed alongside it, or the omission is recorde
       "will answer 'does not exist in HEAD'. Commit the module as unchanged context " +
       "(base === head keeps it out of the diff), or add the id to MODULE_OMITTED_ON_PURPOSE with " +
       "the reason its verdict is decidable from the diff alone.",
+  );
+});
+
+test("clean redaction test proves every separator suffix is removed", () => {
+  const testCase = caseById("clean-test-asserts-the-opposite");
+  const testFile = testCase.files.find((file) => file.path === "src/redact.test.ts");
+  const moduleFile = testCase.files.find((file) => file.path === "src/redact.ts");
+
+  assert.ok(testFile !== undefined, "the changed test must remain in the fixture");
+  assert.ok(moduleFile !== undefined, "the imported implementation must be readable");
+  assert.equal(moduleFile.base, moduleFile.head, "the implementation must be unchanged context");
+  assert.match(
+    moduleFile.head,
+    /const separator = modelId\.indexOf\("#"\);\s+return separator === -1 \? modelId : modelId\.slice\(0, separator\);/u,
+    "the shown implementation must remove everything after the first separator",
+  );
+  assert.equal(
+    testFile.head.match(/redactModelId\("gpt-oss-120b#dep_9f3a#extra"\)/gu)?.length,
+    1,
+    "the added test must exercise multiple suffix separators exactly once",
   );
 });
 
@@ -94,8 +114,10 @@ test("every recorded omission still describes a real case that still omits its m
 test("clean-added-test's module is context, not part of the change", () => {
   const testCase = CASES.find((entry) => entry.id === "clean-added-test");
   const moduleFile = testCase.files.find((file) => file.path === "src/ratio.ts");
+  const testFile = testCase.files.find((file) => file.path === "src/ratio.test.ts");
 
   assert.ok(moduleFile !== undefined, "the module under test must be committed with the case");
+  assert.ok(testFile !== undefined, "the test file must be committed with the case");
   assert.equal(
     moduleFile.base,
     moduleFile.head,
@@ -105,6 +127,14 @@ test("clean-added-test's module is context, not part of the change", () => {
     moduleFile.head,
     /throw new RangeError/u,
     "the module has to actually satisfy the added assertion — otherwise silence would be the wrong verdict",
+  );
+  const ratioImport = /^import \{ ratio \} from "\.\/ratio\.js";$/gmu;
+  assert.equal(testFile.base.match(ratioImport)?.length, 1, "base must import ratio exactly once");
+  assert.equal(testFile.head.match(ratioImport)?.length, 1, "head must import ratio exactly once");
+  assert.equal(
+    testFile.base.match(ratioImport)?.[0],
+    testFile.head.match(ratioImport)?.[0],
+    "the ratio import must be identical context, not part of the added test",
   );
 });
 
@@ -281,12 +311,12 @@ test("every case recorded as using opaque handles still has an undeclared type",
 });
 
 /**
- * The verdict-deciding half of the fix, pinned the same way the module fix is: the type must be
- * context rather than a second changed file, and it must be OPTIONAL — a required field would make
- * `return {}` a type error, which is a different and far shallower defect than the one this case
- * exists to seed.
+ * Both verdict-deciding halves of the fix are pinned: the type must be optional, and the unchanged
+ * receiver must distinguish an omitted field from an explicit empty array. Putting both in the
+ * changed file keeps them in the staged examiner's complete-file evidence without introducing a
+ * second changed path.
  */
-test("cleared-list-omitted-from-update declares its return type as optional context", () => {
+test("cleared-list-omitted-from-update shows how omission preserves stale state", () => {
   const testCase = CASES.find((entry) => entry.id === "cleared-list-omitted-from-update");
   const source = testCase.files.find((file) => file.path === "src/capabilities.ts");
 
@@ -297,9 +327,331 @@ test("cleared-list-omitted-from-update declares its return type as optional cont
     /workflowEligibleModelIds\?:/u,
     "the field has to be optional — otherwise `return {}` is a type error, not the seeded bug",
   );
+  const receiverContract =
+    "/** Omission preserves the current IDs; an explicit empty array clears them. */";
+  assert.equal(source.base.split(receiverContract).length - 1, 1);
+  assert.equal(source.head.split(receiverContract).length - 1, 1);
+  const receiver = [
+    "export function applyEligibilityUpdate(",
+    "  current: readonly string[],",
+    "  update: EligibilityUpdate,",
+    "): readonly string[] {",
+    "  return update.workflowEligibleModelIds ?? current;",
+    "}",
+  ].join("\n");
+  assert.equal(source.base.match(/export function applyEligibilityUpdate\(/gu)?.length, 1);
+  assert.equal(source.head.match(/export function applyEligibilityUpdate\(/gu)?.length, 1);
+  assert.ok(source.base.includes(receiver), "the receiver must be readable at base");
+  assert.ok(source.head.includes(receiver), "the identical receiver must be readable at head");
+  const omittedEmpty = /if \(selected\.length === 0\) return \{\};/u;
+  assert.doesNotMatch(source.base, omittedEmpty, "base must transmit an explicit empty array");
+  assert.match(source.head, omittedEmpty, "head must turn an explicit empty array into omission");
   assert.equal(
     source.base.replace(/\n\s*if \(selected\.length === 0\) return \{\};/u, ""),
     source.head.replace(/\n\s*if \(selected\.length === 0\) return \{\};/u, ""),
-    "the declaration must be identical on both sides, so the graded diff stays the seeded change alone",
+    "the type and receiver must be identical on both sides, so the graded diff stays the seeded change alone",
+  );
+
+  const current = ["stale-model"];
+  const applyUpdate = (update) => update.workflowEligibleModelIds ?? current;
+  const before = { workflowEligibleModelIds: [] };
+  const after = {};
+  assert.deepEqual(
+    applyUpdate(after),
+    current,
+    "the head's omitted field must preserve the receiver's stale current list",
+  );
+  assert.deepEqual(
+    applyUpdate(before),
+    [],
+    "the base's explicit empty array must clear the receiver's current list",
+  );
+});
+
+test("audit-validator-drift keeps both compared validators in the changed complete file", () => {
+  const testCase = CASES.find((entry) => entry.id === "audit-validator-drift");
+  const source = testCase.files.find((file) => file.path === "scripts/audit-metadata.mjs");
+
+  assert.ok(source !== undefined, "the audit case must carry its changed script");
+  assert.equal(testCase.files.length, 1, "no invisible unchanged module may decide this verdict");
+  for (const revision of [source.base, source.head]) {
+    assert.equal(revision.match(/export function validateMetadata\(/gu)?.length, 1);
+    assert.equal(revision.match(/export function isValidMetadata\(/gu)?.length, 1);
+    assert.match(revision, /typeof candidate\.schemaVersion === "string"/u);
+    assert.match(revision, /typeof candidate\.provider === "string"/u);
+  }
+  assert.match(
+    source.base,
+    /export function isValidMetadata[\s\S]*typeof candidate\.schemaVersion === "string"[\s\S]*typeof candidate\.provider === "string"/u,
+    "the base mirror must enforce every shown production predicate",
+  );
+  assert.match(
+    source.head,
+    /export function isValidMetadata\(candidate\) \{\n[ ]{2}return typeof candidate\.authRef === "string";\n\}/u,
+    "the changed mirror must visibly omit the production schemaVersion and provider checks",
+  );
+});
+
+function caseById(id) {
+  const testCase = CASES.find((entry) => entry.id === id);
+  assert.ok(testCase !== undefined, `missing corpus case: ${id}`);
+  return testCase;
+}
+
+function changedSource(id) {
+  return caseById(id)
+    .files.filter((file) => file.base !== file.head)
+    .map((file) => file.head)
+    .join("\n");
+}
+
+function headSource(id, path) {
+  const file = caseById(id).files.find((entry) => entry.path === path);
+  assert.ok(file !== undefined, `${id} is missing ${path}`);
+  return file.head;
+}
+
+test("qualification corpus keeps the 42-case seeded/clean population contract", () => {
+  const changedFiles = CASES.flatMap((entry) =>
+    entry.files.filter((file) => file.base !== file.head),
+  );
+  assert.equal(CASES.length, 42);
+  assert.equal(CASES.filter((entry) => entry.defect !== null).length, 31);
+  assert.equal(CASES.filter((entry) => entry.defect === null).length, 11);
+  assert.equal(changedFiles.length, 50);
+});
+
+test("off-by-one carries a visible contract and a concrete just-outside witness", () => {
+  const testCase = caseById("off-by-one");
+  const source = testCase.files.find((entry) => entry.path === "src/window.ts");
+  assert.ok(source !== undefined, "off-by-one must carry src/window.ts");
+
+  const contract =
+    "/** Return the last n items, or every available item when n exceeds the list length. */";
+  assert.equal(
+    source.base.split(contract).length - 1,
+    1,
+    "base must show the contract exactly once",
+  );
+  assert.equal(
+    source.head.split(contract).length - 1,
+    1,
+    "head must show the contract exactly once",
+  );
+  assert.match(source.base, /items\.slice\(Math\.max\(0, items\.length - n\)\)/u);
+  assert.match(source.head, /items\.slice\(items\.length - n\)/u);
+
+  const items = ["a", "b", "c"];
+  const n = 4;
+  const before = items.slice(Math.max(0, items.length - n));
+  const after = items.slice(items.length - n);
+  assert.deepEqual(before, items, "the clamped base must return every available item");
+  assert.deepEqual(after, ["c"], "the negative head index must wrap and truncate the result");
+});
+
+/**
+ * The clean reset case and its two recall twins share one real module-state mechanism. Each clean
+ * test resets immediately before its dynamic import. The first twin deletes the second reset. The
+ * second keeps both resets but hoists the module to a static import, so the tests retain bindings
+ * to the pre-reset instance. Neither twin uses a cached import Promise: that would add a
+ * race-shaped alternative explanation instead of isolating import timing.
+ */
+test("reset-isolation cases distinguish fresh dynamic imports from removed and bypassed resets", () => {
+  const ids = [
+    "clean-reset-modules-is-load-bearing",
+    "reset-modules-removed-state-bleeds",
+    "reset-modules-static-import-bypasses-reset",
+  ];
+  const fixtures = ids.map((id) => {
+    const testCase = caseById(id);
+    const moduleFile = testCase.files.find((entry) => entry.path === "src/cache.ts");
+    const testFile = testCase.files.find((entry) => entry.path === "src/cache.test.ts");
+    assert.ok(moduleFile !== undefined, `${id} must carry the cache module as context`);
+    assert.ok(testFile !== undefined, `${id} must carry the cache test`);
+    assert.equal(moduleFile.base, moduleFile.head, `${id}'s cache module must stay unchanged`);
+    assert.match(moduleFile.head, /const memo = new Map/u);
+    return { testCase, testFile };
+  });
+
+  const clean = fixtures[0];
+  const removed = fixtures[1];
+  const bypassed = fixtures[2];
+  assert.ok(clean !== undefined);
+  assert.ok(removed !== undefined);
+  assert.ok(bypassed !== undefined);
+
+  const cleanResets = [...clean.testFile.head.matchAll(/vi\.resetModules\(\);/gu)].map(
+    (match) => match.index,
+  );
+  const cleanImports = [...clean.testFile.head.matchAll(/await import\("\.\/cache\.js"\)/gu)].map(
+    (match) => match.index,
+  );
+  assert.equal(cleanResets.length, 2, "each clean test must own one registry reset");
+  assert.equal(cleanImports.length, 2, "each clean test must own one dynamic import");
+  assert.ok(cleanResets.every((reset, index) => reset < cleanImports[index]));
+  assert.equal(
+    clean.testFile.head.match(/vi\.resetModules\(\);\s+const \{[^}]+\} = await import/gu)?.length,
+    2,
+    "each clean reset must be immediately coupled to the dynamic import it protects",
+  );
+  assert.doesNotMatch(clean.testFile.head, /beforeEach/u);
+  assert.equal(clean.testFile.head.includes('from "./cache.js";'), false);
+
+  assert.equal(removed.testFile.base, clean.testFile.head);
+  assert.equal(removed.testFile.head.match(/vi\.resetModules\(\);/gu)?.length, 1);
+  assert.equal(removed.testFile.head.match(/await import\("\.\/cache\.js"\)/gu)?.length, 2);
+  const retainedReset = removed.testFile.head.lastIndexOf("vi.resetModules();");
+  const firstImport = removed.testFile.head.indexOf('await import("./cache.js")');
+  const secondImport = removed.testFile.head.lastIndexOf('await import("./cache.js")');
+  assert.ok(
+    retainedReset < firstImport,
+    "the retained reset must still protect the first dynamic import",
+  );
+  assert.ok(
+    firstImport < secondImport,
+    "the second import must follow the first without another registry reset",
+  );
+
+  assert.equal(bypassed.testFile.base, clean.testFile.head);
+  assert.equal(bypassed.testFile.head.match(/vi\.resetModules\(\);/gu)?.length, 2);
+  assert.match(bypassed.testFile.head, /^import \{ entryCount, lookup \} from "\.\/cache\.js";/mu);
+  assert.doesNotMatch(bypassed.testFile.head, /await import|Promise/u);
+
+  for (const seeded of [removed.testCase, bypassed.testCase]) {
+    assert.deepEqual(seeded.defect, {
+      file: "src/cache.test.ts",
+      category: "test",
+      severity: "high",
+    });
+  }
+});
+
+/**
+ * The 2026-08-10 failure earned a ground-truth repair, not a reviewer prompt exception. The
+ * imported implementation has to be readable without becoming a sixth changed hunk, and its
+ * behavior must make every old assertion plus the new empty-input assertion true. The budget and
+ * ordered five-hunk shape are the pressure contract; changing either would turn the repaired case
+ * into a different experiment for a second, unrelated reason.
+ */
+test("budget-starved clean case keeps its pressure shape and readable redaction context", () => {
+  const testCase = caseById("budget-starved-clean-neighbours");
+  const changedFiles = testCase.files.filter((file) => file.base !== file.head);
+  const changedPaths = changedFiles.map((file) => file.path);
+  const moduleFile = testCase.files.find((file) => file.path === "src/redact-model-id.ts");
+
+  assert.equal(testCase.budgetTokens, 25_000, "the pressure budget is part of the case contract");
+  assert.deepEqual(changedPaths, [
+    "src/trace-context.ts",
+    "src/trust-mode.ts",
+    "src/event-envelope.ts",
+    "src/workspace-layout.ts",
+    "src/redact-model-id.test.ts",
+  ]);
+  for (const file of changedFiles) {
+    assert.ok(file.head.startsWith(file.base), `${file.path} must remain a single appended hunk`);
+  }
+  assert.ok(moduleFile !== undefined, "the module imported by the added test must be readable");
+  assert.equal(moduleFile.base, moduleFile.head, "the module must remain unchanged context");
+  assert.match(
+    moduleFile.head,
+    /export function redactModelId\(modelId: string\): string \{\s+const separator = modelId\.indexOf\("#"\);\s+return separator === -1 \? modelId : modelId\.slice\(0, separator\);\s+\}/u,
+    "the unchanged implementation must satisfy the existing suffix cases and the added empty-input case",
+  );
+});
+
+/**
+ * The v0.23 qualification exposed fixture defects rather than proven reviewer noise. The clean
+ * identifier addition originally truncated its new UUID; the budgeted fixture's new `hopId` was
+ * repaired to keep the full UUID, but deterministic follow-up found its unchanged `traceContext`
+ * still created identifiers from only eight UUID hex characters. A collision warning against the
+ * current file was therefore defensible even though that truncation predated the hunk. Both
+ * revisions must now be clean while the authentication-prefix case remains the positive twin:
+ * truncating a secret comparison is still the seeded defect the reviewer must find.
+ */
+test("clean UUID additions retain full entropy while the prefix-auth defect remains seeded", () => {
+  assert.match(
+    headSource("clean-import-present-above", "src/ids.ts"),
+    /export function traceId\(\): string \{\s+return "trace-" \+ randomUUID\(\);/u,
+  );
+  const budgetedTrace = caseById("budget-starved-clean-neighbours").files.find(
+    (file) => file.path === "src/trace-context.ts",
+  );
+  assert.ok(budgetedTrace !== undefined, "the budgeted case must retain its trace fixture");
+  for (const source of [budgetedTrace.base, budgetedTrace.head]) {
+    assert.match(
+      source,
+      /return \{ id: subsystem \+ "-" \+ randomUUID\(\), subsystem, startedAtMs: nowMs \};/u,
+    );
+    assert.doesNotMatch(source, /randomUUID\(\)\.slice\(0, 8\)/u);
+  }
+  assert.match(
+    budgetedTrace.head,
+    /export function hopId\(context: TraceContext\): string \{\s+return context\.id \+ "\." \+ randomUUID\(\);/u,
+  );
+  assert.match(
+    changedSource("auth-prefix-compare"),
+    /provided\.slice\(0, 8\) === expected\.slice\(0, 8\)/u,
+    "the true-positive prefix comparison must remain in the recall corpus",
+  );
+});
+
+/**
+ * Existing paid cases are the retention fixtures for the examiner's new evidence contract. Each
+ * clean shape has a nearby positive twin where the missing fact is actually visible; pinning both
+ * sides prevents a future clean-case calibration from quietly deleting the corresponding recall
+ * question instead of teaching the examiner to distinguish it.
+ */
+test("precision counterexamples retain their visible true-positive twins", () => {
+  const cleanPinCase = caseById("clean-workflow-pin-update");
+  const cleanPinFile = cleanPinCase.files[0];
+  assert.ok(cleanPinFile !== undefined);
+  const cleanPinUpdate = changedSource(cleanPinCase.id);
+  assert.match(
+    cleanPinUpdate,
+    /actions\/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4\.2\.2/u,
+    "the clean pin update must bind the real v4.2.2 tag commit",
+  );
+  assert.match(
+    cleanPinFile.base,
+    /actions\/checkout@d632683dd7b4114ad314bca15554477dd762a938 # v4\.2\.0/u,
+    "the clean pin update must begin at the real v4.2.0 tag commit",
+  );
+  for (const source of [cleanPinFile.base, cleanPinFile.head]) {
+    assert.match(
+      source,
+      /actions\/checkout@[0-9a-f]{40}/u,
+      "both clean revisions must keep the same action coordinate fully pinned",
+    );
+  }
+
+  const loosenedPin = caseById("workflow-unpinned-action").files[0];
+  assert.ok(loosenedPin !== undefined);
+  assert.match(loosenedPin.base, /actions\/setup-node@[0-9a-f]{40}/u);
+  assert.match(loosenedPin.head, /actions\/setup-node@v4/u);
+
+  assert.match(changedSource("clean-literal-is-in-union"), /type Mode = "strict" \| "lenient"/u);
+  assert.match(
+    changedSource("status-union-widened-consumer-missed"),
+    /type CandidateStatus = "draft" \| "needs-review" \| "approved" \| "rejected"/u,
+  );
+
+  assert.match(changedSource("clean-refactor"), /new Map<string, string>/u);
+  assert.match(changedSource("prototype-lookup-refactor"), /LABELS\[kind\]/u);
+
+  assert.match(changedSource("clean-error-context-added"), /correlationId: client\.id, attempt/u);
+  assert.match(
+    changedSource("secret-in-log"),
+    /logger\.info\("auth attempt", \{ user, token \}\)/u,
+  );
+
+  const desynchronized = changedSource("pinned-reference-duplicate-desync");
+  assert.match(desynchronized, /ADVANCE BOTH TOGETHER/u);
+  const visiblePins = [
+    ...desynchronized.matchAll(/(?:ACTION_PIN:\s*|actions\/checkout@)([0-9a-f]{40})/gu),
+  ].map((match) => match[1]);
+  assert.equal(
+    new Set(visiblePins).size,
+    2,
+    "the true-positive workflow must retain two visibly different full-SHA pins",
   );
 });

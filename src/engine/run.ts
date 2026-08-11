@@ -48,6 +48,11 @@ export interface EngineRunOptions {
   readonly env: NodeJS.ProcessEnv;
   readonly pathValue: string;
   /**
+   * Absolute epoch-millisecond deadline owned by the enclosing review. Every first attempt and
+   * resume receives this SAME value; an invocation may consume only the remaining duration.
+   */
+  readonly reviewDeadlineMs: number;
+  /**
    * The pull request's stated purpose. Since v0.20.0 it travels on the engine's own
    * `--background` flag (rendered through `renderChangeIntent`, so the data-not-instruction frame
    * and the 1500-char bound are unchanged) instead of a proxy-spliced message. The native flag
@@ -57,6 +62,14 @@ export interface EngineRunOptions {
    * anthropic protocol path, which never had a proxy to splice for it.
    */
   readonly changeIntent?: string;
+  /**
+   * Complete repository instructions read from the verified merge-base tree.
+   *
+   * Only the staged single-shot Scout consumes this block. It is loaded before cache lookup and
+   * its separate identity is part of every single-shot cache key, so a rule-text change can never
+   * replay a verdict produced under older repository guidance.
+   */
+  readonly trustedGuidance?: string;
   /**
    * Per-file deterministic context packs (`collectContextPacks`), keyed by reviewed path, handed
    * to the proxy for injection — see `ModelProxyOptions.contextPacks` for the exact mechanics and
@@ -71,6 +84,17 @@ export interface EngineRunOptions {
    * once projected spend crosses it, instead of discovering the overrun only after paying for it.
    */
   readonly allottedBudget: number;
+  /**
+   * Exact paths this invocation is expected to review, derived from `Inventory.reviewablePaths`
+   * after the mechanically-clean/cache-hit exclude union has been applied.
+   *
+   * The staged runner treats this list as authority instead of reimplementing inventory
+   * classification from path globs. In particular, a deletion-critical path may be reviewable
+   * without matching `reviewRelevant`, while a binary or submodule path may match that glob and
+   * still be intentionally non-reviewable. Targeted resumes narrow this list together with their
+   * widened excludes, so each invocation carries its own exact dispatch contract.
+   */
+  readonly expectedReviewablePaths: readonly string[];
   /** Paths the inventory downgraded to `mechanically-clean`. Forwarded to `buildRuleFile`. */
   readonly mechanicallyCleanPaths: readonly string[];
   /**
@@ -124,13 +148,14 @@ async function configureEngine(
   options: EngineRunOptions,
   home: string,
   env: NodeJS.ProcessEnv,
+  timeoutMs: number,
 ): Promise<void> {
   // `config set` writes beneath HOME. Pointing HOME at a fresh directory is what stops the engine
   // from reading a `~/.opencodereview/rule.json` that the runner image or a previous job left
   // behind, and stops this run from leaving state behind for the next one.
   await run(options.binaryPath, ["config", "set", "language", options.config.language], {
     cwd: home,
-    timeoutMs: 30_000,
+    timeoutMs,
     maxBuffer: 1024 * 1024,
     env,
   });
@@ -331,8 +356,16 @@ function recordModelUsage(
  * `ExecFailure` never reached a process that could exit at all: that is the spawn-failure path.
  */
 function failureReason(error: unknown): EngineRunError["reason"] {
+  if (error instanceof EngineRunError) return error.reason;
   if (!(error instanceof ExecFailure)) return "engine.run.spawn_failed";
   return error.timedOut ? "engine.run.timeout" : "engine.run.nonzero_exit";
+}
+
+/** The shared review remainder; zero is a timeout, never a fresh per-invocation allowance. */
+function remainingInvocationMs(options: EngineRunOptions): number {
+  const remaining = Math.max(0, Math.trunc(options.reviewDeadlineMs - Date.now()));
+  if (remaining === 0) throw new EngineRunError("engine.run.timeout");
+  return remaining;
 }
 
 /** This invocation's wire-counted spend so far, or `undefined` when no proxy counted — read for
@@ -354,6 +387,9 @@ export async function runEngine(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
 ): Promise<EngineRunOutput> {
+  // Refuse before acquiring any per-invocation state. In particular a resume that reaches the
+  // enclosing review's boundary cannot refresh `reviewTimeoutSeconds` by entering this function.
+  remainingInvocationMs(options);
   const token = readModelToken(options.config, options.env);
   if (token === undefined) throw new EngineRunError("engine.run.spawn_failed");
 
@@ -366,11 +402,11 @@ export async function runEngine(
     proxy = await startProxyIfNeeded(options, ruleDigest);
     const env = engineEnvironment(options, token, home);
     if (proxy !== undefined) env.OCR_LLM_URL = proxy.url;
-    await configureEngine(options, home, env);
+    await configureEngine(options, home, env, Math.min(30_000, remainingInvocationMs(options)));
 
     const result = await run(options.binaryPath, reviewArguments(options, rulePath), {
       cwd: options.repositoryPath,
-      timeoutMs: options.config.reviewTimeoutSeconds * 1000,
+      timeoutMs: remainingInvocationMs(options),
       maxBuffer: 64 * 1024 * 1024,
       env,
     });

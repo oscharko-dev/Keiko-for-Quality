@@ -71,7 +71,9 @@ function options(overrides: Partial<EngineRunOptions> = {}): EngineRunOptions {
     guidelines: { paths: [] },
     env: {},
     pathValue: "/usr/bin:/bin",
+    reviewDeadlineMs: Date.now() + 1_800_000,
     allottedBudget: 123_456,
+    expectedReviewablePaths: ["src/a.ts"],
     mechanicallyCleanPaths: [],
     ...overrides,
   };
@@ -358,6 +360,16 @@ describe("runEngine: exec failure classification", () => {
       return Promise.resolve({ stdout: Buffer.from(""), stderr: "", code: 0 });
     };
   }
+
+  it("refuses an expired enclosing review before spawning config or review", async () => {
+    await expect(
+      runEngine(
+        options({ env: { MODEL_TOKEN: "secret" }, reviewDeadlineMs: Date.now() - 1 }),
+        createSilentDiagnostics(),
+      ),
+    ).rejects.toMatchObject({ reason: "engine.run.timeout" });
+    expect(execRunMock).not.toHaveBeenCalled();
+  });
 
   it("classifies a timed-out exec failure as engine.run.timeout, not nonzero_exit", async () => {
     execRunMock.mockImplementation(failReviewWith(new ExecFailure("ocr", 1, true)));

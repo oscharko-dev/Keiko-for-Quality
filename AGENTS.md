@@ -7,21 +7,20 @@ reading them will not surface in time to save you the cost of finding out the ha
 ## `npm run review`
 
 `src/cli.ts` is the local CLI entry point (epic #94, issue #96). Run `npm run review -- --help`
-for the full flag, environment-variable, and exit-code reference; see the README's "Local runs"
-section for prerequisites and trust posture. Do not restate either here.
+for the full flag, environment-variable, and exit-code reference; see
+[`docs/operations.md`](docs/operations.md#local-runs) for prerequisites and trust posture. Do not
+restate either here.
 
 Issue #95 landed `performLocalReview` in `src/review.ts`, so the CLI runs a real review end to
 end, through the same shared pipeline `performReview` runs — same digest-pinned engine, same rule
-text, same settlement semantics. Issue #99 landed the other end of that sharing:
-`corpus/real-diffs.mjs` now drives `performLocalReview` too, instead of hand-rolling its own engine
-invocation, so a change to the shared pipeline is proven by one measurement covering both the CLI
-and a real commit, not two separate ones. `corpus/run.mjs` (the seeded-defect qualification
-harness) still drives the engine through its own harness code — its own migration is a
-deliberately separate, not-yet-scoped decision, left alone so the qualification that shipped each
-release keeps the same measurement basis it was recorded under (see `corpus/run.mjs`'s own header
-comment).
+text, same settlement semantics. Issue #99 moved `corpus/real-diffs.mjs` onto that path. The v0.23
+qualification recut completed the staged side: `KFQ_SINGLE_SHOT=1 corpus/run.mjs` now drives
+`performLocalReview` too, so its precision score is based on the shipped Truth/Challenge/Falsifier
+verification and publication plan rather than raw generation. The classic binary mode retains its
+historical direct harness for comparison; evidence from before and after this recut is separated by
+the transitive engine/scorer binding.
 
-## Four commands spend real money
+## Four commands and one manual workflow spend real money
 
 `npm run corpus`, `npm run corpus:real`, `npm run corpus:seed`, and `npm run corpus:completion`
 call a real model over a real endpoint — `corpus:real` against however many commits you point it
@@ -33,6 +32,11 @@ reason. Do not run any of them without the user's explicit go-ahead, and do not 
 "double check" an ordinary change — the deterministic half of the corpus (inventory, placement,
 sanitization, settlement) already runs under `npm test`, and both gates' grading logic is
 hermetically covered by `corpus/seed-gate.test.mjs` and `corpus/completion-gate.test.mjs`.
+
+The manual **historical diagnostic** Actions workflow also spends real model tokens. It exists only
+for a small, digest-bound verifier experiment when credentials are intentionally absent locally;
+its required confirmation is not authorization. Apply the same rule: inspect its zero-token plan
+and obtain the user's explicit go-ahead before dispatching it.
 
 ## Recall gates cannot see a reviewer that does not finish
 
@@ -56,13 +60,21 @@ a green verify masked a defused pin until a direct `node --test` run surfaced it
 gap is what the step is in the chain for.
 
 What did not go away is a naming collision worth knowing before you trust a green CI page: the CI
-job named `verify` is not the script named `verify`. The job runs typecheck, lint, format check,
-`npm test` and `check:bundle` as separate steps, and `test:corpus` is not among them; the job that
-does execute the corpus suites is CI's `SonarCloud` job, through `test:coverage`, and it is skipped
-on pull requests from forks because a fork receives no secrets. So on a fork pull request nothing
-required exercises the corpus at all, and `npm run verify` locally is the only place it is
-guaranteed to run. Read the `verify` job named in the `dist/index.js` section below the same way:
-that is the CI job, not the script.
+job named `verify` is not the script named `verify`. CI's `core verify` job runs typecheck, lint,
+format check, `npm test` and `check:bundle` as separate steps, and `test:corpus` is not among them;
+the `SonarCloud` job executes the corpus and script suites through `test:coverage`. The protected
+`verify` context is a fail-closed aggregate over both jobs, so a same-repository pull request cannot
+pass without the post-scan Sonar evidence checks. Sonar is skipped on pull requests from forks
+because a fork receives no secrets, and the aggregate deliberately treats that skip as red; carry
+the change on a trusted same-repository branch before merging it. A push to `main` is the one
+non-Sonar path: the signed release commit binds the exact dev commit and tree it copied, and a
+separate provenance job resolves that immutable commit from dev history and recomputes both trees.
+The job is load-bearing on the release pull request, where it also checks that the repository's
+squash-message policy will preserve the binding, and repeats on the resulting main push. It does
+not compare against the moving dev tip, so a later dev push cannot invalidate a correct release; a
+missing, malformed, non-dev, or tree-mismatched binding stays red. The release ledger therefore
+reuses already-governed dev evidence only for byte-identical source. Read the `verify` context named
+in the `dist/index.js` section below the same way: that is the CI aggregate, not the script.
 
 ## Every live run this project makes uses `gpt-oss-120b`
 
@@ -130,7 +142,7 @@ absence of overlap.
 
 Consumers execute `dist/index.js` (`action.yml` → `runs.main`), and the file is tracked in git.
 `npm test`, `typecheck` and `lint` all pass without it being current, so a source change without
-`npm run build` looks green locally and then fails CI's `verify` job at `check:bundle`
+`npm run build` looks green locally and then fails CI's `core verify` job at `check:bundle`
 ("dist/index.js is stale"). Worse than the red check is the near-miss it guards against: a pinned
 SHA whose executed bundle differs from its reviewed source. Run `npm run verify` — not the
 individual commands — before calling any change done, and commit the regenerated `dist/index.js`
@@ -147,6 +159,7 @@ fails silently belongs in a program, not in a memory or a checklist.
 
 ```bash
 npm run release -- prep    --version X.Y.Z          # version, README pin comment, build, verify, commit
+npm run release -- attest  --version X.Y.Z          # validate clean-RC gates, verify, evidence-only commit
 npm run release -- release --version X.Y.Z          # release branch off main, dev's tree, identity asserted
 npm run release -- publish --version X.Y.Z --sha <main-squash>   # signed tag + GitHub Release + check
 npm run release -- repin   --version X.Y.Z --sha <main-squash>   # this repo's self-review pin
@@ -155,13 +168,19 @@ npm run release:check                               # any time: newest tag must 
 
 Four things the script refuses rather than warns about, each an error already made here:
 
-- **No gate evidence, no release.** `prep` fails unless `corpus/evidence/` already carries this
-  version's seed-gate and completion-gate reports. The gates are paid and slow, so the script
-  never runs them — it refuses to ship a version whose evidence nobody wrote down.
+- **No gate evidence, no release.** `prep` first creates the clean versioned RC. Qualification,
+  historical replay, seed and completion run on that commit. The raw qualification `OCR_REPORT`
+  stays outside the repository; `npm run qualification:evidence` converts it to the only redacted
+  JSON schema `attest` accepts. Attestation then accepts only the four new version-scoped evidence
+  files and refuses a report whose version, commit, model or promotion verdict does not match.
+  `release` additionally proves the measured RC is an ancestor of `dev` and that only those evidence
+  files changed afterwards.
 - **`npm run verify` is never piped.** A pipeline exits with its LAST command's status, so
   `npm run verify | tail` reads a red chain as green. That shipped a stale `dist/` on 2026-08-08.
-- **The release tree must equal `dev`'s tree**, asserted with `rev-parse HEAD^{tree}`. A release
-  that is not byte-identical to what the gates ran against is a release with no evidence.
+- **The release tree must equal `dev`'s tree at branch cut**, asserted with
+  `rev-parse HEAD^{tree}`. The signed release commit records that dev commit and tree for the later
+  main-push provenance check. Its executable source must equal the measured RC; only the attested
+  release-evidence delta may follow that RC.
 - **The consumer's `uses:` and `ACTION_PIN` move together.** The consumer workflow's own sync
   check fails the run when they disagree; the script counts both rewrites so a half-rewrite stops
   before it is pushed.
@@ -192,8 +211,11 @@ for that would be claiming to have verified something it only waited for.
   `dev` is always the correct side of that false conflict, and neither remedy is available here —
   merging `main` into `dev` and rebasing `dev` both break linear history and the no-force-push
   rule. So the release branch takes `dev`'s tree WHOLE (`git checkout origin/dev -- .`), and the
-  release must assert `HEAD^{tree}` equals `origin/dev^{tree}` before opening the pull request, so
-  what ships is the qualified tree rather than the outcome of a hand-resolved merge.
+  release must assert `HEAD^{tree}` equals `origin/dev^{tree}` before opening the pull request and
+  bind that exact commit and tree in its signed message, so what ships is the qualified tree rather
+  than the outcome of a hand-resolved merge. The release pull request validates that immutable
+  binding before merge; main repeats the proof afterwards. Neither compares against the then-current
+  dev tip.
 - Both branches carry identical protection: signed commits, linear history, no force pushes,
   conversation resolution, and the required checks `verify`, `engine pin`, and
   `SonarCloud Code Analysis` (verified against the live branch protection). `action smoke` runs on

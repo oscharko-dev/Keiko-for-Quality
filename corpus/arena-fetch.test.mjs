@@ -78,6 +78,7 @@ function threadFixture(id, login, path = "a.ts") {
           originalStartLine: null,
           createdAt: "2026-01-01T00:00:00Z",
           commit: { oid: "abc" },
+          originalCommit: { oid: "def" },
           author: { login, __typename: "Bot" },
           replyTo: null,
         },
@@ -86,10 +87,12 @@ function threadFixture(id, login, path = "a.ts") {
   };
 }
 
-function graphqlPage(headRefOid, threads, pageInfo) {
+function graphqlPage(headRefOid, threads, pageInfo, baseRefOid = "basesha1") {
   return {
     data: {
-      repository: { pullRequest: { headRefOid, reviewThreads: { pageInfo, nodes: threads } } },
+      repository: {
+        pullRequest: { baseRefOid, headRefOid, reviewThreads: { pageInfo, nodes: threads } },
+      },
     },
   };
 }
@@ -98,15 +101,30 @@ test("fetchPullRequestReviewThreads returns a single page's threads without pagi
   const threads = [threadFixture("t1", "someone")];
   const page = graphqlPage("headsha1", threads, { hasNextPage: false, endCursor: null });
   let calls = 0;
-  const fakeRunGh = () => {
+  let capturedArgs;
+  const fakeRunGh = (args) => {
     calls += 1;
+    capturedArgs = args;
     return JSON.stringify(page);
   };
   const result = fetchPullRequestReviewThreads("owner", "repo", 1, fakeRunGh);
   assert.equal(calls, 1);
+  assert.equal(result.baseSha, "basesha1");
   assert.equal(result.headSha, "headsha1");
   assert.equal(result.threads.length, 1);
   assert.equal(result.truncatedThreadCount, 0);
+  assert.match(
+    capturedArgs.find((arg) => arg.startsWith("query=")),
+    /\bdiffHunk\b/u,
+  );
+  assert.match(
+    capturedArgs.find((arg) => arg.startsWith("query=")),
+    /\bbaseRefOid\b/u,
+  );
+  assert.match(
+    capturedArgs.find((arg) => arg.startsWith("query=")),
+    /\boriginalCommit\s*\{\s*oid\s*\}/u,
+  );
 });
 
 test("fetchPullRequestReviewThreads follows pagination and merges threads across pages", () => {

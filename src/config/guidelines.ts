@@ -10,16 +10,14 @@ import { MAX_INSTRUCTION_PATH_LENGTH } from "./profile.js";
  * Measured across 268 CodeRabbit findings in this consumer's own history, roughly two in five cite
  * a repository guideline, and Codex attaches an `AGENTS.md` line reference to nearly all of them.
  *
- * Only the **paths** travel into the review, never the contents, and that is the design rather than
- * a shortcut. The first attempt inlined the documents through the engine's `--background-file`, and
- * the engine rejected it: that flag is capped at 8000 characters, while this consumer's `AGENTS.md`
- * alone is 33000. Truncating to fit would have been worse than not citing at all — a model that
- * receives half a rulebook cites rules it never saw the end of.
+ * The configured paths select complete documents from the verified merge-base tree. The staged
+ * reviewer reads a bounded set once in its Scout step; a document that does not fit every bound is
+ * omitted whole rather than truncated. The older `--background-file` attempt could carry only 8000
+ * characters and therefore showed half a rulebook for repositories whose `AGENTS.md` was larger.
  *
- * Naming the paths instead costs a couple of hundred characters, and the model reads what it
- * actually needs with the same search tools it uses to find a caller. The documents are named from
- * the **base** checkout, never from the candidate: a candidate that could nominate its own
- * guidelines would be writing the rules it is judged by.
+ * Candidate content can never become guidance: paths come from trusted action configuration and
+ * bytes come from the immutable **base**, never from the proposed head. `guideline-context.ts`
+ * owns that object-read and framing boundary.
  */
 export interface GuidelineIndex {
   readonly paths: readonly string[];

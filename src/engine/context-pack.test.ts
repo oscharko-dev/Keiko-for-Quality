@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -223,6 +223,43 @@ describe("collectContextPacks", () => {
     expect(pack).not.toContain("src/consumer.ts:");
   });
 
+  it("ignores hostile repository diff configuration instead of executing configured drivers", async () => {
+    const attributesPath = join(repo, ".git", "info", "attributes");
+    await writeFile(attributesPath, "*.ts diff=hostile\n");
+    git(["config", "diff.external", "/usr/bin/false"], repo);
+    git(["config", "diff.hostile.textconv", "/usr/bin/false"], repo);
+    git(["config", "diff.submodule", "log"], repo);
+    try {
+      const externalDriverPacks = await collectContextPacks({
+        repositoryPath: repo,
+        pair,
+        paths: ["src/consumer.ts"],
+        pathValue: process.env.PATH ?? "",
+      });
+      expect(externalDriverPacks.get("src/consumer.ts")).toContain("src/helper.ts:1:");
+
+      // With the external driver removed, the textconv driver is independently hostile. The
+      // context diff must still read the immutable blobs directly and produce the same pack.
+      git(["config", "--unset-all", "diff.external"], repo);
+      const textconvPacks = await collectContextPacks({
+        repositoryPath: repo,
+        pair,
+        paths: ["src/consumer.ts"],
+        pathValue: process.env.PATH ?? "",
+      });
+      expect(textconvPacks.get("src/consumer.ts")).toContain("src/helper.ts:1:");
+    } finally {
+      for (const key of ["diff.external", "diff.hostile.textconv", "diff.submodule"]) {
+        try {
+          git(["config", "--unset-all", key], repo);
+        } catch {
+          // The external driver is removed inside the test; a failed assertion may skip that line.
+        }
+      }
+      await writeFile(attributesPath, "");
+    }
+  });
+
   it("prices no pack for a file below the engine's own plan threshold", async () => {
     const packs = await collectContextPacks({
       repositoryPath: repo,
@@ -247,6 +284,34 @@ describe("collectContextPacks", () => {
       expect(packs.size).toBe(0);
     } finally {
       await rm(empty, { recursive: true, force: true });
+    }
+  });
+
+  it("never renders a grep failure as negative repository evidence", async () => {
+    const wrappers = await mkdtemp(join(tmpdir(), "kfq-pack-git-"));
+    const wrapper = join(wrappers, "git");
+    await writeFile(
+      wrapper,
+      [
+        "#!/bin/sh",
+        'if [ "$2" = "grep" ]; then',
+        "  exit 2",
+        "fi",
+        'exec /usr/bin/git "$@"',
+        "",
+      ].join("\n"),
+    );
+    await chmod(wrapper, 0o755);
+    try {
+      const packs = await collectContextPacks({
+        repositoryPath: repo,
+        pair,
+        paths: ["src/consumer.ts"],
+        pathValue: `${wrappers}:/usr/bin:/bin`,
+      });
+      expect(packs.size).toBe(0);
+    } finally {
+      await rm(wrappers, { recursive: true, force: true });
     }
   });
 

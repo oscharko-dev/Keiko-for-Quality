@@ -284,6 +284,48 @@ document.addEventListener('DOMContentLoaded', async function() {
       template = template.split(uuid).join(blobUrls[uuid]);
     }
 
+    // The embedded README-widget panel predates the monitored card contract in widget/. Keep it
+    // explicitly labelled as a historical layout specimen so illustrative numbers and the former
+    // settlement labels can never be mistaken for live monitoring data. The executable renderer,
+    // metric definitions and current visual contract live in widget/ and its tests.
+    if (!template.includes('Widget service — live numbers')) {
+      throw new Error('Widget service specimen heading not found');
+    }
+    template = template.replace(
+      'Widget service — live numbers',
+      'Widget contract — live values are rendered by widget/'
+    );
+    // "Acted on" was an inference the product cannot prove. Historical email and widget examples
+    // use the observable review-thread state instead.
+    template = template.replaceAll('>acted on<', '>resolved<');
+    const widgetSpecimenStart = template.indexOf('>README widgets<');
+    const widgetSpecimenEnd = template.indexOf('</section>', widgetSpecimenStart);
+    if (widgetSpecimenStart < 0 || widgetSpecimenEnd <= widgetSpecimenStart) {
+      throw new Error('README widget specimen section markers not found');
+    }
+    const widgetSpecimenSource = template.slice(widgetSpecimenStart, widgetSpecimenEnd);
+    const expectedWidgetSpecimenTokens = [
+      '>README widgets<',
+      '>S · M · CARD · BANNER<',
+      "One markdown line in a README is the brand's most-seen surface. The orca and its green carry every variant; the numbers are the repository's own, rendered live.",
+      '>COMPLETE<'
+    ];
+    if (!expectedWidgetSpecimenTokens.every((token) => widgetSpecimenSource.includes(token))) {
+      throw new Error('README widget specimen rewrite contract drifted');
+    }
+    const widgetSpecimen = widgetSpecimenSource
+      .replace('>README widgets<', '>README widget — historical layout specimen<')
+      .replace('>S · M · CARD · BANNER<', '>NOT LIVE · SEE WIDGET/<')
+      .replace(
+        "One markdown line in a README is the brand's most-seen surface. The orca and its green carry every variant; the numbers are the repository's own, rendered live.",
+        'Illustrative layout only: these values are not monitoring data. The exact live metrics, labels and card layout are defined and tested in widget/.'
+      )
+      .replaceAll('>COMPLETE<', '>RUN OK<');
+    template =
+      template.slice(0, widgetSpecimenStart) +
+      widgetSpecimen +
+      template.slice(widgetSpecimenEnd);
+
     // Strip integrity + crossorigin — blob URLs from a file:// document inherit
     // a null origin, so crossorigin forces a CORS fetch that SRI then rejects.
     // The manifest bytes are ours; SRI protects against CDN compromise, not this.

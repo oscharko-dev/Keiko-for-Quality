@@ -78,6 +78,28 @@ describe("corpus harness startup", () => {
     expect(result.stdout).not.toContain("binding");
   });
 
+  it("refuses a staged rule override before any case or model work", () => {
+    const script = fileURLToPath(new URL("../../corpus/run.mjs", import.meta.url));
+    const result = spawnSync(process.execPath, [script, "--only", "no-such-case"], {
+      cwd: fileURLToPath(new URL("../..", import.meta.url)),
+      encoding: "utf8",
+      timeout: 60_000,
+      env: {
+        OCR_BINARY: process.execPath,
+        OCR_LLM_MODEL: "gpt-oss-120b",
+        OCR_RULE: "/unused/override.md",
+        KFQ_SINGLE_SHOT: "1",
+        PATH: process.env.PATH ?? "",
+      },
+    });
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain(
+      "OCR_RULE is not supported by staged production-local qualification",
+    );
+    expect(result.stdout).not.toContain("binding");
+  });
+
   // The same startup guarantee for the real-diffs harness, which carried the second instance of
   // the #48 loader bypass. Missing arguments must die at the usage line — cleanly, before any
   // profile, engine, or model concern — proving the script parses and links under plain node.

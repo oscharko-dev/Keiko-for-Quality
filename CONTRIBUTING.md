@@ -50,19 +50,42 @@ evidence the previous one produced.
 2. Run `npm run check:engine-pin`, which downloads and verifies every platform — not just yours.
 3. Re-run the qualification corpus and record the result.
 
+## Advancing the ast-grep pin
+
+Structural repository retrieval uses a separately pinned ast-grep release when lexical
+exact-commit results are ambiguous and may use it to enrich clear hits with bounded owning-function
+context. The closed runtime-fact detector uses that same pin against one complete bounded immutable
+blob over stdin and can select only versioned catalog text at the exact finding anchor; it never executes candidate code. An unavailable enrichment keeps the exact lexical evidence; an unavailable parser needed
+to disambiguate code fails closed. Non-code manifests and lockfiles remain bounded lexical
+evidence instead of being routed into an unsupported parser. Update every archive and
+extracted-binary digest in
+`src/publish/ast-grep-pin.ts`, then run `npm run check:ast-grep-pin`. That explicit audit downloads
+and verifies every supported platform; ordinary `npm run verify` deliberately stays offline. The
+complete pin is folded into review-cache publication semantics automatically. Because structural
+retrieval can change finding evidence, re-run the qualification corpus before shipping a new pin.
+
 ## Cutting a release
 
 Run `scripts/release.mjs`, never the steps by hand — AGENTS.md's own section explains which
 failure that script exists to make impossible. The phases below are what it does, listed so a
 reader knows what is being checked on their behalf.
 
-1. **Prep on a branch off `dev`:** version bump, the README quickstart's `# vX.Y.Z` comment,
-   `npm run build`. Commit before running the gates, so their reports name a clean tree.
-2. **Run both release gates on the RC tree** (`corpus/seed-gate.mjs`, `corpus/completion-gate.mjs`)
-   and commit their verbatim reports to `corpus/evidence/`. Never pipe `npm run verify` into
-   anything — a pipeline exits with the LAST command's status, so `npm run verify | tail` reads a
-   red chain as green. This has shipped a stale bundle once.
-3. **Release pull request into `main`,** whose tree must be `dev`'s tree, whole:
+1. **Run prep on a clean, final source branch.** It moves package/README to the target version,
+   builds, verifies and signs the release-candidate commit. Land that candidate on `dev`.
+2. **Run all four release measurements** on that clean candidate: qualification, historical replay,
+   consumer seed and completion. Keep the raw qualification `OCR_REPORT` outside the repository,
+   then create its public record with the `qualification:evidence` command documented in
+   `docs/operations.md`. Leave the four new version-scoped reports uncommitted, then run `attest`.
+   Attestation accepts no other dirty path; accepts only the explicitly redacted qualification
+   schema; binds every report to the candidate and pinned model; requires green
+   qualification/seed/completion plus a historical precision gain with at least 80% fixed-finding
+   retention and 75% decision coverage; then runs the full verification chain and signs an
+   evidence-only commit. Land that commit on `dev`. Never pipe `npm run verify` into anything — a
+   pipeline exits with its last command's status, so `npm run verify | tail` reads a red chain as
+   green. This has shipped a stale bundle once.
+3. **Release pull request into `main`,** whose tree must be `dev`'s tree, whole. Before creating it,
+   the script proves that the measured candidate is an ancestor of `dev` and that only the target
+   version's evidence changed afterwards:
    `git rm -rq . && git checkout origin/dev -- .`, then assert
    `git rev-parse HEAD^{tree}` equals `git rev-parse origin/dev^{tree}`.
 4. **Signed tag on the squash commit:** `git tag -s vX.Y.Z <sha> -m "…" && git push origin vX.Y.Z`.

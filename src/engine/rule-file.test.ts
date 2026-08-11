@@ -2,6 +2,17 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  BOUNDARY_OMISSION_EVIDENCE_POLICY,
+  DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+  MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+  PARALLEL_MAPPING_EVIDENCE_POLICY,
+  REFERENCE_TRANSITION_EVIDENCE_POLICY,
+  SENSITIVE_OUTPUT_EVIDENCE_POLICY,
+  TEST_ISOLATION_EVIDENCE_POLICY,
+  TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+  WORKFLOW_TRUST_EVIDENCE_POLICY,
+} from "./claim-decision-policy.js";
 import { buildRuleFile, deriveRepoConventions, serializeRuleFile } from "./rule-file.js";
 import { loadReviewProfile } from "../config/profile.js";
 import { sanitizeFindingBody } from "../publish/sanitize.js";
@@ -129,6 +140,16 @@ describe("buildRuleFile", () => {
     expect(file.rules[0]?.merge_system_rule).toBe(false);
   });
 
+  it("puts parallel mapping crossovers in the early report decision", () => {
+    const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    const reportSection = rule.slice(
+      rule.indexOf("## What to report"),
+      rule.indexOf("## Look before you claim"),
+    );
+    expect(reportSection).toContain("copy-paste crossovers in parallel keyed mappings");
+    expect(reportSection).toContain("every output reports the other sibling's state");
+  });
+
   /**
    * The rule text tells the model what it may emit, and the sanitizer decides what is publishable.
    * If the two disagree the reviewer loses correct findings and settles incomplete — which is what
@@ -148,6 +169,15 @@ describe("buildRuleFile", () => {
       "Validate the token in full, not by prefix.\n\nWhen a caller sends a token sharing its first eight characters with a valid one, the comparison accepts it.",
       "Close the handle after reading.\n\nIf the read throws, this path returns without closing, leaking the handle:\n\n```js\n// no close on this path\nreturn handle.readFile();\n```",
       "Pin this action to a full commit SHA.\n\nOn every run, a tag is resolved fresh, so the reviewed bytes and the executed bytes stop being the same bytes.",
+      "Restore the per-test module reset.\n\nWhen the reset is removed, the second case reuses the first case's memoized module state.",
+      "Restore the immutable action pin.\n\nWhen the workflow resolves `actions/setup-node@v4`, the executed bytes can move after review.",
+      "Keep the explicit empty-list update.\n\nWhen `workflowEligibleModelIds` is empty, omitting it makes the shown `?? current` consumer preserve stale eligibility instead of clearing it.",
+      "Keep the privileged checkout on the base SHA.\n\nWhen `pull_request_target` checks out the candidate head before install, candidate code runs with base-repository authority.",
+      "Remove the token from diagnostic context.\n\nWhen authentication fails, adding the raw token to the structured log discloses the credential.",
+      "Restore the numeric Retry-After conversion.\n\nWhen the header is numeric, `parseRetryAfter` returns seconds, so passing it directly to `setTimeout` retries one thousand times too early.",
+      "Restore the positive batch-size guard.\n\nWhen the shown digest caller supplies its zero fallback, the loop increment stays zero and never terminates.",
+      "Keep the audit validator aligned with production.\n\nWhen metadata lacks `schemaVersion` or `provider`, the loosened audit accepts an object the shown production validator rejects.",
+      "Restore each capability's matching predicate.\n\nOn every config where flags differ, the `figma` member calls the Jira predicate while `jira` calls the Figma predicate, so each capability reports the other connector's authorization.",
     ];
     for (const example of examples) {
       expect(sanitizeFindingBody(example).ok).toBe(true);
@@ -349,12 +379,36 @@ describe("buildRuleFile", () => {
         // (`clearCache`, `resetCache`) the module never exports — observed 3/3 in the v0.18.0
         // qualification and reproduced isolated; the full record is
         // corpus/evidence/fp-analysis-2026-08-06-clean-reset-modules.md.
-        name: "requires the suite's own setup to be read before an isolation claim, and bans invented helpers",
-        phrases: [
-          "before claiming a test's reset, isolation, or fresh-state setup fails to do its job",
-          "as if that setup were absent",
-          "helper the module does not export",
-        ],
+        name: "distinguishes a fresh dynamic import from removed or bypassed reset setup",
+        phrases: [TEST_ISOLATION_EVIDENCE_POLICY],
+      },
+      {
+        name: "walks normalized boundaries and requires a shown preserve-state consumer",
+        phrases: [BOUNDARY_OMISSION_EVIDENCE_POLICY],
+      },
+      {
+        name: "distinguishes privileged candidate execution from a trusted-base data fetch",
+        phrases: [WORKFLOW_TRUST_EVIDENCE_POLICY],
+      },
+      {
+        name: "treats a raw credential passed to an output sink as direct disclosure",
+        phrases: [SENSITIVE_OUTPUT_EVIDENCE_POLICY],
+      },
+      {
+        name: "keeps harmless primitive log context separate from secrets and changed errors",
+        phrases: [DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY],
+      },
+      {
+        name: "traces mixed units and removed guards to an exact shown trigger",
+        phrases: [TRIGGER_AND_GUARD_EVIDENCE_POLICY],
+      },
+      {
+        name: "compares a declared mirror against every shown production predicate",
+        phrases: [MIRRORED_VALIDATOR_EVIDENCE_POLICY],
+      },
+      {
+        name: "compares parallel output keys with their matching sources",
+        phrases: [PARALLEL_MAPPING_EVIDENCE_POLICY],
       },
     ];
 
@@ -371,6 +425,25 @@ describe("buildRuleFile", () => {
         for (const phrase of phrases) expect(rule).toContain(phrase);
       },
     );
+  });
+
+  it("binds all canonical claim-decision policies exactly once in the serialized rule", () => {
+    const file = buildRuleFile(profileWith({}));
+    const rule = file.rules[0]?.rule ?? "";
+    for (const policy of [
+      TEST_ISOLATION_EVIDENCE_POLICY,
+      REFERENCE_TRANSITION_EVIDENCE_POLICY,
+      BOUNDARY_OMISSION_EVIDENCE_POLICY,
+      WORKFLOW_TRUST_EVIDENCE_POLICY,
+      SENSITIVE_OUTPUT_EVIDENCE_POLICY,
+      DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+      TRIGGER_AND_GUARD_EVIDENCE_POLICY,
+      MIRRORED_VALIDATOR_EVIDENCE_POLICY,
+      PARALLEL_MAPPING_EVIDENCE_POLICY,
+    ]) {
+      expect(rule.split(policy)).toHaveLength(2);
+      expect(serializeRuleFile(file).split(policy)).toHaveLength(2);
+    }
   });
 
   describe("path-scoped instructions", () => {
