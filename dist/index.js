@@ -7080,8 +7080,20 @@ function advancingFunction(file) {
 }
 function shownZeroCaller(files, target) {
   return files.some(
-    (file) => file.path !== target.path && file.head.split("\n").some((line) => line.includes(`${target.name}(`) && line.includes("?? 0"))
+    (file) => file.path !== target.path && file.head.split("\n").some((line) => callsIdentifier(line, target.name) && line.includes("?? 0"))
   );
+}
+function callsIdentifier(line, name) {
+  let offset = 0;
+  while (offset < line.length) {
+    const found = line.indexOf(name, offset);
+    if (found < 0) return false;
+    const before = line[found - 1];
+    const after = line.slice(found + name.length).trimStart();
+    if ((before === void 0 || !/[\w$]/u.test(before)) && after.startsWith("(")) return true;
+    offset = found + name.length;
+  }
+  return false;
 }
 function detectCrossFileRegressions(files) {
   const findings = [];

@@ -85,8 +85,21 @@ function shownZeroCaller(files: readonly SourceTransition[], target: AdvancingFu
       file.path !== target.path &&
       file.head
         .split("\n")
-        .some((line) => line.includes(`${target.name}(`) && line.includes("?? 0")),
+        .some((line) => callsIdentifier(line, target.name) && line.includes("?? 0")),
   );
+}
+
+function callsIdentifier(line: string, name: string): boolean {
+  let offset = 0;
+  while (offset < line.length) {
+    const found = line.indexOf(name, offset);
+    if (found < 0) return false;
+    const before = line[found - 1];
+    const after = line.slice(found + name.length).trimStart();
+    if ((before === undefined || !/[\w$]/u.test(before)) && after.startsWith("(")) return true;
+    offset = found + name.length;
+  }
+  return false;
 }
 
 /** Finds a removed positive-step guard only when this diff also shows a zero-valued caller. */

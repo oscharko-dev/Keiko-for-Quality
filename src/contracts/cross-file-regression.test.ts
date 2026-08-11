@@ -37,6 +37,13 @@ describe("detectCrossFileRegressions", () => {
   it.each([
     ["no shown caller", [TARGET]],
     ["safe caller", [TARGET, { ...CALLER, head: CALLER.base }]],
+    [
+      "lookalike caller",
+      [
+        TARGET,
+        { ...CALLER, head: CALLER.head.replace("splitIntoBatches(", "mySplitIntoBatches(") },
+      ],
+    ],
     ["retained guard", [{ ...TARGET, head: TARGET.base }, CALLER]],
     [
       "non-advancing parameter is unrelated",
