@@ -32,6 +32,12 @@ interface MapWrite {
   readonly line: SourceLine;
 }
 
+interface AwaitedFileRead {
+  readonly receiver: string;
+  readonly line: SourceLine;
+  readonly index: number;
+}
+
 const HEAD_ROW = /^H:([1-9]\d*)\| (.*)$/u;
 const BASE_ROW = /^B:([1-9]\d*)\| (.*)$/u;
 const CHANGED_HEAD_ROW = /^D:H:([1-9]\d*)\| \+(.*)$/u;
@@ -331,6 +337,135 @@ function catchDisclosureProof(
   return undefined;
 }
 
+function unhandledFileReadClaim(content: string): boolean {
+  const claim = content.slice(0, MAX_CLAIM_CHARS);
+  return (
+    /\bfile\.text\s*\(\s*\)/iu.test(claim) &&
+    /\b(?:reject\w*|unhandled|uncaught|propagat\w*|read(?:ing)?\s+fail\w*)\b/iu.test(claim) &&
+    /\b(?:catch|error\s+handling)\b/iu.test(claim)
+  );
+}
+
+function awaitedFileReadAtFinding(
+  finding: JudgeableFinding,
+  lines: readonly SourceLine[],
+): AwaitedFileRead | undefined {
+  const matches: AwaitedFileRead[] = [];
+  for (const [index, line] of lines.entries()) {
+    if (!line.changed || !insideFinding(line.line, finding)) continue;
+    const read = /\bawait\s+([A-Za-z_$][\w$]*)\.text\s*\(\s*\)/u.exec(line.code);
+    if (read?.[1] === undefined || /\.catch\s*\(/u.test(line.code.slice(read.index))) continue;
+    matches.push({ receiver: read[1], line, index });
+  }
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+function inputFileBinding(
+  lines: readonly SourceLine[],
+  read: AwaitedFileRead,
+  handlerOpening: number,
+): boolean {
+  const receiver = escaped(read.receiver);
+  const declaration = new RegExp(
+    String.raw`^\s*const\s+${receiver}\s*=\s*[A-Za-z_$][\w$]*\.target\.files\?\.\[0\]\s*;?\s*$`,
+    "u",
+  );
+  return lines.slice(handlerOpening + 1, read.index).some((line) => declaration.test(line.code));
+}
+
+function enclosingAsyncInputHandler(
+  lines: readonly SourceLine[],
+  read: AwaitedFileRead,
+): { readonly name: string; readonly opening: number; readonly closing: number } | undefined {
+  for (let index = read.index; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (line === undefined || line.depth < 1) continue;
+    const declaration =
+      /^\s*async\s+function\s+([A-Za-z_$][\w$]*)\s*\([^)]*ChangeEvent<HTMLInputElement>[^)]*\)[^{]*\{/u.exec(
+        line.code,
+      );
+    const name = declaration?.[1];
+    if (name === undefined) continue;
+    const closing = matchingBrace(lines, index);
+    if (closing !== undefined && read.index > index && read.index < closing) {
+      return { name, opening: index, closing };
+    }
+  }
+  return undefined;
+}
+
+function nextCodeLine(lines: readonly SourceLine[], index: number): string {
+  for (let cursor = index; cursor < lines.length; cursor += 1) {
+    const code = lines[cursor]?.code.trim() ?? "";
+    if (code !== "") return code;
+  }
+  return "";
+}
+
+function tryCatchesRead(
+  lines: readonly SourceLine[],
+  tryIndex: number,
+  readIndex: number,
+): boolean {
+  const line = lines[tryIndex];
+  if (line === undefined || !/\btry\s*\{/u.test(line.code)) return false;
+  const closing = matchingBrace(lines, tryIndex);
+  if (closing === undefined || closing < readIndex) return false;
+  const closingCode = lines[closing]?.code ?? "";
+  return /\bcatch\b/u.test(closingCode) || /^catch\b/u.test(nextCodeLine(lines, closing + 1));
+}
+
+function readIsInsideCaughtTry(
+  lines: readonly SourceLine[],
+  readIndex: number,
+  handler: { readonly opening: number; readonly closing: number },
+): boolean {
+  return lines
+    .slice(handler.opening + 1, readIndex + 1)
+    .some((_line, offset) => tryCatchesRead(lines, handler.opening + 1 + offset, readIndex));
+}
+
+function soleDiscardedHandlerCall(
+  lines: readonly SourceLine[],
+  handler: { readonly name: string; readonly opening: number; readonly closing: number },
+): SourceLine | undefined {
+  const name = escaped(handler.name);
+  const occurrence = new RegExp(String.raw`\b${name}\b`, "gu");
+  const uses = lines.flatMap((line) => [...line.code.matchAll(occurrence)].map(() => line));
+  if (uses.length !== 2) return undefined;
+  const opening = lines[handler.opening];
+  const closing = lines[handler.closing];
+  if (opening === undefined || closing === undefined) return undefined;
+  const call = uses.find((line) => line.line < opening.line || line.line > closing.line);
+  if (!call?.changed) return undefined;
+  const discarded = new RegExp(String.raw`\bvoid\s+${name}\s*\([^)]*\)`, "u");
+  const invocation = discarded.exec(call.code);
+  if (invocation === null || /\.(?:catch|then)\s*\(/u.test(call.code)) return undefined;
+  const suffix = call.code.slice(invocation.index + invocation[0].length).trimStart();
+  return suffix.startsWith(";") || suffix.startsWith("}") ? call : undefined;
+}
+
+function unhandledFileReadProof(
+  finding: JudgeableFinding,
+  lines: readonly SourceLine[],
+): ClosedClaimProof | undefined {
+  if (!unhandledFileReadClaim(finding.content)) return undefined;
+  const read = awaitedFileReadAtFinding(finding, lines);
+  if (read === undefined) return undefined;
+  const handler = enclosingAsyncInputHandler(lines, read);
+  if (
+    handler === undefined ||
+    !inputFileBinding(lines, read, handler.opening) ||
+    readIsInsideCaughtTry(lines, read.index, handler)
+  ) {
+    return undefined;
+  }
+  const call = soleDiscardedHandlerCall(lines, handler);
+  return call === undefined
+    ? undefined
+    : { evidenceRefs: [...refsAt(read.line.line), ...refsAt(call.line)] };
+}
+
 function mapWriteAtFinding(
   finding: JudgeableFinding,
   lines: readonly SourceLine[],
@@ -553,5 +688,9 @@ export function closedClaimProof(
   if (!carriesTrustedEvidenceBrand(evidence)) return undefined;
   if (evidence.headSource === undefined || evidence.baseSource !== undefined) return undefined;
   const lines = sourceLines(evidence.headSource, changedHeadLines(evidence.text));
-  return catchDisclosureProof(finding, lines) ?? duplicateMapProof(finding, lines);
+  return (
+    catchDisclosureProof(finding, lines) ??
+    duplicateMapProof(finding, lines) ??
+    unhandledFileReadProof(finding, lines)
+  );
 }

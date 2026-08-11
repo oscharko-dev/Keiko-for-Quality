@@ -10515,6 +10515,89 @@ function catchDisclosureProof(finding, lines) {
   }
   return void 0;
 }
+function unhandledFileReadClaim(content) {
+  const claim = content.slice(0, MAX_CLAIM_CHARS);
+  return /\bfile\.text\s*\(\s*\)/iu.test(claim) && /\b(?:reject\w*|unhandled|uncaught|propagat\w*|read(?:ing)?\s+fail\w*)\b/iu.test(claim) && /\b(?:catch|error\s+handling)\b/iu.test(claim);
+}
+function awaitedFileReadAtFinding(finding, lines) {
+  const matches = [];
+  for (const [index, line] of lines.entries()) {
+    if (!line.changed || !insideFinding(line.line, finding)) continue;
+    const read = /\bawait\s+([A-Za-z_$][\w$]*)\.text\s*\(\s*\)/u.exec(line.code);
+    if (read?.[1] === void 0 || /\.catch\s*\(/u.test(line.code.slice(read.index))) continue;
+    matches.push({ receiver: read[1], line, index });
+  }
+  return matches.length === 1 ? matches[0] : void 0;
+}
+function inputFileBinding(lines, read, handlerOpening) {
+  const receiver = escaped(read.receiver);
+  const declaration = new RegExp(
+    String.raw`^\s*const\s+${receiver}\s*=\s*[A-Za-z_$][\w$]*\.target\.files\?\.\[0\]\s*;?\s*$`,
+    "u"
+  );
+  return lines.slice(handlerOpening + 1, read.index).some((line) => declaration.test(line.code));
+}
+function enclosingAsyncInputHandler(lines, read) {
+  for (let index = read.index; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (line === void 0 || line.depth < 1) continue;
+    const declaration = /^\s*async\s+function\s+([A-Za-z_$][\w$]*)\s*\([^)]*ChangeEvent<HTMLInputElement>[^)]*\)[^{]*\{/u.exec(
+      line.code
+    );
+    const name = declaration?.[1];
+    if (name === void 0) continue;
+    const closing = matchingBrace2(lines, index);
+    if (closing !== void 0 && read.index > index && read.index < closing) {
+      return { name, opening: index, closing };
+    }
+  }
+  return void 0;
+}
+function nextCodeLine(lines, index) {
+  for (let cursor = index; cursor < lines.length; cursor += 1) {
+    const code = lines[cursor]?.code.trim() ?? "";
+    if (code !== "") return code;
+  }
+  return "";
+}
+function tryCatchesRead(lines, tryIndex, readIndex) {
+  const line = lines[tryIndex];
+  if (line === void 0 || !/\btry\s*\{/u.test(line.code)) return false;
+  const closing = matchingBrace2(lines, tryIndex);
+  if (closing === void 0 || closing < readIndex) return false;
+  const closingCode = lines[closing]?.code ?? "";
+  return /\bcatch\b/u.test(closingCode) || /^catch\b/u.test(nextCodeLine(lines, closing + 1));
+}
+function readIsInsideCaughtTry(lines, readIndex, handler) {
+  return lines.slice(handler.opening + 1, readIndex + 1).some((_line, offset) => tryCatchesRead(lines, handler.opening + 1 + offset, readIndex));
+}
+function soleDiscardedHandlerCall(lines, handler) {
+  const name = escaped(handler.name);
+  const occurrence = new RegExp(String.raw`\b${name}\b`, "gu");
+  const uses = lines.flatMap((line) => [...line.code.matchAll(occurrence)].map(() => line));
+  if (uses.length !== 2) return void 0;
+  const opening = lines[handler.opening];
+  const closing = lines[handler.closing];
+  if (opening === void 0 || closing === void 0) return void 0;
+  const call = uses.find((line) => line.line < opening.line || line.line > closing.line);
+  if (!call?.changed) return void 0;
+  const discarded = new RegExp(String.raw`\bvoid\s+${name}\s*\([^)]*\)`, "u");
+  const invocation = discarded.exec(call.code);
+  if (invocation === null || /\.(?:catch|then)\s*\(/u.test(call.code)) return void 0;
+  const suffix = call.code.slice(invocation.index + invocation[0].length).trimStart();
+  return suffix.startsWith(";") || suffix.startsWith("}") ? call : void 0;
+}
+function unhandledFileReadProof(finding, lines) {
+  if (!unhandledFileReadClaim(finding.content)) return void 0;
+  const read = awaitedFileReadAtFinding(finding, lines);
+  if (read === void 0) return void 0;
+  const handler = enclosingAsyncInputHandler(lines, read);
+  if (handler === void 0 || !inputFileBinding(lines, read, handler.opening) || readIsInsideCaughtTry(lines, read.index, handler)) {
+    return void 0;
+  }
+  const call = soleDiscardedHandlerCall(lines, handler);
+  return call === void 0 ? void 0 : { evidenceRefs: [...refsAt(read.line.line), ...refsAt(call.line)] };
+}
 function mapWriteAtFinding(finding, lines) {
   for (const line of lines) {
     if (!line.changed || !insideFinding(line.line, finding)) continue;
@@ -10658,7 +10741,7 @@ function closedClaimProof(finding, evidence) {
   if (!carriesTrustedEvidenceBrand(evidence)) return void 0;
   if (evidence.headSource === void 0 || evidence.baseSource !== void 0) return void 0;
   const lines = sourceLines(evidence.headSource, changedHeadLines(evidence.text));
-  return catchDisclosureProof(finding, lines) ?? duplicateMapProof(finding, lines);
+  return catchDisclosureProof(finding, lines) ?? duplicateMapProof(finding, lines) ?? unhandledFileReadProof(finding, lines);
 }
 
 // src/publish/substantiate.ts
