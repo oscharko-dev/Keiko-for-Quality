@@ -404,6 +404,8 @@ describe("role prompts", () => {
     expect(truthPrompt).toContain("A matching excerpt alone is not positive proof");
     expect(truthPrompt).toContain("Impact, severity language");
     expect(terminalTruthPrompt).toContain("Do not require proof of impact");
+    expect(truthPrompt).toContain("guard in one caller does not make a missing invariant");
+    expect(terminalTruthPrompt).toContain("shown catch-to-sink flow is sufficient");
     expect(truthPrompt).toContain("D:H");
     expect(truthPrompt).toContain("needs_context");
     expect(plannerPrompt).toContain("same_file_contract");
@@ -1002,6 +1004,38 @@ describe("truth then adversarial falsification", () => {
     expect(out.confirmed).toBe(1);
     expect(out.challengeNoMatches).toBe(1);
     expect(endpoint.prompts()).toHaveLength(2);
+  });
+
+  it("uses reduced terminal Truth once when the initial closed decision is malformed", async () => {
+    const candidate = finding(
+      "When duplicate ids are parsed, the later entry overwrites the first.",
+    );
+    const malformed = truth({ verdict: "confirmed", reason_code: "contradicted" });
+    const endpoint = endpointReplying([malformed, terminalTruth()]);
+    const traces: SubstantiationTerminalTrace[] = [];
+    const out = await substantiate(
+      [candidate],
+      () => CHANGE_EVIDENCE,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      () => ({ chunks: [] }),
+      (trace) => traces.push(trace),
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(out.confirmed).toBe(1);
+    expect(out.undecided).toBe(0);
+    expect(endpoint.prompts()).toHaveLength(2);
+    expect(endpoint.prompts()[1]).toContain("Make the final truth decision");
+    expect(traces).toEqual([
+      expect.objectContaining({
+        stage: "challenge_retrieval",
+        disposition: "kept",
+        reasonCode: "retrieval_no_match",
+        usage: expect.objectContaining({ callCount: 2 }),
+      }),
+    ]);
   });
 
   it("requires the independent Referee to confirm an adversarial defeat", async () => {
@@ -1928,7 +1962,7 @@ describe("hard shared request budget", () => {
     expect(substantiationOnePathTokenUpperBound(candidate, evidence)).toBe(
       MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
     );
-    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(974_447);
+    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(976_767);
   });
 
   it("shares the same hard ceiling across later findings", async () => {

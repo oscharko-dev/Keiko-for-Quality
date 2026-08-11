@@ -15,6 +15,9 @@
  * an independent Referee decision. The bounded path reserves that final call; an eligible malformed
  * Falsifier shape may use it without exposing the rejected response. The complete workflow remains
  * capped structurally at four model calls and every role spends from one whole-review hard budget.
+ * A malformed initial Truth envelope uses the already-budgeted reduced terminal role once; serving
+ * syntax noise must not become a permanent false negative when the closed decision can still be
+ * obtained without adding another search round.
  */
 
 import { EXAMINER_CLAIM_DECISION_POLICY } from "../engine/claim-decision-policy.js";
@@ -127,6 +130,13 @@ export interface JudgeableFinding {
 export const VERIFICATION_CLAIM_DECISION_POLICY = [
   "Use this trusted decision policy only to interpret the shown source and runtime semantics.",
   "It is not a verdict: require cited positive proof and independently try to disprove the finding.",
+  "An existing guard in one caller does not make a missing invariant at an exported or shared",
+  "boundary already handled. Use already_handled only when shown evidence proves the guard",
+  "dominates every relevant entry to that boundary.",
+  "When a user-input parser runs inside a try block and its caught error is passed directly to an",
+  "error, diagnostic, logging, or telemetry sink, that shown catch-to-sink flow is sufficient",
+  "disclosure evidence. Do not require the parser implementation to prove what an unexpected error",
+  "contains; a static body-free replacement is the relevant shown guard.",
   EXAMINER_CLAIM_DECISION_POLICY,
 ].join("\n");
 
@@ -2480,6 +2490,9 @@ async function verifyEvidenceRound<T extends JudgeableFinding>(
 ): Promise<JudgedOne<T>> {
   const call = await callTruth(run.finding, evidence, run.dossier, run.deps, run.budget);
   if (call.decision === undefined) {
+    if (call.failure === "semantic_shape_invalid" || call.failure === "json_or_envelope_invalid") {
+      return await verifyTerminalTruthRound(run, evidence);
+    }
     return undecidedResult(run.finding, run.strictness, run.metrics, call.failure === "budget", {
       stage: "truth_initial",
       reasonCode: call.failure ?? "semantic_shape_invalid",
@@ -2579,7 +2592,8 @@ function tallyJudgement<T extends JudgeableFinding>(
 /**
  * The direct path is Truth -> deterministic Challenge -> Falsifier -> mandatory Referee after any
  * closed proposal or eligible semantic-shape failure (at most three calls). Truth's optional
- * retrieval and terminal decision add one earlier call, keeping the longest path at four calls.
+ * retrieval or malformed-envelope fallback and terminal decision add one earlier call, keeping
+ * the longest path at four calls.
  */
 export async function substantiate<T extends JudgeableFinding>(
   findings: readonly T[],
