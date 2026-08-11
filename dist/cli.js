@@ -11589,10 +11589,8 @@ function undecidedFalsifier(run2, failure) {
   });
 }
 async function settleFalsifierCall(run2, evidence, challenge, truth, call) {
-  const mayReferee = (call.decision !== void 0 || call.failure === "semantic_shape_invalid" || call.failure === "json_or_envelope_invalid") && run2.budget.calls - run2.callsAtStart < 4;
-  if (!mayReferee) {
-    return call.decision === void 0 ? undecidedFalsifier(run2, call.failure) : applyFalsifierDecision(run2, call.decision);
-  }
+  const shouldReferee = call.decision !== void 0 || call.failure === "semantic_shape_invalid" || call.failure === "json_or_envelope_invalid";
+  if (!shouldReferee) return undecidedFalsifier(run2, call.failure);
   const referee = await callReferee(run2.finding, evidence, challenge, truth, run2.deps, run2.budget);
   return referee.decision === void 0 ? undecidedFalsifier(run2, referee.failure) : applyFalsifierDecision(run2, referee.decision);
 }
@@ -11706,8 +11704,7 @@ async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) 
       strictness,
       budget,
       retriever,
-      metrics,
-      callsAtStart: budget.calls
+      metrics
     },
     evidence
   );

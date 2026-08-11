@@ -3209,8 +3209,8 @@ function recordSubstantiation(
  * terminal decision. Every confirmed claim receives a separate contract challenge whose terms are
  * retrieved before the terminal adversarial Falsifier. A challenge search with no novel evidence
  * is the closed no-defeater result for an already direct-proven claim; an expanded challenge reaches
- * the Falsifier. Every closed Falsifier proposal — and an eligible malformed response — reaches the
- * independent Referee on both the direct and Truth-retrieval paths, within the four-call cap.
+ * the Falsifier. Both bounded paths reserve their final call so every closed Falsifier proposal —
+ * and an eligible malformed response — reaches the independent Referee within the four-call cap.
  * Wording is never repaired here: an unproven hypothesis leaves the cohort unchanged only in the
  * sense that no replacement is invented — under production's paranoid policy it is withheld.
  *

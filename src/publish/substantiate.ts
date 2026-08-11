@@ -12,9 +12,9 @@
  * one closed disproof axis and searches for a counterexample or guard outside Truth's proof. A
  * successful search with no novel evidence is itself the terminal no-defeater result; when it does
  * expand the evidence, the terminal Falsifier proposes a verdict and every closed proposal receives
- * an independent Referee decision. A semantically invalid Falsifier shape may use that same final
- * round without exposing the rejected response. The complete workflow remains capped structurally
- * at four model calls and every role spends from one whole-review hard budget.
+ * an independent Referee decision. The bounded path reserves that final call; an eligible malformed
+ * Falsifier shape may use it without exposing the rejected response. The complete workflow remains
+ * capped structurally at four model calls and every role spends from one whole-review hard budget.
  */
 
 import { EXAMINER_CLAIM_DECISION_POLICY } from "../engine/claim-decision-policy.js";
@@ -2187,7 +2187,6 @@ interface CandidateRun<T extends JudgeableFinding> {
   readonly budget: CallBudget;
   readonly retriever: EvidenceRetriever<T> | undefined;
   readonly metrics: CandidateMetrics;
-  readonly callsAtStart: number;
 }
 
 async function continueTruthWithContext<T extends JudgeableFinding>(
@@ -2330,17 +2329,13 @@ async function settleFalsifierCall<T extends JudgeableFinding>(
   // response discarded a Truth-confirmed finding immediately, while `survives` still had to pass
   // the independent Referee. That asymmetry compounded false negatives: the role most strongly
   // prompted to find a defeater needed no corroboration for doing so. Every closed Falsifier
-  // verdict now receives the same independent Referee decision when the four-call ceiling permits.
-  const mayReferee =
-    (call.decision !== undefined ||
-      call.failure === "semantic_shape_invalid" ||
-      call.failure === "json_or_envelope_invalid") &&
-    run.budget.calls - run.callsAtStart < 4;
-  if (!mayReferee) {
-    return call.decision === undefined
-      ? undecidedFalsifier(run, call.failure)
-      : applyFalsifierDecision(run, call.decision);
-  }
+  // verdict now receives the same independent Referee decision. Path construction reaches this
+  // point after at most three calls, so the fourth and final call is reserved for Referee.
+  const shouldReferee =
+    call.decision !== undefined ||
+    call.failure === "semantic_shape_invalid" ||
+    call.failure === "json_or_envelope_invalid";
+  if (!shouldReferee) return undecidedFalsifier(run, call.failure);
 
   const referee = await callReferee(run.finding, evidence, challenge, truth, run.deps, run.budget);
   return referee.decision === undefined
@@ -2499,7 +2494,6 @@ async function judgeOne<T extends JudgeableFinding>(
       budget,
       retriever,
       metrics,
-      callsAtStart: budget.calls,
     },
     evidence,
   );
