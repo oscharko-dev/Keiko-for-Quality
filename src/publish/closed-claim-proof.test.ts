@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   bindTrustedHunkEvidence,
   closedClaimProof,
+  closedClaimRefutation,
   type TrustedHunkEvidence,
 } from "./closed-claim-proof.js";
 import type { JudgeableFinding } from "./substantiate.js";
@@ -161,6 +162,42 @@ function fileReadEvidence(
   );
 }
 
+interface DiagnosticContextOptions {
+  readonly parameter?: string;
+  readonly addedEntry?: string;
+  readonly baseMessage?: string;
+  readonly headMessage?: string;
+  readonly setup?: readonly string[];
+  readonly rethrow?: string;
+  readonly extraHeadChange?: boolean;
+}
+
+function diagnosticContextEvidence(options: DiagnosticContextOptions = {}): TrustedHunkEvidence {
+  const setup = options.setup ?? [];
+  const parameter = options.parameter ?? "attempt: number";
+  const baseMessage = options.baseMessage ?? '"push failed"';
+  const headMessage = options.headMessage ?? baseMessage;
+  const base = [
+    `export async function push(client: Client, ${parameter}): Promise<void> {`,
+    ...setup,
+    "  try {",
+    "    await client.push();",
+    "  } catch (error) {",
+    `    logger.error(${baseMessage}, { correlationId: client.id });`,
+    `    ${options.rethrow ?? "throw error;"}`,
+    "  }",
+    "}",
+  ];
+  const head = [...base];
+  const logLine = 5 + setup.length;
+  head[logLine - 1] =
+    `    logger.error(${headMessage}, { correlationId: client.id, ${options.addedEntry ?? "attempt"} });`;
+  if (options.extraHeadChange === true)
+    head[2 + setup.length] = "    await client.pushWithRetry();";
+  const changed = [logLine, ...(options.extraHeadChange === true ? [3 + setup.length] : [])];
+  return evidence(head, changed, base);
+}
+
 describe("trusted closed claim proof", () => {
   it("rejects dossier rows that do not match the bound source", () => {
     expect(
@@ -288,6 +325,45 @@ describe("trusted closed claim proof", () => {
       closedClaimProof(
         finding("Rename the file upload handler for clarity.", 5),
         fileReadEvidence(),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("refutes a finding about one stable non-secret primitive added to structured error context", () => {
+    expect(
+      closedClaimRefutation(
+        finding("Remove the attempt field because logging it changes error handling.", 5),
+        diagnosticContextEvidence(),
+      ),
+    ).toEqual({ evidenceRefs: ["D:H:5", "H:5", "B:5"] });
+  });
+
+  const rejectedDiagnosticContextShapes: readonly (readonly [string, DiagnosticContextOptions])[] =
+    [
+      ["a sensitive field", { parameter: "token: string", addedEntry: "token" }],
+      ["a non-primitive field", { parameter: "attempt: Attempt" }],
+      ["a computed field", { addedEntry: "attempt: normalize(attempt)" }],
+      ["a reassigned parameter", { setup: ["  attempt = normalize(attempt);"] }],
+      ["a wrapped error", { rethrow: 'throw new Error("push failed", { cause: error });' }],
+      ["a changed message", { headMessage: '"push failed permanently"' }],
+      ["another source change", { extraHeadChange: true }],
+    ];
+
+  it.each(rejectedDiagnosticContextShapes)("does not refute %s", (_name, options) => {
+    const logLine = 5 + (options.setup?.length ?? 0);
+    expect(
+      closedClaimRefutation(
+        finding("Remove the added diagnostic context.", logLine),
+        diagnosticContextEvidence(options),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("requires the finding to be anchored on the proven transition", () => {
+    expect(
+      closedClaimRefutation(
+        finding("Remove the added diagnostic context.", 2),
+        diagnosticContextEvidence(),
       ),
     ).toBeUndefined();
   });

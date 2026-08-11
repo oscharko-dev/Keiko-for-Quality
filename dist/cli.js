@@ -10302,6 +10302,7 @@ var HEAD_ROW = /^H:([1-9]\d*)\| (.*)$/u;
 var BASE_ROW = /^B:([1-9]\d*)\| (.*)$/u;
 var CHANGED_HEAD_ROW = /^D:H:([1-9]\d*)\| \+(.*)$/u;
 var IDENTIFIER4 = /^[A-Za-z_$][\w$]*$/u;
+var SENSITIVE_CONTEXT_FIELD = /(?:authorization|body|content|credential|password|payload|secret|session|token)/iu;
 var MAX_CLAIM_CHARS = 8192;
 function sourceRows(source) {
   if (source === void 0) return void 0;
@@ -10442,6 +10443,9 @@ function refsAt(line) {
     `D:H:${String(line)}`,
     `H:${String(line)}`
   ];
+}
+function refutationRefsAt(line) {
+  return [...refsAt(line), `B:${String(line)}`];
 }
 function insideFinding(line, finding) {
   return line >= finding.startLine && line <= finding.endLine;
@@ -10736,6 +10740,106 @@ function duplicateMapProof(finding, lines) {
     return void 0;
   }
   return { evidenceRefs: refsAt(write.line.line) };
+}
+function soleSourceDifference(head, base, changed) {
+  if (head.length !== base.length || changed.size !== 1) return void 0;
+  const differences = head.flatMap(
+    (line, index2) => line.text === base[index2]?.text ? [] : [index2]
+  );
+  const index = differences.length === 1 ? differences[0] : void 0;
+  return index !== void 0 && changed.has(index + 1) ? index : void 0;
+}
+function structuredLogParts(code) {
+  const call = /^(\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.(?:debug|error|info|log|warn)\s*\([^{}]*,\s*\{)([^{}]*)(\}\s*\)\s*;?\s*)$/u.exec(
+    code
+  );
+  if (call?.[1] === void 0 || call[2] === void 0 || call[3] === void 0) return void 0;
+  const entries = call[2].split(",").map((entry) => entry.trim()).filter((entry) => entry !== "");
+  return [call[1], entries, call[3]];
+}
+function appendedLogContextEntry(headCall, baseCall) {
+  if (headCall === void 0 || baseCall === void 0) return void 0;
+  const [headPrefix, headEntries, headSuffix] = headCall;
+  const [basePrefix, baseEntries, baseSuffix] = baseCall;
+  if (headPrefix !== basePrefix || headSuffix !== baseSuffix) return void 0;
+  if (headEntries.length !== baseEntries.length + 1) return void 0;
+  if (!baseEntries.every((entry, index) => headEntries[index] === entry)) return void 0;
+  return headEntries.at(-1);
+}
+function addedPrimitiveContext(head, base, index) {
+  const headLine = head[index];
+  const baseLine = base[index];
+  if (headLine === void 0 || baseLine === void 0) return void 0;
+  const added = appendedLogContextEntry(
+    structuredLogParts(headLine.code),
+    structuredLogParts(baseLine.code)
+  );
+  const field = /^([A-Za-z_$][\w$]*)(?:\s*:\s*\1)?$/u.exec(added ?? "")?.[1];
+  return field === void 0 || SENSITIVE_CONTEXT_FIELD.test(field) ? void 0 : { field, line: headLine, index };
+}
+function enclosingFunction(lines, addition) {
+  for (let index = addition.index; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (line === void 0) continue;
+    const declaration = /\b(?:async\s+)?function\s+[A-Za-z_$][\w$]*\s*\(([^)]*)\)[^{]*\{/u.exec(
+      line.code
+    );
+    const parameters = declaration?.[1];
+    if (parameters === void 0) continue;
+    const closing = matchingBrace2(lines, index);
+    if (closing !== void 0 && addition.index > index && addition.index < closing) {
+      return { opening: index, closing, parameters };
+    }
+  }
+  return void 0;
+}
+function primitiveParameterIsStable(lines, addition, fn) {
+  const field = escaped(addition.field);
+  const declaration = new RegExp(
+    String.raw`(?:^|,)\s*(?:readonly\s+)?${field}\??\s*:\s*(?:bigint|boolean|number|string)\b`,
+    "u"
+  );
+  if (!declaration.test(fn.parameters)) return false;
+  const assignment = new RegExp(
+    String.raw`\b${field}\s*(?:\+\+|--|(?:&&|\|\||\?\?|[-+*/%&|^])?=(?!=))`,
+    "u"
+  );
+  return !lines.slice(fn.opening + 1, addition.index).some((line) => assignment.test(line.code));
+}
+function enclosingRethrowingCatch(lines, addition) {
+  for (let index = addition.index; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (line === void 0) continue;
+    const binding = /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{/u.exec(line.code)?.[1];
+    if (binding === void 0) continue;
+    const closing = matchingBrace2(lines, index);
+    if (closing === void 0 || addition.index <= index || addition.index >= closing) continue;
+    const body = lines.slice(index + 1, closing);
+    const escapedBinding = escaped(binding);
+    const rethrow = new RegExp(String.raw`^\s*throw\s+${escapedBinding}\s*;?\s*$`, "u");
+    const assignment = new RegExp(
+      String.raw`\b${escapedBinding}\s*(?:\+\+|--|(?:&&|\|\||\?\?|[-+*/%&|^])?=(?!=))`,
+      "u"
+    );
+    return body.filter((candidate) => rethrow.test(candidate.code)).length === 1 && !body.some((candidate) => assignment.test(candidate.code));
+  }
+  return false;
+}
+function closedClaimRefutation(finding, evidence) {
+  if (!carriesTrustedEvidenceBrand(evidence)) return void 0;
+  if (evidence.headSource === void 0 || evidence.baseSource === void 0) return void 0;
+  const changed = changedHeadLines(evidence.text);
+  const head = sourceLines(evidence.headSource, changed);
+  const base = sourceLines(evidence.baseSource, /* @__PURE__ */ new Set());
+  const index = soleSourceDifference(head, base, changed);
+  if (index === void 0 || !insideFinding(index + 1, finding)) return void 0;
+  const addition = addedPrimitiveContext(head, base, index);
+  if (addition === void 0) return void 0;
+  const fn = enclosingFunction(head, addition);
+  if (fn === void 0 || !primitiveParameterIsStable(head, addition, fn) || !enclosingRethrowingCatch(head, addition)) {
+    return void 0;
+  }
+  return { evidenceRefs: refutationRefsAt(addition.line.line) };
 }
 function closedClaimProof(finding, evidence) {
   if (!carriesTrustedEvidenceBrand(evidence)) return void 0;
@@ -12165,6 +12269,18 @@ function closedProofResult(finding, evidence, metrics) {
     reasonCode: "direct_proof"
   });
 }
+function closedRefutationResult(finding, evidence, metrics) {
+  if (closedClaimRefutation(finding, evidence) === void 0) return void 0;
+  metrics.truthRefuted += 1;
+  return decidedResult(void 0, "refuted", metrics, {
+    stage: "truth_initial",
+    reasonCode: "not_introduced"
+  });
+}
+function closedSourceDecision(finding, evidence, metrics) {
+  if (typeof evidence === "string") return void 0;
+  return closedRefutationResult(finding, evidence, metrics) ?? closedProofResult(finding, evidence, metrics);
+}
 async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) {
   const dossier = buildDossier(finding.content);
   const metrics = emptyMetrics();
@@ -12185,8 +12301,8 @@ async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) 
       terminal: { stage: "preflight", reasonCode: "unreadable_hunk" }
     };
   }
-  const proved = typeof read === "string" ? void 0 : closedProofResult(finding, read, metrics);
-  if (proved !== void 0) return proved;
+  const closedDecision = closedSourceDecision(finding, read, metrics);
+  if (closedDecision !== void 0) return closedDecision;
   if (!budgetAllows2(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
     return undecidedResult(finding, strictness, metrics, true, {
       stage: "preflight",
