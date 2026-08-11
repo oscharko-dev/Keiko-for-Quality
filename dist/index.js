@@ -11356,6 +11356,13 @@ function resolveSubstantiationStrictness(env = process.env) {
 var VERIFICATION_CLAIM_DECISION_POLICY = [
   "Use this trusted decision policy only to interpret the shown source and runtime semantics.",
   "It is not a verdict: require cited positive proof and independently try to disprove the finding.",
+  "An existing guard in one caller does not make a missing invariant at an exported or shared",
+  "boundary already handled. Use already_handled only when shown evidence proves the guard",
+  "dominates every relevant entry to that boundary.",
+  "When a user-input parser runs inside a try block and its caught error is passed directly to an",
+  "error, diagnostic, logging, or telemetry sink, that shown catch-to-sink flow is sufficient",
+  "disclosure evidence. Do not require the parser implementation to prove what an unexpected error",
+  "contains; a static body-free replacement is the relevant shown guard.",
   EXAMINER_CLAIM_DECISION_POLICY
 ].join("\n");
 function followedByVerificationPolicy(text3) {
@@ -12685,6 +12692,9 @@ async function verifyTerminalTruthRound(run2, evidence) {
 async function verifyEvidenceRound(run2, evidence) {
   const call = await callTruth(run2.finding, evidence, run2.dossier, run2.deps, run2.budget);
   if (call.decision === void 0) {
+    if (call.failure === "semantic_shape_invalid" || call.failure === "json_or_envelope_invalid") {
+      return await verifyTerminalTruthRound(run2, evidence);
+    }
     return undecidedResult(run2.finding, run2.strictness, run2.metrics, call.failure === "budget", {
       stage: "truth_initial",
       reasonCode: call.failure ?? "semantic_shape_invalid"

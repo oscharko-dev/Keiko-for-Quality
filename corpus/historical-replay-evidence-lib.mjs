@@ -403,8 +403,9 @@ function validateExecution(value, plan, failures) {
       stageCounters.challengeNoMatches >
       stageCounters.challengeFailed ||
     stageCounters.challengeFailed > stageCounters.undecided ||
-    stageCounters.challengeNoMatches > stageCounters.droppedInsufficientEvidence ||
-    stageCounters.challengeExpanded < stageCounters.confirmed + stageCounters.falsifierDefeated
+    stageCounters.challengeNoMatches > stageCounters.confirmed ||
+    stageCounters.challengeExpanded + stageCounters.challengeNoMatches <
+      stageCounters.confirmed + stageCounters.falsifierDefeated
   ) {
     mark(failures, "execution_stage_arithmetic");
   }

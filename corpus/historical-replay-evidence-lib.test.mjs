@@ -40,6 +40,26 @@ test("accepts the production-shaped 92/66 replay with 61 measurable and attempte
   assert.deepEqual(validateHistoricalReplayEvidence(evidence), { valid: true, failures: [] });
 });
 
+test("accepts confirmed findings whose independent challenge search found no counterevidence", () => {
+  const evidence = productionHistoricalReplayEvidenceFixture();
+  evidence.execution.stageCounters.challengeExpanded -= 2;
+  evidence.execution.stageCounters.challengeNoMatches += 2;
+
+  assert.deepEqual(validateHistoricalReplayEvidence(evidence), { valid: true, failures: [] });
+
+  const noMatchWithoutConfirmation = productionHistoricalReplayEvidenceFixture();
+  noMatchWithoutConfirmation.execution.stageCounters.challengeNoMatches =
+    noMatchWithoutConfirmation.execution.stageCounters.confirmed + 1;
+  noMatchWithoutConfirmation.execution.stageCounters.challengeExpanded =
+    noMatchWithoutConfirmation.execution.stageCounters.challengePlanned -
+    noMatchWithoutConfirmation.execution.stageCounters.challengeNoMatches;
+  assert.ok(
+    validateHistoricalReplayEvidence(noMatchWithoutConfirmation).failures.includes(
+      "execution_stage_arithmetic",
+    ),
+  );
+});
+
 test("rejects the former metrics-only release fixture", () => {
   const oldFixture = {
     schemaVersion: 3,
