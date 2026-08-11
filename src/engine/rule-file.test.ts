@@ -140,6 +140,16 @@ describe("buildRuleFile", () => {
     expect(file.rules[0]?.merge_system_rule).toBe(false);
   });
 
+  it("puts parallel mapping crossovers in the early report decision", () => {
+    const rule = buildRuleFile(profileWith({})).rules[0]?.rule ?? "";
+    const reportSection = rule.slice(
+      rule.indexOf("## What to report"),
+      rule.indexOf("## Look before you claim"),
+    );
+    expect(reportSection).toContain("copy-paste crossovers in parallel keyed mappings");
+    expect(reportSection).toContain("every output reports the other sibling's state");
+  });
+
   /**
    * The rule text tells the model what it may emit, and the sanitizer decides what is publishable.
    * If the two disagree the reviewer loses correct findings and settles incomplete — which is what

@@ -3129,6 +3129,9 @@ var CATCH_ALL_RULE = [
   "  catch block that maps every failure to a success-shaped fallback (an empty list, a default",
   "  object) is worse than one that merely swallows the error, because the caller cannot tell a",
   "  real empty result from a hidden failure;",
+  "- copy-paste crossovers in parallel keyed mappings. Compare each changed output key with the",
+  "  input field or helper selected on that same entry and with its adjacent siblings. A symmetric",
+  "  swap can type-check and look regular while every output reports the other sibling's state;",
   "- lookups that can reach the prototype chain: a caller-influenced key into a literal-typed",
   "  record, where the signature promises a narrower type than an inherited member (like",
   "  `toString`) can return \u2014 flag unless guarded by `Object.hasOwn`, a null prototype, or a",
@@ -3743,7 +3746,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v12";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v13";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;
