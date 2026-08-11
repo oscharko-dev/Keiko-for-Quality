@@ -10312,26 +10312,21 @@ function rowMatchesSource(row, source) {
   const line = Number(row[1]);
   return source !== void 0 && row[2] !== void 0 && source[line - 1] === row[2];
 }
+function boundSourceRow(row, head, base) {
+  const headRow = HEAD_ROW.exec(row);
+  if (headRow !== null) return rowMatchesSource(headRow, head) ? 1 : -1;
+  const baseRow = BASE_ROW.exec(row);
+  if (baseRow !== null) return rowMatchesSource(baseRow, base) ? 1 : -1;
+  const changed = CHANGED_HEAD_ROW.exec(row);
+  if (changed !== null) return rowMatchesSource(changed, head) ? 1 : -1;
+  return 0;
+}
 function dossierMatchesSources(text, head, base) {
   let sourceRowsSeen = 0;
   for (const row of text.split("\n")) {
-    const headRow = HEAD_ROW.exec(row);
-    if (headRow !== null) {
-      if (!rowMatchesSource(headRow, head)) return false;
-      sourceRowsSeen += 1;
-      continue;
-    }
-    const baseRow = BASE_ROW.exec(row);
-    if (baseRow !== null) {
-      if (!rowMatchesSource(baseRow, base)) return false;
-      sourceRowsSeen += 1;
-      continue;
-    }
-    const changed = CHANGED_HEAD_ROW.exec(row);
-    if (changed !== null) {
-      if (!rowMatchesSource(changed, head)) return false;
-      sourceRowsSeen += 1;
-    }
+    const bound = boundSourceRow(row, head, base);
+    if (bound < 0) return false;
+    sourceRowsSeen += bound;
   }
   return sourceRowsSeen > 0;
 }
