@@ -10495,7 +10495,10 @@ function changedSinkInCatch(finding, lines, catchIndex, binding) {
     const candidate = lines[index];
     if (candidate === void 0) return void 0;
     if (sinkUsesCaughtBinding(candidate.code, binding)) {
-      return candidate.changed && insideFinding(candidate.line, finding) ? candidate : void 0;
+      const sinkWasAssigned = lines.slice(0, index).some(
+        (prior) => /\bwindow\s*\.\s*reportError\s*(?:(?:&&|\|\||\?\?)?=(?!=)|\+\+|--)/u.test(prior.code) || /\bObject\.defineProperty\(\s*window\s*,\s*["']reportError["']/u.test(prior.code)
+      );
+      return candidate.changed && insideFinding(candidate.line, finding) && !sinkWasAssigned ? candidate : void 0;
     }
     if (/^\s*(?:return|throw)\b/u.test(candidate.code)) return void 0;
     if (mentionsBinding(candidate.code, binding)) return void 0;
@@ -10609,11 +10612,7 @@ function enclosingInputLoop(lines, declaration, write) {
   }
   return void 0;
 }
-function skipsBeforeWrite(lines, loop, write) {
-  const writeIndex = lines.indexOf(write.line);
-  return writeIndex >= 0 && lines.slice(loop.opening + 1, writeIndex).some((candidate) => /\bcontinue\b/u.test(candidate.code));
-}
-function receiverBindingIsStable(lines, declaration, write) {
+function receiverBindingIsStable(lines, declaration, write, throughIndex) {
   const receiver = escaped(write.receiver);
   const redeclared = new RegExp(
     String.raw`\b(?:const|let|var|class|function)\s+${receiver}\b`,
@@ -10624,23 +10623,24 @@ function receiverBindingIsStable(lines, declaration, write) {
     "u"
   );
   const writerOverridden = new RegExp(String.raw`\b${receiver}\.set\s*=(?!=)`, "u");
-  return !lines.some(
-    (line) => line.line > declaration.line && line.line < write.line.line && (redeclared.test(line.code) || reassigned.test(line.code) || writerOverridden.test(line.code))
+  return !lines.slice(0, throughIndex).some(
+    (line) => line.line > declaration.line && line !== write.line && (redeclared.test(line.code) || reassigned.test(line.code) || writerOverridden.test(line.code))
   );
 }
 function hasDuplicateGuard(lines, declaration, write) {
-  const receiver = escaped(write.receiver);
   const key = escaped(write.key).replace(/\s+/gu, String.raw`\s*`);
-  const directGuard = new RegExp(String.raw`\b${receiver}\.has\(\s*${key}\s*\)`, "u");
-  const readGuard = new RegExp(String.raw`\b${receiver}\.get\(\s*${key}\s*\)`, "u");
+  const duplicateLookup = new RegExp(
+    String.raw`\b[A-Za-z_$][\w$]*\.(?:has|get)\(\s*${key}\s*\)`,
+    "u"
+  );
   return lines.some(
-    (line) => line.line > declaration.line && line.line < write.line.line && (directGuard.test(line.code) || readGuard.test(line.code))
+    (line) => line.line > declaration.line && line.line < write.line.line && duplicateLookup.test(line.code)
   );
 }
 function writesEveryInputToStableNativeMap(lines, declaration, write) {
   if (!nativeMapIsUnshadowed(lines)) return false;
   const loop = enclosingInputLoop(lines, declaration, write);
-  return loop !== void 0 && !skipsBeforeWrite(lines, loop, write) && receiverBindingIsStable(lines, declaration, write) && !hasDuplicateGuard(lines, declaration, write);
+  return loop !== void 0 && receiverBindingIsStable(lines, declaration, write, loop.closing) && !hasDuplicateGuard(lines, declaration, write);
 }
 function duplicateMapProof(finding, lines) {
   const claim = finding.content.slice(0, MAX_CLAIM_CHARS);

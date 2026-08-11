@@ -37,9 +37,17 @@ const DISCLOSURE_CLAIM = finding(
 
 function catchEvidence(
   sink: string,
-  options: { readonly changed?: boolean; readonly prior?: boolean; readonly before?: string } = {},
+  options: {
+    readonly changed?: boolean;
+    readonly prior?: boolean;
+    readonly before?: string;
+    readonly setup?: readonly string[];
+  } = {},
 ): TrustedHunkEvidence {
+  const setup = options.setup ?? [];
+  const sinkLine = setup.length + 4;
   const head = [
+    ...setup,
     "function parseUpload(): void {",
     "  try { parse(); } catch (error) {",
     `    ${options.before ?? "// Report the unexpected parser failure."}`,
@@ -57,7 +65,7 @@ function catchEvidence(
         "}",
       ]
     : undefined;
-  return evidence(head, options.changed === false ? [] : [4], base);
+  return evidence(head, options.changed === false ? [] : [sinkLine], base);
 }
 
 const DUPLICATE_CLAIM = finding(
@@ -69,6 +77,7 @@ function mapEvidence(
   options: {
     readonly declaration?: string;
     readonly beforeWrite?: readonly string[];
+    readonly afterWrite?: readonly string[];
     readonly changed?: boolean;
     readonly prior?: boolean;
     readonly loop?: boolean;
@@ -85,6 +94,7 @@ function mapEvidence(
     options.loop === false ? "  if (entries.length > 0) {" : "  for (const entry of entries) {",
     ...before.map((line) => `    ${line}`),
     "    byId.set(id.value, capability);",
+    ...(options.afterWrite ?? []).map((line) => `    ${line}`),
     "  }",
     "  return byId;",
     "}",
@@ -136,6 +146,14 @@ describe("trusted closed claim proof", () => {
     expect(closedClaimProof(DISCLOSURE_CLAIM, catchEvidence("window.reportError(error);"))).toEqual(
       { evidenceRefs: ["D:H:4", "H:4"] },
     );
+  });
+
+  it("rejects a source-visible replacement for the qualified error sink", () => {
+    const setup = ["window.reportError = (failure) => send(redact(failure));"];
+    const claim = finding(DISCLOSURE_CLAIM.content, 5);
+    expect(
+      closedClaimProof(claim, catchEvidence("window.reportError(error);", { setup })),
+    ).toBeUndefined();
   });
 
   it("masks a regex that starts inside a call before matching the catch scope", () => {
@@ -217,10 +235,18 @@ describe("trusted closed claim proof", () => {
       "a loop that can skip before the write",
       { beforeWrite: ["if (byId.has(id.value)) continue;"] },
     ],
+    [
+      "a separate collection that rejects duplicates",
+      { beforeWrite: ["if (seenIds.has(id.value)) throw new Error('duplicate');"] },
+    ],
     ["behavior already present in BASE", { prior: true }],
     ["a shadowed receiver", { beforeWrite: ["const byId = createCapabilityIndex();"] }],
     ["a reassigned receiver", { beforeWrite: ["byId = createCapabilityIndex();"] }],
     ["an overridden Map writer", { beforeWrite: ["byId.set = rejectDuplicateSet;"] }],
+    [
+      "a Map writer overridden after the first write",
+      { afterWrite: ["byId.set = rejectDuplicateSet;"] },
+    ],
     [
       "a shadowed Map constructor",
       { beforeWrite: [], declaration: "const byId = new Map();", mapShadow: true },
