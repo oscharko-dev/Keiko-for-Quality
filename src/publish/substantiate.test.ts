@@ -1036,6 +1036,23 @@ describe("truth then adversarial falsification", () => {
     expect(endpoint.prompts()).toHaveLength(3);
   });
 
+  it("fails closed without Referee when the Falsifier transport is unavailable", async () => {
+    const endpoint = endpointReplying([CONFIRMED, TRANSPORT_FAIL]);
+    const out = await substantiate(
+      [finding("When submitted is undefined, spreading it crashes every production request.")],
+      () => CHANGE_EVIDENCE,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      () => retrievedCaller(),
+    );
+
+    expect(out.findings).toHaveLength(0);
+    expect(out.undecided).toBe(1);
+    expect(endpoint.remaining()).toBe(0);
+    expect(endpoint.prompts()).toHaveLength(2);
+  });
+
   it("does not call a rewrite or an importance scorer", async () => {
     const endpoint = endpointReplying([
       CONFIRMED,
