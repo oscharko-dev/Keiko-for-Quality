@@ -168,7 +168,10 @@ function dispositionMatches(stage, disposition, reason) {
     return disposition === "undecided";
   }
   if (reason === "unreadable_hunk") return disposition === "undecided";
-  if (["diff_echo", "retrieval_no_match", "context_limit"].includes(reason)) {
+  if (reason === "retrieval_no_match") {
+    return disposition === (stage === "challenge_retrieval" ? "kept" : "insufficient_evidence");
+  }
+  if (["diff_echo", "context_limit"].includes(reason)) {
     return disposition === "insufficient_evidence";
   }
   if (["contradicted", "already_handled", "not_introduced"].includes(reason)) {
