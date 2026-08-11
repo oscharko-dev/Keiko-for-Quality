@@ -818,6 +818,38 @@ function sourceLines(source, startLine, endLine) {
   return lines.slice(startLine - 1, endLine).join("\n");
 }
 
+function historicalSourceRows(source) {
+  if (source === undefined) return undefined;
+  return (source.endsWith("\n") ? source.slice(0, -1) : source).split("\n");
+}
+
+function historicalEvidenceRowMatches(row, source) {
+  const line = Number(row[1]);
+  return source !== undefined && row[2] !== undefined && source[line - 1] === row[2];
+}
+
+/** Bind the dossier to the immutable blobs before the zero-call proof path can see it. */
+function bindHistoricalHunkEvidence({ text, headSource, baseSource }) {
+  const head = historicalSourceRows(headSource);
+  const base = historicalSourceRows(baseSource);
+  let sourceRowsSeen = 0;
+  for (const row of text.split("\n")) {
+    const headRow = /^H:([1-9]\d*)\| (.*)$/u.exec(row);
+    const baseRow = /^B:([1-9]\d*)\| (.*)$/u.exec(row);
+    const changed = /^D:H:([1-9]\d*)\| \+(.*)$/u.exec(row);
+    if (headRow !== null) {
+      if (!historicalEvidenceRowMatches(headRow, head)) return undefined;
+      sourceRowsSeen += 1;
+    } else if (baseRow !== null) {
+      if (!historicalEvidenceRowMatches(baseRow, base)) return undefined;
+      sourceRowsSeen += 1;
+    } else if (changed !== null && !historicalEvidenceRowMatches(changed, head)) {
+      return undefined;
+    }
+  }
+  return sourceRowsSeen === 0 ? undefined : Object.freeze({ text, headSource, baseSource });
+}
+
 async function inspectCase(replayCase, repo, readChangeAtCommits) {
   const structural = structuralCaseReason(replayCase);
   if (structural !== undefined) return structural;
@@ -895,6 +927,7 @@ function nonnegativeIntegerField(outcome, field) {
 
 const STAGE_COUNTER_FIELDS = [
   "confirmed",
+  "directProved",
   "truthRefuted",
   "falsifierDefeated",
   "droppedInsufficientEvidence",
@@ -919,6 +952,7 @@ function emptyStageCounters() {
 function validSubstantiationOutcome(outcome, finding) {
   const countFields = [
     "confirmed",
+    "directProved",
     "droppedRefuted",
     "droppedInsufficientEvidence",
     "truthRefuted",
@@ -967,6 +1001,7 @@ function validSubstantiationOutcome(outcome, finding) {
     outcome.undecided;
   return (
     terminalDecisions === 1 &&
+    outcome.directProved <= outcome.confirmed &&
     outcome.confirmed === outcome.findings.length &&
     outcome.droppedRefuted === outcome.truthRefuted + outcome.falsifierDefeated &&
     outcome.droppedUnsupported === outcome.droppedRefuted &&
@@ -989,9 +1024,9 @@ function validSubstantiationOutcome(outcome, finding) {
     outcome.challengeRetrievalPerformed - outcome.challengeExpanded - outcome.challengeNoMatches <=
       outcome.challengeFailed &&
     outcome.challengeFailed <= outcome.undecided &&
-    outcome.challengeNoMatches <= outcome.confirmed &&
+    outcome.challengeNoMatches <= outcome.confirmed - outcome.directProved &&
     outcome.challengeExpanded + outcome.challengeNoMatches >=
-      outcome.confirmed + outcome.falsifierDefeated
+      outcome.confirmed - outcome.directProved + outcome.falsifierDefeated
   );
 }
 
@@ -1308,9 +1343,14 @@ async function attemptHistoricalVerification({
 }) {
   const traceSlot = { value: undefined };
   try {
+    const boundEvidence = bindHistoricalHunkEvidence({
+      text: prepared.evidence,
+      headSource: sources.headSource,
+      baseSource: sources.baseSource,
+    });
     const outcome = await dependencies.substantiate(
       [prepared.judgeable],
-      () => prepared.evidence,
+      () => boundEvidence ?? "",
       judgeEndpoint,
       HISTORICAL_REPLAY_STRICTNESS,
       remainingTokens,
@@ -1614,11 +1654,22 @@ function sourceDigests() {
     evidenceBuilder: join(REPOSITORY_ROOT, "src", "publish", "evidence.ts"),
     repositoryContext: join(REPOSITORY_ROOT, "src", "publish", "repository-context.ts"),
     retrievedEvidence: join(REPOSITORY_ROOT, "src", "publish", "retrieved-evidence.ts"),
-    substantiation: join(REPOSITORY_ROOT, "src", "publish", "substantiate.ts"),
   };
-  return Object.fromEntries(
+  const digests = Object.fromEntries(
     Object.entries(files).map(([name, path]) => [name, sha256(readFileSync(path))]),
   );
+  const substantiationSources = [
+    "src/publish/closed-claim-proof.ts",
+    "src/publish/substantiate.ts",
+  ];
+  return {
+    ...digests,
+    substantiation: sha256(
+      substantiationSources
+        .map((path) => `${path}\0${readFileSync(join(REPOSITORY_ROOT, path), "utf8")}\0`)
+        .join(""),
+    ),
+  };
 }
 
 async function productionVerificationDependencies() {

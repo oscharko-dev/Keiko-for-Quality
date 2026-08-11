@@ -155,7 +155,7 @@ function reasonAllowedAtStage(stage, reason) {
   return stage === "falsifier" && (REQUEST_FAILURES.has(reason) || FALSIFIER_REASONS.has(reason));
 }
 
-function dispositionMatches(stage, disposition, reason) {
+function dispositionMatches(stage, disposition, reason, usage) {
   if (HISTORICAL_TERMINAL_STAGES.has(stage)) return disposition === "unmeasured";
   if (["request_transport_or_status", "usage_invalid", "finish_reason_nonstop"].includes(reason)) {
     return disposition === "undecided";
@@ -177,7 +177,14 @@ function dispositionMatches(stage, disposition, reason) {
   if (["contradicted", "already_handled", "not_introduced"].includes(reason)) {
     return disposition === "refuted";
   }
-  if (reason === "direct_proof") return disposition === "kept";
+  if (reason === "direct_proof") {
+    return (
+      stage === "truth_initial" &&
+      disposition === "kept" &&
+      usage.callCount === 0 &&
+      usage.tokens === 0
+    );
+  }
   if (
     ["counterexample", "existing_guard", "unchanged_base", "causality_unproven"].includes(reason)
   ) {
@@ -209,7 +216,7 @@ function validCase(value) {
     usage.callCount <= 4 &&
     natural(usage.tokens) &&
     reasonAllowedAtStage(selected.stage, selected.reasonCode) &&
-    dispositionMatches(selected.stage, selected.disposition, selected.reasonCode) &&
+    dispositionMatches(selected.stage, selected.disposition, selected.reasonCode, usage) &&
     (!NON_ATTEMPTED_STAGES.has(selected.stage) || (usage.callCount === 0 && usage.tokens === 0))
   );
 }

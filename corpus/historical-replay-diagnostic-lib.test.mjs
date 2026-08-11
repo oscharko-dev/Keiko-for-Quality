@@ -110,6 +110,13 @@ test("accepts a zero-token closed direct proof as an attempted kept case", () =>
     }),
     false,
   );
+  for (const invalid of [
+    { ...directProof, stage: "truth_followup" },
+    { ...directProof, usage: { callCount: 1, tokens: 0 } },
+    { ...directProof, usage: { callCount: 0, tokens: 1 } },
+  ]) {
+    assert.equal(validateHistoricalReplayDiagnostic({ ...diagnostic, cases: [invalid] }), false);
+  }
 });
 
 test("rejects extra text, open vocabularies, reordered ids, and accounting mismatches", () => {

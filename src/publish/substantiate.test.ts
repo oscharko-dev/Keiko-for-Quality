@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { EXAMINER_CLAIM_DECISION_POLICY } from "../engine/claim-decision-policy.js";
+import { bindTrustedHunkEvidence } from "./closed-claim-proof.js";
 import {
   CLOSED_RUNTIME_FACT_CATALOG,
   CLOSED_RUNTIME_FACT_CATALOG_VERSION,
@@ -382,19 +383,35 @@ describe("closed source proofs", () => {
       startLine: 12,
       endLine: 12,
     };
-    const evidence = [
-      "H:8|   const byId = new Map<string, Capability>();",
-      "H:9|   for (const entry of entries) {",
-      "H:10|     const id = readId(entry);",
-      "H:12|     byId.set(id.value, capability);",
+    const headSource = [
+      "function parse(entries: readonly Entry[]): Map<string, Capability> {",
+      "  const byId = new Map<string, Capability>();",
+      "  for (const entry of entries) {",
+      "    const id = readId(entry);",
+      "    work();",
+      "    work();",
+      "    work();",
+      "    work();",
+      "    work();",
+      "    work();",
+      "    work();",
+      "    byId.set(id.value, capability);",
+      "  }",
+      "  return byId;",
+      "}",
+    ].join("\n");
+    const text = [
+      ...headSource.split("\n").map((line, index) => `H:${String(index + 1)}| ${line}`),
       "D:H:12| +    byId.set(id.value, capability);",
     ].join("\n");
+    const evidence = bindTrustedHunkEvidence({ text, headSource, baseSource: undefined });
+    expect(evidence).toBeDefined();
     const endpoint = endpointReplying([]);
     const traces: SubstantiationTerminalTrace[] = [];
 
     const out = await substantiate(
       [candidate],
-      () => evidence,
+      () => evidence ?? "",
       endpoint.deps,
       "paranoid",
       undefined,
@@ -404,6 +421,7 @@ describe("closed source proofs", () => {
 
     expect(out.findings).toEqual([candidate]);
     expect(out.confirmed).toBe(1);
+    expect(out.directProved).toBe(1);
     expect(out.tokens).toBe(0);
     expect(endpoint.prompts()).toEqual([]);
     expect(traces).toEqual([

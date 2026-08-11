@@ -10298,22 +10298,147 @@ async function collectRepositoryContextFollowUp(request, retrieveTerms, dependen
 
 // src/publish/closed-claim-proof.ts
 var HEAD_ROW = /^H:([1-9]\d*)\| (.*)$/u;
+var BASE_ROW = /^B:([1-9]\d*)\| (.*)$/u;
 var CHANGED_HEAD_ROW = /^D:H:([1-9]\d*)\| \+(.*)$/u;
 var IDENTIFIER4 = /^[A-Za-z_$][\w$]*$/u;
 var MAX_CLAIM_CHARS = 8192;
-function headLines(evidence) {
-  const source = /* @__PURE__ */ new Map();
-  const changed = /* @__PURE__ */ new Set();
-  for (const row of evidence.split("\n")) {
-    const head = HEAD_ROW.exec(row);
-    if (head?.[1] !== void 0 && head[2] !== void 0) {
-      source.set(Number(head[1]), head[2]);
+var ERROR_SINK = [
+  String.raw`(?:window\.)?reportError`,
+  "(?:captureException|captureError|reportException|recordException)",
+  String.raw`(?:console|logger|telemetry|diagnostics?)\.(?:error|exception|report|record)`
+].join("|");
+function sourceRows(source) {
+  if (source === void 0) return void 0;
+  const body = source.endsWith("\n") ? source.slice(0, -1) : source;
+  return body.split("\n");
+}
+function rowMatchesSource(row, source) {
+  const line = Number(row[1]);
+  return source !== void 0 && row[2] !== void 0 && source[line - 1] === row[2];
+}
+function dossierMatchesSources(text, head, base) {
+  let sourceRowsSeen = 0;
+  for (const row of text.split("\n")) {
+    const headRow = HEAD_ROW.exec(row);
+    if (headRow !== null) {
+      if (!rowMatchesSource(headRow, head)) return false;
+      sourceRowsSeen += 1;
       continue;
     }
+    const baseRow = BASE_ROW.exec(row);
+    if (baseRow !== null) {
+      if (!rowMatchesSource(baseRow, base)) return false;
+      sourceRowsSeen += 1;
+      continue;
+    }
+    const changed = CHANGED_HEAD_ROW.exec(row);
+    if (changed !== null && !rowMatchesSource(changed, head)) return false;
+  }
+  return sourceRowsSeen > 0;
+}
+function bindTrustedHunkEvidence(input) {
+  const head = sourceRows(input.headSource);
+  const base = sourceRows(input.baseSource);
+  if (input.text === "" || !dossierMatchesSources(input.text, head, base)) return void 0;
+  return Object.freeze({ ...input });
+}
+function changedHeadLines(evidence) {
+  const changed = /* @__PURE__ */ new Set();
+  for (const row of evidence.split("\n")) {
     const diff = CHANGED_HEAD_ROW.exec(row);
     if (diff?.[1] !== void 0) changed.add(Number(diff[1]));
   }
-  return [...source].sort(([left], [right]) => left - right).map(([line, text]) => ({ line, text, changed: changed.has(line) }));
+  return changed;
+}
+function startsRegex(previous) {
+  return previous === "" || "=(:,[!&|?{};".includes(previous);
+}
+function closesMaskedState(state, current) {
+  if (state === "single") return current === "'";
+  if (state === "double") return current === '"';
+  if (state === "template") return current === "`";
+  return state === "regex" && current === "/";
+}
+function maskNonCode3(cursor, current, next) {
+  if (cursor.state === "block") {
+    if (current === "*" && next === "/") {
+      cursor.state = "code";
+      return { text: "  ", skip: 1, stop: false };
+    }
+    return { text: " ", skip: 0, stop: false };
+  }
+  if (cursor.escaped) {
+    cursor.escaped = false;
+    return { text: " ", skip: 0, stop: false };
+  }
+  if (current === "\\") {
+    cursor.escaped = true;
+    return { text: " ", skip: 0, stop: false };
+  }
+  if (closesMaskedState(cursor.state, current)) cursor.state = "code";
+  return { text: " ", skip: 0, stop: false };
+}
+function quoteState(current) {
+  if (current === "'") return "single";
+  if (current === '"') return "double";
+  return "template";
+}
+function isQuote(current) {
+  return ["'", '"', "`"].includes(current);
+}
+function maskCode(cursor, current, next, previous) {
+  if (current === "/" && next === "/") return { text: "", skip: 0, stop: true };
+  if (current === "/" && next === "*") {
+    cursor.state = "block";
+    return { text: "  ", skip: 1, stop: false };
+  }
+  if (isQuote(current)) {
+    cursor.state = quoteState(current);
+    return { text: " ", skip: 0, stop: false };
+  }
+  if (current === "/" && startsRegex(previous)) {
+    cursor.state = "regex";
+    return { text: " ", skip: 0, stop: false };
+  }
+  return {
+    text: current,
+    skip: 0,
+    stop: false,
+    .../\s/u.test(current) ? {} : { significant: current }
+  };
+}
+function maskLine(rawLine, cursor) {
+  let output = "";
+  let previous = "";
+  for (let index = 0; index < rawLine.length; index += 1) {
+    const current = rawLine[index] ?? "";
+    const next = rawLine[index + 1] ?? "";
+    const step = cursor.state === "code" ? maskCode(cursor, current, next, previous) : maskNonCode3(cursor, current, next);
+    if (step.stop) return output.padEnd(rawLine.length, " ");
+    output += step.text;
+    index += step.skip;
+    if (step.significant !== void 0) previous = step.significant;
+  }
+  if (["single", "double", "regex"].includes(cursor.state)) cursor.state = "code";
+  return output;
+}
+function maskSource(source) {
+  const cursor = { state: "code", escaped: false };
+  return (sourceRows(source) ?? []).map((line) => maskLine(line, cursor));
+}
+function sourceLines(source, changed) {
+  const raw = sourceRows(source) ?? [];
+  const masked = maskSource(source);
+  let depth = 0;
+  return raw.map((text, index) => {
+    const code = masked[index] ?? "";
+    const line = { line: index + 1, text, code, changed: changed.has(index + 1), depth };
+    for (const character of code) {
+      if (character === "{") depth += 1;
+      if (character === "}") depth -= 1;
+    }
+    return line;
+  });
 }
 function refsAt(line) {
   return [
@@ -10329,36 +10454,64 @@ function escaped(value) {
 }
 function sinkUsesCaughtBinding(text, binding) {
   const argument = escaped(binding);
-  const sink = [
-    String.raw`(?:window\.)?reportError`,
-    "(?:captureException|captureError|reportException|recordException)",
-    String.raw`(?:console|logger|telemetry|diagnostics?)\.(?:error|exception|report|record)`
-  ].join("|");
-  return new RegExp(String.raw`\b(?:${sink})\s*\(\s*${argument}\s*(?:[,)]|$)`, "u").test(text);
+  return new RegExp(String.raw`\b(?:${ERROR_SINK})\s*\(\s*${argument}\s*(?:[,)]|$)`, "u").test(
+    text
+  );
 }
 function disclosureClaim(content) {
   const claim = content.slice(0, MAX_CLAIM_CHARS);
   return /(?:saniti[sz]|redact|leak|expos|secret|sensitive)/iu.test(claim) && /(?:error|exception|report|log|telemetry|parser)/iu.test(claim);
 }
-function catchBindingNearFinding(finding, line) {
-  if (line.line < finding.startLine - 8 || line.line > finding.endLine) return void 0;
-  const caught = /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{/u.exec(line.text)?.[1];
-  return caught !== void 0 && IDENTIFIER4.test(caught) ? caught : void 0;
+function bindingReassigned(text, binding) {
+  const name = escaped(binding);
+  return new RegExp(
+    String.raw`\b${name}\s*(?:\+\+|--|(?:&&|\|\||\?\?|[-+*/%&|^])?=(?!=))`,
+    "u"
+  ).test(text);
 }
-function caughtSinkAfter(finding, lines, startIndex, binding) {
-  for (const candidate of lines.slice(startIndex + 1, startIndex + 10)) {
-    if (/^\s*\}/u.test(candidate.text)) return void 0;
-    if (!candidate.changed || !insideFinding(candidate.line, finding)) continue;
-    if (sinkUsesCaughtBinding(candidate.text, binding)) return candidate;
+function matchingBrace2(lines, openingIndex) {
+  let balance = 0;
+  for (let index = openingIndex; index < lines.length; index += 1) {
+    const code = lines[index]?.code ?? "";
+    const openingOffset = index === openingIndex ? code.lastIndexOf("{") : 0;
+    if (openingOffset < 0) return void 0;
+    for (const character of code.slice(openingOffset)) {
+      if (character === "{") {
+        balance += 1;
+      }
+      if (character === "}") balance -= 1;
+      if (balance === 0) return index;
+    }
   }
   return void 0;
 }
-function catchDisclosureProof(finding, lines) {
-  if (!disclosureClaim(finding.content)) return void 0;
-  for (const [index, line] of lines.entries()) {
-    const caught = catchBindingNearFinding(finding, line);
-    if (caught === void 0) continue;
-    const sink = caughtSinkAfter(finding, lines, index, caught);
+function baseContainsCaughtSink(baseSource) {
+  if (baseSource === void 0) return false;
+  const priorSink = new RegExp(String.raw`\b(?:${ERROR_SINK})\s*\(\s*[A-Za-z_$][\w$]*\s*[,)]`, "u");
+  return maskSource(baseSource).some((line) => priorSink.test(line));
+}
+function catchBinding(finding, line) {
+  if (line.line < finding.startLine - 8 || line.line > finding.endLine) return void 0;
+  const binding = /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{/u.exec(line.code)?.[1];
+  return binding !== void 0 && IDENTIFIER4.test(binding) ? binding : void 0;
+}
+function changedSinkInCatch(finding, lines, catchIndex, binding) {
+  const closeIndex = matchingBrace2(lines, catchIndex);
+  if (closeIndex === void 0) return void 0;
+  for (let index = catchIndex + 1; index < closeIndex; index += 1) {
+    const candidate = lines[index];
+    if (candidate === void 0 || bindingReassigned(candidate.code, binding)) return void 0;
+    if (!candidate.changed || !insideFinding(candidate.line, finding)) continue;
+    if (sinkUsesCaughtBinding(candidate.code, binding)) return candidate;
+  }
+  return void 0;
+}
+function catchDisclosureProof(finding, lines, baseSource) {
+  if (!disclosureClaim(finding.content) || baseContainsCaughtSink(baseSource)) return void 0;
+  for (const [catchIndex, line] of lines.entries()) {
+    const binding = catchBinding(finding, line);
+    if (binding === void 0) continue;
+    const sink = changedSinkInCatch(finding, lines, catchIndex, binding);
     if (sink !== void 0) return { evidenceRefs: refsAt(sink.line) };
   }
   return void 0;
@@ -10366,47 +10519,99 @@ function catchDisclosureProof(finding, lines) {
 function mapWriteAtFinding(finding, lines) {
   for (const line of lines) {
     if (!line.changed || !insideFinding(line.line, finding)) continue;
-    const call = /\b([A-Za-z_$][\w$]*)\.set\(/u.exec(line.text);
-    if (call?.[1] === void 0) continue;
-    const argumentsText = line.text.slice(call.index + call[0].length);
-    const comma = argumentsText.indexOf(",");
-    if (comma < 0) continue;
-    const key = argumentsText.slice(0, comma).trim();
-    if (!/^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/u.test(key)) continue;
-    return { receiver: call[1], key, line };
+    const call = /^\s*([A-Za-z_$][\w$]*)\.set\(\s*([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*)\s*,/u.exec(
+      line.code
+    );
+    if (call?.[1] !== void 0 && call[2] !== void 0) {
+      return { receiver: call[1], key: call[2], line };
+    }
   }
   return void 0;
 }
-function isShownMap(lines, write) {
+function nativeMapIsUnshadowed(lines) {
+  return !lines.some(
+    (line) => /\b(?:const|let|var|class|function|interface|type)\s+Map\b|\bimport\s+(?:Map\b|\*\s+as\s+Map\b|\{[^}]*\bMap\b)|\([^)]*\bMap\b[^)]*\)\s*(?:=>|\{)/u.test(
+      line.code
+    )
+  );
+}
+function mapDeclaration(lines, write) {
   const receiver = escaped(write.receiver);
   const declaration = new RegExp(
-    String.raw`\b(?:const|let|var)\s+${receiver}\s*=\s*new\s+Map(?:\s*<[^;]+>)?\s*\(`,
+    String.raw`^\s*const\s+${receiver}\s*=\s*new\s+Map(?:\s*<[^;]+>)?\s*\(`,
     "u"
   );
-  return lines.some((line) => line.line <= write.line.line && declaration.test(line.text));
+  const matches = lines.filter(
+    (line) => line.line < write.line.line && declaration.test(line.code)
+  );
+  return matches.length === 1 ? matches[0] : void 0;
 }
-function hasShownDuplicateGuard(lines, write) {
+function isInputLoopCandidate(line, declaration, write) {
+  if (line === void 0) return false;
+  if (line.line <= declaration.line || line.line >= write.line.line) return false;
+  return line.depth === declaration.depth && /\bfor\s*\([^)]*\bof\b[^)]*\)\s*\{/u.test(line.code);
+}
+function loopRepeatsAfterWrite(lines, opening, write) {
+  const closing = matchingBrace2(lines, opening);
+  if (closing === void 0 || lines[closing] === void 0) return void 0;
+  if (lines[closing].line <= write.line.line) return void 0;
+  const exits = lines.slice(write.line.line, closing).some((candidate) => /^\s*(?:break|return|throw)\b/u.test(candidate.code));
+  return exits ? void 0 : closing;
+}
+function enclosingInputLoop(lines, declaration, write) {
+  if (write.line.depth !== declaration.depth + 1) return void 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (!isInputLoopCandidate(line, declaration, write)) continue;
+    const closing = loopRepeatsAfterWrite(lines, index, write);
+    if (closing !== void 0) return { opening: index, closing };
+  }
+  return void 0;
+}
+function receiverBindingIsStable(lines, declaration, write) {
+  const receiver = escaped(write.receiver);
+  const redeclared = new RegExp(
+    String.raw`\b(?:const|let|var|class|function)\s+${receiver}\b`,
+    "u"
+  );
+  const reassigned = new RegExp(
+    String.raw`\b${receiver}\s*(?:\+\+|--|(?:&&|\|\||\?\?|[-+*/%&|^])?=(?!=))`,
+    "u"
+  );
+  return !lines.some(
+    (line) => line.line > declaration.line && line.line < write.line.line && (redeclared.test(line.code) || reassigned.test(line.code))
+  );
+}
+function hasDuplicateGuard(lines, declaration, write) {
   const receiver = escaped(write.receiver);
   const key = escaped(write.key).replace(/\s+/gu, String.raw`\s*`);
   const directGuard = new RegExp(String.raw`\b${receiver}\.has\(\s*${key}\s*\)`, "u");
-  const nearbyGuard = /\b(?:duplicate|unique|seen)\b.*\b(?:has|throw|return|reject)/iu;
   return lines.some(
-    (line) => line.line < write.line.line && line.line >= write.line.line - 24 && (directGuard.test(line.text) || nearbyGuard.test(line.text))
+    (line) => line.line > declaration.line && line.line < write.line.line && directGuard.test(line.code)
   );
 }
-function duplicateMapProof(finding, lines) {
+function baseContainsMapWrite(baseSource, key) {
+  if (baseSource === void 0) return false;
+  const escapedKey = escaped(key).replace(/\s+/gu, String.raw`\s*`);
+  const priorWrite = new RegExp(String.raw`^\s*[A-Za-z_$][\w$]*\.set\(\s*${escapedKey}\s*,`, "u");
+  return maskSource(baseSource).some((line) => priorWrite.test(line));
+}
+function duplicateMapProof(finding, lines, baseSource) {
   const claim = finding.content.slice(0, MAX_CLAIM_CHARS);
   if (!/\bduplicate[sd]?\b/iu.test(claim)) return void 0;
   if (!/\b(?:overwrit\w*|discard\w*|collision\w*|reject\w*)\b/iu.test(claim)) return void 0;
   const write = mapWriteAtFinding(finding, lines);
-  if (write === void 0 || !isShownMap(lines, write) || hasShownDuplicateGuard(lines, write)) {
+  if (write === void 0 || baseContainsMapWrite(baseSource, write.key)) return void 0;
+  const declaration = mapDeclaration(lines, write);
+  if (declaration === void 0 || !nativeMapIsUnshadowed(lines) || enclosingInputLoop(lines, declaration, write) === void 0 || !receiverBindingIsStable(lines, declaration, write) || hasDuplicateGuard(lines, declaration, write)) {
     return void 0;
   }
   return { evidenceRefs: refsAt(write.line.line) };
 }
 function closedClaimProof(finding, evidence) {
-  const lines = headLines(evidence);
-  return catchDisclosureProof(finding, lines) ?? duplicateMapProof(finding, lines);
+  if (evidence.headSource === void 0) return void 0;
+  const lines = sourceLines(evidence.headSource, changedHeadLines(evidence.text));
+  return catchDisclosureProof(finding, lines, evidence.baseSource) ?? duplicateMapProof(finding, lines, evidence.baseSource);
 }
 
 // src/publish/substantiate.ts
@@ -11417,6 +11622,7 @@ function dropsOnUnreadableHunk(strictness) {
 function emptyMetrics() {
   return {
     confirmed: 0,
+    directProved: 0,
     truthRefuted: 0,
     falsifierDefeated: 0,
     retrievalRequested: 0,
@@ -11823,6 +12029,7 @@ async function verifyEvidenceRound(run2, evidence) {
 function closedProofResult(finding, evidence, metrics) {
   if (closedClaimProof(finding, evidence) === void 0) return void 0;
   metrics.confirmed += 1;
+  metrics.directProved += 1;
   return decidedResult(finding, "kept", metrics, {
     stage: "truth_initial",
     reasonCode: "direct_proof"
@@ -11837,7 +12044,8 @@ async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) 
       reasonCode: "diff_echo"
     });
   }
-  const evidence = readHunk(finding);
+  const read = readHunk(finding);
+  const evidence = typeof read === "string" ? read : read.text;
   if (evidence === "") {
     return {
       finding: dropsOnUnreadableHunk(strictness) ? void 0 : finding,
@@ -11847,7 +12055,7 @@ async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) 
       terminal: { stage: "preflight", reasonCode: "unreadable_hunk" }
     };
   }
-  const proved = closedProofResult(finding, evidence, metrics);
+  const proved = typeof read === "string" ? void 0 : closedProofResult(finding, read, metrics);
   if (proved !== void 0) return proved;
   if (!budgetAllows2(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
     return undecidedResult(finding, strictness, metrics, true, {
@@ -11879,6 +12087,7 @@ function emptyCounts() {
 }
 function tallyJudgement(counts, judged) {
   counts.confirmed += judged.metrics.confirmed;
+  counts.directProved += judged.metrics.directProved;
   counts.truthRefuted += judged.metrics.truthRefuted;
   counts.falsifierDefeated += judged.metrics.falsifierDefeated;
   counts.retrievalRequested += judged.metrics.retrievalRequested;
@@ -13100,7 +13309,7 @@ async function prepareFindingEvidence(run2, context, cache, ctx, finding) {
   const read = await readFindingEvidence(run2, context, cache, ctx, finding);
   if (read === void 0) return void 0;
   const anchorSource = read.item.status === "D" ? read.sources.baseText : read.sources.headText;
-  const anchorText = sourceLines(anchorSource, finding.startLine, finding.endLine);
+  const anchorText = sourceLines2(anchorSource, finding.startLine, finding.endLine);
   if (anchorText === void 0) return void 0;
   const findingAnchor = { startLine: finding.startLine, endLine: finding.endLine };
   const baseFindingAnchor = baseAnchorForFinding(read, finding);
@@ -13150,7 +13359,7 @@ async function evidenceForSurvivors(run2, context, modelFindings) {
   }
   return evidence;
 }
-function sourceLines(source, startLine, endLine) {
+function sourceLines2(source, startLine, endLine) {
   if (source === void 0 || !Number.isSafeInteger(startLine) || !Number.isSafeInteger(endLine) || startLine < 1 || endLine < startLine) {
     return void 0;
   }
@@ -13225,6 +13434,7 @@ function recordSubstantiation(run2, outcome) {
   run2.diagnostics.record("publish.substantiated", {
     counts: {
       kept: outcome.findings.length,
+      direct_proved: outcome.directProved,
       truth_refuted: outcome.truthRefuted,
       falsifier_defeated: outcome.falsifierDefeated,
       insufficient_evidence: outcome.droppedInsufficientEvidence,
@@ -13243,6 +13453,14 @@ function recordSubstantiation(run2, outcome) {
       tokens: outcome.tokens
     }
   });
+}
+function trustedFindingEvidence(prepared) {
+  if (prepared === void 0) return "";
+  return bindTrustedHunkEvidence({
+    text: prepared.text,
+    headSource: prepared.headText,
+    baseSource: prepared.baseText
+  }) ?? "";
 }
 async function substantiateModelSurvivors(run2, context, modelFindings) {
   if (modelFindings.length === 0) return NO_SUBSTANTIATION;
@@ -13268,7 +13486,7 @@ async function substantiateModelSurvivors(run2, context, modelFindings) {
     };
   });
   const evidenceByJudgeable = new Map(
-    judgeable.map((finding) => [finding, evidence.get(finding.original)?.text ?? ""])
+    judgeable.map((finding) => [finding, trustedFindingEvidence(evidence.get(finding.original))])
   );
   const outcome = await substantiate(
     judgeable,

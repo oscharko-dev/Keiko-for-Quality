@@ -101,6 +101,7 @@ const STAGE_COUNTER_KEYS = [
   "challengePlanned",
   "challengeRetrievalPerformed",
   "confirmed",
+  "directProved",
   "droppedInsufficientEvidence",
   "falsifierDefeated",
   "retrievalExpanded",
@@ -372,6 +373,7 @@ function validateExecution(value, plan, failures) {
     validatedOutcomes < 0 ||
     terminalStageOutcomes !== validatedOutcomes ||
     stageCounters.confirmed !== corroboratedDecisions.keep ||
+    stageCounters.directProved > stageCounters.confirmed ||
     stageCounters.truthRefuted +
       stageCounters.falsifierDefeated +
       stageCounters.droppedInsufficientEvidence !==
@@ -403,9 +405,9 @@ function validateExecution(value, plan, failures) {
       stageCounters.challengeNoMatches >
       stageCounters.challengeFailed ||
     stageCounters.challengeFailed > stageCounters.undecided ||
-    stageCounters.challengeNoMatches > stageCounters.confirmed ||
+    stageCounters.challengeNoMatches > stageCounters.confirmed - stageCounters.directProved ||
     stageCounters.challengeExpanded + stageCounters.challengeNoMatches <
-      stageCounters.confirmed + stageCounters.falsifierDefeated
+      stageCounters.confirmed - stageCounters.directProved + stageCounters.falsifierDefeated
   ) {
     mark(failures, "execution_stage_arithmetic");
   }

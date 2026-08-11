@@ -120,6 +120,7 @@ export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".r
       corroboratedDecisions: { keep: 21, drop: 40, unmeasured: 5 },
       stageCounters: {
         confirmed: 21,
+        directProved: 0,
         truthRefuted: 30,
         falsifierDefeated: 6,
         droppedInsufficientEvidence: 4,

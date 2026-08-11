@@ -22,7 +22,7 @@
 
 import { EXAMINER_CLAIM_DECISION_POLICY } from "../engine/claim-decision-policy.js";
 import { LIMITS as ENGINE_RESULT_LIMITS } from "../engine/result.js";
-import { closedClaimProof } from "./closed-claim-proof.js";
+import { closedClaimProof, type TrustedHunkEvidence } from "./closed-claim-proof.js";
 import { MAX_EVIDENCE_CHARS, extractEvidenceIdentifiers } from "./evidence.js";
 import { decodeEvidenceSourcePath, encodeEvidenceSourcePath } from "./evidence-path.js";
 import { validatedRetrieveTerms } from "./repository-context.js";
@@ -305,6 +305,8 @@ export type EvidenceRetriever<T extends JudgeableFinding = JudgeableFinding> = (
 export interface SubstantiationOutcome<T extends JudgeableFinding> {
   readonly findings: readonly T[];
   readonly confirmed: number;
+  /** Confirmations licensed by exact source parsing without a model or challenge call. */
+  readonly directProved: number;
   readonly droppedRefuted: number;
   readonly droppedInsufficientEvidence: number;
   readonly truthRefuted: number;
@@ -1635,7 +1637,7 @@ export function extractVerdict(text: string | undefined): SubstantiationVerdict 
   return closedValue(matches.at(-1)?.[1], SUBSTANTIATION_VERDICTS);
 }
 
-export type HunkReader = (finding: JudgeableFinding) => string;
+export type HunkReader = (finding: JudgeableFinding) => string | TrustedHunkEvidence;
 
 const MAX_RETRIEVAL_SOURCES = 3;
 const MAX_RETRIEVAL_LINES = 200;
@@ -1865,6 +1867,7 @@ interface TerminalDiagnostic {
 
 interface CandidateMetrics {
   confirmed: number;
+  directProved: number;
   truthRefuted: number;
   falsifierDefeated: number;
   retrievalRequested: number;
@@ -1890,6 +1893,7 @@ interface JudgedOne<T extends JudgeableFinding> {
 function emptyMetrics(): CandidateMetrics {
   return {
     confirmed: 0,
+    directProved: 0,
     truthRefuted: 0,
     falsifierDefeated: 0,
     retrievalRequested: 0,
@@ -2509,11 +2513,12 @@ async function verifyEvidenceRound<T extends JudgeableFinding>(
 
 function closedProofResult<T extends JudgeableFinding>(
   finding: T,
-  evidence: string,
+  evidence: TrustedHunkEvidence,
   metrics: CandidateMetrics,
 ): JudgedOne<T> | undefined {
   if (closedClaimProof(finding, evidence) === undefined) return undefined;
   metrics.confirmed += 1;
+  metrics.directProved += 1;
   return decidedResult(finding, "kept", metrics, {
     stage: "truth_initial",
     reasonCode: "direct_proof",
@@ -2536,7 +2541,8 @@ async function judgeOne<T extends JudgeableFinding>(
       reasonCode: "diff_echo",
     });
   }
-  const evidence = readHunk(finding);
+  const read = readHunk(finding);
+  const evidence = typeof read === "string" ? read : read.text;
   if (evidence === "") {
     return {
       finding: dropsOnUnreadableHunk(strictness) ? undefined : finding,
@@ -2550,7 +2556,7 @@ async function judgeOne<T extends JudgeableFinding>(
   // rule. It may keep only the finding already supplied: exact changed rows, claim semantics, and
   // the absence of a shown guard all come from trusted evidence parsing above. Every other shape
   // continues through the full independent model workflow below.
-  const proved = closedProofResult(finding, evidence, metrics);
+  const proved = typeof read === "string" ? undefined : closedProofResult(finding, read, metrics);
   if (proved !== undefined) return proved;
   if (!budgetAllows(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
     return undecidedResult(finding, strictness, metrics, true, {
@@ -2594,6 +2600,7 @@ function tallyJudgement<T extends JudgeableFinding>(
   judged: JudgedOne<T>,
 ): void {
   counts.confirmed += judged.metrics.confirmed;
+  counts.directProved += judged.metrics.directProved;
   counts.truthRefuted += judged.metrics.truthRefuted;
   counts.falsifierDefeated += judged.metrics.falsifierDefeated;
   counts.retrievalRequested += judged.metrics.retrievalRequested;
