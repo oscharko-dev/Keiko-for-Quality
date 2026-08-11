@@ -1457,6 +1457,27 @@ test("a verifier budget block is budget-unmeasured and every call receives the t
   assert.equal(result.report.unmeasuredByReason.verificationUndecided, 0);
 });
 
+test("a negative contract search remains a valid confirmed historical decision", async () => {
+  const result = await runHistoricalReplayVerification({
+    databaseIds: [1],
+    cases: [boundReplayCase(1)],
+    maxTokens: 1_000,
+    ...replayVerificationDependencies(async (findings) =>
+      substantiationOutcome(findings, {
+        challengeExpanded: 0,
+        challengeNoMatches: 1,
+      }),
+    ),
+  });
+
+  assert.deepEqual(result.decisions, [{ databaseId: 1, decision: "keep" }]);
+  assert.deepEqual(result.report.corroboratedDecisions, { keep: 1, drop: 0, unmeasured: 0 });
+  assert.equal(result.report.unmeasuredByReason.verificationError, 0);
+  assert.equal(result.report.stageCounters.confirmed, 1);
+  assert.equal(result.report.stageCounters.challengeExpanded, 0);
+  assert.equal(result.report.stageCounters.challengeNoMatches, 1);
+});
+
 test("invalid budget accounting exhausts the local ledger before another verifier call", async () => {
   let calls = 0;
   const result = await runHistoricalReplayVerification({

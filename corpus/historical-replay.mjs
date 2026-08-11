@@ -989,8 +989,9 @@ function validSubstantiationOutcome(outcome, finding) {
     outcome.challengeRetrievalPerformed - outcome.challengeExpanded - outcome.challengeNoMatches <=
       outcome.challengeFailed &&
     outcome.challengeFailed <= outcome.undecided &&
-    outcome.challengeNoMatches <= outcome.droppedInsufficientEvidence &&
-    outcome.challengeExpanded >= outcome.confirmed + outcome.falsifierDefeated
+    outcome.challengeNoMatches <= outcome.confirmed &&
+    outcome.challengeExpanded + outcome.challengeNoMatches >=
+      outcome.confirmed + outcome.falsifierDefeated
   );
 }
 
