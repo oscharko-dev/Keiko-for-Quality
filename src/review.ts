@@ -135,6 +135,7 @@ import {
   type JudgeableFinding,
   type SubstantiationOutcome,
 } from "./publish/substantiate.js";
+import { bindTrustedHunkEvidence, type TrustedHunkEvidence } from "./publish/closed-claim-proof.js";
 
 export interface ReviewRequest {
   readonly client: GitHubClient;
@@ -3173,6 +3174,7 @@ function recordSubstantiation(
   run.diagnostics.record("publish.substantiated", {
     counts: {
       kept: outcome.findings.length,
+      direct_proved: outcome.directProved,
       truth_refuted: outcome.truthRefuted,
       falsifier_defeated: outcome.falsifierDefeated,
       insufficient_evidence: outcome.droppedInsufficientEvidence,
@@ -3191,6 +3193,19 @@ function recordSubstantiation(
       tokens: outcome.tokens,
     },
   });
+}
+
+function trustedFindingEvidence(
+  prepared: PreparedFindingEvidence | undefined,
+): string | TrustedHunkEvidence {
+  if (prepared === undefined) return "";
+  return (
+    bindTrustedHunkEvidence({
+      text: prepared.text,
+      headSource: prepared.headText,
+      baseSource: prepared.baseText,
+    }) ?? ""
+  );
 }
 
 /**
@@ -3255,8 +3270,8 @@ async function substantiateModelSurvivors(
       original: survivor.finding,
     };
   });
-  const evidenceByJudgeable = new Map<JudgeableFinding, string>(
-    judgeable.map((finding) => [finding, evidence.get(finding.original)?.text ?? ""]),
+  const evidenceByJudgeable = new Map<JudgeableFinding, string | TrustedHunkEvidence>(
+    judgeable.map((finding) => [finding, trustedFindingEvidence(evidence.get(finding.original))]),
   );
 
   const outcome = await substantiate(

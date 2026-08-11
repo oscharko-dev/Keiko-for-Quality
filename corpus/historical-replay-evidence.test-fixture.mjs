@@ -68,7 +68,7 @@ function reasonCounts(overrides = {}) {
   };
 }
 
-/** Production-shaped, aggregate-only v5 evidence over the calibrated 92/66 historical cohort. */
+/** Production-shaped, aggregate-only v6 evidence over the calibrated 92/66 historical cohort. */
 export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".repeat(40) } = {}) {
   const sourceRecords = calibratedRecords();
   const decisions = calibratedDecisions(sourceRecords);
@@ -120,6 +120,7 @@ export function productionHistoricalReplayEvidenceFixture({ reviewerTree = "a".r
       corroboratedDecisions: { keep: 21, drop: 40, unmeasured: 5 },
       stageCounters: {
         confirmed: 21,
+        directProved: 0,
         truthRefuted: 30,
         falsifierDefeated: 6,
         droppedInsufficientEvidence: 4,

@@ -18,6 +18,7 @@ test("accepts the production-shaped 92/66 replay with 61 measurable and attempte
   assert.equal(evidence.execution.attemptedCases, 61);
   assert.deepEqual(evidence.execution.stageCounters, {
     confirmed: 21,
+    directProved: 0,
     truthRefuted: 30,
     falsifierDefeated: 6,
     droppedInsufficientEvidence: 4,
@@ -57,6 +58,32 @@ test("accepts confirmed findings whose independent challenge search found no cou
     validateHistoricalReplayEvidence(noMatchWithoutConfirmation).failures.includes(
       "execution_stage_arithmetic",
     ),
+  );
+});
+
+test("accounts for zero-call direct proofs outside the challenge path", () => {
+  const evidence = productionHistoricalReplayEvidenceFixture();
+  evidence.execution.stageCounters.directProved = 2;
+  evidence.execution.stageCounters.challengePlanned -= 2;
+  evidence.execution.stageCounters.challengeRetrievalPerformed -= 2;
+  evidence.execution.stageCounters.challengeExpanded -= 2;
+
+  assert.deepEqual(validateHistoricalReplayEvidence(evidence), { valid: true, failures: [] });
+
+  const challengedDirectProof = productionHistoricalReplayEvidenceFixture();
+  challengedDirectProof.execution.stageCounters.directProved = 2;
+  challengedDirectProof.execution.stageCounters.challengePlanned = 60;
+  challengedDirectProof.execution.stageCounters.challengeRetrievalPerformed = 60;
+  challengedDirectProof.execution.stageCounters.challengeExpanded = 58;
+  assert.ok(
+    validateHistoricalReplayEvidence(challengedDirectProof).failures.includes(
+      "execution_stage_arithmetic",
+    ),
+  );
+
+  evidence.execution.stageCounters.directProved = evidence.execution.stageCounters.confirmed + 1;
+  assert.ok(
+    validateHistoricalReplayEvidence(evidence).failures.includes("execution_stage_arithmetic"),
   );
 });
 
@@ -144,7 +171,7 @@ test("rejects digest, aggregate arithmetic, population-floor, and extra-field ta
   assert.ok(validateHistoricalReplayEvidence(stageExtra).failures.includes("execution_shape"));
 
   const oldSchema = productionHistoricalReplayEvidenceFixture();
-  oldSchema.schemaVersion = 4;
+  oldSchema.schemaVersion = 5;
   assert.ok(validateHistoricalReplayEvidence(oldSchema).failures.includes("identity"));
 
   const missingStages = productionHistoricalReplayEvidenceFixture();

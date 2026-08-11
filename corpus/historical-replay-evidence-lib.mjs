@@ -101,6 +101,7 @@ const STAGE_COUNTER_KEYS = [
   "challengePlanned",
   "challengeRetrievalPerformed",
   "confirmed",
+  "directProved",
   "droppedInsufficientEvidence",
   "falsifierDefeated",
   "retrievalExpanded",
@@ -372,6 +373,7 @@ function validateExecution(value, plan, failures) {
     validatedOutcomes < 0 ||
     terminalStageOutcomes !== validatedOutcomes ||
     stageCounters.confirmed !== corroboratedDecisions.keep ||
+    stageCounters.directProved > stageCounters.confirmed ||
     stageCounters.truthRefuted +
       stageCounters.falsifierDefeated +
       stageCounters.droppedInsufficientEvidence !==
@@ -390,7 +392,7 @@ function validateExecution(value, plan, failures) {
     stageCounters.retrievalNoMatches > stageCounters.droppedInsufficientEvidence ||
     stageCounters.retrievalRequested - stageCounters.retrievalPerformed >
       stageCounters.droppedInsufficientEvidence ||
-    stageCounters.challengePlanned > validatedOutcomes ||
+    stageCounters.challengePlanned > validatedOutcomes - stageCounters.directProved ||
     stageCounters.challengeRetrievalPerformed > stageCounters.challengePlanned ||
     stageCounters.challengeExpanded + stageCounters.challengeNoMatches >
       stageCounters.challengeRetrievalPerformed ||
@@ -403,9 +405,9 @@ function validateExecution(value, plan, failures) {
       stageCounters.challengeNoMatches >
       stageCounters.challengeFailed ||
     stageCounters.challengeFailed > stageCounters.undecided ||
-    stageCounters.challengeNoMatches > stageCounters.confirmed ||
+    stageCounters.challengeNoMatches > stageCounters.confirmed - stageCounters.directProved ||
     stageCounters.challengeExpanded + stageCounters.challengeNoMatches <
-      stageCounters.confirmed + stageCounters.falsifierDefeated
+      stageCounters.confirmed - stageCounters.directProved + stageCounters.falsifierDefeated
   ) {
     mark(failures, "execution_stage_arithmetic");
   }
@@ -594,7 +596,7 @@ function validateScore(value, holdoutFromPullRequest, plan, execution, failures)
 }
 
 /**
- * Validates one release-grade schema-v5 historical replay artifact.
+ * Validates one release-grade schema-v6 historical replay artifact.
  *
  * The return shape mirrors the qualification evidence validator so release code can fail closed
  * without learning this schema's internals.
@@ -603,7 +605,7 @@ export function validateHistoricalReplayEvidence(report) {
   const failures = [];
   const root = exactRecord(report, ROOT_KEYS);
   if (root === undefined) return { valid: false, failures: ["root_shape"] };
-  if (root.schemaVersion !== 5 || root.artifact !== HISTORICAL_REPLAY_EVIDENCE_ARTIFACT) {
+  if (root.schemaVersion !== 6 || root.artifact !== HISTORICAL_REPLAY_EVIDENCE_ARTIFACT) {
     mark(failures, "identity");
   }
   if (

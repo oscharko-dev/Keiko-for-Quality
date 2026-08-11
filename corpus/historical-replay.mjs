@@ -895,6 +895,7 @@ function nonnegativeIntegerField(outcome, field) {
 
 const STAGE_COUNTER_FIELDS = [
   "confirmed",
+  "directProved",
   "truthRefuted",
   "falsifierDefeated",
   "droppedInsufficientEvidence",
@@ -919,6 +920,7 @@ function emptyStageCounters() {
 function validSubstantiationOutcome(outcome, finding) {
   const countFields = [
     "confirmed",
+    "directProved",
     "droppedRefuted",
     "droppedInsufficientEvidence",
     "truthRefuted",
@@ -967,6 +969,7 @@ function validSubstantiationOutcome(outcome, finding) {
     outcome.undecided;
   return (
     terminalDecisions === 1 &&
+    outcome.directProved <= outcome.confirmed &&
     outcome.confirmed === outcome.findings.length &&
     outcome.droppedRefuted === outcome.truthRefuted + outcome.falsifierDefeated &&
     outcome.droppedUnsupported === outcome.droppedRefuted &&
@@ -981,7 +984,7 @@ function validSubstantiationOutcome(outcome, finding) {
     outcome.retrievalNoMatches <= outcome.droppedInsufficientEvidence &&
     outcome.retrievalRequested - outcome.retrievalPerformed <=
       outcome.droppedInsufficientEvidence &&
-    outcome.challengePlanned <= 1 &&
+    outcome.challengePlanned <= 1 - outcome.directProved &&
     outcome.challengeRetrievalPerformed <= outcome.challengePlanned &&
     outcome.challengeExpanded + outcome.challengeNoMatches <= outcome.challengeRetrievalPerformed &&
     outcome.challengePlanned ===
@@ -989,9 +992,9 @@ function validSubstantiationOutcome(outcome, finding) {
     outcome.challengeRetrievalPerformed - outcome.challengeExpanded - outcome.challengeNoMatches <=
       outcome.challengeFailed &&
     outcome.challengeFailed <= outcome.undecided &&
-    outcome.challengeNoMatches <= outcome.confirmed &&
+    outcome.challengeNoMatches <= outcome.confirmed - outcome.directProved &&
     outcome.challengeExpanded + outcome.challengeNoMatches >=
-      outcome.confirmed + outcome.falsifierDefeated
+      outcome.confirmed - outcome.directProved + outcome.falsifierDefeated
   );
 }
 
@@ -1036,6 +1039,7 @@ function historicalTraceEntry(databaseId, reason, usage = EMPTY_HISTORICAL_TRACE
 
 function assertHistoricalVerificationDependencies(dependencies) {
   const required = [
+    dependencies.bindTrustedHunkEvidence,
     dependencies.buildChangeEvidence,
     dependencies.mappedBaseRangeFromUnifiedDiff,
     dependencies.collectInitialRepositoryContext,
@@ -1300,6 +1304,7 @@ async function attemptHistoricalVerification({
   replayCase,
   sources,
   prepared,
+  boundEvidence,
   remainingTokens,
   judgeEndpoint,
   dependencies,
@@ -1310,7 +1315,7 @@ async function attemptHistoricalVerification({
   try {
     const outcome = await dependencies.substantiate(
       [prepared.judgeable],
-      () => prepared.evidence,
+      () => boundEvidence,
       judgeEndpoint,
       HISTORICAL_REPLAY_STRICTNESS,
       remainingTokens,
@@ -1413,6 +1418,20 @@ async function processHistoricalReplayCase({
     recordHistoricalUnmeasured(state, replayCase, prepared.reason);
     return;
   }
+  let boundEvidence;
+  try {
+    boundEvidence = dependencies.bindTrustedHunkEvidence({
+      text: prepared.evidence,
+      headSource: resolved.sources.headSource,
+      baseSource: resolved.sources.baseSource,
+    });
+  } catch {
+    boundEvidence = undefined;
+  }
+  if (boundEvidence === undefined) {
+    recordHistoricalUnmeasured(state, replayCase, "evidenceUnavailable");
+    return;
+  }
   const remainingTokens = maxTokens - state.accountedTokens;
   if (remainingTokens <= 0) {
     recordHistoricalUnmeasured(state, replayCase, "budget");
@@ -1423,6 +1442,7 @@ async function processHistoricalReplayCase({
     replayCase,
     sources: resolved.sources,
     prepared,
+    boundEvidence,
     remainingTokens,
     judgeEndpoint,
     dependencies,
@@ -1492,11 +1512,13 @@ export async function runHistoricalReplayVerification({
   collectClosedRuntimeFactsAtCommit,
   requestsClosedRuntimeFacts,
   toRetrievedEvidence,
+  bindTrustedHunkEvidence,
   substantiate,
   captureDiagnosticTrace = false,
 }) {
   const { caseIds } = assertDecisionInputs(databaseIds, cases);
   const verificationDependencies = {
+    bindTrustedHunkEvidence,
     buildChangeEvidence,
     mappedBaseRangeFromUnifiedDiff,
     collectInitialRepositoryContext,
@@ -1539,7 +1561,7 @@ export function buildRedactedHistoricalReplayEvidence({
     throw new Error("reviewer tree binding is malformed");
   }
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     artifact: HISTORICAL_REPLAY_EVIDENCE_ARTIFACT,
     generatedAt,
     scope: {
@@ -1614,11 +1636,22 @@ function sourceDigests() {
     evidenceBuilder: join(REPOSITORY_ROOT, "src", "publish", "evidence.ts"),
     repositoryContext: join(REPOSITORY_ROOT, "src", "publish", "repository-context.ts"),
     retrievedEvidence: join(REPOSITORY_ROOT, "src", "publish", "retrieved-evidence.ts"),
-    substantiation: join(REPOSITORY_ROOT, "src", "publish", "substantiate.ts"),
   };
-  return Object.fromEntries(
+  const digests = Object.fromEntries(
     Object.entries(files).map(([name, path]) => [name, sha256(readFileSync(path))]),
   );
+  const substantiationSources = [
+    "src/publish/closed-claim-proof.ts",
+    "src/publish/substantiate.ts",
+  ];
+  return {
+    ...digests,
+    substantiation: sha256(
+      substantiationSources
+        .map((path) => `${path}\0${readFileSync(join(REPOSITORY_ROOT, path), "utf8")}\0`)
+        .join(""),
+    ),
+  };
 }
 
 async function productionVerificationDependencies() {
@@ -1629,12 +1662,14 @@ async function productionVerificationDependencies() {
     { requestsClosedRuntimeFacts, toRetrievedEvidence },
     { collectClosedRuntimeFactsAtCommit },
     { substantiate },
+    { bindTrustedHunkEvidence },
   ] = await Promise.all([
     import("../src/publish/evidence.ts"),
     import("../src/publish/repository-context.ts"),
     import("../src/publish/retrieved-evidence.ts"),
     import("../src/publish/runtime-facts.ts"),
     import("../src/publish/substantiate.ts"),
+    import("../src/publish/closed-claim-proof.ts"),
   ]);
   return {
     buildChangeEvidence,
@@ -1644,6 +1679,7 @@ async function productionVerificationDependencies() {
     collectClosedRuntimeFactsAtCommit,
     requestsClosedRuntimeFacts,
     toRetrievedEvidence,
+    bindTrustedHunkEvidence,
     substantiate,
   };
 }
@@ -1805,6 +1841,7 @@ export async function runHistoricalReplayCommand(argv, env = process.env, depend
       collectClosedRuntimeFactsAtCommit: loaded.collectClosedRuntimeFactsAtCommit,
       requestsClosedRuntimeFacts: loaded.requestsClosedRuntimeFacts,
       toRetrievedEvidence: loaded.toRetrievedEvidence,
+      bindTrustedHunkEvidence: loaded.bindTrustedHunkEvidence,
       substantiate: loaded.substantiate,
       captureDiagnosticTrace: diagnosticReservation !== undefined,
     });

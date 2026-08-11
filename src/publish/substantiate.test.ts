@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { EXAMINER_CLAIM_DECISION_POLICY } from "../engine/claim-decision-policy.js";
+import { bindTrustedHunkEvidence } from "./closed-claim-proof.js";
 import {
   CLOSED_RUNTIME_FACT_CATALOG,
   CLOSED_RUNTIME_FACT_CATALOG_VERSION,
@@ -371,6 +372,67 @@ describe("deterministic dossier", () => {
     expect(buildDossier("The guard in `wait` is gone.").namesLocation).toBe(true);
     expect(buildDossier("The route changed.").namesLocation).toBe(false);
     expect(needsJudging(buildDossier("+  const x = 1;\n-  const x = 2;"))).toBe(false);
+  });
+});
+
+describe("closed source proofs", () => {
+  it("keeps a closed direct proof without spending a probabilistic verifier call", async () => {
+    const candidate: JudgeableFinding = {
+      path: "src/parser.ts",
+      content: "Reject duplicate IDs instead of silently overwriting the previous entry.",
+      startLine: 13,
+      endLine: 13,
+    };
+    const headSource = [
+      "function parse(entries: readonly Entry[]): Map<string, Capability> {",
+      "  const byId = new Map<string, Capability>();",
+      "  if (!Array.isArray(entries)) return byId;",
+      "  for (const entry of entries) {",
+      "    const id = readId(entry);",
+      "    work();",
+      "    work();",
+      "    work();",
+      "    work();",
+      "    work();",
+      "    work();",
+      "    work();",
+      "    byId.set(id.value, capability);",
+      "  }",
+      "  return byId;",
+      "}",
+    ].join("\n");
+    const text = [
+      ...headSource.split("\n").map((line, index) => `H:${String(index + 1)}| ${line}`),
+      "D:H:13| +    byId.set(id.value, capability);",
+    ].join("\n");
+    const evidence = bindTrustedHunkEvidence({ text, headSource, baseSource: undefined });
+    expect(evidence).toBeDefined();
+    const endpoint = endpointReplying([]);
+    const traces: SubstantiationTerminalTrace[] = [];
+
+    const out = await substantiate(
+      [candidate],
+      () => evidence ?? "",
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      undefined,
+      (trace) => traces.push(trace),
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(out.confirmed).toBe(1);
+    expect(out.directProved).toBe(1);
+    expect(out.tokens).toBe(0);
+    expect(endpoint.prompts()).toEqual([]);
+    expect(traces).toEqual([
+      {
+        stage: "truth_initial",
+        disposition: "kept",
+        reasonCode: "direct_proof",
+        usage: { callCount: 0, tokens: 0 },
+      },
+    ]);
   });
 });
 
