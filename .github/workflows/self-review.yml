@@ -87,7 +87,7 @@ jobs:
       # The pinned release — see this file's header for why this is not `uses: ./`. Advance it in
       # the same change that tags a release, exactly as the consumer's pin is advanced.
       - name: Review
-        uses: oscharko-dev/Keiko-for-Quality@0c53cb11a924ba62dc2172316dee4ecf4a758360 # v0.21.2
+        uses: oscharko-dev/Keiko-for-Quality@2049125bbe0c516da9357150bac347c316630645 # v0.23.0
         with:
           profile: .github/keiko-for-quality.json
           model_endpoint: ${{ secrets.KFQ_MODEL_ENDPOINT }}
