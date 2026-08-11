@@ -2276,7 +2276,42 @@ async function resolveContractChallenge<T extends JudgeableFinding>(
     return { kind: "insufficient", reasonCode: "retrieval_no_match" };
   }
   run.metrics.challengeExpanded += 1;
-  return { kind: "expanded", evidence: `${evidence}\n\n${rendered}` };
+  return {
+    kind: "expanded",
+    evidence: focusedChallengeEvidence(evidence, challenge.evidenceRefs, rendered),
+  };
+}
+
+const CHALLENGE_PROOF_CONTEXT_RADIUS = 8;
+
+function addChallengeProofWindow(selected: Set<number>, centre: number, lineCount: number): void {
+  const start = Math.max(0, centre - CHALLENGE_PROOF_CONTEXT_RADIUS);
+  const end = Math.min(lineCount - 1, centre + CHALLENGE_PROOF_CONTEXT_RADIUS);
+  for (let index = start; index <= end; index += 1) selected.add(index);
+}
+
+/**
+ * Truth needs the complete dossier to establish the change. The adversarial roles do not: their
+ * job is to compare Truth's exact proof with one independently retrieved contract pack. Passing
+ * the entire dossier again buried a short counterexample among thousands of unrelated source
+ * lines in historical reviews. Keep each cited proof line with a small, deterministic neighbour
+ * window, then append the already bounded R4-R6 challenge evidence verbatim.
+ */
+function focusedChallengeEvidence(
+  evidence: string,
+  proofRefs: readonly VerificationEvidenceRef[],
+  renderedChallenge: string,
+): string {
+  const lines = evidence.split("\n");
+  const prefixes = proofRefs.map((reference) => `${reference}|`);
+  const selected = new Set<number>();
+  for (const [index, line] of lines.entries()) {
+    if (prefixes.some((prefix) => line.startsWith(prefix))) {
+      addChallengeProofWindow(selected, index, lines.length);
+    }
+  }
+  const proof = lines.filter((_line, index) => selected.has(index)).join("\n");
+  return `${proof}\n\n${renderedChallenge}`;
 }
 
 function applyFalsifierDecision<T extends JudgeableFinding>(

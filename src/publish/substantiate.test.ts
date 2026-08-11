@@ -895,6 +895,44 @@ describe("truth then adversarial falsification", () => {
     expect(endpoint.prompts()[2]).toContain("final independent referee");
   });
 
+  it("focuses adversarial roles on cited proof windows and retrieved challenge evidence", async () => {
+    const paddedEvidence = [
+      "HEAD (proposed code):",
+      "H:1| // The caller supplies milliseconds.",
+      "H:2| export async function wait(delay: number) {",
+      "H:3|   await sleep(delay);",
+      ...Array.from(
+        { length: 9 },
+        (_value, index) => `H:${String(index + 4)}| unrelatedHeadLine${String(index + 4)}();`,
+      ),
+      ...Array.from({ length: 10 }, (_value, index) => `UNRELATED DISTRACTOR ${String(index + 1)}`),
+      "BASE (before change):",
+      "B:3|   await sleep(delay * 1000);",
+      "CHANGE (merge-base to HEAD):",
+      "D:B:3| -  await sleep(delay * 1000);",
+      "D:H:3| +  await sleep(delay);",
+    ].join("\n");
+    const candidate = finding("When the header is numeric, the wait is 1000× short.");
+    const endpoint = endpointReplying([CONFIRMED, SURVIVES, REFEREE_SURVIVES]);
+    const out = await substantiate(
+      [candidate],
+      () => paddedEvidence,
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      () => retrievedCaller(),
+    );
+
+    expect(out.findings).toEqual([candidate]);
+    expect(endpoint.prompts()[0]).toContain("\nUNRELATED DISTRACTOR 1\n");
+    for (const prompt of endpoint.prompts().slice(1)) {
+      expect(prompt).toContain("H:1| // The caller supplies milliseconds.");
+      expect(prompt).toContain("R4:H:9| await wait(header.delay);");
+      expect(prompt).not.toContain("\nUNRELATED DISTRACTOR 1\n");
+      expect(prompt).not.toContain("H:12| unrelatedHeadLine12();");
+    }
+  });
+
   it("renders retrieved source identity with the reversible evidence-path encoding", async () => {
     const candidate = finding("When the header is numeric, the wait is 1000× short.");
     const endpoint = endpointReplying([CONFIRMED, SURVIVES, REFEREE_SURVIVES]);

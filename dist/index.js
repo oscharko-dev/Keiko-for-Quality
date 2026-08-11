@@ -12558,9 +12558,30 @@ async function resolveContractChallenge(run2, evidence, challenge) {
     return { kind: "insufficient", reasonCode: "retrieval_no_match" };
   }
   run2.metrics.challengeExpanded += 1;
-  return { kind: "expanded", evidence: `${evidence}
+  return {
+    kind: "expanded",
+    evidence: focusedChallengeEvidence(evidence, challenge.evidenceRefs, rendered)
+  };
+}
+var CHALLENGE_PROOF_CONTEXT_RADIUS = 8;
+function addChallengeProofWindow(selected, centre, lineCount) {
+  const start = Math.max(0, centre - CHALLENGE_PROOF_CONTEXT_RADIUS);
+  const end = Math.min(lineCount - 1, centre + CHALLENGE_PROOF_CONTEXT_RADIUS);
+  for (let index = start; index <= end; index += 1) selected.add(index);
+}
+function focusedChallengeEvidence(evidence, proofRefs, renderedChallenge) {
+  const lines = evidence.split("\n");
+  const prefixes = proofRefs.map((reference) => `${reference}|`);
+  const selected = /* @__PURE__ */ new Set();
+  for (const [index, line] of lines.entries()) {
+    if (prefixes.some((prefix) => line.startsWith(prefix))) {
+      addChallengeProofWindow(selected, index, lines.length);
+    }
+  }
+  const proof = lines.filter((_line, index) => selected.has(index)).join("\n");
+  return `${proof}
 
-${rendered}` };
+${renderedChallenge}`;
 }
 function applyFalsifierDecision(run2, decision) {
   if (decision.verdict === "defeated") {
