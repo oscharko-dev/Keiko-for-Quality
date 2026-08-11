@@ -6722,6 +6722,208 @@ function describePinDesync(desync, path) {
   ].join("\n");
 }
 
+// src/contracts/parallel-mapping.ts
+var IDENTIFIER = /^[A-Za-z_$][\w$]*$/u;
+var EXECUTABLE_EXTENSIONS = /* @__PURE__ */ new Set([
+  ".cjs",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".mts",
+  ".ts",
+  ".tsx"
+]);
+var QUOTE_CLOSING = {
+  "double-quote": '"',
+  "single-quote": "'",
+  template: "`"
+};
+function quotedTransition(source, index, state) {
+  if (source[index] === "\\") return { consumed: 2, state };
+  return source[index] === QUOTE_CLOSING[state] ? { consumed: 1, state: "code" } : void 0;
+}
+function nonCodeTransition(source, index, state) {
+  const char = source[index];
+  if (state === "line-comment") return char === "\n" ? { consumed: 1, state: "code" } : void 0;
+  if (state === "block-comment") {
+    return char === "*" && source[index + 1] === "/" ? { consumed: 2, state: "code" } : void 0;
+  }
+  return quotedTransition(source, index, state);
+}
+function codeTransition(source, index) {
+  const char = source[index];
+  const next = source[index + 1];
+  if (char === "/" && next === "/") return { consumed: 2, state: "line-comment" };
+  if (char === "/" && next === "*") return { consumed: 2, state: "block-comment" };
+  if (char === "'") return { consumed: 1, state: "single-quote" };
+  if (char === '"') return { consumed: 1, state: "double-quote" };
+  if (char === "`") return { consumed: 1, state: "template" };
+  return { consumed: 1, state: "code" };
+}
+function nextLexicalState(source, index, state) {
+  return state === "code" ? codeTransition(source, index) : nonCodeTransition(source, index, state);
+}
+function maskTransition(current, transition) {
+  return current !== "code" || transition.state !== "code" || transition.consumed > 1;
+}
+function codeProjection(source) {
+  const projected = new Array(source.length);
+  let state = "code";
+  for (let index = 0; index < source.length; ) {
+    const current = state;
+    const transition = nextLexicalState(source, index, state);
+    const consumed = transition?.consumed ?? 1;
+    state = transition?.state ?? state;
+    for (let offset = 0; offset < consumed; offset += 1) {
+      const char = source[index + offset] ?? "";
+      projected[index + offset] = maskTransition(current, { consumed, state }) && char !== "\n" ? " " : char;
+    }
+    index += consumed;
+  }
+  return projected.join("");
+}
+function codeBounds(line) {
+  const start = line.search(/\S/u);
+  if (start < 0) return void 0;
+  let end = line.length;
+  while (end > start && /\s/u.test(line[end - 1] ?? "")) end -= 1;
+  return { start, end };
+}
+function validMappingParts(key, helper, argumentsText) {
+  return IDENTIFIER.test(key) && IDENTIFIER.test(helper) && !argumentsText.includes("(") && !argumentsText.includes(")");
+}
+function mappingEntry(line, projectedLine, index) {
+  const bounds = codeBounds(projectedLine);
+  if (bounds === void 0) return void 0;
+  const trimmed = line.slice(bounds.start, bounds.end);
+  const projected = projectedLine.slice(bounds.start, bounds.end);
+  const normalized = trimmed.endsWith(",") ? trimmed.slice(0, -1).trimEnd() : trimmed;
+  const projectedNormalized = projected.endsWith(",") ? projected.slice(0, -1).trimEnd() : projected;
+  const separator = projectedNormalized.indexOf(":");
+  const open2 = projectedNormalized.indexOf("(", separator + 1);
+  if (separator <= 0 || open2 <= separator || !projectedNormalized.endsWith(")")) return void 0;
+  const key = normalized.slice(0, separator).trim();
+  const helper = normalized.slice(separator + 1, open2).trim();
+  const argumentsText = normalized.slice(open2 + 1, -1).trim();
+  if (!validMappingParts(key, helper, argumentsText)) return void 0;
+  return { key, helper, argumentsText, line: index + 1 };
+}
+function mappingEntries(source) {
+  const entries = [];
+  const projectedLines = codeProjection(source).split("\n");
+  for (const [index, line] of source.split("\n").entries()) {
+    const entry = mappingEntry(line, projectedLines[index] ?? "", index);
+    if (entry !== void 0) entries.push(entry);
+  }
+  return entries;
+}
+function uniqueEntriesByKey(entries) {
+  const grouped = /* @__PURE__ */ new Map();
+  for (const entry of entries) grouped.set(entry.key, [...grouped.get(entry.key) ?? [], entry]);
+  return new Map(
+    [...grouped].flatMap(
+      ([key, matches]) => matches.length === 1 && matches[0] !== void 0 ? [[key, matches[0]]] : []
+    )
+  );
+}
+function identifierTerms(identifier) {
+  return identifier.replace(/([a-z\d])([A-Z])/gu, "$1 $2").split(/[^A-Za-z\d]+/u).filter((term) => term !== "").map((term) => term.toLowerCase());
+}
+function helperMatchesKey(helper, key) {
+  const helperTerms = identifierTerms(helper);
+  const keyTerms = identifierTerms(key);
+  return helperTerms.some(
+    (_, start) => keyTerms.every((term, offset) => helperTerms[start + offset] === term)
+  );
+}
+function isExactCrossover(leftBase, rightBase, leftHead, rightHead) {
+  return leftBase.helper !== rightBase.helper && helperMatchesKey(leftBase.helper, leftBase.key) && !helperMatchesKey(leftBase.helper, rightBase.key) && helperMatchesKey(rightBase.helper, rightBase.key) && !helperMatchesKey(rightBase.helper, leftBase.key) && leftHead.helper === rightBase.helper && rightHead.helper === leftBase.helper && leftHead.argumentsText === leftBase.argumentsText && rightHead.argumentsText === rightBase.argumentsText;
+}
+function literalMapping(line, projected) {
+  const bounds = codeBounds(projected);
+  if (bounds === void 0) return void 0;
+  const segment = line.slice(bounds.start, bounds.end).replace(/,\s*$/u, "");
+  const separator = projected.slice(bounds.start, bounds.end).indexOf(":");
+  if (separator <= 0) return void 0;
+  const key = segment.slice(0, separator).trim();
+  const value = segment.slice(separator + 1).trim();
+  if (!IDENTIFIER.test(key) || value.length < 2) return void 0;
+  const quote = value[0];
+  const literal = value.slice(1, -1);
+  if (quote !== '"' && quote !== "'" || value.at(-1) !== quote || !IDENTIFIER.test(literal)) {
+    return void 0;
+  }
+  return [key, literal];
+}
+function literalMappings(source) {
+  const values = /* @__PURE__ */ new Map();
+  const projectedLines = codeProjection(source).split("\n");
+  for (const [index, line] of source.split("\n").entries()) {
+    const mapping = literalMapping(line, projectedLines[index] ?? "");
+    if (mapping === void 0) continue;
+    const [key, literal] = mapping;
+    values.set(key, [...values.get(key) ?? [], literal]);
+  }
+  return new Map(
+    [...values].flatMap(
+      ([key, matches]) => matches.length === 1 && matches[0] !== void 0 ? [[key, matches[0]]] : []
+    )
+  );
+}
+function hasExplicitCrossMap(source, leftKey, rightKey) {
+  const mappings = literalMappings(source);
+  return mappings.get(leftKey) === rightKey && mappings.get(rightKey) === leftKey;
+}
+function uniqueTransitionsByHelpers(baseByKey, headByKey) {
+  const grouped = /* @__PURE__ */ new Map();
+  for (const [key, base] of baseByKey) {
+    const head = headByKey.get(key);
+    if (head === void 0 || head.helper === base.helper) continue;
+    const transition = `${base.helper}\0${head.helper}`;
+    grouped.set(transition, [...grouped.get(transition) ?? [], { base, head }]);
+  }
+  return new Map(
+    [...grouped].flatMap(
+      ([key, matches]) => matches.length === 1 && matches[0] !== void 0 ? [[key, matches[0]]] : []
+    )
+  );
+}
+function isParallelMappingCandidatePath(path) {
+  const dot = path.lastIndexOf(".");
+  return dot >= 0 && EXECUTABLE_EXTENSIONS.has(path.slice(dot).toLowerCase());
+}
+function detectParallelMappingCrossovers(base, head) {
+  const baseByKey = uniqueEntriesByKey(mappingEntries(base));
+  const headByKey = uniqueEntriesByKey(mappingEntries(head));
+  const transitions = uniqueTransitionsByHelpers(baseByKey, headByKey);
+  const crossovers = [];
+  const consumed = /* @__PURE__ */ new Set();
+  for (const [transitionKey, left] of transitions) {
+    if (consumed.has(transitionKey)) continue;
+    const reverseKey = `${left.head.helper}\0${left.base.helper}`;
+    const right = transitions.get(reverseKey);
+    if (right === void 0 || right.base.key === left.base.key || !isExactCrossover(left.base, right.base, left.head, right.head) || hasExplicitCrossMap(head, left.base.key, right.base.key)) {
+      continue;
+    }
+    consumed.add(transitionKey);
+    consumed.add(reverseKey);
+    crossovers.push({
+      leftKey: left.base.key,
+      rightKey: right.base.key,
+      leftHelper: left.head.helper,
+      rightHelper: right.head.helper,
+      line: Math.min(left.head.line, right.head.line)
+    });
+  }
+  return crossovers;
+}
+function describeParallelMappingCrossover(crossover) {
+  return `Restore each mapping's matching helper.
+
+When \`${crossover.leftKey}\` calls \`${crossover.leftHelper}\` while \`${crossover.rightKey}\` calls \`${crossover.rightHelper}\`, each output reports the other sibling's state. The base version establishes the opposite key-to-helper pairing, and the shown arguments did not change.`;
+}
+
 // src/inventory/classify.ts
 function isMode(change, mode) {
   return change.oldMode === mode || change.newMode === mode;
@@ -12902,6 +13104,13 @@ async function collectGateFindings(request, inventory, diagnostics, blobCache = 
   const ctx = gitContext2(request);
   const findings = [];
   const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings, blobCache);
+  const mappingCrossovers = await collectParallelMappingFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache
+  );
   const compared = await compareMatchedPairs(blobCache, ctx, request, inventory, pairs, findings);
   if (pairs.length === 0 && findings.length === 0 && pinDesyncs === 0) return [];
   diagnostics.record("contracts.gate", {
@@ -12910,10 +13119,55 @@ async function collectGateFindings(request, inventory, diagnostics, blobCache = 
       pairs: pairs.length,
       compared,
       findings: findings.length,
-      pin_desync: pinDesyncs
+      pin_desync: pinDesyncs,
+      mapping_crossover: mappingCrossovers
     }
   });
   return findings;
+}
+function pushParallelMappingFindings(findings, item, base, head) {
+  let found = 0;
+  for (const crossover of detectParallelMappingCrossovers(base, head)) {
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    findings.push({
+      path: item.path,
+      content: describeParallelMappingCrossover(crossover),
+      startLine: crossover.line,
+      endLine: crossover.line,
+      category: "bug",
+      severity: "high"
+    });
+    found += 1;
+  }
+  return found;
+}
+async function collectParallelMappingFindings(ctx, request, inventory, findings, blobCache) {
+  return collectModifiedBlobPairFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache,
+    ({ item, path, base, head }) => isParallelMappingCandidatePath(path) ? pushParallelMappingFindings(findings, item, base, head) : 0
+  );
+}
+async function collectModifiedBlobPairFindings(ctx, request, inventory, findings, blobCache, push) {
+  let found = 0;
+  for (const item of inventory.items) {
+    if (!item.reviewable || item.status !== "M" && item.status !== "R") continue;
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    const path = item.path;
+    const base = await readTextAtCommitCached(
+      blobCache,
+      ctx,
+      inventory.pair.mergeBase,
+      item.oldPath ?? item.path
+    );
+    const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
+    if (base === void 0 || head === void 0) continue;
+    found += push({ item, path, base, head });
+  }
+  return found;
 }
 function pushPinDesyncFindings(findings, item, path, base, head) {
   let found = 0;
@@ -12932,22 +13186,14 @@ function pushPinDesyncFindings(findings, item, path, base, head) {
   return found;
 }
 async function collectPinDesyncFindings(ctx, request, inventory, findings, blobCache) {
-  let found = 0;
-  for (const item of inventory.items) {
-    if (!item.reviewable || item.status !== "M" && item.status !== "R") continue;
-    if (findings.length >= MAX_GATE_FINDINGS) break;
-    const path = item.path;
-    const base = await readTextAtCommitCached(
-      blobCache,
-      ctx,
-      inventory.pair.mergeBase,
-      item.oldPath ?? item.path
-    );
-    const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
-    if (base === void 0 || head === void 0) continue;
-    found += pushPinDesyncFindings(findings, item, path, base, head);
-  }
-  return found;
+  return collectModifiedBlobPairFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache,
+    ({ item, path, base, head }) => pushPinDesyncFindings(findings, item, path, base, head)
+  );
 }
 function pushGateFindings(findings, path, items, describe) {
   for (const item of items) {

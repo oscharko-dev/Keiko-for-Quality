@@ -558,6 +558,77 @@ describe("performLocalReview (issue #95)", () => {
       ].sort(),
     );
   });
+
+  it("reports an exact parallel helper crossover even when the model returns no finding", async () => {
+    const mappingRepo = await mkdtemp(join(tmpdir(), "kfq-review-mapping-"));
+    const mappingGit = (args: readonly string[]): string =>
+      execFileSync("git", args, {
+        cwd: mappingRepo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.test",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.test",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+        },
+      });
+    try {
+      mappingGit(["init", "-q", "-b", "main"]);
+      await mkdir(join(mappingRepo, "src"), { recursive: true });
+      const file = join(mappingRepo, "src/capabilities.ts");
+      await writeFile(
+        file,
+        "export const capabilities = (config: Config) => ({\n" +
+          "  figma: isFigmaConnectorAuthorized(config),\n" +
+          "  jira: isJiraConnectorAuthorized(config),\n" +
+          "});\n",
+      );
+      mappingGit(["add", "-A"]);
+      mappingGit(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+      const mappingBase = mappingGit(["rev-parse", "HEAD"]).trim();
+      await writeFile(
+        file,
+        "export const capabilities = (config: Config) => ({\n" +
+          "  figma: isJiraConnectorAuthorized(config),\n" +
+          "  jira: isFigmaConnectorAuthorized(config),\n" +
+          "});\n",
+      );
+      mappingGit(["add", "-A"]);
+      mappingGit(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+      const mappingHead = mappingGit(["rev-parse", "HEAD"]).trim();
+
+      const engineDigest = "e".repeat(64);
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({ stdout: engineStdout(1), ruleDigest: engineDigest });
+      const diagnostics = createSilentDiagnostics();
+      const report = await performLocalReview(
+        baseRequest({
+          base: commitSha(mappingBase),
+          head: commitSha(mappingHead),
+          repositoryPath: mappingRepo,
+        }),
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(report.findings).toHaveLength(1);
+      expect(report.findings[0]).toMatchObject({
+        path: "src/capabilities.ts",
+        startLine: 2,
+        endLine: 2,
+        category: "bug",
+        severity: "high",
+      });
+      expect(report.findings[0]?.body).toContain("each output reports the other sibling's state");
+      const record = diagnostics.drain().find((entry) => entry.code === "contracts.gate");
+      expect(record?.counts?.mapping_crossover).toBe(1);
+    } finally {
+      await rm(mappingRepo, { recursive: true, force: true });
+    }
+  });
 });
 
 /**

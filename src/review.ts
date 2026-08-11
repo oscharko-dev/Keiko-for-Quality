@@ -72,6 +72,11 @@ import {
   findUncoveredUnionMembers,
 } from "./contracts/shape-gate.js";
 import { describePinDesync, detectPinDesync } from "./contracts/pin-desync.js";
+import {
+  describeParallelMappingCrossover,
+  detectParallelMappingCrossovers,
+  isParallelMappingCandidatePath,
+} from "./contracts/parallel-mapping.js";
 import type { InventoryItem } from "./inventory/classify.js";
 import {
   buildInventory,
@@ -1595,6 +1600,13 @@ async function collectGateFindings(
   const ctx = gitContext(request);
   const findings: EngineFinding[] = [];
   const pinDesyncs = await collectPinDesyncFindings(ctx, request, inventory, findings, blobCache);
+  const mappingCrossovers = await collectParallelMappingFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache,
+  );
   const compared = await compareMatchedPairs(blobCache, ctx, request, inventory, pairs, findings);
 
   if (pairs.length === 0 && findings.length === 0 && pinDesyncs === 0) return [];
@@ -1605,9 +1617,89 @@ async function collectGateFindings(
       compared,
       findings: findings.length,
       pin_desync: pinDesyncs,
+      mapping_crossover: mappingCrossovers,
     },
   });
   return findings;
+}
+
+/**
+ * Exact two-way key/helper swaps need no model judgment: the base file establishes both matching
+ * pairs, while the head crosses the same helpers without changing either call's arguments.
+ */
+function pushParallelMappingFindings(
+  findings: EngineFinding[],
+  item: InventoryItem,
+  base: string,
+  head: string,
+): number {
+  let found = 0;
+  for (const crossover of detectParallelMappingCrossovers(base, head)) {
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    findings.push({
+      path: item.path,
+      content: describeParallelMappingCrossover(crossover),
+      startLine: crossover.line,
+      endLine: crossover.line,
+      category: "bug",
+      severity: "high",
+    });
+    found += 1;
+  }
+  return found;
+}
+
+async function collectParallelMappingFindings(
+  ctx: GitContext,
+  request: PipelineRequest,
+  inventory: Inventory,
+  findings: EngineFinding[],
+  blobCache: BlobTextCache,
+): Promise<number> {
+  return collectModifiedBlobPairFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache,
+    ({ item, path, base, head }) =>
+      isParallelMappingCandidatePath(path)
+        ? pushParallelMappingFindings(findings, item, base, head)
+        : 0,
+  );
+}
+
+interface ModifiedBlobPair {
+  readonly item: InventoryItem;
+  readonly path: string;
+  readonly base: string;
+  readonly head: string;
+}
+
+async function collectModifiedBlobPairFindings(
+  ctx: GitContext,
+  request: PipelineRequest,
+  inventory: Inventory,
+  findings: EngineFinding[],
+  blobCache: BlobTextCache,
+  push: (pair: ModifiedBlobPair) => number,
+): Promise<number> {
+  let found = 0;
+  for (const item of inventory.items) {
+    if (!item.reviewable || (item.status !== "M" && item.status !== "R")) continue;
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    const path = item.path as string;
+    const base = await readTextAtCommitCached(
+      blobCache,
+      ctx,
+      inventory.pair.mergeBase,
+      (item.oldPath ?? item.path) as string,
+    );
+    const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
+    if (base === undefined || head === undefined) continue;
+    found += push({ item, path, base, head });
+  }
+  return found;
 }
 
 /**
@@ -1666,24 +1758,14 @@ async function collectPinDesyncFindings(
   findings: EngineFinding[],
   blobCache: BlobTextCache,
 ): Promise<number> {
-  let found = 0;
-  for (const item of inventory.items) {
-    // An added file has no base to disagree with, and a deleted one declares nothing any more —
-    // only a real edit, in place or under a new name, can leave one declaration stale.
-    if (!item.reviewable || (item.status !== "M" && item.status !== "R")) continue;
-    if (findings.length >= MAX_GATE_FINDINGS) break;
-    const path = item.path as string;
-    const base = await readTextAtCommitCached(
-      blobCache,
-      ctx,
-      inventory.pair.mergeBase,
-      (item.oldPath ?? item.path) as string,
-    );
-    const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
-    if (base === undefined || head === undefined) continue;
-    found += pushPinDesyncFindings(findings, item, path, base, head);
-  }
-  return found;
+  return collectModifiedBlobPairFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache,
+    ({ item, path, base, head }) => pushPinDesyncFindings(findings, item, path, base, head),
+  );
 }
 
 /**
