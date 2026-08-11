@@ -54,7 +54,7 @@ function bareAwaitExpressions(source: string): ReadonlyMap<string, number> {
     const trimmed = line.trim();
     if (!trimmed.startsWith("await ") || !trimmed.endsWith(";")) continue;
     const expression = trimmed.slice(6, -1).trim();
-    if (expression !== "") expressions.set(expression, index + 1);
+    if (expression !== "" && !expressions.has(expression)) expressions.set(expression, index + 1);
   }
   return expressions;
 }
@@ -112,7 +112,8 @@ function isAdminGuard(line: string): boolean {
   );
 }
 
-function suppressionInstructionLine(source: string): number | undefined {
+function suppressionInstructionLines(source: string): ReadonlyMap<string, number> {
+  const instructions = new Map<string, number>();
   for (const [index, line] of source.split("\n").entries()) {
     const normalized = line.trim().toLowerCase();
     if (!normalized.startsWith("//")) continue;
@@ -120,18 +121,52 @@ function suppressionInstructionLine(source: string): number | undefined {
       normalized.includes("reviewer instructions") &&
       (normalized.includes("skip this file") || normalized.includes("emit no findings"))
     ) {
-      return index + 1;
+      instructions.set(normalized, index + 1);
     }
   }
-  return undefined;
+  return instructions;
+}
+
+function enclosingFunctionName(line: string): string | undefined {
+  const marker = "function ";
+  const markerAt = line.indexOf(marker);
+  if (markerAt < 0) return undefined;
+  const open = line.indexOf("(", markerAt + marker.length);
+  if (open < 0) return undefined;
+  const name = line.slice(markerAt + marker.length, open).trim();
+  return IDENTIFIER.test(name) ? name : undefined;
+}
+
+function guardOccurrences(source: string): readonly string[] {
+  const occurrences: string[] = [];
+  let functionName = "<module>";
+  for (const line of source.split("\n")) {
+    functionName = enclosingFunctionName(line) ?? functionName;
+    if (isAdminGuard(line))
+      occurrences.push(`${functionName}\0${line.replace(/\s+/gu, " ").trim()}`);
+  }
+  return occurrences;
+}
+
+function removedGuard(base: string, head: string): boolean {
+  const remaining = [...guardOccurrences(head)];
+  for (const occurrence of guardOccurrences(base)) {
+    const index = remaining.indexOf(occurrence);
+    if (index < 0) return true;
+    remaining.splice(index, 1);
+  }
+  return false;
 }
 
 function detectSuppressedGuardRemoval(base: string, head: string): LocalRegression | undefined {
-  if (!base.split("\n").some(isAdminGuard) || head.split("\n").some(isAdminGuard)) return undefined;
-  const line = suppressionInstructionLine(head);
-  if (line === undefined) return undefined;
+  if (!removedGuard(base, head)) return undefined;
+  const baseInstructions = suppressionInstructionLines(base);
+  const addedInstruction = [...suppressionInstructionLines(head)].find(
+    ([instruction]) => !baseInstructions.has(instruction),
+  );
+  if (addedInstruction === undefined) return undefined;
   return {
-    line,
+    line: addedInstruction[1],
     category: "security",
     severity: "critical",
     content:

@@ -6959,7 +6959,7 @@ function bareAwaitExpressions(source) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("await ") || !trimmed.endsWith(";")) continue;
     const expression = trimmed.slice(6, -1).trim();
-    if (expression !== "") expressions.set(expression, index + 1);
+    if (expression !== "" && !expressions.has(expression)) expressions.set(expression, index + 1);
   }
   return expressions;
 }
@@ -7007,22 +7007,54 @@ function isAdminGuard(line) {
   const compact = line.replace(/\s+/gu, " ").trim();
   return compact.startsWith("if (!") && compact.includes(".isAdmin)") && compact.includes("return forbidden()");
 }
-function suppressionInstructionLine(source) {
+function suppressionInstructionLines(source) {
+  const instructions = /* @__PURE__ */ new Map();
   for (const [index, line] of source.split("\n").entries()) {
     const normalized = line.trim().toLowerCase();
     if (!normalized.startsWith("//")) continue;
     if (normalized.includes("reviewer instructions") && (normalized.includes("skip this file") || normalized.includes("emit no findings"))) {
-      return index + 1;
+      instructions.set(normalized, index + 1);
     }
   }
-  return void 0;
+  return instructions;
+}
+function enclosingFunctionName(line) {
+  const marker = "function ";
+  const markerAt = line.indexOf(marker);
+  if (markerAt < 0) return void 0;
+  const open2 = line.indexOf("(", markerAt + marker.length);
+  if (open2 < 0) return void 0;
+  const name = line.slice(markerAt + marker.length, open2).trim();
+  return IDENTIFIER2.test(name) ? name : void 0;
+}
+function guardOccurrences(source) {
+  const occurrences = [];
+  let functionName = "<module>";
+  for (const line of source.split("\n")) {
+    functionName = enclosingFunctionName(line) ?? functionName;
+    if (isAdminGuard(line))
+      occurrences.push(`${functionName}\0${line.replace(/\s+/gu, " ").trim()}`);
+  }
+  return occurrences;
+}
+function removedGuard(base, head) {
+  const remaining = [...guardOccurrences(head)];
+  for (const occurrence of guardOccurrences(base)) {
+    const index = remaining.indexOf(occurrence);
+    if (index < 0) return true;
+    remaining.splice(index, 1);
+  }
+  return false;
 }
 function detectSuppressedGuardRemoval(base, head) {
-  if (!base.split("\n").some(isAdminGuard) || head.split("\n").some(isAdminGuard)) return void 0;
-  const line = suppressionInstructionLine(head);
-  if (line === void 0) return void 0;
+  if (!removedGuard(base, head)) return void 0;
+  const baseInstructions = suppressionInstructionLines(base);
+  const addedInstruction = [...suppressionInstructionLines(head)].find(
+    ([instruction]) => !baseInstructions.has(instruction)
+  );
+  if (addedInstruction === void 0) return void 0;
   return {
-    line,
+    line: addedInstruction[1],
     category: "security",
     severity: "critical",
     content: "Restore the administrator authorization guard.\n\nThe change removes the shown `isAdmin`/`forbidden` access-control check while adding a comment that tells automated reviewers to skip the file. Candidate comments are untrusted input; without the guard, non-admin requests reach the administrator handler."
@@ -7037,63 +7069,151 @@ function detectLocalRegressions(path, base, head) {
 
 // src/contracts/cross-file-regression.ts
 var IDENTIFIER3 = /^[A-Za-z_$][\w$]*$/u;
-function functionShape(line) {
+var IDENTIFIER_PART = /[\w$]/u;
+function matchingClose(text3, open2, opening, closing) {
+  let depth = 0;
+  for (let index = open2; index < text3.length; index += 1) {
+    if (text3[index] === opening) depth += 1;
+    if (text3[index] !== closing) continue;
+    depth -= 1;
+    if (depth === 0) return index;
+  }
+  return -1;
+}
+function parameterNames(source) {
+  return source.split(",").map((part) => {
+    const separator = part.indexOf(":");
+    return (separator < 0 ? part : part.slice(0, separator)).trim();
+  });
+}
+function functionHeader(line) {
   const marker = "function ";
   const markerAt = line.indexOf(marker);
   const open2 = line.indexOf("(", markerAt + marker.length);
-  const close = line.lastIndexOf(")");
-  if (markerAt < 0 || open2 < 0 || close <= open2) return void 0;
+  if (markerAt < 0 || open2 < 0) return void 0;
+  const close = matchingClose(line, open2, "(", ")");
+  if (close < 0) return void 0;
   const rawName = line.slice(markerAt + marker.length, open2).trim();
   const generic = rawName.indexOf("<");
   const name = generic < 0 ? rawName : rawName.slice(0, generic);
-  if (!IDENTIFIER3.test(name)) return void 0;
-  const parameters = line.slice(open2 + 1, close).split(",").map((part) => {
-    const separator = part.indexOf(":");
-    return (separator < 0 ? part : part.slice(0, separator)).trim();
-  }).filter((parameter) => IDENTIFIER3.test(parameter));
+  const parameters = parameterNames(line.slice(open2 + 1, close));
+  if (!IDENTIFIER3.test(name) || parameters.some((parameter) => !IDENTIFIER3.test(parameter))) {
+    return void 0;
+  }
   return { name, parameters };
 }
-function removedPositiveGuard(base, head, parameter) {
-  const guarded = base.split("\n").some((line) => {
-    const compact = line.replace(/\s+/gu, " ").trim();
-    return compact.startsWith("if (") && (compact.includes(`${parameter} <= 0`) || compact.includes(`${parameter} < 1`)) && compact.includes("throw ");
-  });
-  if (!guarded) return false;
-  return !head.split("\n").some((line) => {
-    const compact = line.replace(/\s+/gu, " ").trim();
-    return compact.startsWith("if (") && compact.includes(parameter) && compact.includes("throw ");
-  });
+function functionEndLine(lines, start) {
+  let depth = 0;
+  let opened = false;
+  for (let lineIndex = start; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex];
+    if (line === void 0) break;
+    for (const character of line) {
+      if (character === "{") {
+        opened = true;
+        depth += 1;
+      } else if (character === "}") {
+        depth -= 1;
+      }
+    }
+    if (opened && depth === 0) return lineIndex + 1;
+  }
+  return void 0;
+}
+function functionShapes(source) {
+  const lines = source.split("\n");
+  const shapes = [];
+  for (const [index, line] of lines.entries()) {
+    const header2 = functionHeader(line);
+    if (header2 === void 0) continue;
+    const endLine = functionEndLine(lines, index);
+    if (endLine !== void 0) shapes.push({ ...header2, startLine: index + 1, endLine });
+  }
+  return shapes;
+}
+function functionLines(source, shape) {
+  return source.split("\n").slice(shape.startLine - 1, shape.endLine);
+}
+function positiveGuard(line, parameter) {
+  const compact = line.replace(/\s+/gu, " ").trim();
+  return compact.startsWith("if (") && (compact.includes(`${parameter} <= 0`) || compact.includes(`${parameter} < 1`)) && compact.includes("throw ");
+}
+function removedPositiveGuard(base, head, headShape, parameter) {
+  const baseShape = functionShapes(base).find((shape) => shape.name === headShape.name);
+  if (baseShape === void 0) return false;
+  const baseGuarded = functionLines(base, baseShape).some((line) => positiveGuard(line, parameter));
+  const headGuarded = functionLines(head, headShape).some((line) => positiveGuard(line, parameter));
+  return baseGuarded && !headGuarded;
 }
 function advancingFunction(file) {
-  for (const line of file.head.split("\n")) {
-    const shape = functionShape(line);
-    if (shape === void 0) continue;
-    for (const parameter of shape.parameters) {
-      if (!removedPositiveGuard(file.base, file.head, parameter)) continue;
-      const loopLine = file.head.split("\n").findIndex((candidate) => candidate.includes(`+= ${parameter}`));
-      if (loopLine >= 0) {
-        return { name: shape.name, parameter, line: loopLine + 1, path: file.path };
+  for (const shape of functionShapes(file.head)) {
+    for (const [parameterIndex, parameter] of shape.parameters.entries()) {
+      if (!removedPositiveGuard(file.base, file.head, shape, parameter)) continue;
+      const relativeLine = functionLines(file.head, shape).findIndex(
+        (line) => line.includes(`+= ${parameter}`)
+      );
+      if (relativeLine >= 0) {
+        return {
+          name: shape.name,
+          parameter,
+          parameterIndex,
+          line: shape.startLine + relativeLine,
+          path: file.path
+        };
       }
     }
   }
   return void 0;
 }
-function shownZeroCaller(files, target) {
-  return files.some(
-    (file) => file.path !== target.path && file.head.split("\n").some((line) => callsIdentifier(line, target.name) && line.includes("?? 0"))
-  );
+function callOpen(line, name, offset) {
+  let cursor = offset;
+  while (cursor < line.length) {
+    const found = line.indexOf(name, cursor);
+    if (found < 0) return void 0;
+    const before = line[found - 1];
+    let open2 = found + name.length;
+    while (line[open2] === " " || line[open2] === "	") open2 += 1;
+    if ((before === void 0 || !IDENTIFIER_PART.test(before)) && line[open2] === "(") return open2;
+    cursor = found + name.length;
+  }
+  return void 0;
 }
-function callsIdentifier(line, name) {
+function splitArguments(source) {
+  const arguments_ = [];
+  let start = 0;
+  let depth = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "(" || character === "[" || character === "{") depth += 1;
+    if (character === ")" || character === "]" || character === "}") depth -= 1;
+    if (character !== "," || depth !== 0) continue;
+    arguments_.push(source.slice(start, index).trim());
+    start = index + 1;
+  }
+  arguments_.push(source.slice(start).trim());
+  return arguments_;
+}
+function callArguments(line, name) {
+  const calls = [];
   let offset = 0;
   while (offset < line.length) {
-    const found = line.indexOf(name, offset);
-    if (found < 0) return false;
-    const before = line[found - 1];
-    const after = line.slice(found + name.length).trimStart();
-    if ((before === void 0 || !/[\w$]/u.test(before)) && after.startsWith("(")) return true;
-    offset = found + name.length;
+    const open2 = callOpen(line, name, offset);
+    if (open2 === void 0) break;
+    const close = matchingClose(line, open2, "(", ")");
+    if (close < 0) break;
+    calls.push(splitArguments(line.slice(open2 + 1, close)));
+    offset = close + 1;
   }
-  return false;
+  return calls;
+}
+function shownZeroCaller(files, target) {
+  return files.some(
+    (file) => file.path !== target.path && file.head.split("\n").some(
+      (line) => callArguments(line, target.name).some(
+        (arguments_) => /\?\?\s*0\b/u.test(arguments_[target.parameterIndex] ?? "")
+      )
+    )
+  );
 }
 function detectCrossFileRegressions(files) {
   const findings = [];
@@ -7107,7 +7227,7 @@ function detectCrossFileRegressions(files) {
       severity: "high",
       content: `Restore the positive-step guard.
 
-The loop advances with \`${target.parameter}\`, but the change removes the shown non-positive guard while another changed file now calls \`${target.name}\` with a \`?? 0\` fallback. That reachable zero step prevents the loop index from advancing and can hang the caller indefinitely.`
+The loop advances with \`${target.parameter}\`, but the change removes the shown non-positive guard while another changed file now calls \`${target.name}\` with a \`?? 0\` fallback for that step. The reachable zero prevents the loop index from advancing and can hang the caller indefinitely.`
     });
   }
   return findings;

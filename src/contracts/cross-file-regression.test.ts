@@ -35,8 +35,32 @@ describe("detectCrossFileRegressions", () => {
   });
 
   it.each([
+    [
+      "an unrelated upper-bound throw",
+      TARGET.head.replace(
+        "  const batches",
+        '  if (size > 100) throw new RangeError("too large");\n  const batches',
+      ),
+    ],
+    [
+      "the same guard retained by another function",
+      `${TARGET.head}\nfunction other(size: number): void {\n  if (size <= 0) throw new RangeError("positive");\n}`,
+    ],
+    [
+      "a return type containing a later parenthesized expression",
+      TARGET.head.replace("): T[][] {", "): ReturnType<typeof buildResult()> {"),
+    ],
+  ])("still finds the regression with %s", (_name, head) => {
+    expect(detectCrossFileRegressions([{ ...TARGET, head }, CALLER])).toHaveLength(1);
+  });
+
+  it.each([
     ["no shown caller", [TARGET]],
     ["safe caller", [TARGET, { ...CALLER, head: CALLER.base }]],
+    [
+      "zero fallback in a different argument",
+      [TARGET, { ...CALLER, head: "return splitIntoBatches(items ?? 0, 20);" }],
+    ],
     [
       "lookalike caller",
       [
