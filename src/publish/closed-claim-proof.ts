@@ -38,10 +38,18 @@ interface AwaitedFileRead {
   readonly index: number;
 }
 
+interface DiagnosticContextAddition {
+  readonly field: string;
+  readonly line: SourceLine;
+  readonly index: number;
+}
+
 const HEAD_ROW = /^H:([1-9]\d*)\| (.*)$/u;
 const BASE_ROW = /^B:([1-9]\d*)\| (.*)$/u;
 const CHANGED_HEAD_ROW = /^D:H:([1-9]\d*)\| \+(.*)$/u;
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/u;
+const SENSITIVE_CONTEXT_FIELD =
+  /(?:authorization|body|content|credential|password|payload|secret|session|token)/iu;
 const MAX_CLAIM_CHARS = 8_192;
 function sourceRows(source: string | undefined): readonly string[] | undefined {
   if (source === undefined) return undefined;
@@ -235,6 +243,10 @@ function refsAt(line: number): readonly VerificationEvidenceRef[] {
     `D:H:${String(line)}` as VerificationEvidenceRef,
     `H:${String(line)}` as VerificationEvidenceRef,
   ];
+}
+
+function refutationRefsAt(line: number): readonly VerificationEvidenceRef[] {
+  return [...refsAt(line), `B:${String(line)}` as VerificationEvidenceRef];
 }
 
 function insideFinding(line: number, finding: JudgeableFinding): boolean {
@@ -678,6 +690,159 @@ function duplicateMapProof(
     return undefined;
   }
   return { evidenceRefs: refsAt(write.line.line) };
+}
+
+function soleSourceDifference(
+  head: readonly SourceLine[],
+  base: readonly SourceLine[],
+  changed: ReadonlySet<number>,
+): number | undefined {
+  if (head.length !== base.length || changed.size !== 1) return undefined;
+  const differences = head.flatMap((line, index) =>
+    line.text === base[index]?.text ? [] : [index],
+  );
+  const index = differences.length === 1 ? differences[0] : undefined;
+  return index !== undefined && changed.has(index + 1) ? index : undefined;
+}
+
+function structuredLogParts(
+  code: string,
+): readonly [string, readonly string[], string] | undefined {
+  const call =
+    /^(\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\.(?:debug|error|info|log|warn)\s*\([^{}]*,\s*\{)([^{}]*)(\}\s*\)\s*;?\s*)$/u.exec(
+      code,
+    );
+  if (call?.[1] === undefined || call[2] === undefined || call[3] === undefined) return undefined;
+  const entries = call[2]
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+  return [call[1], entries, call[3]];
+}
+
+function appendedLogContextEntry(
+  headCall: readonly [string, readonly string[], string] | undefined,
+  baseCall: readonly [string, readonly string[], string] | undefined,
+): string | undefined {
+  if (headCall === undefined || baseCall === undefined) return undefined;
+  const [headPrefix, headEntries, headSuffix] = headCall;
+  const [basePrefix, baseEntries, baseSuffix] = baseCall;
+  if (headPrefix !== basePrefix || headSuffix !== baseSuffix) return undefined;
+  if (headEntries.length !== baseEntries.length + 1) return undefined;
+  if (!baseEntries.every((entry, index) => headEntries[index] === entry)) return undefined;
+  return headEntries.at(-1);
+}
+
+function addedPrimitiveContext(
+  head: readonly SourceLine[],
+  base: readonly SourceLine[],
+  index: number,
+): DiagnosticContextAddition | undefined {
+  const headLine = head[index];
+  const baseLine = base[index];
+  if (headLine === undefined || baseLine === undefined) return undefined;
+  const added = appendedLogContextEntry(
+    structuredLogParts(headLine.code),
+    structuredLogParts(baseLine.code),
+  );
+  const field = /^([A-Za-z_$][\w$]*)(?:\s*:\s*\1)?$/u.exec(added ?? "")?.[1];
+  return field === undefined || SENSITIVE_CONTEXT_FIELD.test(field)
+    ? undefined
+    : { field, line: headLine, index };
+}
+
+function enclosingFunction(
+  lines: readonly SourceLine[],
+  addition: DiagnosticContextAddition,
+): { readonly opening: number; readonly closing: number; readonly parameters: string } | undefined {
+  for (let index = addition.index; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (line === undefined) continue;
+    const declaration = /\b(?:async\s+)?function\s+[A-Za-z_$][\w$]*\s*\(([^)]*)\)[^{]*\{/u.exec(
+      line.code,
+    );
+    const parameters = declaration?.[1];
+    if (parameters === undefined) continue;
+    const closing = matchingBrace(lines, index);
+    if (closing !== undefined && addition.index > index && addition.index < closing) {
+      return { opening: index, closing, parameters };
+    }
+  }
+  return undefined;
+}
+
+function primitiveParameterIsStable(
+  lines: readonly SourceLine[],
+  addition: DiagnosticContextAddition,
+  fn: { readonly opening: number; readonly parameters: string },
+): boolean {
+  const field = escaped(addition.field);
+  const declaration = new RegExp(
+    String.raw`(?:^|,)\s*(?:readonly\s+)?${field}\??\s*:\s*(?:bigint|boolean|number|string)\b`,
+    "u",
+  );
+  if (!declaration.test(fn.parameters)) return false;
+  const assignment = new RegExp(
+    String.raw`\b${field}\s*(?:\+\+|--|(?:&&|\|\||\?\?|[-+*/%&|^])?=(?!=))`,
+    "u",
+  );
+  return !lines.slice(fn.opening + 1, addition.index).some((line) => assignment.test(line.code));
+}
+
+function enclosingRethrowingCatch(
+  lines: readonly SourceLine[],
+  addition: DiagnosticContextAddition,
+): boolean {
+  for (let index = addition.index; index >= 0; index -= 1) {
+    const line = lines[index];
+    if (line === undefined) continue;
+    const binding = /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{/u.exec(line.code)?.[1];
+    if (binding === undefined) continue;
+    const closing = matchingBrace(lines, index);
+    if (closing === undefined || addition.index <= index || addition.index >= closing) continue;
+    const body = lines.slice(index + 1, closing);
+    const escapedBinding = escaped(binding);
+    const rethrow = new RegExp(String.raw`^\s*throw\s+${escapedBinding}\s*;?\s*$`, "u");
+    const assignment = new RegExp(
+      String.raw`\b${escapedBinding}\s*(?:\+\+|--|(?:&&|\|\||\?\?|[-+*/%&|^])?=(?!=))`,
+      "u",
+    );
+    return (
+      body.filter((candidate) => rethrow.test(candidate.code)).length === 1 &&
+      !body.some((candidate) => assignment.test(candidate.code))
+    );
+  }
+  return false;
+}
+
+/**
+ * Refute only a closed, source-bound no-op transition: one non-secret primitive is appended to an
+ * existing structured log context and the catch still rethrows the identical error. This executes
+ * before probabilistic substantiation so serving variance cannot turn the measured clean twin into
+ * a release-blocking false positive.
+ */
+export function closedClaimRefutation(
+  finding: JudgeableFinding,
+  evidence: TrustedHunkEvidence,
+): ClosedClaimProof | undefined {
+  if (!carriesTrustedEvidenceBrand(evidence)) return undefined;
+  if (evidence.headSource === undefined || evidence.baseSource === undefined) return undefined;
+  const changed = changedHeadLines(evidence.text);
+  const head = sourceLines(evidence.headSource, changed);
+  const base = sourceLines(evidence.baseSource, new Set());
+  const index = soleSourceDifference(head, base, changed);
+  if (index === undefined || !insideFinding(index + 1, finding)) return undefined;
+  const addition = addedPrimitiveContext(head, base, index);
+  if (addition === undefined) return undefined;
+  const fn = enclosingFunction(head, addition);
+  if (
+    fn === undefined ||
+    !primitiveParameterIsStable(head, addition, fn) ||
+    !enclosingRethrowingCatch(head, addition)
+  ) {
+    return undefined;
+  }
+  return { evidenceRefs: refutationRefsAt(addition.line.line) };
 }
 
 /** Return a proof only when exact, source-bound changed code closes the whole claim. */

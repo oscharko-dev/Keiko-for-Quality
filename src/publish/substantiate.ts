@@ -22,7 +22,11 @@
 
 import { EXAMINER_CLAIM_DECISION_POLICY } from "../engine/claim-decision-policy.js";
 import { LIMITS as ENGINE_RESULT_LIMITS } from "../engine/result.js";
-import { closedClaimProof, type TrustedHunkEvidence } from "./closed-claim-proof.js";
+import {
+  closedClaimProof,
+  closedClaimRefutation,
+  type TrustedHunkEvidence,
+} from "./closed-claim-proof.js";
 import { MAX_EVIDENCE_CHARS, extractEvidenceIdentifiers } from "./evidence.js";
 import { decodeEvidenceSourcePath, encodeEvidenceSourcePath } from "./evidence-path.js";
 import { validatedRetrieveTerms } from "./repository-context.js";
@@ -2525,6 +2529,31 @@ function closedProofResult<T extends JudgeableFinding>(
   });
 }
 
+function closedRefutationResult<T extends JudgeableFinding>(
+  finding: T,
+  evidence: TrustedHunkEvidence,
+  metrics: CandidateMetrics,
+): JudgedOne<T> | undefined {
+  if (closedClaimRefutation(finding, evidence) === undefined) return undefined;
+  metrics.truthRefuted += 1;
+  return decidedResult<T>(undefined, "refuted", metrics, {
+    stage: "truth_initial",
+    reasonCode: "not_introduced",
+  });
+}
+
+function closedSourceDecision<T extends JudgeableFinding>(
+  finding: T,
+  evidence: string | TrustedHunkEvidence,
+  metrics: CandidateMetrics,
+): JudgedOne<T> | undefined {
+  if (typeof evidence === "string") return undefined;
+  return (
+    closedRefutationResult(finding, evidence, metrics) ??
+    closedProofResult(finding, evidence, metrics)
+  );
+}
+
 async function judgeOne<T extends JudgeableFinding>(
   finding: T,
   readHunk: HunkReader,
@@ -2552,12 +2581,12 @@ async function judgeOne<T extends JudgeableFinding>(
       terminal: { stage: "preflight", reasonCode: "unreadable_hunk" },
     };
   }
-  // A closed source proof is stronger than another probabilistic restatement of the same runtime
-  // rule. It may keep only the finding already supplied: exact changed rows, claim semantics, and
-  // the absence of a shown guard all come from trusted evidence parsing above. Every other shape
-  // continues through the full independent model workflow below.
-  const proved = typeof read === "string" ? undefined : closedProofResult(finding, read, metrics);
-  if (proved !== undefined) return proved;
+  // Closed source decisions are stronger than another probabilistic restatement of the same
+  // transition. Refutation is checked first because a fully proven clean diff must never be kept by
+  // a claim-specific positive proof. Every other shape continues through the full independent model
+  // workflow below.
+  const closedDecision = closedSourceDecision(finding, read, metrics);
+  if (closedDecision !== undefined) return closedDecision;
   if (!budgetAllows(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
     return undecidedResult(finding, strictness, metrics, true, {
       stage: "preflight",

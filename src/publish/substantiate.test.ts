@@ -376,6 +376,61 @@ describe("deterministic dossier", () => {
 });
 
 describe("closed source proofs", () => {
+  it("refutes a proven safe diagnostic-context addition without a verifier call", async () => {
+    const candidate: JudgeableFinding = {
+      path: "src/upload.ts",
+      content:
+        "When an upload fails, adding `taskId` to this log exposes sensitive diagnostic context.",
+      startLine: 5,
+      endLine: 5,
+    };
+    const headSource = [
+      "async function upload(taskId: string): Promise<void> {",
+      "  try {",
+      "    await send();",
+      "  } catch (error) {",
+      '    logger.error("Upload failed", { error, taskId });',
+      "    throw error;",
+      "  }",
+      "}",
+    ].join("\n");
+    const baseSource = headSource.replace(", taskId });", " });");
+    const text = [
+      ...headSource.split("\n").map((line, index) => `H:${String(index + 1)}| ${line}`),
+      ...baseSource.split("\n").map((line, index) => `B:${String(index + 1)}| ${line}`),
+      'D:B:5| -    logger.error("Upload failed", { error });',
+      'D:H:5| +    logger.error("Upload failed", { error, taskId });',
+    ].join("\n");
+    const evidence = bindTrustedHunkEvidence({ text, headSource, baseSource });
+    expect(evidence).toBeDefined();
+    const endpoint = endpointReplying([]);
+    const traces: SubstantiationTerminalTrace[] = [];
+
+    const out = await substantiate(
+      [candidate],
+      () => evidence ?? "",
+      endpoint.deps,
+      "paranoid",
+      undefined,
+      undefined,
+      (trace) => traces.push(trace),
+    );
+
+    expect(out.findings).toEqual([]);
+    expect(out.truthRefuted).toBe(1);
+    expect(out.droppedRefuted).toBe(1);
+    expect(out.tokens).toBe(0);
+    expect(endpoint.prompts()).toEqual([]);
+    expect(traces).toEqual([
+      {
+        stage: "truth_initial",
+        disposition: "refuted",
+        reasonCode: "not_introduced",
+        usage: { callCount: 0, tokens: 0 },
+      },
+    ]);
+  });
+
   it("keeps a closed direct proof without spending a probabilistic verifier call", async () => {
     const candidate: JudgeableFinding = {
       path: "src/parser.ts",
