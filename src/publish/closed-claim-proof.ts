@@ -37,12 +37,6 @@ const BASE_ROW = /^B:([1-9]\d*)\| (.*)$/u;
 const CHANGED_HEAD_ROW = /^D:H:([1-9]\d*)\| \+(.*)$/u;
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/u;
 const MAX_CLAIM_CHARS = 8_192;
-const ERROR_SINK = [
-  String.raw`(?:window\.)?reportError`,
-  "(?:captureException|captureError|reportException|recordException)",
-  String.raw`(?:console|logger|telemetry|diagnostics?)\.(?:error|exception|report|record)`,
-].join("|");
-
 function sourceRows(source: string | undefined): readonly string[] | undefined {
   if (source === undefined) return undefined;
   const body = source.endsWith("\n") ? source.slice(0, -1) : source;
@@ -74,7 +68,10 @@ function dossierMatchesSources(
       continue;
     }
     const changed = CHANGED_HEAD_ROW.exec(row);
-    if (changed !== null && !rowMatchesSource(changed, head)) return false;
+    if (changed !== null) {
+      if (!rowMatchesSource(changed, head)) return false;
+      sourceRowsSeen += 1;
+    }
   }
   return sourceRowsSeen > 0;
 }
@@ -241,7 +238,7 @@ function escaped(value: string): string {
 
 function sinkUsesCaughtBinding(text: string, binding: string): boolean {
   const argument = escaped(binding);
-  return new RegExp(String.raw`\b(?:${ERROR_SINK})\s*\(\s*${argument}\s*(?:[,)]|$)`, "u").test(
+  return new RegExp(String.raw`^\s*window\.reportError\(\s*${argument}\s*\)\s*;?\s*$`, "u").test(
     text,
   );
 }
@@ -254,12 +251,8 @@ function disclosureClaim(content: string): boolean {
   );
 }
 
-function bindingReassigned(text: string, binding: string): boolean {
-  const name = escaped(binding);
-  return new RegExp(
-    String.raw`\b${name}\s*(?:\+\+|--|(?:&&|\|\||\?\?|[-+*/%&|^])?=(?!=))`,
-    "u",
-  ).test(text);
+function mentionsBinding(text: string, binding: string): boolean {
+  return new RegExp(String.raw`\b${escaped(binding)}\b`, "u").test(text);
 }
 
 function scanBraceBalance(code: string, initialBalance: number): number {
@@ -286,12 +279,6 @@ function matchingBrace(lines: readonly SourceLine[], openingIndex: number): numb
   return undefined;
 }
 
-function baseContainsCaughtSink(baseSource: string | undefined): boolean {
-  if (baseSource === undefined) return false;
-  const priorSink = new RegExp(String.raw`\b(?:${ERROR_SINK})\s*\(\s*[A-Za-z_$][\w$]*\s*[,)]`, "u");
-  return maskSource(baseSource).some((line) => priorSink.test(line));
-}
-
 function catchBinding(finding: JudgeableFinding, line: SourceLine): string | undefined {
   if (line.line < finding.startLine - 8 || line.line > finding.endLine) return undefined;
   const binding = /\bcatch\s*\(\s*([A-Za-z_$][\w$]*)\s*\)\s*\{/u.exec(line.code)?.[1];
@@ -308,9 +295,11 @@ function changedSinkInCatch(
   if (closeIndex === undefined) return undefined;
   for (let index = catchIndex + 1; index < closeIndex; index += 1) {
     const candidate = lines[index];
-    if (candidate === undefined || bindingReassigned(candidate.code, binding)) return undefined;
-    if (!candidate.changed || !insideFinding(candidate.line, finding)) continue;
-    if (sinkUsesCaughtBinding(candidate.code, binding)) return candidate;
+    if (candidate === undefined) return undefined;
+    if (sinkUsesCaughtBinding(candidate.code, binding)) {
+      return candidate.changed && insideFinding(candidate.line, finding) ? candidate : undefined;
+    }
+    if (mentionsBinding(candidate.code, binding)) return undefined;
   }
   return undefined;
 }
@@ -318,9 +307,8 @@ function changedSinkInCatch(
 function catchDisclosureProof(
   finding: JudgeableFinding,
   lines: readonly SourceLine[],
-  baseSource: string | undefined,
 ): ClosedClaimProof | undefined {
-  if (!disclosureClaim(finding.content) || baseContainsCaughtSink(baseSource)) return undefined;
+  if (!disclosureClaim(finding.content)) return undefined;
   for (const [catchIndex, line] of lines.entries()) {
     const binding = catchBinding(finding, line);
     if (binding === undefined) continue;
@@ -355,6 +343,16 @@ function importsMap(code: string): boolean {
   return /\bMap\b/u.test(clause);
 }
 
+function destructuresMap(code: string): boolean {
+  for (const keyword of ["const", "let", "var"] as const) {
+    const opening = code.indexOf(`${keyword} {`);
+    if (opening < 0) continue;
+    const closing = code.indexOf("}", opening + keyword.length + 2);
+    if (closing > opening && /\bMap\b/u.test(code.slice(opening, closing + 1))) return true;
+  }
+  return false;
+}
+
 function parameterShadowsMap(code: string): boolean {
   const opening = code.indexOf("(");
   const closing = code.indexOf(")", opening + 1);
@@ -365,10 +363,13 @@ function parameterShadowsMap(code: string): boolean {
 }
 
 function nativeMapIsUnshadowed(lines: readonly SourceLine[]): boolean {
-  const declaration = /\b(?:const|let|var|class|function|interface|type)\s+Map\b/u;
+  const directBinding = /\b(?:const|let|var|class|function|interface|type)\s+Map\b/u;
   return !lines.some(
     (line) =>
-      declaration.test(line.code) || importsMap(line.code) || parameterShadowsMap(line.code),
+      directBinding.test(line.code) ||
+      importsMap(line.code) ||
+      destructuresMap(line.code) ||
+      parameterShadowsMap(line.code),
   );
 }
 
@@ -391,14 +392,32 @@ function mapDeclaration(lines: readonly SourceLine[], write: MapWrite): SourceLi
   return matches.length === 1 ? matches[0] : undefined;
 }
 
-function isInputLoopCandidate(
+function inputLoopIterable(
   line: SourceLine | undefined,
   declaration: SourceLine,
   write: MapWrite,
-): line is SourceLine {
-  if (line === undefined) return false;
-  if (line.line <= declaration.line || line.line >= write.line.line) return false;
-  return line.depth === declaration.depth && /\bfor\s*\([^)]*\bof\b[^)]*\)\s*\{/u.test(line.code);
+): string | undefined {
+  if (line === undefined) return undefined;
+  if (line.line <= declaration.line || line.line >= write.line.line) return undefined;
+  if (line.depth !== declaration.depth) return undefined;
+  return /^\s*for\s*\(\s*const\s+[A-Za-z_$][\w$]*\s+of\s+([A-Za-z_$][\w$]*)\s*\)\s*\{/u.exec(
+    line.code,
+  )?.[1];
+}
+
+function hasArrayInputGuard(
+  lines: readonly SourceLine[],
+  declaration: SourceLine,
+  opening: number,
+  iterable: string,
+): boolean {
+  const rejectingGuard = `if(!Array.isArray(${iterable}))return`;
+  return lines
+    .slice(0, opening)
+    .some(
+      (line) =>
+        line.line > declaration.line && line.code.replace(/\s/gu, "").startsWith(rejectingGuard),
+    );
 }
 
 function loopRepeatsAfterWrite(
@@ -409,10 +428,15 @@ function loopRepeatsAfterWrite(
   const closing = matchingBrace(lines, opening);
   if (closing === undefined || lines[closing] === undefined) return undefined;
   if (lines[closing].line <= write.line.line) return undefined;
-  const exits = lines
-    .slice(write.line.line, closing)
-    .some((candidate) => /^\s*(?:break|return|throw)\b/u.test(candidate.code));
-  return exits ? undefined : closing;
+  if (lines.slice(opening + 1, closing).some((candidate) => /\bbreak\b/u.test(candidate.code))) {
+    return undefined;
+  }
+  const writeIndex = lines.indexOf(write.line);
+  if (writeIndex < 0) return undefined;
+  const exitsAfterWrite = lines
+    .slice(writeIndex + 1, closing)
+    .some((candidate) => /^\s*(?:return|throw)\b/u.test(candidate.code));
+  return exitsAfterWrite ? undefined : closing;
 }
 
 function enclosingInputLoop(
@@ -423,7 +447,9 @@ function enclosingInputLoop(
   if (write.line.depth !== declaration.depth + 1) return undefined;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index];
-    if (!isInputLoopCandidate(line, declaration, write)) continue;
+    const iterable = inputLoopIterable(line, declaration, write);
+    if (iterable === undefined || !hasArrayInputGuard(lines, declaration, index, iterable))
+      continue;
     const closing = loopRepeatsAfterWrite(lines, index, write);
     if (closing !== undefined) return { opening: index, closing };
   }
@@ -466,23 +492,15 @@ function hasDuplicateGuard(
   );
 }
 
-function baseContainsMapWrite(baseSource: string | undefined, key: string): boolean {
-  if (baseSource === undefined) return false;
-  const escapedKey = escaped(key).replace(/\s+/gu, String.raw`\s*`);
-  const priorWrite = new RegExp(String.raw`^\s*[A-Za-z_$][\w$]*\.set\(\s*${escapedKey}\s*,`, "u");
-  return maskSource(baseSource).some((line) => priorWrite.test(line));
-}
-
 function duplicateMapProof(
   finding: JudgeableFinding,
   lines: readonly SourceLine[],
-  baseSource: string | undefined,
 ): ClosedClaimProof | undefined {
   const claim = finding.content.slice(0, MAX_CLAIM_CHARS);
   if (!/\bduplicate[sd]?\b/iu.test(claim)) return undefined;
   if (!/\b(?:overwrit\w*|discard\w*|collision\w*|reject\w*)\b/iu.test(claim)) return undefined;
   const write = mapWriteAtFinding(finding, lines);
-  if (write === undefined || baseContainsMapWrite(baseSource, write.key)) return undefined;
+  if (write === undefined) return undefined;
   const declaration = mapDeclaration(lines, write);
   if (
     declaration === undefined ||
@@ -502,10 +520,7 @@ export function closedClaimProof(
   evidence: TrustedHunkEvidence,
 ): ClosedClaimProof | undefined {
   if (!carriesTrustedEvidenceBrand(evidence)) return undefined;
-  if (evidence.headSource === undefined) return undefined;
+  if (evidence.headSource === undefined || evidence.baseSource !== undefined) return undefined;
   const lines = sourceLines(evidence.headSource, changedHeadLines(evidence.text));
-  return (
-    catchDisclosureProof(finding, lines, evidence.baseSource) ??
-    duplicateMapProof(finding, lines, evidence.baseSource)
-  );
+  return catchDisclosureProof(finding, lines) ?? duplicateMapProof(finding, lines);
 }

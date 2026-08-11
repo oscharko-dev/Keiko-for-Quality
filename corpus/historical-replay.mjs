@@ -843,8 +843,9 @@ function bindHistoricalHunkEvidence({ text, headSource, baseSource }) {
     } else if (baseRow !== null) {
       if (!historicalEvidenceRowMatches(baseRow, base)) return undefined;
       sourceRowsSeen += 1;
-    } else if (changed !== null && !historicalEvidenceRowMatches(changed, head)) {
-      return undefined;
+    } else if (changed !== null) {
+      if (!historicalEvidenceRowMatches(changed, head)) return undefined;
+      sourceRowsSeen += 1;
     }
   }
   return sourceRowsSeen === 0 ? undefined : Object.freeze({ text, headSource, baseSource });

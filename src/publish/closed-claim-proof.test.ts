@@ -62,7 +62,7 @@ function catchEvidence(
 
 const DUPLICATE_CLAIM = finding(
   "Reject duplicate capability IDs instead of silently overwriting the previous entry.",
-  4,
+  5,
 );
 
 function mapEvidence(
@@ -72,13 +72,16 @@ function mapEvidence(
     readonly changed?: boolean;
     readonly prior?: boolean;
     readonly loop?: boolean;
+    readonly arrayGuard?: boolean;
   } = {},
 ): TrustedHunkEvidence {
   const before = options.beforeWrite ?? [];
-  const writeLine = 4 + before.length;
+  const guard = options.arrayGuard === false ? [] : ["  if (!Array.isArray(entries)) return byId;"];
+  const writeLine = 4 + guard.length + before.length;
   const head = [
     "function readCapabilities(entries: readonly Entry[]): Map<string, Capability> {",
     `  ${options.declaration ?? "const byId = new Map<string, Capability>();"}`,
+    ...guard,
     options.loop === false ? "  if (entries.length > 0) {" : "  for (const entry of entries) {",
     ...before.map((line) => `    ${line}`),
     "    byId.set(id.value, capability);",
@@ -111,6 +114,16 @@ describe("trusted closed claim proof", () => {
     ).toBeUndefined();
   });
 
+  it("binds a dossier that contains only an exact changed-source row", () => {
+    expect(
+      bindTrustedHunkEvidence({
+        text: "D:H:1| +window.reportError(error);",
+        headSource: "window.reportError(error);",
+        baseSource: undefined,
+      }),
+    ).toBeDefined();
+  });
+
   it("proves a changed caught binding passed directly to an error sink", () => {
     expect(closedClaimProof(DISCLOSURE_CLAIM, catchEvidence("window.reportError(error);"))).toEqual(
       { evidenceRefs: ["D:H:4", "H:4"] },
@@ -126,6 +139,17 @@ describe("trusted closed claim proof", () => {
       "window.reportError(error);",
       { before: 'error = new Error("safe");' },
     ],
+    [
+      "a shadowed catch binding",
+      "window.reportError(error);",
+      { before: "for (const error of fallbackErrors) { reportError(error); }" },
+    ],
+    [
+      "a caught value sanitized in place",
+      "window.reportError(error);",
+      { before: 'error.message = "parse failed";' },
+    ],
+    ["an unqualified local helper", "reportError(error);", {}],
     ["behavior already present in BASE", "window.reportError(error);", { prior: true }],
     ["a comment", "// window.reportError(error);", {}],
     ["a string", 'const example = "window.reportError(error);";', {}],
@@ -142,7 +166,7 @@ describe("trusted closed claim proof", () => {
 
   it("proves a changed duplicate write on a stable native Map inside an input loop", () => {
     expect(closedClaimProof(DUPLICATE_CLAIM, mapEvidence())).toEqual({
-      evidenceRefs: ["D:H:4", "H:4"],
+      evidenceRefs: ["D:H:5", "H:5"],
     });
   });
 
@@ -155,12 +179,18 @@ describe("trusted closed claim proof", () => {
     ["a custom collection", { declaration: "const byId = createCapabilityIndex();" }],
     ["an unchanged write", { changed: false }],
     ["a non-repeated write", { loop: false }],
+    ["an iterable not proven to be an array", { arrayGuard: false }],
+    ["a loop that can break before the write", { beforeWrite: ["if (byId.size !== 0) break;"] }],
     ["behavior already present in BASE", { prior: true }],
     ["a shadowed receiver", { beforeWrite: ["const byId = createCapabilityIndex();"] }],
     ["a reassigned receiver", { beforeWrite: ["byId = createCapabilityIndex();"] }],
     [
       "a shadowed Map constructor",
       { beforeWrite: [], declaration: "const byId = new Map();", mapShadow: true },
+    ],
+    [
+      "a destructured Map constructor",
+      { beforeWrite: [], declaration: "const byId = new Map();", destructuredMap: true },
     ],
     ["a comment", { beforeWrite: [], changed: true, write: "// byId.set(id.value, capability);" }],
     [
@@ -174,20 +204,24 @@ describe("trusted closed claim proof", () => {
   ])("does not license %s", (_name, rawOptions) => {
     const options = rawOptions as typeof rawOptions & {
       readonly mapShadow?: boolean;
+      readonly destructuredMap?: boolean;
       readonly write?: string;
+      readonly arrayGuard?: boolean;
     };
-    if (options.mapShadow || options.write !== undefined) {
+    if (options.mapShadow || options.destructuredMap || options.write !== undefined) {
       const head = [
         ...(options.mapShadow ? ["const Map = CustomMap;"] : []),
+        ...(options.destructuredMap ? ["const { Map } = strictCollections;"] : []),
         "function readCapabilities(entries: readonly Entry[]): unknown {",
         "  const byId = new Map();",
+        "  if (!Array.isArray(entries)) return byId;",
         "  for (const entry of entries) {",
         `    ${options.write ?? "byId.set(id.value, capability);"}`,
         "  }",
         "  return byId;",
         "}",
       ];
-      const line = options.mapShadow ? 5 : 4;
+      const line = options.mapShadow || options.destructuredMap ? 6 : 5;
       expect(
         closedClaimProof(finding(DUPLICATE_CLAIM.content, line), evidence(head, [line])),
       ).toBeUndefined();

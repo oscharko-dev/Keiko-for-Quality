@@ -380,12 +380,13 @@ describe("closed source proofs", () => {
     const candidate: JudgeableFinding = {
       path: "src/parser.ts",
       content: "Reject duplicate IDs instead of silently overwriting the previous entry.",
-      startLine: 12,
-      endLine: 12,
+      startLine: 13,
+      endLine: 13,
     };
     const headSource = [
       "function parse(entries: readonly Entry[]): Map<string, Capability> {",
       "  const byId = new Map<string, Capability>();",
+      "  if (!Array.isArray(entries)) return byId;",
       "  for (const entry of entries) {",
       "    const id = readId(entry);",
       "    work();",
@@ -402,7 +403,7 @@ describe("closed source proofs", () => {
     ].join("\n");
     const text = [
       ...headSource.split("\n").map((line, index) => `H:${String(index + 1)}| ${line}`),
-      "D:H:12| +    byId.set(id.value, capability);",
+      "D:H:13| +    byId.set(id.value, capability);",
     ].join("\n");
     const evidence = bindTrustedHunkEvidence({ text, headSource, baseSource: undefined });
     expect(evidence).toBeDefined();
