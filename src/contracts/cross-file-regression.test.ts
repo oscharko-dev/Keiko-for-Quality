@@ -61,6 +61,7 @@ describe("detectCrossFileRegressions", () => {
       "zero fallback in a different argument",
       [TARGET, { ...CALLER, head: "return splitIntoBatches(items ?? 0, 20);" }],
     ],
+    ["pre-existing zero fallback", [TARGET, { ...CALLER, base: CALLER.head }]],
     [
       "lookalike caller",
       [
@@ -75,5 +76,21 @@ describe("detectCrossFileRegressions", () => {
     ],
   ])("stays silent for %s", (_name, files) => {
     expect(detectCrossFileRegressions(files)).toEqual([]);
+  });
+
+  it("accepts an added executable caller but ignores documentation snippets", () => {
+    expect(detectCrossFileRegressions([TARGET, { ...CALLER, base: "" }])).toHaveLength(1);
+    expect(
+      detectCrossFileRegressions([TARGET, { ...CALLER, path: "docs/example.md", base: "" }]),
+    ).toEqual([]);
+  });
+
+  it("ignores parentheses inside literals and comments while matching calls", () => {
+    const caller = {
+      ...CALLER,
+      base: "",
+      head: 'return splitIntoBatches(label(")"), configuredSize ?? 0); // unrelated )',
+    };
+    expect(detectCrossFileRegressions([TARGET, caller])).toHaveLength(1);
   });
 });

@@ -31,12 +31,34 @@ interface AdvancingFunction {
 
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/u;
 const IDENTIFIER_PART = /[\w$]/u;
+const EXECUTABLE_EXTENSIONS = new Set([
+  ".cjs",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".mts",
+  ".ts",
+  ".tsx",
+]);
+
+function executablePath(path: string): boolean {
+  const dot = path.lastIndexOf(".");
+  return dot >= 0 && EXECUTABLE_EXTENSIONS.has(path.slice(dot).toLowerCase());
+}
+
+function maskNonCode(text: string): string {
+  return text.replace(/(["'`])(?:\\.|(?!\1).)*\1|\/\/.*|\/\*.*?\*\//gu, (match) =>
+    " ".repeat(match.length),
+  );
+}
 
 function matchingClose(text: string, open: number, opening: string, closing: string): number {
+  const structural = maskNonCode(text);
   let depth = 0;
-  for (let index = open; index < text.length; index += 1) {
-    if (text[index] === opening) depth += 1;
-    if (text[index] !== closing) continue;
+  for (let index = open; index < structural.length; index += 1) {
+    if (structural[index] === opening) depth += 1;
+    if (structural[index] !== closing) continue;
     depth -= 1;
     if (depth === 0) return index;
   }
@@ -162,11 +184,12 @@ function callOpen(line: string, name: string, offset: number): number | undefine
 }
 
 function splitArguments(source: string): readonly string[] {
+  const structural = maskNonCode(source);
   const arguments_: string[] = [];
   let start = 0;
   let depth = 0;
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index];
+  for (let index = 0; index < structural.length; index += 1) {
+    const character = structural[index];
     if (character === "(" || character === "[" || character === "{") depth += 1;
     if (character === ")" || character === "]" || character === "}") depth -= 1;
     if (character !== "," || depth !== 0) continue;
@@ -192,17 +215,21 @@ function callArguments(line: string, name: string): readonly (readonly string[])
 }
 
 function shownZeroCaller(files: readonly SourceTransition[], target: AdvancingFunction): boolean {
-  return files.some(
-    (file) =>
-      file.path !== target.path &&
-      file.head
-        .split("\n")
-        .some((line) =>
-          callArguments(line, target.name).some((arguments_) =>
-            /\?\?\s*0\b/u.test(arguments_[target.parameterIndex] ?? ""),
-          ),
-        ),
-  );
+  return files.some((file) => {
+    if (file.path === target.path || !executablePath(file.path)) return false;
+    const headHasZero = sourceHasZeroArgument(file.head, target);
+    return headHasZero && !sourceHasZeroArgument(file.base, target);
+  });
+}
+
+function sourceHasZeroArgument(source: string, target: AdvancingFunction): boolean {
+  return source
+    .split("\n")
+    .some((line) =>
+      callArguments(line, target.name).some((arguments_) =>
+        /\?\?\s*0\b/u.test(arguments_[target.parameterIndex] ?? ""),
+      ),
+    );
 }
 
 /** Finds a removed positive-step guard only when this diff also shows a zero-valued caller. */
@@ -211,6 +238,7 @@ export function detectCrossFileRegressions(
 ): readonly CrossFileRegression[] {
   const findings: CrossFileRegression[] = [];
   for (const file of files) {
+    if (!executablePath(file.path)) continue;
     const target = advancingFunction(file);
     if (target === undefined || !shownZeroCaller(files, target)) continue;
     findings.push({

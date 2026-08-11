@@ -1782,6 +1782,12 @@ async function collectCrossFileRegressionFindings(
 ): Promise<number> {
   const pairs: ModifiedBlobPair[] = [];
   for (const item of inventory.items) {
+    if (item.reviewable && item.status === "A") {
+      const path = item.path as string;
+      const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
+      if (head !== undefined) pairs.push({ item, path, base: "", head });
+      continue;
+    }
     const pair = await readModifiedBlobPair(ctx, request, inventory, item, blobCache);
     if (pair !== undefined) pairs.push(pair);
   }

@@ -678,13 +678,6 @@ describe("performLocalReview (issue #95)", () => {
           "  return batches;\n" +
           "}\n",
       );
-      await writeFile(
-        digest,
-        'import { splitIntoBatches } from "./batch.js";\n\n' +
-          "export function digestBatches(items: readonly string[], configuredSize?: number): string[][] {\n" +
-          "  return splitIntoBatches(items, configuredSize ?? 20);\n" +
-          "}\n",
-      );
       regressionGit(["add", "-A"]);
       regressionGit(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
       const regressionBase = regressionGit(["rev-parse", "HEAD"]).trim();

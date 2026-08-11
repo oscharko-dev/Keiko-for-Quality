@@ -13,6 +13,11 @@ interface AwaitAssignment {
   readonly variable: string;
 }
 
+interface SourceScope {
+  readonly text: string;
+  readonly startLine: number;
+}
+
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/u;
 const EXECUTABLE_EXTENSIONS = new Set([
   ".cjs",
@@ -31,12 +36,12 @@ function executablePath(path: string): boolean {
 }
 
 function awaitAssignment(line: string, index: number): AwaitAssignment | undefined {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith("const ") || !trimmed.endsWith(";")) return undefined;
+  const trimmed = line.trim().replace(/;$/u, "");
+  if (!trimmed.startsWith("const ")) return undefined;
   const separator = trimmed.indexOf(" = await ");
   if (separator < 6) return undefined;
   const variable = trimmed.slice(6, separator).trim();
-  const expression = trimmed.slice(separator + 9, -1).trim();
+  const expression = trimmed.slice(separator + 9).trim();
   if (!IDENTIFIER.test(variable) || expression === "") return undefined;
   return { expression, line: index + 1, variable };
 }
@@ -51,9 +56,9 @@ function awaitAssignments(source: string): readonly AwaitAssignment[] {
 function bareAwaitExpressions(source: string): ReadonlyMap<string, number> {
   const expressions = new Map<string, number>();
   for (const [index, line] of source.split("\n").entries()) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("await ") || !trimmed.endsWith(";")) continue;
-    const expression = trimmed.slice(6, -1).trim();
+    const trimmed = line.trim().replace(/;$/u, "");
+    if (!trimmed.startsWith("await ")) continue;
+    const expression = trimmed.slice(6).trim();
     if (expression !== "" && !expressions.has(expression)) expressions.set(expression, index + 1);
   }
   return expressions;
@@ -72,7 +77,7 @@ function assertedVariables(source: string): ReadonlySet<string> {
   return variables;
 }
 
-function detectDiscardedRefresh(base: string, head: string): LocalRegression | undefined {
+function discardedRefreshInScope(base: string, head: string): LocalRegression | undefined {
   const baseAssignments = awaitAssignments(base);
   const headAssignments = awaitAssignments(head);
   const bareHead = bareAwaitExpressions(head);
@@ -103,13 +108,41 @@ function detectDiscardedRefresh(base: string, head: string): LocalRegression | u
   return undefined;
 }
 
-function isAdminGuard(line: string): boolean {
-  const compact = line.replace(/\s+/gu, " ").trim();
-  return (
-    compact.startsWith("if (!") &&
-    compact.includes(".isAdmin)") &&
-    compact.includes("return forbidden()")
-  );
+function braceDelta(line: string): number {
+  let depth = 0;
+  for (const character of line) {
+    if (character === "{") depth += 1;
+    if (character === "}") depth -= 1;
+  }
+  return depth;
+}
+
+function sourceScopes(source: string): readonly SourceScope[] {
+  const lines = source.split("\n");
+  const scopes: SourceScope[] = [];
+  let start: number | undefined;
+  let depth = 0;
+  for (const [index, line] of lines.entries()) {
+    if (start === undefined && line.includes("{")) start = index;
+    depth += braceDelta(line);
+    if (start === undefined || depth !== 0) continue;
+    scopes.push({ text: lines.slice(start, index + 1).join("\n"), startLine: start + 1 });
+    start = undefined;
+  }
+  return scopes.length === 0 ? [{ text: source, startLine: 1 }] : scopes;
+}
+
+function detectDiscardedRefresh(base: string, head: string): LocalRegression | undefined {
+  const baseScopes = sourceScopes(base);
+  for (const [index, headScope] of sourceScopes(head).entries()) {
+    const baseScope = baseScopes[index];
+    if (baseScope === undefined) continue;
+    const regression = discardedRefreshInScope(baseScope.text, headScope.text);
+    if (regression !== undefined) {
+      return { ...regression, line: regression.line + headScope.startLine - 1 };
+    }
+  }
+  return undefined;
 }
 
 function suppressionInstructionLines(source: string): ReadonlyMap<string, number> {
@@ -137,13 +170,31 @@ function enclosingFunctionName(line: string): string | undefined {
   return IDENTIFIER.test(name) ? name : undefined;
 }
 
+function adminGuardKey(
+  lines: readonly string[],
+  index: number,
+  functionName: string,
+): string | undefined {
+  const compact = lines
+    .slice(index, index + 3)
+    .join(" ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!compact.startsWith("if (!") || !compact.includes("return forbidden()")) return undefined;
+  const conditionEnd = compact.indexOf(".isAdmin)");
+  if (conditionEnd < 0) return undefined;
+  const condition = compact.slice(0, conditionEnd + ".isAdmin)".length);
+  return `${functionName}\0${condition}`;
+}
+
 function guardOccurrences(source: string): readonly string[] {
+  const lines = source.split("\n");
   const occurrences: string[] = [];
   let functionName = "<module>";
-  for (const line of source.split("\n")) {
+  for (const [index, line] of lines.entries()) {
     functionName = enclosingFunctionName(line) ?? functionName;
-    if (isAdminGuard(line))
-      occurrences.push(`${functionName}\0${line.replace(/\s+/gu, " ").trim()}`);
+    const key = adminGuardKey(lines, index, functionName);
+    if (key !== undefined) occurrences.push(key);
   }
   return occurrences;
 }

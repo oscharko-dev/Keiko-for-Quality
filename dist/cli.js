@@ -6563,12 +6563,12 @@ function executablePath(path) {
   return dot >= 0 && EXECUTABLE_EXTENSIONS2.has(path.slice(dot).toLowerCase());
 }
 function awaitAssignment(line, index) {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith("const ") || !trimmed.endsWith(";")) return void 0;
+  const trimmed = line.trim().replace(/;$/u, "");
+  if (!trimmed.startsWith("const ")) return void 0;
   const separator = trimmed.indexOf(" = await ");
   if (separator < 6) return void 0;
   const variable = trimmed.slice(6, separator).trim();
-  const expression = trimmed.slice(separator + 9, -1).trim();
+  const expression = trimmed.slice(separator + 9).trim();
   if (!IDENTIFIER2.test(variable) || expression === "") return void 0;
   return { expression, line: index + 1, variable };
 }
@@ -6578,9 +6578,9 @@ function awaitAssignments(source) {
 function bareAwaitExpressions(source) {
   const expressions = /* @__PURE__ */ new Map();
   for (const [index, line] of source.split("\n").entries()) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("await ") || !trimmed.endsWith(";")) continue;
-    const expression = trimmed.slice(6, -1).trim();
+    const trimmed = line.trim().replace(/;$/u, "");
+    if (!trimmed.startsWith("await ")) continue;
+    const expression = trimmed.slice(6).trim();
     if (expression !== "" && !expressions.has(expression)) expressions.set(expression, index + 1);
   }
   return expressions;
@@ -6597,7 +6597,7 @@ function assertedVariables(source) {
   }
   return variables;
 }
-function detectDiscardedRefresh(base, head) {
+function discardedRefreshInScope(base, head) {
   const baseAssignments = awaitAssignments(base);
   const headAssignments = awaitAssignments(head);
   const bareHead = bareAwaitExpressions(head);
@@ -6625,9 +6625,39 @@ The second \`${fresh.expression}\` result is now discarded while the assertion s
   }
   return void 0;
 }
-function isAdminGuard(line) {
-  const compact = line.replace(/\s+/gu, " ").trim();
-  return compact.startsWith("if (!") && compact.includes(".isAdmin)") && compact.includes("return forbidden()");
+function braceDelta(line) {
+  let depth = 0;
+  for (const character of line) {
+    if (character === "{") depth += 1;
+    if (character === "}") depth -= 1;
+  }
+  return depth;
+}
+function sourceScopes(source) {
+  const lines = source.split("\n");
+  const scopes = [];
+  let start;
+  let depth = 0;
+  for (const [index, line] of lines.entries()) {
+    if (start === void 0 && line.includes("{")) start = index;
+    depth += braceDelta(line);
+    if (start === void 0 || depth !== 0) continue;
+    scopes.push({ text: lines.slice(start, index + 1).join("\n"), startLine: start + 1 });
+    start = void 0;
+  }
+  return scopes.length === 0 ? [{ text: source, startLine: 1 }] : scopes;
+}
+function detectDiscardedRefresh(base, head) {
+  const baseScopes = sourceScopes(base);
+  for (const [index, headScope] of sourceScopes(head).entries()) {
+    const baseScope = baseScopes[index];
+    if (baseScope === void 0) continue;
+    const regression = discardedRefreshInScope(baseScope.text, headScope.text);
+    if (regression !== void 0) {
+      return { ...regression, line: regression.line + headScope.startLine - 1 };
+    }
+  }
+  return void 0;
 }
 function suppressionInstructionLines(source) {
   const instructions = /* @__PURE__ */ new Map();
@@ -6649,13 +6679,22 @@ function enclosingFunctionName(line) {
   const name = line.slice(markerAt + marker.length, open2).trim();
   return IDENTIFIER2.test(name) ? name : void 0;
 }
+function adminGuardKey(lines, index, functionName) {
+  const compact = lines.slice(index, index + 3).join(" ").replace(/\s+/gu, " ").trim();
+  if (!compact.startsWith("if (!") || !compact.includes("return forbidden()")) return void 0;
+  const conditionEnd = compact.indexOf(".isAdmin)");
+  if (conditionEnd < 0) return void 0;
+  const condition = compact.slice(0, conditionEnd + ".isAdmin)".length);
+  return `${functionName}\0${condition}`;
+}
 function guardOccurrences(source) {
+  const lines = source.split("\n");
   const occurrences = [];
   let functionName = "<module>";
-  for (const line of source.split("\n")) {
+  for (const [index, line] of lines.entries()) {
     functionName = enclosingFunctionName(line) ?? functionName;
-    if (isAdminGuard(line))
-      occurrences.push(`${functionName}\0${line.replace(/\s+/gu, " ").trim()}`);
+    const key = adminGuardKey(lines, index, functionName);
+    if (key !== void 0) occurrences.push(key);
   }
   return occurrences;
 }
@@ -6692,11 +6731,32 @@ function detectLocalRegressions(path, base, head) {
 // src/contracts/cross-file-regression.ts
 var IDENTIFIER3 = /^[A-Za-z_$][\w$]*$/u;
 var IDENTIFIER_PART = /[\w$]/u;
+var EXECUTABLE_EXTENSIONS3 = /* @__PURE__ */ new Set([
+  ".cjs",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".mts",
+  ".ts",
+  ".tsx"
+]);
+function executablePath2(path) {
+  const dot = path.lastIndexOf(".");
+  return dot >= 0 && EXECUTABLE_EXTENSIONS3.has(path.slice(dot).toLowerCase());
+}
+function maskNonCode(text) {
+  return text.replace(
+    /(["'`])(?:\\.|(?!\1).)*\1|\/\/.*|\/\*.*?\*\//gu,
+    (match) => " ".repeat(match.length)
+  );
+}
 function matchingClose(text, open2, opening, closing) {
+  const structural = maskNonCode(text);
   let depth = 0;
-  for (let index = open2; index < text.length; index += 1) {
-    if (text[index] === opening) depth += 1;
-    if (text[index] !== closing) continue;
+  for (let index = open2; index < structural.length; index += 1) {
+    if (structural[index] === opening) depth += 1;
+    if (structural[index] !== closing) continue;
     depth -= 1;
     if (depth === 0) return index;
   }
@@ -6801,11 +6861,12 @@ function callOpen(line, name, offset) {
   return void 0;
 }
 function splitArguments(source) {
+  const structural = maskNonCode(source);
   const arguments_ = [];
   let start = 0;
   let depth = 0;
-  for (let index = 0; index < source.length; index += 1) {
-    const character = source[index];
+  for (let index = 0; index < structural.length; index += 1) {
+    const character = structural[index];
     if (character === "(" || character === "[" || character === "{") depth += 1;
     if (character === ")" || character === "]" || character === "}") depth -= 1;
     if (character !== "," || depth !== 0) continue;
@@ -6829,17 +6890,23 @@ function callArguments(line, name) {
   return calls;
 }
 function shownZeroCaller(files, target) {
-  return files.some(
-    (file) => file.path !== target.path && file.head.split("\n").some(
-      (line) => callArguments(line, target.name).some(
-        (arguments_) => /\?\?\s*0\b/u.test(arguments_[target.parameterIndex] ?? "")
-      )
+  return files.some((file) => {
+    if (file.path === target.path || !executablePath2(file.path)) return false;
+    const headHasZero = sourceHasZeroArgument(file.head, target);
+    return headHasZero && !sourceHasZeroArgument(file.base, target);
+  });
+}
+function sourceHasZeroArgument(source, target) {
+  return source.split("\n").some(
+    (line) => callArguments(line, target.name).some(
+      (arguments_) => /\?\?\s*0\b/u.test(arguments_[target.parameterIndex] ?? "")
     )
   );
 }
 function detectCrossFileRegressions(files) {
   const findings = [];
   for (const file of files) {
+    if (!executablePath2(file.path)) continue;
     const target = advancingFunction(file);
     if (target === void 0 || !shownZeroCaller(files, target)) continue;
     findings.push({
@@ -12402,6 +12469,12 @@ async function collectModifiedBlobPairFindings(ctx, request, inventory, findings
 async function collectCrossFileRegressionFindings(ctx, request, inventory, findings, blobCache) {
   const pairs = [];
   for (const item of inventory.items) {
+    if (item.reviewable && item.status === "A") {
+      const path = item.path;
+      const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
+      if (head !== void 0) pairs.push({ item, path, base: "", head });
+      continue;
+    }
     const pair = await readModifiedBlobPair(ctx, request, inventory, item, blobCache);
     if (pair !== void 0) pairs.push(pair);
   }
