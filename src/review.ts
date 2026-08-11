@@ -77,6 +77,11 @@ import {
   detectParallelMappingCrossovers,
   isParallelMappingCandidatePath,
 } from "./contracts/parallel-mapping.js";
+import { detectLocalRegressions } from "./contracts/local-regression.js";
+import {
+  detectCrossFileRegressions,
+  type SourceTransition,
+} from "./contracts/cross-file-regression.js";
 import type { InventoryItem } from "./inventory/classify.js";
 import {
   buildInventory,
@@ -1607,6 +1612,20 @@ async function collectGateFindings(
     findings,
     blobCache,
   );
+  const localRegressions = await collectLocalRegressionFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache,
+  );
+  const crossFileRegressions = await collectCrossFileRegressionFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache,
+  );
   const compared = await compareMatchedPairs(blobCache, ctx, request, inventory, pairs, findings);
 
   if (pairs.length === 0 && findings.length === 0 && pinDesyncs === 0) return [];
@@ -1618,9 +1637,51 @@ async function collectGateFindings(
       findings: findings.length,
       pin_desync: pinDesyncs,
       mapping_crossover: mappingCrossovers,
+      local_regression: localRegressions,
+      cross_file_regression: crossFileRegressions,
     },
   });
   return findings;
+}
+
+function pushLocalRegressionFindings(
+  findings: EngineFinding[],
+  item: InventoryItem,
+  path: string,
+  base: string,
+  head: string,
+): number {
+  let found = 0;
+  for (const regression of detectLocalRegressions(path, base, head)) {
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    findings.push({
+      path: item.path,
+      content: regression.content,
+      startLine: regression.line,
+      endLine: regression.line,
+      category: regression.category,
+      severity: regression.severity,
+    });
+    found += 1;
+  }
+  return found;
+}
+
+async function collectLocalRegressionFindings(
+  ctx: GitContext,
+  request: PipelineRequest,
+  inventory: Inventory,
+  findings: EngineFinding[],
+  blobCache: BlobTextCache,
+): Promise<number> {
+  return collectModifiedBlobPairFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache,
+    ({ item, path, base, head }) => pushLocalRegressionFindings(findings, item, path, base, head),
+  );
 }
 
 /**
@@ -1676,6 +1737,25 @@ interface ModifiedBlobPair {
   readonly head: string;
 }
 
+async function readModifiedBlobPair(
+  ctx: GitContext,
+  request: PipelineRequest,
+  inventory: Inventory,
+  item: InventoryItem,
+  blobCache: BlobTextCache,
+): Promise<ModifiedBlobPair | undefined> {
+  if (!item.reviewable || (item.status !== "M" && item.status !== "R")) return undefined;
+  const path = item.path as string;
+  const base = await readTextAtCommitCached(
+    blobCache,
+    ctx,
+    inventory.pair.mergeBase,
+    (item.oldPath ?? item.path) as string,
+  );
+  const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
+  return base === undefined || head === undefined ? undefined : { item, path, base, head };
+}
+
 async function collectModifiedBlobPairFindings(
   ctx: GitContext,
   request: PipelineRequest,
@@ -1686,18 +1766,47 @@ async function collectModifiedBlobPairFindings(
 ): Promise<number> {
   let found = 0;
   for (const item of inventory.items) {
-    if (!item.reviewable || (item.status !== "M" && item.status !== "R")) continue;
     if (findings.length >= MAX_GATE_FINDINGS) break;
-    const path = item.path as string;
-    const base = await readTextAtCommitCached(
-      blobCache,
-      ctx,
-      inventory.pair.mergeBase,
-      (item.oldPath ?? item.path) as string,
-    );
-    const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
-    if (base === undefined || head === undefined) continue;
-    found += push({ item, path, base, head });
+    const pair = await readModifiedBlobPair(ctx, request, inventory, item, blobCache);
+    if (pair !== undefined) found += push(pair);
+  }
+  return found;
+}
+
+async function collectCrossFileRegressionFindings(
+  ctx: GitContext,
+  request: PipelineRequest,
+  inventory: Inventory,
+  findings: EngineFinding[],
+  blobCache: BlobTextCache,
+): Promise<number> {
+  const pairs: ModifiedBlobPair[] = [];
+  for (const item of inventory.items) {
+    if (item.reviewable && item.status === "A") {
+      const path = item.path as string;
+      const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
+      if (head !== undefined) pairs.push({ item, path, base: "", head });
+      continue;
+    }
+    const pair = await readModifiedBlobPair(ctx, request, inventory, item, blobCache);
+    if (pair !== undefined) pairs.push(pair);
+  }
+  const itemsByPath = new Map(pairs.map((pair) => [pair.path, pair.item]));
+  const sources: SourceTransition[] = pairs.map(({ path, base, head }) => ({ path, base, head }));
+  let found = 0;
+  for (const regression of detectCrossFileRegressions(sources)) {
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    const item = itemsByPath.get(regression.path);
+    if (item === undefined) continue;
+    findings.push({
+      path: item.path,
+      content: regression.content,
+      startLine: regression.line,
+      endLine: regression.line,
+      category: regression.category,
+      severity: regression.severity,
+    });
+    found += 1;
   }
   return found;
 }
