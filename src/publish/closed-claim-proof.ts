@@ -262,19 +262,26 @@ function bindingReassigned(text: string, binding: string): boolean {
   ).test(text);
 }
 
+function scanBraceBalance(code: string, initialBalance: number): number {
+  let balance = initialBalance;
+  for (const character of code) {
+    if (character === "{") balance += 1;
+    if (character === "}") balance -= 1;
+    if (balance === 0) return 0;
+  }
+  return balance;
+}
+
 function matchingBrace(lines: readonly SourceLine[], openingIndex: number): number | undefined {
-  let balance = 0;
-  for (let index = openingIndex; index < lines.length; index += 1) {
-    const code = lines[index]?.code ?? "";
-    const openingOffset = index === openingIndex ? code.lastIndexOf("{") : 0;
-    if (openingOffset < 0) return undefined;
-    for (const character of code.slice(openingOffset)) {
-      if (character === "{") {
-        balance += 1;
-      }
-      if (character === "}") balance -= 1;
-      if (balance === 0) return index;
-    }
+  const openingCode = lines[openingIndex]?.code ?? "";
+  const openingOffset = openingCode.lastIndexOf("{");
+  if (openingOffset < 0) return undefined;
+
+  let balance = scanBraceBalance(openingCode.slice(openingOffset), 0);
+  if (balance === 0) return openingIndex;
+  for (let index = openingIndex + 1; index < lines.length; index += 1) {
+    balance = scanBraceBalance(lines[index]?.code ?? "", balance);
+    if (balance === 0) return index;
   }
   return undefined;
 }
@@ -340,22 +347,45 @@ function mapWriteAtFinding(
   return undefined;
 }
 
+function importsMap(code: string): boolean {
+  const trimmed = code.trimStart();
+  if (!trimmed.startsWith("import ")) return false;
+  const clause = trimmed.split(/\s+from\s+/u, 1)[0] ?? "";
+  return /\bMap\b/u.test(clause);
+}
+
+function parameterShadowsMap(code: string): boolean {
+  const opening = code.indexOf("(");
+  const closing = code.indexOf(")", opening + 1);
+  if (opening < 0 || closing < 0) return false;
+  if (!/\bMap\b/u.test(code.slice(opening + 1, closing))) return false;
+  const suffix = code.slice(closing + 1).trimStart();
+  return suffix.startsWith("=>") || suffix.startsWith("{");
+}
+
 function nativeMapIsUnshadowed(lines: readonly SourceLine[]): boolean {
-  return !lines.some((line) =>
-    /\b(?:const|let|var|class|function|interface|type)\s+Map\b|\bimport\s+(?:Map\b|\*\s+as\s+Map\b|\{[^}]*\bMap\b)|\([^)]*\bMap\b[^)]*\)\s*(?:=>|\{)/u.test(
-      line.code,
-    ),
+  const declaration = /\b(?:const|let|var|class|function|interface|type)\s+Map\b/u;
+  return !lines.some(
+    (line) =>
+      declaration.test(line.code) || importsMap(line.code) || parameterShadowsMap(line.code),
   );
 }
 
+function initializesNativeMap(code: string, receiver: string): boolean {
+  const declaration = /^\s*const\s+([A-Za-z_$][\w$]*)\s*=\s*new\s+Map\b/u.exec(code);
+  if (declaration?.[1] !== receiver) return false;
+  let suffix = code.slice(declaration[0].length).trimStart();
+  if (suffix.startsWith("<")) {
+    const genericEnd = suffix.indexOf(">");
+    if (genericEnd < 1 || genericEnd > 256) return false;
+    suffix = suffix.slice(genericEnd + 1).trimStart();
+  }
+  return suffix.startsWith("(");
+}
+
 function mapDeclaration(lines: readonly SourceLine[], write: MapWrite): SourceLine | undefined {
-  const receiver = escaped(write.receiver);
-  const declaration = new RegExp(
-    String.raw`^\s*const\s+${receiver}\s*=\s*new\s+Map(?:\s*<[^;]+>)?\s*\(`,
-    "u",
-  );
   const matches = lines.filter(
-    (line) => line.line < write.line.line && declaration.test(line.code),
+    (line) => line.line < write.line.line && initializesNativeMap(line.code, write.receiver),
   );
   return matches.length === 1 ? matches[0] : undefined;
 }
