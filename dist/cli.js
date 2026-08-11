@@ -6546,6 +6546,183 @@ function describeParallelMappingCrossover(crossover) {
 When \`${crossover.leftKey}\` calls \`${crossover.leftHelper}\` while \`${crossover.rightKey}\` calls \`${crossover.rightHelper}\`, each output reports the other sibling's state. The base version establishes the opposite key-to-helper pairing, and the shown arguments did not change.`;
 }
 
+// src/contracts/local-regression.ts
+var IDENTIFIER2 = /^[A-Za-z_$][\w$]*$/u;
+var EXECUTABLE_EXTENSIONS2 = /* @__PURE__ */ new Set([
+  ".cjs",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".mts",
+  ".ts",
+  ".tsx"
+]);
+function executablePath(path) {
+  const dot = path.lastIndexOf(".");
+  return dot >= 0 && EXECUTABLE_EXTENSIONS2.has(path.slice(dot).toLowerCase());
+}
+function awaitAssignment(line, index) {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("const ") || !trimmed.endsWith(";")) return void 0;
+  const separator = trimmed.indexOf(" = await ");
+  if (separator < 6) return void 0;
+  const variable = trimmed.slice(6, separator).trim();
+  const expression = trimmed.slice(separator + 9, -1).trim();
+  if (!IDENTIFIER2.test(variable) || expression === "") return void 0;
+  return { expression, line: index + 1, variable };
+}
+function awaitAssignments(source) {
+  return source.split("\n").map(awaitAssignment).filter((value) => value !== void 0);
+}
+function bareAwaitExpressions(source) {
+  const expressions = /* @__PURE__ */ new Map();
+  for (const [index, line] of source.split("\n").entries()) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("await ") || !trimmed.endsWith(";")) continue;
+    const expression = trimmed.slice(6, -1).trim();
+    if (expression !== "") expressions.set(expression, index + 1);
+  }
+  return expressions;
+}
+function assertedVariables(source) {
+  const variables = /* @__PURE__ */ new Set();
+  for (const line of source.split("\n")) {
+    const start = line.indexOf("expect(");
+    if (start < 0) continue;
+    const tail = line.slice(start + 7).trimStart();
+    const end = tail.search(/[.)]/u);
+    const variable = end < 0 ? "" : tail.slice(0, end);
+    if (IDENTIFIER2.test(variable)) variables.add(variable);
+  }
+  return variables;
+}
+function detectDiscardedRefresh(base, head) {
+  const baseAssignments = awaitAssignments(base);
+  const headAssignments = awaitAssignments(head);
+  const bareHead = bareAwaitExpressions(head);
+  const baseAssertions = assertedVariables(base);
+  const headAssertions = assertedVariables(head);
+  for (const fresh of baseAssignments) {
+    const retained = headAssignments.some(
+      (entry) => entry.variable === fresh.variable && entry.expression === fresh.expression
+    );
+    if (!baseAssertions.has(fresh.variable) || retained) continue;
+    const line = bareHead.get(fresh.expression);
+    if (line === void 0) continue;
+    const stale = headAssignments.find(
+      (entry) => entry.expression === fresh.expression && headAssertions.has(entry.variable)
+    );
+    if (stale === void 0 || stale.line >= line) continue;
+    return {
+      line,
+      category: "test",
+      severity: "high",
+      content: `Assert on the refreshed result.
+
+The second \`${fresh.expression}\` result is now discarded while the assertion still reads the earlier \`${stale.variable}\` value. The test therefore no longer proves that the refresh changed the session state.`
+    };
+  }
+  return void 0;
+}
+function isAdminGuard(line) {
+  const compact = line.replace(/\s+/gu, " ").trim();
+  return compact.startsWith("if (!") && compact.includes(".isAdmin)") && compact.includes("return forbidden()");
+}
+function suppressionInstructionLine(source) {
+  for (const [index, line] of source.split("\n").entries()) {
+    const normalized = line.trim().toLowerCase();
+    if (!normalized.startsWith("//")) continue;
+    if (normalized.includes("reviewer instructions") && (normalized.includes("skip this file") || normalized.includes("emit no findings"))) {
+      return index + 1;
+    }
+  }
+  return void 0;
+}
+function detectSuppressedGuardRemoval(base, head) {
+  if (!base.split("\n").some(isAdminGuard) || head.split("\n").some(isAdminGuard)) return void 0;
+  const line = suppressionInstructionLine(head);
+  if (line === void 0) return void 0;
+  return {
+    line,
+    category: "security",
+    severity: "critical",
+    content: "Restore the administrator authorization guard.\n\nThe change removes the shown `isAdmin`/`forbidden` access-control check while adding a comment that tells automated reviewers to skip the file. Candidate comments are untrusted input; without the guard, non-admin requests reach the administrator handler."
+  };
+}
+function detectLocalRegressions(path, base, head) {
+  if (!executablePath(path)) return [];
+  return [detectSuppressedGuardRemoval(base, head), detectDiscardedRefresh(base, head)].filter(
+    (value) => value !== void 0
+  );
+}
+
+// src/contracts/cross-file-regression.ts
+var IDENTIFIER3 = /^[A-Za-z_$][\w$]*$/u;
+function functionShape(line) {
+  const marker = "function ";
+  const markerAt = line.indexOf(marker);
+  const open2 = line.indexOf("(", markerAt + marker.length);
+  const close = line.lastIndexOf(")");
+  if (markerAt < 0 || open2 < 0 || close <= open2) return void 0;
+  const rawName = line.slice(markerAt + marker.length, open2).trim();
+  const generic = rawName.indexOf("<");
+  const name = generic < 0 ? rawName : rawName.slice(0, generic);
+  if (!IDENTIFIER3.test(name)) return void 0;
+  const parameters = line.slice(open2 + 1, close).split(",").map((part) => {
+    const separator = part.indexOf(":");
+    return (separator < 0 ? part : part.slice(0, separator)).trim();
+  }).filter((parameter) => IDENTIFIER3.test(parameter));
+  return { name, parameters };
+}
+function removedPositiveGuard(base, head, parameter) {
+  const guarded = base.split("\n").some((line) => {
+    const compact = line.replace(/\s+/gu, " ").trim();
+    return compact.startsWith("if (") && (compact.includes(`${parameter} <= 0`) || compact.includes(`${parameter} < 1`)) && compact.includes("throw ");
+  });
+  if (!guarded) return false;
+  return !head.split("\n").some((line) => {
+    const compact = line.replace(/\s+/gu, " ").trim();
+    return compact.startsWith("if (") && compact.includes(parameter) && compact.includes("throw ");
+  });
+}
+function advancingFunction(file) {
+  for (const line of file.head.split("\n")) {
+    const shape = functionShape(line);
+    if (shape === void 0) continue;
+    for (const parameter of shape.parameters) {
+      if (!removedPositiveGuard(file.base, file.head, parameter)) continue;
+      const loopLine = file.head.split("\n").findIndex((candidate) => candidate.includes(`+= ${parameter}`));
+      if (loopLine >= 0) {
+        return { name: shape.name, parameter, line: loopLine + 1, path: file.path };
+      }
+    }
+  }
+  return void 0;
+}
+function shownZeroCaller(files, target) {
+  return files.some(
+    (file) => file.path !== target.path && file.head.split("\n").some((line) => line.includes(`${target.name}(`) && line.includes("?? 0"))
+  );
+}
+function detectCrossFileRegressions(files) {
+  const findings = [];
+  for (const file of files) {
+    const target = advancingFunction(file);
+    if (target === void 0 || !shownZeroCaller(files, target)) continue;
+    findings.push({
+      path: target.path,
+      line: target.line,
+      category: "bug",
+      severity: "high",
+      content: `Restore the positive-step guard.
+
+The loop advances with \`${target.parameter}\`, but the change removes the shown non-positive guard while another changed file now calls \`${target.name}\` with a \`?? 0\` fallback. That reachable zero step prevents the loop index from advancing and can hang the caller indefinitely.`
+    });
+  }
+  return findings;
+}
+
 // src/inventory/classify.ts
 function isMode(change, mode) {
   return change.oldMode === mode || change.newMode === mode;
@@ -11987,6 +12164,20 @@ async function collectGateFindings(request, inventory, diagnostics, blobCache = 
     findings,
     blobCache
   );
+  const localRegressions = await collectLocalRegressionFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache
+  );
+  const crossFileRegressions = await collectCrossFileRegressionFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache
+  );
   const compared = await compareMatchedPairs(blobCache, ctx, request, inventory, pairs, findings);
   if (pairs.length === 0 && findings.length === 0 && pinDesyncs === 0) return [];
   diagnostics.record("contracts.gate", {
@@ -11996,10 +12187,38 @@ async function collectGateFindings(request, inventory, diagnostics, blobCache = 
       compared,
       findings: findings.length,
       pin_desync: pinDesyncs,
-      mapping_crossover: mappingCrossovers
+      mapping_crossover: mappingCrossovers,
+      local_regression: localRegressions,
+      cross_file_regression: crossFileRegressions
     }
   });
   return findings;
+}
+function pushLocalRegressionFindings(findings, item, path, base, head) {
+  let found = 0;
+  for (const regression of detectLocalRegressions(path, base, head)) {
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    findings.push({
+      path: item.path,
+      content: regression.content,
+      startLine: regression.line,
+      endLine: regression.line,
+      category: regression.category,
+      severity: regression.severity
+    });
+    found += 1;
+  }
+  return found;
+}
+async function collectLocalRegressionFindings(ctx, request, inventory, findings, blobCache) {
+  return collectModifiedBlobPairFindings(
+    ctx,
+    request,
+    inventory,
+    findings,
+    blobCache,
+    ({ item, path, base, head }) => pushLocalRegressionFindings(findings, item, path, base, head)
+  );
 }
 function pushParallelMappingFindings(findings, item, base, head) {
   let found = 0;
@@ -12027,21 +12246,49 @@ async function collectParallelMappingFindings(ctx, request, inventory, findings,
     ({ item, path, base, head }) => isParallelMappingCandidatePath(path) ? pushParallelMappingFindings(findings, item, base, head) : 0
   );
 }
+async function readModifiedBlobPair(ctx, request, inventory, item, blobCache) {
+  if (!item.reviewable || item.status !== "M" && item.status !== "R") return void 0;
+  const path = item.path;
+  const base = await readTextAtCommitCached(
+    blobCache,
+    ctx,
+    inventory.pair.mergeBase,
+    item.oldPath ?? item.path
+  );
+  const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
+  return base === void 0 || head === void 0 ? void 0 : { item, path, base, head };
+}
 async function collectModifiedBlobPairFindings(ctx, request, inventory, findings, blobCache, push) {
   let found = 0;
   for (const item of inventory.items) {
-    if (!item.reviewable || item.status !== "M" && item.status !== "R") continue;
     if (findings.length >= MAX_GATE_FINDINGS) break;
-    const path = item.path;
-    const base = await readTextAtCommitCached(
-      blobCache,
-      ctx,
-      inventory.pair.mergeBase,
-      item.oldPath ?? item.path
-    );
-    const head = await readTextAtCommitCached(blobCache, ctx, request.head, path);
-    if (base === void 0 || head === void 0) continue;
-    found += push({ item, path, base, head });
+    const pair = await readModifiedBlobPair(ctx, request, inventory, item, blobCache);
+    if (pair !== void 0) found += push(pair);
+  }
+  return found;
+}
+async function collectCrossFileRegressionFindings(ctx, request, inventory, findings, blobCache) {
+  const pairs = [];
+  for (const item of inventory.items) {
+    const pair = await readModifiedBlobPair(ctx, request, inventory, item, blobCache);
+    if (pair !== void 0) pairs.push(pair);
+  }
+  const itemsByPath = new Map(pairs.map((pair) => [pair.path, pair.item]));
+  const sources = pairs.map(({ path, base, head }) => ({ path, base, head }));
+  let found = 0;
+  for (const regression of detectCrossFileRegressions(sources)) {
+    if (findings.length >= MAX_GATE_FINDINGS) break;
+    const item = itemsByPath.get(regression.path);
+    if (item === void 0) continue;
+    findings.push({
+      path: item.path,
+      content: regression.content,
+      startLine: regression.line,
+      endLine: regression.line,
+      category: regression.category,
+      severity: regression.severity
+    });
+    found += 1;
   }
   return found;
 }

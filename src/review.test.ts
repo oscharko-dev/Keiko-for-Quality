@@ -2561,6 +2561,8 @@ describe("performReview: review-cache memoization end to end", () => {
         findings: 1,
         pin_desync: 0,
         mapping_crossover: 0,
+        local_regression: 0,
+        cross_file_regression: 0,
       });
     });
 
