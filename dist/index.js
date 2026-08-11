@@ -11540,7 +11540,8 @@ function mapWriteAtFinding(finding, lines) {
 function importsMap(code) {
   const trimmed = code.trimStart();
   if (!trimmed.startsWith("import ")) return false;
-  const clause = trimmed.split(/\s+from\s+/u, 1)[0] ?? "";
+  const fromOffset = trimmed.lastIndexOf(" from ");
+  const clause = fromOffset < 0 ? trimmed : trimmed.slice(0, fromOffset);
   return /\bMap\b/u.test(clause);
 }
 function parameterShadowsMap(code) {
