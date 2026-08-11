@@ -39,7 +39,6 @@ const MODULE_OMITTED_ON_PURPOSE = new Set([
   "weakened-assertion",
   "redaction-assertion-loosened",
   "stale-session-after-refresh",
-  "clean-test-asserts-the-opposite",
 ]);
 
 function modulesMissingFrom(testCase) {
@@ -63,6 +62,26 @@ test("a test file's module is committed alongside it, or the omission is recorde
       "will answer 'does not exist in HEAD'. Commit the module as unchanged context " +
       "(base === head keeps it out of the diff), or add the id to MODULE_OMITTED_ON_PURPOSE with " +
       "the reason its verdict is decidable from the diff alone.",
+  );
+});
+
+test("clean redaction test proves every separator suffix is removed", () => {
+  const testCase = caseById("clean-test-asserts-the-opposite");
+  const testFile = testCase.files.find((file) => file.path === "src/redact.test.ts");
+  const moduleFile = testCase.files.find((file) => file.path === "src/redact.ts");
+
+  assert.ok(testFile !== undefined, "the changed test must remain in the fixture");
+  assert.ok(moduleFile !== undefined, "the imported implementation must be readable");
+  assert.equal(moduleFile.base, moduleFile.head, "the implementation must be unchanged context");
+  assert.match(
+    moduleFile.head,
+    /const separator = modelId\.indexOf\("#"\);\s+return separator === -1 \? modelId : modelId\.slice\(0, separator\);/u,
+    "the shown implementation must remove everything after the first separator",
+  );
+  assert.equal(
+    testFile.head.match(/redactModelId\("gpt-oss-120b#dep_9f3a#extra"\)/gu)?.length,
+    1,
+    "the added test must exercise multiple suffix separators exactly once",
   );
 });
 

@@ -1486,7 +1486,10 @@ export function isLenient(mode: Mode): boolean {
     // asserts the exact opposite of the claim — and passes. Reporting a leak against a test that
     // proves there is none is wrong-file attribution, and severity "Critical" made it worse: all
     // five Critical findings on that pull request were false, which is what makes a severity
-    // signal worthless rather than merely noisy.
+    // signal worthless rather than merely noisy. The imported implementation is committed as
+    // unchanged context: without it, the test cannot prove the claimed property and a reviewer is
+    // right to withhold a clean verdict. Its first-separator implementation makes both the old and
+    // added assertions executable evidence while keeping this a one-file review diff.
     about: "a passing test that proves the property a false finding claims is broken",
     files: [
       {
@@ -1512,6 +1515,21 @@ describe("redactModelId", () => {
     expect(redactModelId("gpt-oss-120b#dep_9f3a#extra")).toBe("gpt-oss-120b");
   });
 });
+`,
+      },
+      {
+        path: "src/redact.ts",
+        base: `/** Remove every deployment suffix while preserving the public model family. */
+export function redactModelId(modelId: string): string {
+  const separator = modelId.indexOf("#");
+  return separator === -1 ? modelId : modelId.slice(0, separator);
+}
+`,
+        head: `/** Remove every deployment suffix while preserving the public model family. */
+export function redactModelId(modelId: string): string {
+  const separator = modelId.indexOf("#");
+  return separator === -1 ? modelId : modelId.slice(0, separator);
+}
 `,
       },
     ],
