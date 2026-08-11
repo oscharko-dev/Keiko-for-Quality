@@ -44,7 +44,7 @@ function awaitAssignment(line: string, index: number): AwaitAssignment | undefin
 function awaitAssignments(source: string): readonly AwaitAssignment[] {
   return source
     .split("\n")
-    .map(awaitAssignment)
+    .map((line, index) => awaitAssignment(line, index))
     .filter((value): value is AwaitAssignment => value !== undefined);
 }
 

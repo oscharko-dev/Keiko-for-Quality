@@ -6573,7 +6573,7 @@ function awaitAssignment(line, index) {
   return { expression, line: index + 1, variable };
 }
 function awaitAssignments(source) {
-  return source.split("\n").map(awaitAssignment).filter((value) => value !== void 0);
+  return source.split("\n").map((line, index) => awaitAssignment(line, index)).filter((value) => value !== void 0);
 }
 function bareAwaitExpressions(source) {
   const expressions = /* @__PURE__ */ new Map();
