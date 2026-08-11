@@ -1,0 +1,362 @@
+{
+  "schemaVersion": 6,
+  "artifact": "keiko-for-quality/historical-replay-evidence",
+  "generatedAt": "2026-08-11T17:59:25.218Z",
+  "scope": {
+    "measuredStage": "post-generation-truth-deterministic-contract-challenge-falsifier-referee-closed-runtime-fact-workflow",
+    "historicalHeadSource": "immutable GitHub originalCommit for the review comment",
+    "historicalBaseSource": "unique merge-base of harvested current target ref and original review commit",
+    "historicalDiffSource": "exact single-change unified diff from derived merge-base to immutable originalCommit",
+    "repositoryContextSource": "bounded exact originalCommit and derived-merge-base trees with optional truth retrieval, mandatory deterministic contract challenge retrieval, and closed catalog runtime facts from exact anchored syntax in bounded immutable blobs",
+    "verificationWorkflow": "truth judge, optional truth retrieval and rerun, mandatory deterministic independent contract challenge, adversarial falsifier, reduced independent referee, optional closed runtime fact detector",
+    "pullRequestEventBase": "not available in harvest; not measured",
+    "candidateGeneration": "not measured",
+    "classificationAndPrWideRanking": "not measured",
+    "endToEndRecall": "not measured"
+  },
+  "binding": {
+    "model": "gpt-oss-120b",
+    "protocol": "openai",
+    "strictness": "paranoid",
+    "harvestSha256": "d09a3de7ce86afcab75111c0c8ce10a8d34896917cedb72c1fe8e9f824381052",
+    "endpointSha256": "26d6ddf0a6fe78a4bf3baa06e8842f720046d3884686df9e1cea697512e52be9",
+    "reviewerTree": "8b2ba94c3e71cd54809f77f117d52d6da1ff3d57",
+    "sourceSha256": {
+      "driver": "5c1c89731be0f0dd39b380d830e609747b1c2affa05778ffee57b124c97b9593",
+      "scorer": "a6a0dd386a26502a562807f54cce8ede33bfc62cadc22ede40104c6fc3d9fe1a",
+      "evidenceBuilder": "8a5e8b5ba439496a97be31ddd05989501068032ad6b61edbc8301948e53988d1",
+      "repositoryContext": "940cb9abb48469a1c5797b1b9bc40216c3915c66e69817b67faa51d7e1537b7e",
+      "retrievedEvidence": "ef1fcadbffb57cd6b797870797debfdef04db1e1be0e00d2be9628ed26da777f",
+      "substantiation": "e238813d9dccc39c0068e8b54203048077e8372dbd0e8fa39c218ddd36b76aa1"
+    }
+  },
+  "budget": {
+    "estimatedTokensPerCase": 1000000,
+    "configuredMaxTokens": 61000000,
+    "estimatedStartWorkTokens": 61000000,
+    "estimatedMaximumEndpointRequests": 244
+  },
+  "plan": {
+    "populationRecords": 92,
+    "corroboratedCases": 66,
+    "locallyBoundCases": 61,
+    "structurallyUnmeasuredCases": 5,
+    "estimatedAffordableCases": 61,
+    "estimatedCostExcessCases": 0,
+    "estimatedStartWorkTokens": 61000000,
+    "configuredMaxTokens": 61000000,
+    "estimatedMaximumEndpointRequests": 244,
+    "localUnmeasured": {
+      "outsideCorroboratedPopulation": 0,
+      "missingHistoricalBinding": 0,
+      "invalidHistoricalBinding": 4,
+      "findingBodyUnavailable": 0,
+      "sourceUnavailable": 0,
+      "evidenceUnavailable": 1,
+      "budget": 0,
+      "verificationUndecided": 0,
+      "verificationError": 0
+    }
+  },
+  "execution": {
+    "populationRecords": 92,
+    "corroboratedCases": 66,
+    "attemptedCases": 61,
+    "estimatedAttemptedTokens": 61000000,
+    "accountedTokens": 886054,
+    "configuredMaxTokens": 61000000,
+    "populationDecisions": {
+      "keep": 33,
+      "drop": 24,
+      "unmeasured": 35
+    },
+    "corroboratedDecisions": {
+      "keep": 33,
+      "drop": 24,
+      "unmeasured": 9
+    },
+    "stageCounters": {
+      "confirmed": 33,
+      "directProved": 2,
+      "truthRefuted": 15,
+      "falsifierDefeated": 2,
+      "droppedInsufficientEvidence": 7,
+      "retrievalRequested": 7,
+      "retrievalPerformed": 7,
+      "retrievalExpanded": 6,
+      "retrievalNoMatches": 1,
+      "retrievalFailed": 0,
+      "challengePlanned": 34,
+      "challengeRetrievalPerformed": 34,
+      "challengeExpanded": 29,
+      "challengeNoMatches": 4,
+      "challengeFailed": 1,
+      "undecided": 4,
+      "budgetBlocked": 0
+    },
+    "unmeasuredByReason": {
+      "outsideCorroboratedPopulation": 26,
+      "missingHistoricalBinding": 0,
+      "invalidHistoricalBinding": 4,
+      "findingBodyUnavailable": 0,
+      "sourceUnavailable": 0,
+      "evidenceUnavailable": 1,
+      "budget": 0,
+      "verificationUndecided": 4,
+      "verificationError": 0
+    }
+  },
+  "holdoutFromPullRequest": 3037,
+  "score": {
+    "schemaVersion": 1,
+    "holdoutFromPullRequest": 3037,
+    "all": {
+      "before": {
+        "records": 92,
+        "eligible": 66,
+        "groundTruth": {
+          "fixedConfirmed": 17,
+          "refutedConfirmed": 49
+        },
+        "excluded": {
+          "total": 26,
+          "byLabel": {
+            "refuted_contradicted": 15,
+            "refuted_unconfirmed": 0,
+            "fixed_unconfirmed": 0,
+            "unanswered": 11,
+            "unclassified": 0
+          }
+        },
+        "eligibleDecisions": {
+          "keep": 66,
+          "drop": 0,
+          "unmeasured": 0
+        },
+        "confusionMatrix": {
+          "truePositive": 17,
+          "falseNegative": 0,
+          "falsePositive": 49,
+          "trueNegative": 0
+        },
+        "unmeasured": {
+          "fixedConfirmed": 0,
+          "refutedConfirmed": 0,
+          "total": 0
+        },
+        "metrics": {
+          "precision": 0.25757575757575757,
+          "fixedRetention": 1,
+          "falsePositiveRejection": 0,
+          "decisionCoverage": 1
+        }
+      },
+      "after": {
+        "records": 92,
+        "eligible": 66,
+        "groundTruth": {
+          "fixedConfirmed": 17,
+          "refutedConfirmed": 49
+        },
+        "excluded": {
+          "total": 26,
+          "byLabel": {
+            "refuted_contradicted": 15,
+            "refuted_unconfirmed": 0,
+            "fixed_unconfirmed": 0,
+            "unanswered": 11,
+            "unclassified": 0
+          }
+        },
+        "eligibleDecisions": {
+          "keep": 33,
+          "drop": 24,
+          "unmeasured": 9
+        },
+        "confusionMatrix": {
+          "truePositive": 14,
+          "falseNegative": 0,
+          "falsePositive": 19,
+          "trueNegative": 24
+        },
+        "unmeasured": {
+          "fixedConfirmed": 3,
+          "refutedConfirmed": 6,
+          "total": 9
+        },
+        "metrics": {
+          "precision": 0.42424242424242425,
+          "fixedRetention": 0.8235294117647058,
+          "falsePositiveRejection": 0.4897959183673469,
+          "decisionCoverage": 0.8636363636363636
+        }
+      }
+    },
+    "chronological": {
+      "training": {
+        "before": {
+          "records": 38,
+          "eligible": 24,
+          "groundTruth": {
+            "fixedConfirmed": 11,
+            "refutedConfirmed": 13
+          },
+          "excluded": {
+            "total": 14,
+            "byLabel": {
+              "refuted_contradicted": 3,
+              "refuted_unconfirmed": 0,
+              "fixed_unconfirmed": 0,
+              "unanswered": 11,
+              "unclassified": 0
+            }
+          },
+          "eligibleDecisions": {
+            "keep": 24,
+            "drop": 0,
+            "unmeasured": 0
+          },
+          "confusionMatrix": {
+            "truePositive": 11,
+            "falseNegative": 0,
+            "falsePositive": 13,
+            "trueNegative": 0
+          },
+          "unmeasured": {
+            "fixedConfirmed": 0,
+            "refutedConfirmed": 0,
+            "total": 0
+          },
+          "metrics": {
+            "precision": 0.4583333333333333,
+            "fixedRetention": 1,
+            "falsePositiveRejection": 0,
+            "decisionCoverage": 1
+          }
+        },
+        "after": {
+          "records": 38,
+          "eligible": 24,
+          "groundTruth": {
+            "fixedConfirmed": 11,
+            "refutedConfirmed": 13
+          },
+          "excluded": {
+            "total": 14,
+            "byLabel": {
+              "refuted_contradicted": 3,
+              "refuted_unconfirmed": 0,
+              "fixed_unconfirmed": 0,
+              "unanswered": 11,
+              "unclassified": 0
+            }
+          },
+          "eligibleDecisions": {
+            "keep": 15,
+            "drop": 7,
+            "unmeasured": 2
+          },
+          "confusionMatrix": {
+            "truePositive": 9,
+            "falseNegative": 0,
+            "falsePositive": 6,
+            "trueNegative": 7
+          },
+          "unmeasured": {
+            "fixedConfirmed": 2,
+            "refutedConfirmed": 0,
+            "total": 2
+          },
+          "metrics": {
+            "precision": 0.6,
+            "fixedRetention": 0.8181818181818182,
+            "falsePositiveRejection": 0.5384615384615384,
+            "decisionCoverage": 0.9166666666666666
+          }
+        }
+      },
+      "holdout": {
+        "before": {
+          "records": 54,
+          "eligible": 42,
+          "groundTruth": {
+            "fixedConfirmed": 6,
+            "refutedConfirmed": 36
+          },
+          "excluded": {
+            "total": 12,
+            "byLabel": {
+              "refuted_contradicted": 12,
+              "refuted_unconfirmed": 0,
+              "fixed_unconfirmed": 0,
+              "unanswered": 0,
+              "unclassified": 0
+            }
+          },
+          "eligibleDecisions": {
+            "keep": 42,
+            "drop": 0,
+            "unmeasured": 0
+          },
+          "confusionMatrix": {
+            "truePositive": 6,
+            "falseNegative": 0,
+            "falsePositive": 36,
+            "trueNegative": 0
+          },
+          "unmeasured": {
+            "fixedConfirmed": 0,
+            "refutedConfirmed": 0,
+            "total": 0
+          },
+          "metrics": {
+            "precision": 0.14285714285714285,
+            "fixedRetention": 1,
+            "falsePositiveRejection": 0,
+            "decisionCoverage": 1
+          }
+        },
+        "after": {
+          "records": 54,
+          "eligible": 42,
+          "groundTruth": {
+            "fixedConfirmed": 6,
+            "refutedConfirmed": 36
+          },
+          "excluded": {
+            "total": 12,
+            "byLabel": {
+              "refuted_contradicted": 12,
+              "refuted_unconfirmed": 0,
+              "fixed_unconfirmed": 0,
+              "unanswered": 0,
+              "unclassified": 0
+            }
+          },
+          "eligibleDecisions": {
+            "keep": 18,
+            "drop": 17,
+            "unmeasured": 7
+          },
+          "confusionMatrix": {
+            "truePositive": 5,
+            "falseNegative": 0,
+            "falsePositive": 13,
+            "trueNegative": 17
+          },
+          "unmeasured": {
+            "fixedConfirmed": 1,
+            "refutedConfirmed": 6,
+            "total": 7
+          },
+          "metrics": {
+            "precision": 0.2777777777777778,
+            "fixedRetention": 0.8333333333333334,
+            "falsePositiveRejection": 0.4722222222222222,
+            "decisionCoverage": 0.8333333333333334
+          }
+        }
+      }
+    }
+  }
+}
