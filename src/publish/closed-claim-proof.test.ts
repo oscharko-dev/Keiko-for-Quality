@@ -359,6 +359,15 @@ describe("trusted closed claim proof", () => {
     ).toEqual({ evidenceRefs: ["D:H:5", "H:5", "B:5"] });
   });
 
+  it.each(["**=", "<<=", ">>=", ">>>="])("rejects a parameter mutated with %s", (operator) => {
+    expect(
+      closedClaimRefutation(
+        finding("Remove the added diagnostic context.", 6),
+        diagnosticContextEvidence({ setup: [`  attempt ${operator} 1;`] }),
+      ),
+    ).toBeUndefined();
+  });
+
   const rejectedDiagnosticContextShapes: readonly (readonly [string, DiagnosticContextOptions])[] =
     [
       ["a sensitive field", { parameter: "token: string", addedEntry: "token" }],
