@@ -357,3 +357,80 @@ jobs:
           path: corpus/evidence/completion-*-v${{ inputs.version }}.md
           if-no-files-found: error
           retention-days: 90
+
+  promotion:
+    name: release promotion gate
+    needs:
+      - preflight
+      - qualification
+      - historical
+      - seed
+      - completion
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the exact candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.expected_reviewer_sha }}
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+
+      - name: Download qualification evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: qualification-v${{ inputs.version }}
+          path: ${{ runner.temp }}/release-evidence/qualification
+
+      - name: Download historical evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: historical-v${{ inputs.version }}
+          path: ${{ runner.temp }}/release-evidence/historical
+
+      - name: Download seed evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: seed-v${{ inputs.version }}
+          path: ${{ runner.temp }}/release-evidence/seed
+
+      - name: Download completion evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: completion-v${{ inputs.version }}
+          path: ${{ runner.temp }}/release-evidence/completion
+
+      - name: Validate the complete release-evidence set
+        env:
+          EVIDENCE_ROOT: ${{ runner.temp }}/release-evidence
+          EXPECTED_HEAD: ${{ inputs.expected_reviewer_sha }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          qualification=("${EVIDENCE_ROOT}/qualification"/qualification-*-v"${EXPECTED_VERSION}".json)
+          historical=("${EVIDENCE_ROOT}/historical"/historical-replay-*-v"${EXPECTED_VERSION}".json)
+          seed=("${EVIDENCE_ROOT}/seed"/seed-gate-*-v"${EXPECTED_VERSION}".md)
+          completion=("${EVIDENCE_ROOT}/completion"/completion-*-v"${EXPECTED_VERSION}".md)
+
+          [[ ${#qualification[@]} -eq 1 && -f "${qualification[0]}" ]]
+          [[ ${#historical[@]} -eq 1 && -f "${historical[0]}" ]]
+          [[ ${#seed[@]} -eq 1 && -f "${seed[0]}" ]]
+          [[ ${#completion[@]} -eq 1 && -f "${completion[0]}" ]]
+          [[ "$(git rev-parse HEAD)" == "${EXPECTED_HEAD}" ]]
+          candidate_tree=$(git rev-parse HEAD^{tree})
+
+          node scripts/check-release-evidence.mjs \
+            --version "${EXPECTED_VERSION}" \
+            --head "${EXPECTED_HEAD}" \
+            --tree "${candidate_tree}" \
+            --qualification "${qualification[0]}" \
+            --historical "${historical[0]}" \
+            --seed "${seed[0]}" \
+            --completion "${completion[0]}"

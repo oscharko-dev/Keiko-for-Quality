@@ -96,6 +96,44 @@ describe("paid release-gate workflow contract", () => {
     assert.equal([...workflow.matchAll(/if-no-files-found: error/gu)].length, 4);
   });
 
+  it("promotes only the complete evidence set for the exact candidate", () => {
+    const promotion = jobSection("promotion");
+    for (const dependency of ["preflight", "qualification", "historical", "seed", "completion"]) {
+      assert.match(promotion, new RegExp(`^ {6}- ${dependency}$`, "mu"));
+    }
+    assert.match(promotion, /ref: \$\{\{ inputs\.expected_reviewer_sha \}\}/u);
+    assert.match(promotion, /persist-credentials: false/u);
+
+    for (const artifact of ["qualification", "historical", "seed", "completion"]) {
+      assert.match(
+        promotion,
+        new RegExp(`name: ${artifact}-v\\$\\{\\{ inputs\\.version \\}\\}`),
+        `${artifact} evidence is downloaded by its version-scoped artifact name`,
+      );
+      assert.match(
+        promotion,
+        new RegExp(`path: \\$\\{\\{ runner\\.temp \\}\\}/release-evidence/${artifact}`),
+        `${artifact} evidence has an isolated download directory`,
+      );
+    }
+
+    assert.match(promotion, /shopt -s nullglob/u);
+    assert.equal([...promotion.matchAll(/\$\{#[a-z]+\[@\]\} -eq 1/gu)].length, 4);
+    assert.match(promotion, /git rev-parse HEAD\^\{tree\}/u);
+    assert.match(promotion, /node scripts\/check-release-evidence\.mjs/u);
+    for (const flag of [
+      "version",
+      "head",
+      "tree",
+      "qualification",
+      "historical",
+      "seed",
+      "completion",
+    ]) {
+      assert.match(promotion, new RegExp(`--${flag} `), `promotion passes --${flag}`);
+    }
+  });
+
   it("never passes workflow_dispatch inputs directly to a shell", () => {
     for (const filename of readdirSync(workflowsDirectory)) {
       if (!/\.ya?ml$/u.test(filename)) continue;

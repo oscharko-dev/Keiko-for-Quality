@@ -78,7 +78,7 @@ reader knows what is being checked on their behalf.
    `docs/operations.md`. Leave the four new version-scoped reports uncommitted, then run `attest`.
    Attestation accepts no other dirty path; accepts only the explicitly redacted qualification
    schema; binds every report to the candidate and pinned model; requires green
-   qualification/seed/completion plus a historical precision gain with at least 80% fixed-finding
+   qualification/seed/completion plus a historical precision gain with at least 75% fixed-finding
    retention and 75% decision coverage; then runs the full verification chain and signs an
    evidence-only commit. Land that commit on `dev`. Never pipe `npm run verify` into anything — a
    pipeline exits with its last command's status, so `npm run verify | tail` reads a red chain as

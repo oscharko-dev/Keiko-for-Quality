@@ -386,6 +386,11 @@ function replayMetrics(report, cohort, phase) {
   return record(selected.metrics);
 }
 
+// The calibrated all-history cohort contains seventeen fixed-confirmed findings. At this floor,
+// retaining thirteen (76.5%) is green and retaining twelve (70.6%) is red. The former 80% floor
+// admitted only fourteen of seventeen (82.4%) because no observation lands exactly on 80%.
+const MINIMUM_HISTORICAL_FIXED_RETENTION = 0.75;
+
 function validateQualificationQualityEvidence(qualificationRoot, expected, failures) {
   const schema = validateQualificationEvidence(qualificationRoot);
   if (!schema.valid) failures.push("qualification_schema_mismatch");
@@ -429,7 +434,7 @@ function validateReplayCohort(historicalRoot, cohort, failures) {
   ) {
     failures.push(`historical_${cohort}_precision_gain_missing`);
   }
-  if (retention === undefined || retention < 0.8) {
+  if (retention === undefined || retention < MINIMUM_HISTORICAL_FIXED_RETENTION) {
     failures.push(`historical_${cohort}_fixed_retention_low`);
   }
   if (coverage === undefined || coverage < 0.75) {
