@@ -419,10 +419,23 @@ jobs:
           seed=("${EVIDENCE_ROOT}/seed"/seed-gate-*-v"${EXPECTED_VERSION}".md)
           completion=("${EVIDENCE_ROOT}/completion"/completion-*-v"${EXPECTED_VERSION}".md)
 
-          [[ ${#qualification[@]} -eq 1 && -f "${qualification[0]}" ]]
-          [[ ${#historical[@]} -eq 1 && -f "${historical[0]}" ]]
-          [[ ${#seed[@]} -eq 1 && -f "${seed[0]}" ]]
-          [[ ${#completion[@]} -eq 1 && -f "${completion[0]}" ]]
+          require_single_evidence() {
+            local label="$1"
+            shift
+            if (( $# != 1 )); then
+              echo "::error::Expected exactly one ${label} evidence file; found $#."
+              exit 1
+            fi
+            if [[ ! -f "$1" ]]; then
+              echo "::error::The selected ${label} evidence path is not a file."
+              exit 1
+            fi
+          }
+
+          require_single_evidence qualification "${qualification[@]}"
+          require_single_evidence historical "${historical[@]}"
+          require_single_evidence seed "${seed[@]}"
+          require_single_evidence completion "${completion[@]}"
           [[ "$(git rev-parse HEAD)" == "${EXPECTED_HEAD}" ]]
           candidate_tree=$(git rev-parse HEAD^{tree})
 
