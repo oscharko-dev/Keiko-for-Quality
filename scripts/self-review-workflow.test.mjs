@@ -57,6 +57,12 @@ const expectedGateScript = [
   "",
 ].join("\n");
 
+function trustedGateScript() {
+  const script = runScript(stepBlock("Require a complete settlement"));
+  assert.equal(script, expectedGateScript, "refuse to execute anything outside the exact gate");
+  return script;
+}
+
 describe("required self-review settlement gate", () => {
   it("reads the pinned action's output after reviewing from the protected base", () => {
     const review = stepBlock("Review");
@@ -75,7 +81,7 @@ describe("required self-review settlement gate", () => {
   });
 
   it("accepts exactly complete and fails closed for every other action outcome", () => {
-    const script = runScript(stepBlock("Require a complete settlement"));
+    const script = trustedGateScript();
     const execute = (outcome) =>
       spawnSync("/bin/bash", ["-eu", "-o", "pipefail", "-c", script], {
         encoding: "utf8",
@@ -104,6 +110,6 @@ describe("required self-review settlement gate", () => {
     assert.doesNotMatch(gate, /continue-on-error/u);
     assert.doesNotMatch(gate, /secrets\.|github\.token|GH_TOKEN|KFQ_MODEL_TOKEN/u);
     assert.doesNotMatch(gate, /\b(?:curl|gh)\b|issues\/comments|summary_comment_url/u);
-    assert.equal(runScript(gate), expectedGateScript);
+    assert.equal(trustedGateScript(), expectedGateScript);
   });
 });
