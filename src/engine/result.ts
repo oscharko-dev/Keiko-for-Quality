@@ -95,7 +95,7 @@ export interface EngineWarning {
 /** Closed vocabulary for `EngineWarning.cause`. `other` means the message matched no known
  *  pattern — deliberately not "unknown", because the engine DID say something and this adapter
  *  simply has no name for it yet. */
-export type WarningCause = "tool_budget" | "other";
+export type WarningCause = "tool_budget" | "non_retryable" | "other";
 
 export interface CoverageEntry {
   readonly path: string;
@@ -435,11 +435,14 @@ function unwrapEnvelopeContent(content: string, field: string): UnwrappedEnvelop
  * reworded engine release degrades to `other` — an unmatched cause, never a wrong one.
  */
 const TOOL_BUDGET_MESSAGE = /main_task did not complete/i;
+const NON_RETRYABLE_SINGLE_SHOT_MESSAGE =
+  /^single_shot (?:core|integration) examiner request rejected$/u;
 
 /** The class of a `subtask_error`, from the engine's own message. Never carries the message. */
 function classifyWarning(type: string, message: unknown): WarningCause | undefined {
   if (type !== "subtask_error" && type !== "scan_subtask_error") return undefined;
   if (typeof message !== "string") return "other";
+  if (NON_RETRYABLE_SINGLE_SHOT_MESSAGE.test(message)) return "non_retryable";
   return TOOL_BUDGET_MESSAGE.test(message) ? "tool_budget" : "other";
 }
 

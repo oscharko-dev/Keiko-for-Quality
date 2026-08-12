@@ -63,7 +63,7 @@ vi.mock("./publish/runtime-facts.js", async (importOriginal) => ({
   collectClosedRuntimeFactsAtCommit: collectClosedRuntimeFactsAtCommitMock,
 }));
 
-const { computeAllottedBudget, performReview } = await import("./review.js");
+const { computeAllottedBudget, performLocalReview, performReview } = await import("./review.js");
 const { EngineRunError } = await import("./engine/run.js");
 
 /**
@@ -1572,7 +1572,7 @@ describe("performReview: review-cache memoization end to end", () => {
         ruleDigest: engineDigest,
       });
       // The retry still cannot finish it — the gap stands, but it was paid for once, not never.
-      runEngineMock.mockResolvedValueOnce({
+      runEngineMock.mockResolvedValue({
         stdout: finishedWithFailures(["src/b.ts"], 1),
         ruleDigest: engineDigest,
       });
@@ -1597,6 +1597,111 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(codes).not.toContain("engine.resume_skipped_run_completed");
       expect(report.outcome).toBe("incomplete");
       expect(report.reason).toBe("settlement.incomplete.coverage_gap");
+    });
+
+    it("never rebuys a staged file whose request was permanently rejected", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "completed_with_errors",
+          summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+          comments: [],
+          warnings: [
+            {
+              type: "subtask_error",
+              file: "src/b.ts",
+              message: "single_shot core examiner request rejected",
+            },
+          ],
+        }),
+        ruleDigest: engineDigest,
+      });
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(
+        {
+          ...baseRequest(undefined),
+          config: { ...CONFIG, protocol: "openai" },
+        },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("incomplete");
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
+      expect(diagnostics.drain().map((record) => record.code)).not.toContain(
+        "engine.resumed_gap_targeted",
+      );
+    });
+
+    it("does not retry transient peers by falsely crediting a permanently rejected path", async () => {
+      const mixedRepo = await mkdtemp(join(tmpdir(), "kfq-mixed-retry-causes-"));
+      try {
+        git(["init", "-q", "-b", "main"], mixedRepo);
+        await mkdir(join(mixedRepo, "src"), { recursive: true });
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 1;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "base", "--no-gpg-sign"], mixedRepo);
+        const mixedBase = git(["rev-parse", "HEAD"], mixedRepo).trim();
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 2;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "head", "--no-gpg-sign"], mixedRepo);
+        const mixedHead = git(["rev-parse", "HEAD"], mixedRepo).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        runEngineMock.mockResolvedValue({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 4, total_tokens: 60_000, budget_exceeded: false },
+            comments: [],
+            warnings: [
+              {
+                type: "subtask_error",
+                file: "src/b.ts",
+                message: "single_shot core examiner request rejected",
+              },
+              {
+                type: "subtask_error",
+                file: "src/c.ts",
+                message: "single_shot core examiner failed",
+              },
+            ],
+          }),
+          ruleDigest: engineDigest,
+        });
+        const request = baseRequest(undefined);
+        vi.spyOn(request.client, "getPullRequest").mockResolvedValue({
+          headSha: commitSha(mixedHead),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        });
+        const diagnostics = createSilentDiagnostics();
+
+        const report = await performReview(
+          {
+            ...request,
+            base: commitSha(mixedBase),
+            head: commitSha(mixedHead),
+            repositoryPath: mixedRepo,
+            config: { ...CONFIG, protocol: "openai" },
+          },
+          diagnostics,
+        );
+
+        expect(report.outcome).toBe("incomplete");
+        expect(runEngineMock).toHaveBeenCalledTimes(1);
+        expect(diagnostics.drain().map((record) => record.code)).not.toContain(
+          "engine.resumed_gap_targeted",
+        );
+      } finally {
+        await rm(mixedRepo, { recursive: true, force: true });
+      }
     });
 
     it("settles complete when the targeted retry closes the gap", async () => {
@@ -1774,24 +1879,319 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(second.allottedBudget).toBe(200_000);
     });
 
-    it("keeps retrying while the gap shrinks, and stops the moment it does not", async () => {
+    it("uses every bounded distinct-seed round before accepting an unchanged one-file gap", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      // Round 0 loses one of two paths; round 1 returns the SAME casualty. That is the
-      // deterministic per-file failure, recognised one round later — the loop must stop there
-      // rather than buying two more rounds of the identical answer.
+      // Every round loses the same one of two paths. Different fixed seeds make each attempt a
+      // genuine bounded second opinion, but the hard cap still keeps a persistent failure honest.
       runEngineMock.mockResolvedValue({
         stdout: finishedWithFailures(["src/b.ts"], 2),
         ruleDigest: engineDigest,
       });
 
       const diagnostics = createSilentDiagnostics();
-      await performReview(baseRequest(undefined), diagnostics);
+      await performReview(
+        { ...baseRequest(undefined), config: { ...CONFIG, protocol: "openai" } },
+        diagnostics,
+      );
 
-      // First dispatch plus exactly one targeted round — never the cap of three.
-      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      expect(runEngineMock).toHaveBeenCalledTimes(4);
+      expect(
+        runEngineMock.mock.calls.map((call) => (call[0] as { samplingSeed?: number }).samplingSeed),
+      ).toEqual([undefined, 43, 44, 45]);
       const codes = diagnostics.drain().map((record) => record.code);
       expect(codes).toContain("engine.resume_gap_not_shrinking");
+    });
+
+    it("lets a distinct-seed round recover the one-file gap that the previous round repeated", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+            comments: [],
+            warnings: [
+              { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+            ],
+          }),
+          ruleDigest: engineDigest,
+        })
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 1, total_tokens: 20_000, budget_exceeded: false },
+            comments: [],
+            warnings: [
+              { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+            ],
+          }),
+          ruleDigest: engineDigest,
+        })
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "success",
+            summary: { files_reviewed: 1, total_tokens: 20_000, budget_exceeded: false },
+            comments: [],
+            warnings: [],
+          }),
+          ruleDigest: engineDigest,
+        });
+
+      const report = await performReview(
+        { ...baseRequest(undefined), config: { ...CONFIG, protocol: "openai" } },
+        createSilentDiagnostics(),
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(report.reason).toBeUndefined();
+      expect(
+        runEngineMock.mock.calls.map((call) => (call[0] as { samplingSeed?: number }).samplingSeed),
+      ).toEqual([undefined, 43, 44]);
+    });
+
+    it("never credits a shrinking gap reported by an untrustworthy targeted result", async () => {
+      const mixedRepo = await mkdtemp(join(tmpdir(), "kfq-untrusted-targeted-gap-"));
+      try {
+        git(["init", "-q", "-b", "main"], mixedRepo);
+        await mkdir(join(mixedRepo, "src"), { recursive: true });
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 1;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "base", "--no-gpg-sign"], mixedRepo);
+        const mixedBase = git(["rev-parse", "HEAD"], mixedRepo).trim();
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 2;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "head", "--no-gpg-sign"], mixedRepo);
+        const mixedHead = git(["rev-parse", "HEAD"], mixedRepo).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        runEngineMock
+          .mockResolvedValueOnce({
+            stdout: finishedWithFailures(["src/b.ts", "src/c.ts"], 4),
+            ruleDigest: engineDigest,
+          })
+          .mockResolvedValueOnce({
+            stdout: JSON.stringify({
+              status: "failed",
+              summary: { files_reviewed: 2, total_tokens: 20_000, budget_exceeded: false },
+              comments: [],
+              warnings: [
+                {
+                  type: "subtask_error",
+                  file: "src/b.ts",
+                  message: "single_shot core examiner failed",
+                },
+              ],
+            }),
+            ruleDigest: engineDigest,
+          })
+          // Before the trust boundary, the apparently smaller gap bought this third round; its
+          // process failure then credited src/c.ts even though the failed result never proved it.
+          .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit", 1_000));
+        const request = baseRequest(undefined);
+        vi.spyOn(request.client, "getPullRequest").mockResolvedValue({
+          headSha: commitSha(mixedHead),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        });
+
+        const report = await performLocalReview(
+          {
+            ...request,
+            base: commitSha(mixedBase),
+            head: commitSha(mixedHead),
+            repositoryPath: mixedRepo,
+            config: { ...CONFIG, protocol: "openai" },
+          },
+          createSilentDiagnostics(),
+        );
+
+        expect(report).toMatchObject({
+          outcome: "incomplete",
+          reason: "settlement.incomplete.engine_status_not_success",
+          inventory: { reviewable: 4, reviewed: 2 },
+        });
+        expect(runEngineMock).toHaveBeenCalledTimes(2);
+      } finally {
+        await rm(mixedRepo, { recursive: true, force: true });
+      }
+    });
+
+    it("replays the exact 36-file completion failure as gap 3 to 1 to 1 to 0", async () => {
+      const replayRepo = await mkdtemp(join(tmpdir(), "kfq-completion-36-"));
+      const git = (args: readonly string[]): string =>
+        execFileSync("git", [...args], {
+          cwd: replayRepo,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@example.test",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@example.test",
+            GIT_CONFIG_GLOBAL: "/dev/null",
+            GIT_CONFIG_SYSTEM: "/dev/null",
+          },
+        });
+      try {
+        git(["init", "-q", "-b", "main"]);
+        await mkdir(join(replayRepo, "src"), { recursive: true });
+        for (let index = 0; index < 36; index += 1) {
+          await writeFile(join(replayRepo, "src", `file-${String(index)}.ts`), "old\n");
+        }
+        git(["add", "."]);
+        git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+        const replayBase = git(["rev-parse", "HEAD"]).trim();
+        for (let index = 0; index < 36; index += 1) {
+          await writeFile(join(replayRepo, "src", `file-${String(index)}.ts`), "new\n");
+        }
+        git(["add", "."]);
+        git(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+        const replayHead = git(["rev-parse", "HEAD"]).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        const result = (
+          filesReviewed: number,
+          failedPaths: readonly string[],
+          totalTokens: number,
+        ): string =>
+          JSON.stringify({
+            status: failedPaths.length === 0 ? "success" : "completed_with_errors",
+            summary: { files_reviewed: filesReviewed, total_tokens: totalTokens },
+            comments: [],
+            warnings: failedPaths.map((file) => ({
+              type: "subtask_error",
+              file,
+              message: "single_shot core examiner failed",
+            })),
+          });
+        runEngineMock
+          .mockResolvedValueOnce({
+            stdout: result(36, ["src/file-33.ts", "src/file-34.ts", "src/file-35.ts"], 100_000),
+            ruleDigest: engineDigest,
+          })
+          .mockResolvedValueOnce({
+            stdout: result(3, ["src/file-35.ts"], 30_000),
+            ruleDigest: engineDigest,
+          })
+          .mockResolvedValueOnce({
+            stdout: result(1, ["src/file-35.ts"], 10_000),
+            ruleDigest: engineDigest,
+          })
+          .mockResolvedValueOnce({
+            stdout: result(1, [], 10_000),
+            ruleDigest: engineDigest,
+          });
+        const request = baseRequest(undefined);
+        vi.spyOn(request.client, "getPullRequest").mockResolvedValue({
+          headSha: commitSha(replayHead),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        });
+        const diagnostics = createSilentDiagnostics();
+
+        const report = await performReview(
+          {
+            ...request,
+            base: commitSha(replayBase),
+            head: commitSha(replayHead),
+            repositoryPath: replayRepo,
+            config: { ...CONFIG, protocol: "openai" },
+          },
+          diagnostics,
+        );
+
+        expect(report).toMatchObject({ outcome: "complete", reviewablePaths: 36 });
+        expect(
+          runEngineMock.mock.calls.map(
+            (call) => (call[0] as { samplingSeed?: number }).samplingSeed,
+          ),
+        ).toEqual([undefined, 43, 44, 45]);
+        expect(
+          diagnostics.drain().find((record) => record.code === "run.spend")?.counts?.engine,
+        ).toBe(150_000);
+      } finally {
+        await rm(replayRepo, { recursive: true, force: true });
+      }
+    });
+
+    it("charges a failed round before deciding whether the next one still fits", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+            comments: [],
+            warnings: [
+              { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+            ],
+          }),
+          ruleDigest: engineDigest,
+        })
+        .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit", 1_800_000));
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(
+        { ...baseRequest(undefined), config: { ...CONFIG, protocol: "openai" } },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("incomplete");
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      expect(diagnostics.drain().map((record) => record.code)).toContain(
+        "engine.resume_skipped_budget_exhausted",
+      );
+      expect(
+        diagnostics.drain().find((record) => record.code === "run.spend")?.counts?.engine,
+      ).toBe(1_860_000);
+    });
+
+    it("preserves earlier coverage when a later targeted round throws", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const failed = JSON.stringify({
+        status: "completed_with_errors",
+        summary: { files_reviewed: 1, total_tokens: 20_000, budget_exceeded: false },
+        comments: [],
+        warnings: [
+          { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+        ],
+      });
+      runEngineMock
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+            comments: [],
+            warnings: [
+              { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+            ],
+          }),
+          ruleDigest: engineDigest,
+        })
+        .mockResolvedValueOnce({ stdout: failed, ruleDigest: engineDigest })
+        .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit", 1_000))
+        .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit", 1_000));
+
+      const report = await performLocalReview(
+        { ...baseRequest(undefined), config: { ...CONFIG, protocol: "openai" } },
+        createSilentDiagnostics(),
+      );
+
+      expect(report.outcome).toBe("incomplete");
+      expect(report.inventory).toMatchObject({ reviewable: 2, reviewed: 1 });
+      expect(runEngineMock).toHaveBeenCalledTimes(4);
     });
 
     it("still refuses a wholesale retry when the failures are not a minority", async () => {

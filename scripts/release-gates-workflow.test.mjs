@@ -108,6 +108,12 @@ describe("paid release-gate workflow contract", () => {
     assert.match(workflow, /seed-gate-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.md/u);
     assert.match(workflow, /completion-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.md/u);
     assert.equal([...workflow.matchAll(/if-no-files-found: error/gu)].length, 4);
+    const completion = jobSection("completion");
+    assert.match(
+      completion,
+      /- name: Upload completion evidence\n {8}if: always\(\)/u,
+      "red completion evidence remains available for diagnosis while the job stays red",
+    );
   });
 
   it("promotes only the complete evidence set for the exact candidate", () => {

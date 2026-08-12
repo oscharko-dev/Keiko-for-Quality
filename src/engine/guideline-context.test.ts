@@ -210,7 +210,7 @@ describe("loadGuidelineContext", () => {
       ),
     ).toEqual(["too_many_lines", "line_too_long", "file_too_large", "blob_too_large", "available"]);
     expect(result.instruction).toContain("Only this complete source renders.");
-    expect(result.instruction).not.toContain("410");
+    expect(result.instruction).not.toContain("x".repeat(410));
   });
 
   it("caps configured files and the total rendered instruction without slicing a source", async () => {

@@ -568,6 +568,42 @@ describe("shared request ledger", () => {
     expect(result.kind).toBe("invalid_response");
   });
 
+  it("distinguishes a rejected request from a malformed successful response", async () => {
+    const ledger = createGenerationLedger(100_000);
+    const result = await requestGeneration(
+      {
+        endpoint: "https://model.example/v1",
+        token: "secret",
+        model: "gpt-oss-120b",
+        seed: 42,
+        system: "system",
+        user: "user",
+        timeoutMs: 1_000,
+      },
+      ledger,
+      (() => Promise.resolve(new Response("rejected", { status: 400 }))) as typeof fetch,
+    );
+    expect(result.kind).toBe("request_rejected");
+  });
+
+  it("classifies HTTP 408 as a transient transport failure", async () => {
+    const ledger = createGenerationLedger(100_000);
+    const result = await requestGeneration(
+      {
+        endpoint: "https://model.example/v1",
+        token: "secret",
+        model: "gpt-oss-120b",
+        seed: 42,
+        system: "system",
+        user: "user",
+        timeoutMs: 1_000,
+      },
+      ledger,
+      (() => Promise.resolve(new Response("timeout", { status: 408 }))) as typeof fetch,
+    );
+    expect(result.kind).toBe("transport_failure");
+  });
+
   it("applies the caller's real request deadline to the endpoint signal", async () => {
     const system = "system";
     const user = "user";
