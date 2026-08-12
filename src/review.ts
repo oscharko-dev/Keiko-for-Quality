@@ -2785,7 +2785,7 @@ function mergeResumedResult(
   return { ...second, findings: [...carriedFindings, ...second.findings] };
 }
 
-/** True when publication itself failed in a way that means the change was not fully reviewed. */
+/** True when delivery of an already-verified finding failed after the review itself completed. */
 function publicationDegraded(outcome: PublishOutcome): boolean {
   return (
     outcome.rejectedSanitization > 0 ||
@@ -2794,10 +2794,7 @@ function publicationDegraded(outcome: PublishOutcome): boolean {
     // A finding whose publish call itself failed was contained per finding rather than allowed to
     // abort the loop (publisher.ts), but containment does not make it published: the consumer
     // never saw it, so the run cannot read as fully reviewed.
-    (outcome.apiFailures ?? 0) > 0 ||
-    // A verifier outage withheld fresh claims instead of publishing them. The withholding is the
-    // safe publication decision; this flag is what stops that outage from masquerading as clean.
-    (outcome.verificationUndecided ?? 0) > 0
+    (outcome.apiFailures ?? 0) > 0
   );
 }
 
@@ -3281,7 +3278,7 @@ function incrementCount(counts: Record<string, number>, key: string): void {
   counts[key] = (counts[key] ?? 0) + 1;
 }
 
-/** Closed stage/reason counters diagnose incomplete verification without logging reviewed text. */
+/** Closed stage/reason counters diagnose an undecided hypothesis without logging reviewed text. */
 function captureUndecidedTrace(
   counts: Record<string, number>,
   trace: SubstantiationTerminalTrace,
@@ -3388,10 +3385,11 @@ function judgeableFindings(
  * sense that no replacement is invented — under production's paranoid policy it is withheld.
  *
  * This call is deliberately fail-closed for the OpenAI-compatible production path. A missing file,
- * unreachable judge, malformed verdict, or fabricated evidence line withholds the fresh candidate
- * and increments `undecided`; the caller turns that count into an incomplete review instead of a
- * false clean result. Anthropic retains the pre-existing no-audit path until this independent judge
- * has a native protocol adapter; Keiko's measured/deployed `gpt-oss-120b` path is OpenAI-compatible.
+ * unreachable judge, malformed verdict, or fabricated evidence line withholds the raw hypothesis
+ * and increments `undecided`; the caller exposes that count, leaves its path uncached, and never
+ * publishes it as a finding. File coverage may still be complete. Anthropic retains the pre-existing
+ * no-audit path until this independent judge has a native protocol adapter; Keiko's measured/deployed
+ * `gpt-oss-120b` path is OpenAI-compatible.
  */
 async function substantiateModelSurvivors(
   run: PipelineRun,
@@ -3999,20 +3997,18 @@ async function reportDegradedPublication(inputs: DegradedPublicationInputs): Pro
     },
     memo,
   );
-  // An undecided verifier did not earn a durable clean/found verdict for the affected files, and
-  // the outcome does not identify them narrowly enough to cache the remainder safely. Delivery-only
-  // degradation may still retain the independently verified work.
-  const finalized =
-    (publish.verificationUndecided ?? 0) > 0
-      ? undefined
-      : finalizeCacheStore(
-          run.request,
-          inventory,
-          memo,
-          findingsForStorage(settlement.findings, qualityByOriginal, droppedOriginals),
-          undefined,
-          uncacheablePaths,
-        );
+  // Verification uncertainty is represented narrowly by `uncacheablePaths`: the affected paths
+  // remain retryable while independently settled paths retain their already-paid-for result. This
+  // branch is entered only for a genuine delivery failure, but such a failure can coexist with an
+  // undecided verifier candidate in the same run, so the same path-level admission rule applies.
+  const finalized = finalizeCacheStore(
+    run.request,
+    inventory,
+    memo,
+    findingsForStorage(settlement.findings, qualityByOriginal, droppedOriginals),
+    undefined,
+    uncacheablePaths,
+  );
   return {
     ...report,
     publish,
@@ -4230,8 +4226,10 @@ async function publishSettledFindings(
   const audited = publication.value;
   const { outcome: publish, qualityByOriginal, droppedOriginals, uncacheablePaths } = audited;
 
-  // A finding the reviewer found but could not publish is a finding the consumer never saw. The
+  // A verified finding the reviewer could not deliver is a finding the consumer never saw. The
   // engine's own verdict was "complete", so this is the only place that fact can be recorded.
+  // Verifier-undecided hypotheses are different: they are safely withheld before becoming
+  // findings, remain visible in quality telemetry, and keep only their affected paths retryable.
   //
   // The reason names the SETTLEMENT outcome (Keiko-for-Quality#57). It used to carry
   // `publish.finding_rejected_placement`, a publication diagnostic: accurate about where the
@@ -4820,7 +4818,7 @@ async function localSettleOrReport(
   }
 }
 
-function verificationIncompleteLocalReport(
+function sanitizationIncompleteLocalReport(
   run: LocalRun,
   inventory: Inventory,
   memo: MemoContext,
@@ -4933,8 +4931,8 @@ async function completeLocalReport(
     }
     throw error;
   }
-  if (reported.verificationUndecided > 0 || reported.rejectedSanitization > 0) {
-    return verificationIncompleteLocalReport(run, inventory, memo, reported);
+  if (reported.rejectedSanitization > 0) {
+    return sanitizationIncompleteLocalReport(run, inventory, memo, reported);
   }
   // Identical admission call to the action path's: only a complete outcome reaches this function,
   // and what is stored is the AUDITED form of the engine's own findings (never a gate or

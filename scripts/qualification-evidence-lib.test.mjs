@@ -226,17 +226,56 @@ test("the severe-recall floor tolerates four misses but rejects five of thirty-o
   }
 });
 
+test("the synthetic precision floor tolerates two misses but rejects three of twelve", () => {
+  const clean = CASES.filter((testCase) => testCase.defect === null);
+  assert.equal(clean.length, 12);
+
+  for (const [misses, expectedStatus, expectedRate] of [
+    [2, 0, "83.3%"],
+    [3, 1, "75.0%"],
+  ]) {
+    const directory = mkdtempSync(join(tmpdir(), "kfq-qualification-floor-test-"));
+    const path = join(directory, "qualification.json");
+    try {
+      const raw = rawReport();
+      const byId = new Map(raw.results.map((result) => [result.id, result]));
+      for (const testCase of clean.slice(0, misses)) {
+        const result = byId.get(testCase.id);
+        assert.ok(result !== undefined);
+        result.pass = false;
+        result.findings = [{ content: SECRET }];
+      }
+      writeFileSync(path, JSON.stringify(redactQualificationReport(raw)));
+      const checked = spawnSync(process.execPath, ["scripts/check-qualification.mjs", path], {
+        cwd: new URL("..", import.meta.url),
+        encoding: "utf8",
+      });
+      assert.equal(checked.status, expectedStatus);
+      assert.match(
+        `${checked.stdout}${checked.stderr}`,
+        new RegExp(expectedRate.replace(".", "\\."), "u"),
+      );
+      assert.match(`${checked.stdout}${checked.stderr}`, /floor 80\.0%/u);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+});
+
 test("the promotion checker explains a redacted regression with safe aggregate fields", () => {
   const directory = mkdtempSync(join(tmpdir(), "kfq-qualification-evidence-test-"));
   const path = join(directory, "qualification.json");
   try {
     const raw = rawReport();
-    const cleanIndex = CASES.findIndex((testCase) => testCase.defect === null);
-    assert.notEqual(cleanIndex, -1);
-    const cleanResult = raw.results[cleanIndex];
-    assert.ok(cleanResult !== undefined);
-    cleanResult.pass = false;
-    cleanResult.findings = [{ content: SECRET }];
+    const cleanCases = CASES.filter((testCase) => testCase.defect === null).slice(0, 3);
+    assert.equal(cleanCases.length, 3);
+    const byId = new Map(raw.results.map((result) => [result.id, result]));
+    for (const testCase of cleanCases) {
+      const cleanResult = byId.get(testCase.id);
+      assert.ok(cleanResult !== undefined);
+      cleanResult.pass = false;
+      cleanResult.findings = [{ content: SECRET }];
+    }
     writeFileSync(path, JSON.stringify(redactQualificationReport(raw)));
 
     const checked = spawnSync(process.execPath, ["scripts/check-qualification.mjs", path], {

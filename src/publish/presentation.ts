@@ -327,6 +327,12 @@ export interface SummaryCounts {
    *  `findsOutdatedRecurrence`. Always a plain number here, for the same reason
    *  `suppressedIntraRun` above is. */
   readonly suppressedRecurrence: number;
+  /** Model hypotheses withheld by the independent evidence stage. These are not findings and do
+   *  not reduce file coverage, but they remain visible so a complete review cannot look like an
+   *  unqualified clean bill of health when verification removed candidates. */
+  readonly suppressedEvidence: number;
+  /** Evidence decisions the verifier could not finish. Their paths remain uncached and retryable. */
+  readonly verificationUndecided: number;
   /**
    * The four counters `publicationDegraded` (`review.ts`) actually decides complete-vs-incomplete
    * on. Without them, a reader of the summary comment could see `findingsPublished` fall short of
@@ -424,7 +430,7 @@ function outcomeText(report: SummaryReport): string {
  * closes.
  */
 function countRows(counts: SummaryCounts): readonly string[] {
-  const rows: readonly (readonly [string, number])[] = [
+  const rows: readonly (readonly [string, number | string])[] = [
     ["Total paths", counts.totalPaths],
     ["Reviewable", counts.reviewablePaths],
     ["Excluded", counts.excludedPaths],
@@ -439,6 +445,10 @@ function countRows(counts: SummaryCounts): readonly string[] {
     ["Suppressed (similar)", counts.suppressedSimilar],
     ["Suppressed (dispositioned)", counts.suppressedDispositioned],
     ["Suppressed (outdated recurrence)", counts.suppressedRecurrence],
+    [
+      "Withheld by evidence (undecided)",
+      `${String(counts.suppressedEvidence)} (${String(counts.verificationUndecided)})`,
+    ],
     ["Rejected (sanitization)", counts.rejectedSanitization],
     ["Rejected (placement)", counts.rejectedPlacement],
     ["Read-back failures", counts.readbackFailures],

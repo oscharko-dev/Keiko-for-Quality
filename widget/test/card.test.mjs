@@ -12,32 +12,34 @@ import { renderCard } from "../src/card.ts";
 const FULL = {
   owner: "oscharko-dev",
   repo: "Keiko",
-  runs30d: 128,
-  runSuccessPct: 98.6,
+  summaryRecords30d: 123,
   findings: 342,
-  resolvedPct: 71.4,
+  completionPct: 89.4,
   openThreads: 98,
-  prsWithFindings: 23,
-  runStatus: "ok",
-  lastRunHours: 3.2,
+  settlementStatus: "complete",
+  lastReviewHours: 3.2,
+  historicalHoldoutPrecisionPct: 27.8,
+  qualityVersion: "v0.24.0",
+  dataAsOf: "2026-08-12T12:17:00.000Z",
 };
 
 test("renders every metric it is handed", () => {
   const svg = renderCard(FULL);
   assert.ok(svg.startsWith("<svg "));
-  assert.match(svg, />128</);
+  assert.match(svg, />123</);
   assert.match(svg, />342</);
-  assert.match(svg, />71\.4%</);
-  assert.match(svg, />98\.6%</);
+  assert.match(svg, />89\.4%</);
+  assert.match(svg, />27\.8%</);
   assert.match(svg, />98</);
-  assert.match(svg, />23</);
-  assert.match(svg, />RUN OK</);
-  assert.match(svg, />resolved</);
-  assert.match(svg, />RUN SUCCESS</);
+  assert.match(svg, />last review 3 h ago · complete</);
+  assert.match(svg, />PR records · 30 d</);
+  assert.match(svg, />PRs complete</);
+  assert.match(svg, />HOLDOUT PREC · V0\.24\.0</);
   assert.match(svg, />OPEN THREADS</);
-  assert.match(svg, />PRS W\/ FINDINGS</);
-  assert.doesNotMatch(svg, /acted on|COMPLETE/);
-  assert.match(svg, /last run 3 h ago/);
+  assert.match(svg, />2026-08-12</);
+  assert.match(svg, />DATA AS OF · 12:17Z</);
+  assert.doesNotMatch(svg, /RUN SUCCESS|resolved/);
+  assert.match(svg, /last review 3 h ago/);
   assert.match(svg, /oscharko-dev\/Keiko/);
   assert.match(svg, /quality\.keiko\.dev/);
   assert.match(svg, /EX EXPERIENTIA DISCO/);
@@ -62,20 +64,30 @@ test("escapes markup in owner and repo names", () => {
   assert.match(svg, /a&lt;script&gt;\/b&quot;&amp;&apos;c/);
 });
 
-test("a non-successful workflow run renders honestly in the warn colour", () => {
-  const svg = renderCard({ owner: "o", repo: "r", runStatus: "not_ok" });
-  assert.match(svg, />RUN NOT OK</);
+test("an incomplete settlement renders honestly in the warn colour", () => {
+  const svg = renderCard({ owner: "o", repo: "r", settlementStatus: "incomplete" });
+  assert.match(svg, />latest incomplete</);
   assert.match(svg, /#D9A24F/);
-  assert.doesNotMatch(svg, /INCOMPLETE/);
+  assert.doesNotMatch(svg, /RUN OK|RUN NOT OK/);
 });
 
 test("only an exact percentage of one hundred renders as 100%", () => {
-  const near = renderCard({ owner: "o", repo: "r", resolvedPct: 99.5, runSuccessPct: 99.99 });
+  const near = renderCard({
+    owner: "o",
+    repo: "r",
+    completionPct: 99.5,
+    historicalHoldoutPrecisionPct: 99.99,
+  });
   assert.match(near, />99\.5%</);
   assert.match(near, />&lt;100%</);
   assert.doesNotMatch(near, />100%</);
 
-  const exact = renderCard({ owner: "o", repo: "r", resolvedPct: 100, runSuccessPct: 100 });
+  const exact = renderCard({
+    owner: "o",
+    repo: "r",
+    completionPct: 100,
+    historicalHoldoutPrecisionPct: 100,
+  });
   assert.equal((exact.match(/>100%</g) ?? []).length, 2);
 });
 
@@ -88,17 +100,20 @@ test("themes use their own palettes", () => {
 });
 
 test("day granularity takes over past 48 hours", () => {
-  assert.match(renderCard({ owner: "o", repo: "r", lastRunHours: 0.4 }), /last run &lt;1 h ago/);
-  assert.match(renderCard({ owner: "o", repo: "r", lastRunHours: 72 }), /last run 3 d ago/);
+  assert.match(
+    renderCard({ owner: "o", repo: "r", lastReviewHours: 0.4 }),
+    /last review &lt;1 h ago/,
+  );
+  assert.match(renderCard({ owner: "o", repo: "r", lastReviewHours: 72 }), /last review 3 d ago/);
 });
 
-test("long repository slugs and last-run time occupy separate header lines", () => {
+test("long repository slugs and last-review time occupy separate header lines", () => {
   const svg = renderCard({
     owner: "oscharko-dev",
     repo: "Keiko-for-Quality",
-    lastRunHours: 1,
+    lastReviewHours: 1,
   });
-  assert.doesNotMatch(svg, /Keiko-for-Quality · last run/);
+  assert.doesNotMatch(svg, /Keiko-for-Quality · last review/);
   assert.match(svg, />oscharko-dev\/Keiko-for-Quality</);
-  assert.match(svg, />last run 1 h ago</);
+  assert.match(svg, />last review 1 h ago</);
 });
