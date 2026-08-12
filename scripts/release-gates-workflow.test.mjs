@@ -85,6 +85,12 @@ describe("paid release-gate workflow contract", () => {
     assert.match(preflight, /EXPECTED_REVIEWER_SHA.*DISPATCH_SHA/u);
     assert.match(preflight, /RUN_RELEASE_GATES/u);
     assert.match(preflight, /test -z "\$\(git status --porcelain\)"/u);
+    assert.match(
+      workflow,
+      /channel:\n {8}description: "standard keeps every quality-promotion floor; recovery requires an explicit withheld reason"/u,
+    );
+    assert.match(workflow, /RECOVERY_REASON: \$\{\{ inputs\.recovery_reason \}\}/u);
+    assert.match(preflight, /historical_holdout_fixed_retention_low/u);
   });
 
   it("binds every paid job to the same protected environment and immutable checkout", () => {
@@ -157,9 +163,11 @@ describe("paid release-gate workflow contract", () => {
       "historical",
       "seed",
       "completion",
+      "channel",
     ]) {
       assert.match(promotion, new RegExp(`--${flag} `), `promotion passes --${flag}`);
     }
+    assert.match(promotion, /channel_args=\(--channel "\$\{RELEASE_CHANNEL\}"\)/u);
   });
 
   it("names zero, duplicate, and non-file evidence before failing closed", () => {

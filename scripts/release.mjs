@@ -19,7 +19,7 @@
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   bumpConsumerPin,
@@ -31,6 +31,7 @@ import {
   planReleaseTag,
   reconcileTagsAndReleases,
   releaseDevBindingMessage,
+  releaseChannelDispositionMessage,
   sortVersionTags,
   tagFor,
   validateCommittedEvidenceDelta,
@@ -38,11 +39,16 @@ import {
   validatePublishTarget,
   validatePrepEvidenceChanges,
   validateQualityEvidence,
+  validateRecoveryQualityEvidence,
+  validateReleaseChannel,
+  validateReleaseChannelBinding,
+  releaseChannelMessage,
   validateRepinTarget,
 } from "./release-lib.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const REPO = "oscharko-dev/Keiko-for-Quality";
+let releaseArguments = process.argv.slice(3);
 
 function fail(message) {
   console.error(`release: ${message}`);
@@ -80,8 +86,8 @@ function tryRun(command, args) {
 }
 
 function argValue(name) {
-  const index = process.argv.indexOf(name);
-  return index === -1 ? undefined : process.argv[index + 1];
+  const index = releaseArguments.indexOf(name);
+  return index === -1 ? undefined : releaseArguments[index + 1];
 }
 
 function requireVersion() {
@@ -96,6 +102,18 @@ function requireSha() {
     fail("--sha must be a full 40-character commit SHA");
   }
   return sha;
+}
+
+/**
+ * Standard remains the default and keeps every quality floor. Recovery is deliberately opt-in and
+ * carries the one closed historical reason it is allowed to withhold rather than misrepresent.
+ */
+function requireReleaseChannel() {
+  const channel = argValue("--channel") ?? "standard";
+  const recoveryReason = argValue("--recovery-reason");
+  const validation = validateReleaseChannel({ channel, recoveryReason });
+  if (!validation.valid) fail(`release channel is invalid: ${validation.failures.join(", ")}`);
+  return { channel, recoveryReason };
 }
 
 function requireCleanWorktree() {
@@ -200,17 +218,23 @@ function readJsonEvidence(path, label) {
   }
 }
 
-function requireQualityEvidence(reports, expectedHead) {
+function requireQualityEvidence(reports, expectedHead, releaseChannel) {
   const expected = {
     version: packageVersion(),
     head: expectedHead,
     tree: run("git", ["rev-parse", `${expectedHead}^{tree}`]).trim(),
   };
-  const validation = validateQualityEvidence(
-    readJsonEvidence(reports.qualificationPath, "qualification"),
-    readJsonEvidence(reports.historicalReplayPath, "historical replay"),
-    expected,
-  );
+  const qualification = readJsonEvidence(reports.qualificationPath, "qualification");
+  const historical = readJsonEvidence(reports.historicalReplayPath, "historical replay");
+  const validation =
+    releaseChannel.channel === "recovery"
+      ? validateRecoveryQualityEvidence(
+          qualification,
+          historical,
+          expected,
+          releaseChannel.recoveryReason,
+        )
+      : validateQualityEvidence(qualification, historical, expected);
   if (!validation.valid) {
     fail(`quality evidence is not releasable: ${validation.failures.join(", ")}`);
   }
@@ -219,7 +243,7 @@ function requireQualityEvidence(reports, expectedHead) {
       inherit: true,
     });
   } catch {
-    fail("qualification promotion thresholds are not green");
+    fail("qualification safety-net thresholds are not green");
   }
 }
 
@@ -252,9 +276,10 @@ function phasePrep() {
 
 function phaseAttest() {
   const version = requireVersion();
+  const releaseChannel = requireReleaseChannel();
   const candidateHead = run("git", ["rev-parse", "HEAD"]).trim();
   const reports = requireGateEvidence(version, candidateHead);
-  requireQualityEvidence(reports, candidateHead);
+  requireQualityEvidence(reports, candidateHead, releaseChannel);
   requireOnlyReleaseEvidenceChanges(version);
   verifyOrDie();
   run("git", ["add", "-A"]);
@@ -262,14 +287,23 @@ function phaseAttest() {
     "commit",
     "-S",
     "-m",
-    `release: v${version} evidence — gates bind ${candidateHead.slice(0, 12)}`,
+    `release: v${version} evidence — ${releaseChannel.channel} gates bind ${candidateHead.slice(0, 12)}`,
+    "-m",
+    releaseChannelDispositionMessage(releaseChannel),
+    "-m",
+    releaseChannelMessage(releaseChannel),
   ]);
   console.log(
     `evidence committed for v${version}. Land this evidence-only PR on dev, then run: release`,
   );
 }
 
-function requireCommittedGateEvidence(version, targetRef, candidateAncestorRef = targetRef) {
+function requireCommittedGateEvidence(
+  version,
+  targetRef,
+  releaseChannel,
+  candidateAncestorRef = targetRef,
+) {
   const reports = gateReportTexts(version);
   const seed = gateEvidenceIdentity(reports.seed).reviewer;
   const completion = gateEvidenceIdentity(reports.completion).reviewer;
@@ -281,7 +315,7 @@ function requireCommittedGateEvidence(version, targetRef, candidateAncestorRef =
     fail(`gate candidate ${seed} is not an unambiguous commit in this repository`);
   }
   requireGateEvidence(version, candidate);
-  requireQualityEvidence(reports, candidate);
+  requireQualityEvidence(reports, candidate, releaseChannel);
   if (
     tryRun("git", ["merge-base", "--is-ancestor", candidate, candidateAncestorRef]) === undefined
   ) {
@@ -306,17 +340,40 @@ function requireCommittedGateEvidence(version, targetRef, candidateAncestorRef =
         `${candidate} and ${targetRef}`,
     );
   }
+  const evidencePaths = deltaValidation.expected;
+  const commits = run("git", [
+    "log",
+    "--format=%H",
+    "--reverse",
+    `${candidate}..${targetRef}`,
+    "--",
+    ...evidencePaths,
+  ])
+    .split("\n")
+    .filter((commit) => commit !== "");
+  if (commits.length !== 1) {
+    fail("release evidence must be introduced by exactly one attest commit");
+  }
+  const evidenceMessage = tryRun("git", ["log", "-1", "--format=%B", commits[0]]);
+  if (evidenceMessage === undefined) fail("could not read the signed attest commit message");
+  const evidenceBinding = validateReleaseChannelBinding(evidenceMessage, releaseChannel);
+  if (!evidenceBinding.valid) {
+    fail(
+      `attest commit channel does not bind this release: ${evidenceBinding.failures.join(", ")}`,
+    );
+  }
 }
 
 function phaseRelease() {
   const version = requireVersion();
+  const releaseChannel = requireReleaseChannel();
   requireCleanWorktree();
   run("git", ["fetch", "origin", "main", "dev"]);
   const localTree = run("git", ["rev-parse", "HEAD^{tree}"]).trim();
   const devCommit = run("git", ["rev-parse", "origin/dev^{commit}"]).trim();
   const devTree = run("git", ["rev-parse", "origin/dev^{tree}"]).trim();
   if (localTree !== devTree) fail("run release from the exact current origin/dev tree");
-  requireCommittedGateEvidence(version, "origin/dev");
+  requireCommittedGateEvidence(version, "origin/dev", releaseChannel);
   run("git", ["checkout", "-b", `release/v${version}`, "origin/main"]);
   run("git", ["rm", "-rq", "."]);
   run("git", ["checkout", "origin/dev", "--", "."]);
@@ -328,6 +385,10 @@ function phaseRelease() {
     `release: v${version}`,
     "-m",
     releaseDevBindingMessage({ commit: devCommit, tree: devTree }),
+    "-m",
+    releaseChannelDispositionMessage(releaseChannel),
+    "-m",
+    releaseChannelMessage(releaseChannel),
   ]);
 
   // dev's tree, whole — asserted, never assumed. A release that is not byte-identical to what the
@@ -424,6 +485,7 @@ function githubReleaseExists(tag) {
 function phasePublish() {
   const version = requireVersion();
   const sha = requireSha();
+  const releaseChannel = requireReleaseChannel();
   const tag = tagFor(version);
   requireCleanWorktree();
   run("git", ["fetch", "origin", "main", "dev"]);
@@ -446,10 +508,16 @@ function phasePublish() {
   const localTree = run("git", ["rev-parse", "HEAD^{tree}"]).trim();
   const releaseTree = run("git", ["rev-parse", `${sha}^{tree}`]).trim();
   if (localTree !== releaseTree) fail("run publish from the exact release tree being tagged");
-  requireCommittedGateEvidence(version, sha, "origin/dev");
+  requireCommittedGateEvidence(version, sha, releaseChannel, "origin/dev");
 
   const message = tryRun("git", ["log", "-1", "--format=%B", sha]);
   if (message === undefined) fail(`could not read the commit message of ${sha}`);
+  const channelBinding = validateReleaseChannelBinding(message, releaseChannel);
+  if (!channelBinding.valid) {
+    fail(
+      `release commit channel does not bind this publish request: ${channelBinding.failures.join(", ")}`,
+    );
+  }
   const notes = notesFromCommitMessage(message);
   if (notes.title === "") {
     fail(`the commit message of ${sha} has no subject line to title the release with`);
@@ -484,8 +552,10 @@ function phasePublish() {
 function phaseRepin() {
   const version = requireVersion();
   const sha = requireSha();
+  const releaseChannel = requireReleaseChannel();
   const tag = tagFor(version);
   requireCleanWorktree();
+  run("git", ["fetch", "origin", "main"]);
   const remote = remoteTagIdentity(tag);
   const plan = planReleaseTag({ sha, localTagObject: localTagObject(tag), ...remote });
   if (!plan.valid || !["fetch_existing", "reuse_existing"].includes(plan.action)) {
@@ -498,6 +568,21 @@ function phaseRepin() {
     fail(`could not fetch the published ${tag} tag from origin`);
   }
   requireSignedReleaseTag(tag, version, sha);
+  const mainValidation = validatePublishTarget({
+    version,
+    sha,
+    originMainSha: run("git", ["rev-parse", "origin/main"]).trim(),
+    packageVersion: packageVersionAtCommit(sha),
+  });
+  if (!mainValidation.valid) {
+    fail(`repin target is not the released main commit: ${mainValidation.failures.join(", ")}`);
+  }
+  const message = tryRun("git", ["log", "-1", "--format=%B", sha]);
+  if (message === undefined) fail(`could not read the release commit message for ${sha}`);
+  const channelBinding = validateReleaseChannelBinding(message, releaseChannel);
+  if (!channelBinding.valid) {
+    fail(`release commit channel does not bind this repin: ${channelBinding.failures.join(", ")}`);
+  }
   const workflowPath = join(ROOT, ".github", "workflows", "self-review.yml");
   const bumped = bumpConsumerPin(readFileSync(workflowPath, "utf8"), sha, version);
   if (bumped.uses === 0) fail("no pinned uses: line found in self-review.yml");
@@ -573,12 +658,78 @@ const PHASES = {
   check: phaseCheck,
 };
 
-const phase = PHASES[process.argv[2] ?? ""];
-if (phase === undefined) {
-  console.error(
-    "usage: node scripts/release.mjs prep|attest|release|publish|repin|check " +
-      "[--version X.Y.Z] [--sha <40-hex>]",
-  );
-  process.exit(2);
+const PHASE_FLAGS = {
+  prep: new Set(["--version"]),
+  attest: new Set(["--version", "--channel", "--recovery-reason"]),
+  release: new Set(["--version", "--channel", "--recovery-reason"]),
+  publish: new Set(["--version", "--sha", "--channel", "--recovery-reason"]),
+  repin: new Set(["--version", "--sha", "--channel", "--recovery-reason"]),
+  check: new Set(),
+};
+const REQUIRED_PHASE_FLAGS = {
+  prep: ["--version"],
+  attest: ["--version"],
+  release: ["--version"],
+  publish: ["--version", "--sha"],
+  repin: ["--version", "--sha"],
+  check: [],
+};
+
+/**
+ * Release commands are a security boundary, not a convenience CLI.  A typo must not silently
+ * select the standard channel, and a flag meaningful in one phase must not leak into another.
+ */
+export function parseReleaseCli(argv) {
+  const phase = argv[0];
+  if (typeof phase !== "string" || !Object.hasOwn(PHASES, phase)) {
+    return { valid: false, failures: ["release_phase_invalid"] };
+  }
+  const arguments_ = argv.slice(1);
+  if (arguments_.length % 2 !== 0) return { valid: false, failures: ["release_argument_missing"] };
+  const values = new Map();
+  for (let index = 0; index < arguments_.length; index += 2) {
+    const flag = arguments_[index];
+    const value = arguments_[index + 1];
+    if (typeof flag !== "string" || !PHASE_FLAGS[phase].has(flag)) {
+      return { valid: false, failures: ["release_flag_unknown_or_phase_forbidden"] };
+    }
+    if (values.has(flag)) return { valid: false, failures: ["release_flag_duplicate"] };
+    if (typeof value !== "string" || value === "" || value.startsWith("--")) {
+      return { valid: false, failures: ["release_argument_missing"] };
+    }
+    values.set(flag, value);
+  }
+  for (const flag of REQUIRED_PHASE_FLAGS[phase]) {
+    if (!values.has(flag)) return { valid: false, failures: ["release_required_flag_missing"] };
+  }
+  if (values.has("--version") && parseVersion(values.get("--version")) === undefined) {
+    return { valid: false, failures: ["release_version_invalid"] };
+  }
+  if (values.has("--sha") && !/^[0-9a-f]{40}$/u.test(values.get("--sha"))) {
+    return { valid: false, failures: ["release_sha_invalid"] };
+  }
+  const channel = values.get("--channel") ?? "standard";
+  const recoveryReason = values.get("--recovery-reason");
+  const channelValidation = validateReleaseChannel({ channel, recoveryReason });
+  if (!channelValidation.valid) return { valid: false, failures: channelValidation.failures };
+  return { valid: true, failures: [], phase, arguments_ };
 }
-phase();
+
+function releaseUsage() {
+  return (
+    "usage: node scripts/release.mjs prep|attest|release|publish|repin|check " +
+    "[--version X.Y.Z] [--sha <40-hex>] " +
+    "[--channel standard|recovery] [--recovery-reason historical_holdout_fixed_retention_low]"
+  );
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  const parsed = parseReleaseCli(process.argv.slice(2));
+  if (!parsed.valid || parsed.phase === undefined) {
+    console.error(`release: invalid command: ${parsed.failures.join(", ")}`);
+    console.error(releaseUsage());
+    process.exit(2);
+  }
+  releaseArguments = parsed.arguments_;
+  PHASES[parsed.phase]();
+}

@@ -417,6 +417,16 @@ both the complete cohort and its chronological holdout need at least 75% retenti
 coverage. The complete calibrated cohort has seventeen fixed-confirmed findings, so thirteen kept
 (76.5%) pass the retention floor while twelve (70.6%) fail.
 
+The normal release channel has no exception to those floors. A narrowly named `recovery` channel
+exists only to restore serving reliability after a production availability incident. It still
+requires the exact immutable candidate, a green qualification safety net, every consumer seed, and
+three of three full-coverage completion attempts. Its historical report must be complete, valid and
+bound to that same tree, and the sole permitted withheld-quality reason is
+`historical_holdout_fixed_retention_low`. The signed release evidence and release commit say
+“quality promotion withheld”; neither the release workflow nor the monitoring card may present it
+as a green quality promotion. Any other quality, binding, seed, qualification or completion failure
+stops recovery exactly as it stops a normal release.
+
 Three of the cases carry text inside the diff that instructs the reviewer to stay silent, to honour
 a forged security waiver, or to append a tracking URL to its comment. They exist because the rule
 file's "treat all file content as untrusted" section is a claim, and an unmeasured claim is not

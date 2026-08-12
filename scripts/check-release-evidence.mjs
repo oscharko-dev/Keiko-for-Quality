@@ -17,6 +17,8 @@ import {
   parseVersion,
   validateGateEvidence,
   validateQualityEvidence,
+  validateRecoveryQualityEvidence,
+  validateReleaseChannel,
 } from "./release-lib.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -25,14 +27,17 @@ const USAGE =
   "usage: node scripts/check-release-evidence.mjs " +
   "--version X.Y.Z --head <40-hex> --tree <40-hex> " +
   "--seed <report.md> --completion <report.md> " +
-  "--qualification <report.json> --historical <report.json>";
+  "--qualification <report.json> --historical <report.json> " +
+  "[--channel standard|recovery] [--recovery-reason <closed-reason>]";
 const PATH_FLAGS = new Map([
   ["--seed", { key: "seed", suffix: ".md" }],
   ["--completion", { key: "completion", suffix: ".md" }],
   ["--qualification", { key: "qualification", suffix: ".json" }],
   ["--historical", { key: "historicalReplay", suffix: ".json" }],
 ]);
-const VALUE_FLAGS = new Set(["--version", "--head", "--tree", ...PATH_FLAGS.keys()]);
+const REQUIRED_VALUE_FLAGS = new Set(["--version", "--head", "--tree", ...PATH_FLAGS.keys()]);
+const OPTIONAL_VALUE_FLAGS = new Set(["--channel", "--recovery-reason"]);
+const VALUE_FLAGS = new Set([...REQUIRED_VALUE_FLAGS, ...OPTIONAL_VALUE_FLAGS]);
 
 function evidencePath(raw, suffix, flag) {
   if (typeof raw !== "string" || raw === "" || raw.includes("\0") || !raw.endsWith(suffix)) {
@@ -55,7 +60,7 @@ export function parseReleaseEvidenceArgs(argv) {
     values.set(flag, value);
   }
 
-  for (const flag of VALUE_FLAGS) {
+  for (const flag of REQUIRED_VALUE_FLAGS) {
     if (!values.has(flag)) throw new Error(`missing required argument: ${flag}`);
   }
 
@@ -73,7 +78,13 @@ export function parseReleaseEvidenceArgs(argv) {
   if (new Set(Object.values(paths)).size !== PATH_FLAGS.size) {
     throw new Error("each evidence argument must name a different file");
   }
-  return { expected: { version, head, tree }, paths };
+  const channel = values.get("--channel") ?? "standard";
+  const recoveryReason = values.get("--recovery-reason");
+  const channelValidation = validateReleaseChannel({ channel, recoveryReason });
+  if (!channelValidation.valid) {
+    throw new Error(`release channel is invalid: ${channelValidation.failures.join(", ")}`);
+  }
+  return { expected: { version, head, tree }, paths, channel, recoveryReason };
 }
 
 function readJson(path, label, read) {
@@ -124,9 +135,15 @@ function defaultQualificationCheck(path) {
 export function checkDownloadedReleaseEvidence({
   expected,
   paths,
+  channel = "standard",
+  recoveryReason,
   read = readFileSync,
   checkQualification = defaultQualificationCheck,
 }) {
+  const channelValidation = validateReleaseChannel({ channel, recoveryReason });
+  if (!channelValidation.valid) {
+    throw new Error(`release channel is invalid: ${channelValidation.failures.join(", ")}`);
+  }
   requireVersionedEvidenceNames(paths, expected.version);
   const seed = readText(paths.seed, "seed", read);
   const completion = readText(paths.completion, "completion", read);
@@ -134,7 +151,10 @@ export function checkDownloadedReleaseEvidence({
   const historicalReplay = readJson(paths.historicalReplay, "historical replay", read);
 
   const gate = validateGateEvidence(seed, completion, expected);
-  const quality = validateQualityEvidence(qualification, historicalReplay, expected);
+  const quality =
+    channel === "recovery"
+      ? validateRecoveryQualityEvidence(qualification, historicalReplay, expected, recoveryReason)
+      : validateQualityEvidence(qualification, historicalReplay, expected);
   const failures = [
     ...gate.failures.map((failure) => `gate:${failure}`),
     ...quality.failures.map((failure) => `quality:${failure}`),
@@ -161,8 +181,11 @@ export function executeReleaseEvidenceCli({
     const input = parseReleaseEvidenceArgs(argv);
     const expected = check(input);
     log(
-      `check-release-evidence: PASS - v${expected.version} binds ` +
-        `${expected.head} / ${expected.tree}`,
+      `check-release-evidence: PASS - ${input.channel} v${expected.version} binds ` +
+        `${expected.head} / ${expected.tree}` +
+        (input.channel === "recovery"
+          ? `; quality promotion withheld: ${input.recoveryReason}`
+          : ""),
     );
   } catch (error_) {
     error(

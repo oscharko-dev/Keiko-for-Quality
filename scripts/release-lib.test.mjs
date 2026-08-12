@@ -12,16 +12,22 @@ import {
   isVersionedReleaseEvidencePath,
   notesFromCommitMessage,
   parseReleaseDevBinding,
+  parseReleaseChannelMessage,
   parseVersion,
   planReleaseTag,
   reconcileTagsAndReleases,
   releaseDevBindingMessage,
+  releaseChannelMessage,
+  releaseChannelDispositionMessage,
   sortVersionTags,
   tagFor,
   validateCommittedEvidenceDelta,
   validateGateEvidence,
   validatePublishTarget,
   validateQualityEvidence,
+  validateRecoveryQualityEvidence,
+  validateReleaseChannel,
+  validateReleaseChannelBinding,
   validatePrepEvidenceChanges,
   validateRepinTarget,
 } from "./release-lib.mjs";
@@ -72,6 +78,32 @@ function withAllFixedRetentionCount(source, retainedOfSeventeen) {
   return evidence;
 }
 
+function withHoldoutFixedRetentionCount(source, retainedOfSix) {
+  const evidence = JSON.parse(JSON.stringify(source));
+  const all = evidence.score.all.after;
+  const holdout = evidence.score.chronological.holdout.after;
+  assert.equal(holdout.groundTruth.fixedConfirmed, 6);
+  const newlyDropped = holdout.confusionMatrix.truePositive - retainedOfSix;
+  assert.ok(newlyDropped >= 0);
+  for (const population of [all, holdout]) {
+    population.confusionMatrix.truePositive -= newlyDropped;
+    population.confusionMatrix.falseNegative += newlyDropped;
+    population.eligibleDecisions.keep -= newlyDropped;
+    population.eligibleDecisions.drop += newlyDropped;
+    recomputeHistoricalMetrics(population);
+  }
+  for (const decisions of [
+    evidence.execution.populationDecisions,
+    evidence.execution.corroboratedDecisions,
+  ]) {
+    decisions.keep -= newlyDropped;
+    decisions.drop += newlyDropped;
+  }
+  evidence.execution.stageCounters.confirmed -= newlyDropped;
+  evidence.execution.stageCounters.droppedInsufficientEvidence += newlyDropped;
+  return evidence;
+}
+
 test("accepts X.Y.Z and nothing else", () => {
   assert.equal(parseVersion("0.21.3"), "0.21.3");
   assert.equal(tagFor("0.21.3"), "v0.21.3");
@@ -99,6 +131,47 @@ test("round-trips one strict immutable dev binding and rejects ambiguous free te
     () => releaseDevBindingMessage({ commit: "not-a-commit", tree: binding.tree }),
     /full lowercase Git ids/u,
   );
+});
+
+test("recovery channel is opt-in, closed, and recorded in the signed release commit", () => {
+  const recoveryReason = "historical_holdout_fixed_retention_low";
+  assert.deepEqual(validateReleaseChannel({ channel: "standard" }), { valid: true, failures: [] });
+  assert.deepEqual(validateReleaseChannel({ channel: "standard", recoveryReason }), {
+    valid: false,
+    failures: ["standard_release_has_recovery_reason"],
+  });
+  assert.deepEqual(validateReleaseChannel({ channel: "recovery", recoveryReason }), {
+    valid: true,
+    failures: [],
+  });
+  assert.equal(
+    validateReleaseChannel({ channel: "recovery", recoveryReason: "anything" }).valid,
+    false,
+  );
+  const message = releaseChannelMessage({ channel: "recovery", recoveryReason });
+  assert.equal(
+    releaseChannelDispositionMessage({ channel: "recovery", recoveryReason }),
+    `Quality promotion withheld: ${recoveryReason}`,
+  );
+  assert.equal(
+    releaseChannelDispositionMessage({ channel: "standard" }),
+    "Quality promotion: green",
+  );
+  assert.deepEqual(parseReleaseChannelMessage(message), {
+    valid: true,
+    failures: [],
+    channel: "recovery",
+    recoveryReason,
+  });
+  assert.deepEqual(
+    validateReleaseChannelBinding(message, { channel: "recovery", recoveryReason }),
+    { valid: true, failures: [] },
+  );
+  assert.deepEqual(validateReleaseChannelBinding(message, { channel: "standard" }), {
+    valid: false,
+    failures: ["release_channel_binding_mismatch", "recovery_quality_reason_binding_mismatch"],
+  });
+  assert.equal(parseReleaseChannelMessage(`${message}\n${message}`).valid, false);
 });
 
 test("rewrites the README quickstart pin comment and reports how many it touched", () => {
@@ -520,6 +593,55 @@ test("historical fixed-retention promotion accepts 13/17 and rejects 12/17", () 
     valid: false,
     failures: ["historical_all_fixed_retention_low"],
   });
+});
+
+test("recovery accepts only the named, bound holdout-retention failure and never upgrades it", () => {
+  const expected = { version: "0.23.0", head: "a".repeat(40), tree: "b".repeat(40) };
+  const qualification = redactQualificationReport({
+    measured: true,
+    binding: {
+      measuredAt: "2026-08-09T09:00:00.000Z",
+      strictness: "paranoid",
+      adapter: { version: expected.version, commit: expected.head },
+      engine: { sha256: "c".repeat(64) },
+      rule: { sha256: "d".repeat(64) },
+      corpus: { cases: "e".repeat(64), scorer: "f".repeat(64) },
+      model: { id: "gpt-oss-120b", protocol: "openai", endpointDigest: "0".repeat(64) },
+    },
+    results: CASES.map((testCase) => ({
+      id: testCase.id,
+      kind: testCase.defect === null ? "precision" : "recall",
+      pass: true,
+      findings: testCase.defect === null ? [] : [{}],
+      rejected: [],
+      tokens: 1,
+      rejectedSanitization: 0,
+      suppressedIntraRun: 0,
+    })),
+  });
+  const historical = withHoldoutFixedRetentionCount(
+    productionHistoricalReplayEvidenceFixture({ reviewerTree: expected.tree }),
+    4,
+  );
+  const reason = "historical_holdout_fixed_retention_low";
+  assert.deepEqual(validateQualityEvidence(qualification, historical, expected), {
+    valid: false,
+    failures: [reason],
+  });
+  assert.deepEqual(validateRecoveryQualityEvidence(qualification, historical, expected, reason), {
+    valid: true,
+    failures: [],
+    withheldReason: reason,
+  });
+  const unknown = withAllFixedRetentionCount(historical, 12);
+  assert.equal(
+    validateRecoveryQualityEvidence(qualification, unknown, expected, reason).valid,
+    false,
+  );
+  assert.equal(
+    validateRecoveryQualityEvidence(qualification, historical, expected, "unknown").valid,
+    false,
+  );
 });
 
 test("takes the release notes from the release commit rather than asking for them twice", () => {
