@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   BOUNDARY_OMISSION_EVIDENCE_POLICY,
   DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
+  HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
   MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   PARALLEL_MAPPING_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
@@ -178,11 +179,15 @@ describe("buildRuleFile", () => {
       "Restore the positive batch-size guard.\n\nWhen the shown digest caller supplies its zero fallback, the loop increment stays zero and never terminates.",
       "Keep the audit validator aligned with production.\n\nWhen metadata lacks `schemaVersion` or `provider`, the loosened audit accepts an object the shown production validator rejects.",
       "Restore each capability's matching predicate.\n\nOn every config where flags differ, the `figma` member calls the Jira predicate while `jira` calls the Figma predicate, so each capability reports the other connector's authorization.",
+      "Restore the helper's terminal failure before spawning.\n\nWhen the changed helper returns `undefined` instead of throwing, this call passes the invalid value to `spawn`.",
+      "Move platform work behind the guard.\n\nWhen this module loads on Linux, its top-level compiler probe runs before the shown `win32` guard and aborts startup.",
+      "Keep independently computed baseline counts separate.\n\nWhen the total file count changes, `uncoveredFiles` may correctly stay unchanged because its producer counts only files with zero covered lines.",
     ];
     for (const example of examples) {
       expect(sanitizeFindingBody(example).ok).toBe(true);
     }
     expect(rule).toContain("Do not emit HTML, images, links or URLs");
+    expect(rule).toContain("baseline fields, or snapshot values must change together");
   });
 
   /**
@@ -410,6 +415,10 @@ describe("buildRuleFile", () => {
         name: "compares parallel output keys with their matching sources",
         phrases: [PARALLEL_MAPPING_EVIDENCE_POLICY],
       },
+      {
+        name: "traces helper exits and distinguishes imports from module evaluation",
+        phrases: [HELPER_CONTROL_FLOW_EVIDENCE_POLICY],
+      },
     ];
 
     // Rows are spread as positional tuples with a `%s` title, not as objects with `$name`: `$key`
@@ -440,6 +449,7 @@ describe("buildRuleFile", () => {
       TRIGGER_AND_GUARD_EVIDENCE_POLICY,
       MIRRORED_VALIDATOR_EVIDENCE_POLICY,
       PARALLEL_MAPPING_EVIDENCE_POLICY,
+      HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
     ]) {
       expect(rule.split(policy)).toHaveLength(2);
       expect(serializeRuleFile(file).split(policy)).toHaveLength(2);

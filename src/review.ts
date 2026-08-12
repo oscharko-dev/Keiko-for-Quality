@@ -116,6 +116,8 @@ import {
   MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR,
   selectPrWideFindings,
   selectVerificationCandidates,
+  type FindingCandidate,
+  type PrWideSelection,
 } from "./publish/pr-wide-selection.js";
 import {
   collectInitialRepositoryContext,
@@ -124,6 +126,7 @@ import {
   type RepositoryContextRequest,
 } from "./publish/repository-context.js";
 import { requestsClosedRuntimeFacts, toRetrievedEvidence } from "./publish/retrieved-evidence.js";
+import { decodeEvidenceSourcePath } from "./publish/evidence-path.js";
 import type { ClosedRuntimeFact } from "./publish/runtime-fact-catalog.js";
 import { collectClosedRuntimeFactsAtCommit } from "./publish/runtime-facts.js";
 import {
@@ -134,8 +137,15 @@ import {
   type EvidenceRetriever,
   type JudgeableFinding,
   type SubstantiationOutcome,
+  type SubstantiationTerminalTrace,
+  type SubstantiationTraceReasonCode,
+  type SubstantiationTraceStage,
 } from "./publish/substantiate.js";
-import { bindTrustedHunkEvidence, type TrustedHunkEvidence } from "./publish/closed-claim-proof.js";
+import {
+  bindTrustedHunkEvidence,
+  type ClosedRefutationRuleId,
+  type TrustedHunkEvidence,
+} from "./publish/closed-claim-proof.js";
 
 export interface ReviewRequest {
   readonly client: GitHubClient;
@@ -326,6 +336,8 @@ export interface LocalReviewReport {
     readonly evidenceWithheld: number;
     readonly rankedOut: number;
     readonly verificationUndecided: number;
+    /** Selected findings that remained unsafe at the final publication boundary. */
+    readonly rejectedSanitization: number;
   };
   /** This run's real spend, mirroring the `run.spend` diagnostic the action path records. */
   readonly spend: {
@@ -645,6 +657,36 @@ function gitContext(request: PipelineRequest): GitContext {
     timeoutMs: 120_000,
     pathValue: request.pathValue,
   };
+}
+
+function recordPlannedCandidates(
+  diagnostics: Diagnostics,
+  batch: FindingBatch,
+  plan: PublicationPlan,
+): void {
+  diagnostics.record("publish.candidates.planned", {
+    counts: {
+      generated: batch.findings.length,
+      sanitized: batch.findings.length - plan.counters.rejectedSanitization,
+      deduplicated: plan.survivors.length,
+    },
+  });
+}
+
+function recordRankedCandidates(
+  diagnostics: Diagnostics,
+  verification: PrWideSelection<FindingCandidate>,
+  batch: FindingBatch,
+  selected: PrWideSelection<FindingCandidate>,
+  plan: PublicationPlan,
+): void {
+  diagnostics.record("publish.candidates.ranked", {
+    counts: {
+      verified: verification.kept.filter((survivor) => batch.verify.has(survivor.finding)).length,
+      ranked: selected.kept.length,
+      publication: plan.survivors.length,
+    },
+  });
 }
 
 /**
@@ -1392,6 +1434,17 @@ function recordRejectedEngineFindings(
   });
 }
 
+function recordEngineCandidateCount(
+  parsed: EngineResult,
+  diagnostics: Diagnostics,
+  headSha: CommitSha,
+): void {
+  diagnostics.record("engine.result.candidates", {
+    headSha,
+    counts: { generated: parsed.findings.length },
+  });
+}
+
 async function reviewEngineBinaryPath(
   request: PipelineRequest,
   workspace: string,
@@ -1434,6 +1487,7 @@ async function executeEngine(
     // Recorded only when non-zero: a zero here is the ordinary case, and a line for it would
     // bury the one occurrence that matters under nineteen that do not.
     recordRejectedEngineFindings(parsed, diagnostics, inventory.pair.head);
+    recordEngineCandidateCount(parsed, diagnostics, inventory.pair.head);
     const { result: classified, classifyTokens } = await repairEngineFindings(
       parsed,
       request,
@@ -2090,9 +2144,9 @@ async function collectChangePassFindings(
  * mirrors this repair-before-plan order, so it keeps measuring the pipeline that ships.
  *
  * Returns the repair spend alongside the (possibly reclassified) result, so the caller can fold it
- * into this run's `SpendLedger`. Zero on every skip path below — an implausible finding count, the
- * anthropic protocol, no findings to classify, no token to call with, or nothing that actually needs
- * it — because none of them ever placed a call.
+ * into this run's `SpendLedger`. Zero on every skip path below — a raw cohort above the publication
+ * ceiling, the anthropic protocol, no findings to classify, no token to call with, or nothing that
+ * actually needs it — because none of them ever placed a call.
  */
 async function repairEngineFindings(
   parsed: EngineResult,
@@ -2101,25 +2155,20 @@ async function repairEngineFindings(
   diagnostics: Diagnostics,
   maxTokens: number,
 ): Promise<{ result: EngineResult; classifyTokens: number }> {
-  // `settle` (`settle.ts`'s `commonDisqualifier`) disqualifies any result over `config.maxFindings`
-  // as implausible — a misconfigured model, a runaway run, or a successful prompt injection, not a
-  // genuinely terrible change — and it does so unconditionally, after this function returns. That
-  // verdict does not depend on classification, so classifying first only spends repair's own model
-  // calls on a result `settle` was always going to throw away: a flood of a few hundred findings
-  // turns a run `settle` disqualifies for free into one that burns tokens getting there first — and
-  // because the flood can originate from candidate-controlled diff or comment content the model
-  // reads, this is a cost-amplification vector, not just a waste. Checking the identical threshold
-  // here, before the first call, is what actually avoids that spend rather than merely explaining it
-  // afterward. The publish-time audit needs no analogous guard of its own: a disqualified result
-  // never carries findings past `settle` (`commonDisqualifier` discards them outright), so there is
-  // nothing left for the audit to see by the time it could run.
+  // `maxFindings` limits the FINAL publication set; it must never invalidate a complete engine
+  // result merely because generation produced more hypotheses. It is still the right free guard for
+  // this early, per-finding repair pass. The publication plan keeps at most the configured total and
+  // sends at most sixteen model-authored candidates to verification, where the surviving bounded
+  // cohort receives the ordinary classification audit. Repairing hundreds of raw, candidate-shaped
+  // hypotheses before that plan could amplify attacker-controlled cost without changing which
+  // candidates are ultimately eligible to publish. Skip only that mass repair here; settlement,
+  // sanitization, deduplication, bounded verification, ranking, and publication all still run.
   //
   // Deliberately NOT extended to `parsed.budgetExceeded`: a budget-truncated run's findings are
   // still published and its covered files still memoized (`verdictsSurviveIncompleteness` in
   // `settle.ts`), so their classification quality matters exactly as much as an ordinary run's.
-  // Only an implausible finding COUNT says "do not trust this enough to spend on it" — running out
-  // of budget says nothing of the kind, and skipping on it too would ship worse-classified findings
-  // to every reader of a large, merely expensive change.
+  // A budget-truncated cohort within the publication ceiling therefore still receives the ordinary
+  // repair. The count guard is solely an early cost bound, never a trust or settlement verdict.
   if (parsed.findings.length > request.config.maxFindings) {
     return { result: parsed, classifyTokens: 0 };
   }
@@ -2798,7 +2847,7 @@ const NO_AUDITED: ReadonlyMap<EngineFinding, EngineFinding> = new Map();
  */
 async function auditFreshSurvivors(
   run: PipelineRun,
-  fresh: readonly PlannedFinding[],
+  fresh: readonly FindingCandidate[],
 ): Promise<ReadonlyMap<EngineFinding, EngineFinding>> {
   if (fresh.length === 0) return NO_AUDITED;
   requireReviewTime(run.deadline);
@@ -2855,7 +2904,7 @@ async function auditFreshSurvivors(
 /** Audits verified prose and maps the classification verdict back to the engine original. */
 async function auditEffectiveFreshSurvivors(
   run: PipelineRun,
-  fresh: readonly PlannedFinding[],
+  fresh: readonly FindingCandidate[],
   repaired: ReadonlyMap<EngineFinding, EngineFinding>,
 ): Promise<ReadonlyMap<EngineFinding, EngineFinding>> {
   const effective = fresh.map((survivor) => {
@@ -2904,6 +2953,7 @@ interface EvidenceSources {
 interface PreparedFindingEvidence extends EvidenceSources {
   readonly text: string;
   readonly unifiedDiff: string;
+  readonly headRepositorySources: ReadonlyMap<string, string>;
   readonly repositoryRequest: RepositoryContextRequest;
   readonly repositoryContext: RepositoryEvidenceContext;
 }
@@ -2971,6 +3021,30 @@ function baseAnchorForFinding(
     : mappedBaseRangeFromUnifiedDiff(read.unifiedDiff, anchor);
 }
 
+function repositoryRequestForFinding(
+  run: PipelineRun,
+  context: PublishContext,
+  read: EvidenceRead,
+  finding: EngineFinding,
+  anchorText: string,
+): RepositoryContextRequest {
+  const baseFindingAnchor = baseAnchorForFinding(read, finding);
+  return {
+    repositoryPath: run.request.repositoryPath,
+    pathValue: run.request.pathValue,
+    head: run.request.head,
+    base: context.baseSha,
+    reviewPath: read.path,
+    baseReviewPath: (read.item.oldPath ?? read.item.path) as string,
+    findingAnchor: { startLine: finding.startLine, endLine: finding.endLine },
+    ...(baseFindingAnchor === undefined ? {} : { baseFindingAnchor }),
+    findingContent: finding.content,
+    anchorText,
+    unifiedDiff: read.unifiedDiff,
+    deadlineMs: run.deadline.expiresAtMs,
+  };
+}
+
 async function prepareFindingEvidence(
   run: PipelineRun,
   context: PublishContext,
@@ -2983,22 +3057,7 @@ async function prepareFindingEvidence(
   const anchorSource = read.item.status === "D" ? read.sources.baseText : read.sources.headText;
   const anchorText = sourceLines(anchorSource, finding.startLine, finding.endLine);
   if (anchorText === undefined) return undefined;
-  const findingAnchor = { startLine: finding.startLine, endLine: finding.endLine };
-  const baseFindingAnchor = baseAnchorForFinding(read, finding);
-  const repositoryRequest: RepositoryContextRequest = {
-    repositoryPath: run.request.repositoryPath,
-    pathValue: run.request.pathValue,
-    head: run.request.head,
-    base: context.baseSha,
-    reviewPath: read.path,
-    baseReviewPath: (read.item.oldPath ?? read.item.path) as string,
-    findingAnchor,
-    ...(baseFindingAnchor === undefined ? {} : { baseFindingAnchor }),
-    findingContent: finding.content,
-    anchorText,
-    unifiedDiff: read.unifiedDiff,
-    deadlineMs: run.deadline.expiresAtMs,
-  };
+  const repositoryRequest = repositoryRequestForFinding(run, context, read, finding, anchorText);
   const repositoryContext = await collectInitialRepositoryContext(repositoryRequest);
   const dossier = buildChangeEvidence(
     read.sources.headText,
@@ -3011,15 +3070,47 @@ async function prepareFindingEvidence(
     },
     { unifiedDiff: read.unifiedDiff, repositoryContext },
   );
+  const headRepositorySources = await readRenderedRepositorySources(run, cache, ctx, dossier.text);
   return dossier.text === ""
     ? undefined
     : {
         ...read.sources,
         text: dossier.text,
         unifiedDiff: read.unifiedDiff,
+        headRepositorySources,
         repositoryRequest,
         repositoryContext,
       };
+}
+
+function renderedRepositoryPaths(text: string): readonly string[] | undefined {
+  const paths: string[] = [];
+  for (const row of text.split("\n")) {
+    const match = /^H[1-8] = (.+)$/u.exec(row);
+    if (match?.[1] === undefined) continue;
+    const path = decodeEvidenceSourcePath(match[1]);
+    if (path === undefined) return undefined;
+    paths.push(path);
+  }
+  return [...new Set(paths)];
+}
+
+async function readRenderedRepositorySources(
+  run: PipelineRun,
+  cache: BlobTextCache,
+  ctx: GitContext,
+  dossier: string,
+): Promise<ReadonlyMap<string, string>> {
+  const paths = renderedRepositoryPaths(dossier);
+  if (paths === undefined || paths.length === 0) return new Map();
+  const sources = new Map<string, string>();
+  for (const path of paths) {
+    requireReviewTime(run.deadline);
+    const source = await readTextAtCommitCached(cache, ctx, run.request.head, path);
+    if (source === undefined) return new Map();
+    sources.set(path, source);
+  }
+  return sources;
 }
 
 /**
@@ -3035,7 +3126,7 @@ async function prepareFindingEvidence(
 async function evidenceForSurvivors(
   run: PipelineRun,
   context: PublishContext,
-  modelFindings: readonly PlannedFinding[],
+  modelFindings: readonly FindingCandidate[],
 ): Promise<ReadonlyMap<EngineFinding, PreparedFindingEvidence>> {
   const cache: BlobTextCache = new Map();
   const ctx = gitContext(run.request);
@@ -3166,9 +3257,44 @@ async function closedRuntimeFactsForChallenge(
   });
 }
 
+const UNDECIDED_STAGE_COUNT: Readonly<Record<SubstantiationTraceStage, string>> = {
+  preflight: "undecided_stage_preflight",
+  truth_initial: "undecided_stage_truth_initial",
+  truth_retrieval: "undecided_stage_truth_retrieval",
+  truth_followup: "undecided_stage_truth_followup",
+  challenge_planner: "undecided_stage_challenge_planner",
+  challenge_retrieval: "undecided_stage_challenge_retrieval",
+  falsifier: "undecided_stage_falsifier",
+};
+
+const UNDECIDED_REASON_COUNT: Readonly<Partial<Record<SubstantiationTraceReasonCode, string>>> = {
+  budget: "undecided_reason_budget",
+  request_transport_or_status: "undecided_reason_request",
+  usage_invalid: "undecided_reason_usage",
+  finish_reason_nonstop: "undecided_reason_finish",
+  json_or_envelope_invalid: "undecided_reason_json",
+  semantic_shape_invalid: "undecided_reason_shape",
+  retrieval_error: "undecided_reason_retrieval",
+};
+
+function incrementCount(counts: Record<string, number>, key: string): void {
+  counts[key] = (counts[key] ?? 0) + 1;
+}
+
+/** Closed stage/reason counters diagnose incomplete verification without logging reviewed text. */
+function captureUndecidedTrace(
+  counts: Record<string, number>,
+  trace: SubstantiationTerminalTrace,
+): void {
+  if (trace.disposition !== "undecided") return;
+  incrementCount(counts, UNDECIDED_STAGE_COUNT[trace.stage]);
+  incrementCount(counts, UNDECIDED_REASON_COUNT[trace.reasonCode] ?? "undecided_reason_other");
+}
+
 function recordSubstantiation(
   run: PipelineRun,
   outcome: SubstantiationOutcome<JudgeableOriginal>,
+  undecidedTraceCounts: Readonly<Record<string, number>>,
 ): void {
   run.ledger.classify += outcome.tokens;
   run.diagnostics.record("publish.substantiated", {
@@ -3191,6 +3317,7 @@ function recordSubstantiation(
       undecided: outcome.undecided,
       budget_blocked: outcome.budgetBlocked,
       tokens: outcome.tokens,
+      ...undecidedTraceCounts,
     },
   });
 }
@@ -3204,8 +3331,39 @@ function trustedFindingEvidence(
       text: prepared.text,
       headSource: prepared.headText,
       baseSource: prepared.baseText,
+      headCommit: prepared.repositoryRequest.head,
+      headRepositorySources: prepared.headRepositorySources,
     }) ?? ""
   );
+}
+
+type RefutationCounts = Partial<Record<ClosedRefutationRuleId, number>>;
+
+function incrementRefutationCount(counts: RefutationCounts, ruleId: ClosedRefutationRuleId): void {
+  counts[ruleId] = (counts[ruleId] ?? 0) + 1;
+}
+
+function recordDeterministicRefutations(diagnostics: Diagnostics, counts: RefutationCounts): void {
+  if (Object.keys(counts).length === 0) return;
+  diagnostics.record("publish.deterministic_refutation", { counts });
+}
+
+function judgeableFindings(
+  modelFindings: readonly FindingCandidate[],
+  evidence: ReadonlyMap<EngineFinding, PreparedFindingEvidence>,
+): readonly JudgeableOriginal[] {
+  return modelFindings.map((survivor) => {
+    const prepared = evidence.get(survivor.finding);
+    const path = survivor.finding.path as string;
+    return {
+      path,
+      basePath: prepared?.repositoryRequest.baseReviewPath ?? path,
+      content: survivor.finding.content,
+      startLine: survivor.finding.startLine,
+      endLine: survivor.finding.endLine,
+      original: survivor.finding,
+    };
+  });
 }
 
 /**
@@ -3238,7 +3396,7 @@ function trustedFindingEvidence(
 async function substantiateModelSurvivors(
   run: PipelineRun,
   context: PublishContext,
-  modelFindings: readonly PlannedFinding[],
+  modelFindings: readonly FindingCandidate[],
 ): Promise<SubstantiationResult> {
   if (modelFindings.length === 0) return NO_SUBSTANTIATION;
   requireReviewTime(run.deadline);
@@ -3247,8 +3405,7 @@ async function substantiateModelSurvivors(
   // Anthropic keeps its existing strictly-parsed engine path until a native adapter exists.
   if (deps === undefined) return NO_SUBSTANTIATION;
 
-  // Same whole-review ceiling as `auditFreshSurvivors`, enforced inside `substantiate` before
-  // every endpoint request. Passing the exact remainder makes the limit hard even when one
+  // Passing the exact whole-review remainder keeps the limit hard even when one
   // finding takes either full truth -> retrieval -> terminal truth -> challenge -> falsifier or
   // truth -> challenge -> falsifier -> referee. Both paths remain atomically admitted at four calls.
   const remaining = Math.max(
@@ -3258,21 +3415,12 @@ async function substantiateModelSurvivors(
 
   const evidence = await evidenceForSurvivors(run, context, modelFindings);
   requireReviewTime(run.deadline);
-  const judgeable = modelFindings.map((survivor) => {
-    const prepared = evidence.get(survivor.finding);
-    const path = survivor.finding.path as string;
-    return {
-      path,
-      basePath: prepared?.repositoryRequest.baseReviewPath ?? path,
-      content: survivor.finding.content,
-      startLine: survivor.finding.startLine,
-      endLine: survivor.finding.endLine,
-      original: survivor.finding,
-    };
-  });
+  const judgeable = judgeableFindings(modelFindings, evidence);
   const evidenceByJudgeable = new Map<JudgeableFinding, string | TrustedHunkEvidence>(
     judgeable.map((finding) => [finding, trustedFindingEvidence(evidence.get(finding.original))]),
   );
+  const undecidedTraceCounts: Record<string, number> = {};
+  const deterministicRefutations: RefutationCounts = {};
 
   const outcome = await substantiate(
     judgeable,
@@ -3283,8 +3431,15 @@ async function substantiateModelSurvivors(
     resolveSubstantiationStrictness(run.request.env),
     remaining,
     evidenceRetriever(evidence, run),
+    (trace) => {
+      captureUndecidedTrace(undecidedTraceCounts, trace);
+    },
+    (ruleId) => {
+      incrementRefutationCount(deterministicRefutations, ruleId);
+    },
   );
-  recordSubstantiation(run, outcome);
+  recordDeterministicRefutations(run.diagnostics, deterministicRefutations);
+  recordSubstantiation(run, outcome, undecidedTraceCounts);
   requireReviewTime(run.deadline);
 
   return partitionSubstantiated(judgeable, outcome);
@@ -3342,7 +3497,7 @@ interface AuditedPublication {
  */
 function uncacheableModelPaths(
   modelOriginals: ReadonlySet<EngineFinding>,
-  initiallyPlanned: readonly PlannedFinding[],
+  initiallyPlanned: readonly FindingCandidate[],
   dropped: ReadonlySet<EngineFinding>,
   rankedOut: readonly EngineFinding[],
   selectedOriginals: ReadonlySet<EngineFinding>,
@@ -3380,7 +3535,7 @@ function qualityReplacements(
 }
 
 function originalByEffectiveFinding(
-  survivors: readonly PlannedFinding[],
+  survivors: readonly FindingCandidate[],
   replacements: ReadonlyMap<EngineFinding, EngineFinding>,
 ): ReadonlyMap<EngineFinding, EngineFinding> {
   return new Map(
@@ -3392,7 +3547,7 @@ function originalByEffectiveFinding(
 }
 
 function originalsInPlan(
-  survivors: readonly PlannedFinding[],
+  survivors: readonly FindingCandidate[],
   originals: ReadonlyMap<EngineFinding, EngineFinding>,
 ): ReadonlySet<EngineFinding> {
   return new Set(survivors.map((survivor) => originals.get(survivor.finding) ?? survivor.finding));
@@ -3415,7 +3570,10 @@ function addPlanCounters(
     suppressedRanked: rankedSuppressed,
     verificationUndecided,
     suppressedRecurrence: (initial.suppressedRecurrence ?? 0) + (final.suppressedRecurrence ?? 0),
-    rejectedSanitization: initial.rejectedSanitization + final.rejectedSanitization,
+    // The initial pass sees raw hypotheses before truth and PR-wide ranking. A malformed candidate
+    // that those stages refute or rank out was never a publication loss; only the selected final
+    // cohort can degrade completion when it remains unpublishable.
+    rejectedSanitization: final.rejectedSanitization,
     // Only the final cohort reaches a reader. Counting the initial pass too would double-count
     // every unchanged survivor merely because quality replacements require a second full plan.
     neutralized: final.neutralized ?? 0,
@@ -3461,7 +3619,7 @@ function qualityPublicationPlan(
 
 async function auditSubstantiatedFresh(
   run: PipelineRun,
-  fresh: readonly PlannedFinding[],
+  fresh: readonly FindingCandidate[],
   substantiated: SubstantiationResult,
 ): Promise<ReadonlyMap<EngineFinding, EngineFinding>> {
   const survivors = fresh.filter((survivor) => !substantiated.dropped.has(survivor.finding));
@@ -3473,14 +3631,18 @@ async function runPublicationQualityStages(
   run: PipelineRun,
   context: PublishContext,
   batch: FindingBatch,
-  initialPlan: PublicationPlan,
+  candidates: readonly FindingCandidate[],
 ): Promise<{
-  readonly verification: ReturnType<typeof selectVerificationCandidates>;
+  readonly verification: PrWideSelection<FindingCandidate>;
   readonly substantiated: SubstantiationResult;
   readonly auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
 }> {
   requireReviewTime(run.deadline);
-  const verification = selectVerificationCandidates(initialPlan.survivors, batch.verify);
+  const verification = selectVerificationCandidates(
+    candidates,
+    batch.verify,
+    run.request.config.maxFindings,
+  );
   const modelFindings = verification.kept.filter((survivor) => batch.verify.has(survivor.finding));
   const substantiated = await substantiateModelSurvivors(run, context, modelFindings);
   requireReviewTime(run.deadline);
@@ -3492,7 +3654,7 @@ async function runPublicationQualityStages(
 
 function replanSelectedFindings(
   context: PublishContext,
-  selected: readonly PlannedFinding[],
+  selected: readonly FindingCandidate[],
   diagnostics: Diagnostics,
   prefetch: ExistingConversationsPrefetch,
 ): Promise<PublicationPlan> {
@@ -3507,9 +3669,10 @@ function replanSelectedFindings(
 interface FinalizeAuditedPlanInputs {
   readonly batch: FindingBatch;
   readonly initialPlan: PublicationPlan;
+  readonly qualityCandidates: readonly FindingCandidate[];
   readonly finalPlan: PublicationPlan;
-  readonly verification: ReturnType<typeof selectVerificationCandidates>;
-  readonly selected: ReturnType<typeof selectPrWideFindings>;
+  readonly verification: PrWideSelection<FindingCandidate>;
+  readonly selected: PrWideSelection<FindingCandidate>;
   readonly substantiated: SubstantiationResult;
   readonly combined: ReadonlyMap<EngineFinding, EngineFinding>;
   readonly originals: ReadonlyMap<EngineFinding, EngineFinding>;
@@ -3519,6 +3682,7 @@ function finalizeAuditedPlan(inputs: FinalizeAuditedPlanInputs): AuditedPlan {
   const {
     batch,
     initialPlan,
+    qualityCandidates,
     finalPlan,
     verification,
     selected,
@@ -3529,7 +3693,7 @@ function finalizeAuditedPlan(inputs: FinalizeAuditedPlanInputs): AuditedPlan {
   const rankedOut = [...verification.rankedOutOriginals, ...selected.rankedOutOriginals];
   const uncacheablePaths = uncacheableModelPaths(
     batch.verify,
-    initialPlan.survivors,
+    qualityCandidates,
     substantiated.dropped,
     rankedOut,
     originalsInPlan(selected.kept, originals),
@@ -3548,6 +3712,23 @@ function finalizeAuditedPlan(inputs: FinalizeAuditedPlanInputs): AuditedPlan {
     droppedOriginals: droppedQualityOriginals(substantiated, rankedOut),
     uncacheablePaths,
   };
+}
+
+/** Restores original engine order across the two initial planning outcomes that remain eligible for
+ *  quality work: publishable dedup survivors and raw sanitizer rejections. Cross-run/intra-run
+ *  duplicates stay suppressed. Rejected prose carries only its finding identity; it cannot reach a
+ *  publication boundary until `replanSelectedFindings` sanitizes the verified final cohort again. */
+function candidatesForPublicationQuality(
+  batch: FindingBatch,
+  plan: PublicationPlan,
+): readonly FindingCandidate[] {
+  const survivors = new Map(plan.survivors.map((survivor) => [survivor.finding, survivor]));
+  const rejected = new Set(plan.rejectedSanitizationCandidates);
+  return batch.findings.flatMap((finding) => {
+    const survivor = survivors.get(finding);
+    if (survivor !== undefined) return [survivor];
+    return rejected.has(finding) ? [{ finding }] : [];
+  });
 }
 
 /**
@@ -3570,19 +3751,26 @@ async function planAndAudit(
 ): Promise<AuditedPlan> {
   requireReviewTime(run.deadline);
   const initialPlan = await planPublication(context, batch.findings, run.diagnostics, prefetch);
+  recordPlannedCandidates(run.diagnostics, batch, initialPlan);
+  const qualityCandidates = candidatesForPublicationQuality(batch, initialPlan);
   // Substantiation runs FIRST and the order is load-bearing: it can drop a survivor, and auditing a
   // finding this stage is about to remove spends 1-3 model calls on an opinion nobody will read.
   const { verification, substantiated, auditedByOriginal } = await runPublicationQualityStages(
     run,
     context,
     batch,
-    initialPlan,
+    qualityCandidates,
   );
   const combined = qualityReplacements(substantiated, auditedByOriginal);
   const substantiatedSurvivors = verification.kept.filter(
     (survivor) => !substantiated.dropped.has(survivor.finding),
   );
-  const selected = selectPrWideFindings(substantiatedSurvivors, batch.verify, combined);
+  const selected = selectPrWideFindings(
+    substantiatedSurvivors,
+    batch.verify,
+    run.request.config.maxFindings,
+    combined,
+  );
   const originals = originalByEffectiveFinding(substantiatedSurvivors, combined);
   const finalPlan = await replanSelectedFindings(
     context,
@@ -3590,10 +3778,12 @@ async function planAndAudit(
     run.diagnostics,
     initialPlan.prefetch,
   );
+  recordRankedCandidates(run.diagnostics, verification, batch, selected, finalPlan);
   requireReviewTime(run.deadline);
   return finalizeAuditedPlan({
     batch,
     initialPlan,
+    qualityCandidates,
     finalPlan,
     verification,
     selected,
@@ -3633,6 +3823,9 @@ async function publishAudited(
   }
   requireReviewTime(run.deadline);
   const outcome = await executePublication(context, { ...plan, survivors }, run.diagnostics);
+  run.diagnostics.record("publish.pipeline.completed", {
+    counts: { published: outcome.published },
+  });
   return { outcome, qualityByOriginal, droppedOriginals, uncacheablePaths };
 }
 
@@ -4445,6 +4638,8 @@ async function localFindings(
   readonly evidenceWithheld: number;
   readonly rankedOut: number;
   readonly verificationUndecided: number;
+  /** Selected findings that remained unsafe at the final publication boundary. */
+  readonly rejectedSanitization: number;
 }> {
   if (batch.findings.length === 0) {
     return {
@@ -4455,6 +4650,7 @@ async function localFindings(
       evidenceWithheld: 0,
       rankedOut: 0,
       verificationUndecided: 0,
+      rejectedSanitization: 0,
     };
   }
   const context = localPublishContext(run.request, inventory);
@@ -4468,6 +4664,7 @@ async function localFindings(
     evidenceWithheld: plan.counters.suppressedEvidence ?? 0,
     rankedOut: plan.counters.suppressedRanked ?? 0,
     verificationUndecided: plan.counters.verificationUndecided ?? 0,
+    rejectedSanitization: plan.counters.rejectedSanitization,
   };
 }
 
@@ -4478,6 +4675,7 @@ function localQuality(reported: ReportedLocalFindings): NonNullable<LocalReviewR
     evidenceWithheld: reported.evidenceWithheld,
     rankedOut: reported.rankedOut,
     verificationUndecided: reported.verificationUndecided,
+    rejectedSanitization: reported.rejectedSanitization,
   };
 }
 
@@ -4635,6 +4833,7 @@ function verificationIncompleteLocalReport(
       verification_undecided: reported.verificationUndecided,
       suppressed_evidence: reported.evidenceWithheld,
       suppressed_ranked: reported.rankedOut,
+      rejected_sanitization: reported.rejectedSanitization,
     },
   });
   return {
@@ -4734,7 +4933,7 @@ async function completeLocalReport(
     }
     throw error;
   }
-  if (reported.verificationUndecided > 0) {
+  if (reported.verificationUndecided > 0 || reported.rejectedSanitization > 0) {
     return verificationIncompleteLocalReport(run, inventory, memo, reported);
   }
   // Identical admission call to the action path's: only a complete outcome reaches this function,

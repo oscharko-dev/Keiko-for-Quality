@@ -348,7 +348,7 @@ describe("runAction: writing the store back", () => {
     ["a rejected manifest schema", "settlement.incomplete.schema_rejected"],
     ["an unexpected terminal state", "settlement.incomplete.terminal_state"],
     ["a failed coverage entry", "settlement.incomplete.coverage_failed"],
-    ["an implausible finding count", "settlement.incomplete.engine_error"],
+    ["an engine execution failure", "settlement.incomplete.engine_error"],
     ["an unlisted warning", "settlement.incomplete.warning_not_allowlisted"],
     ["a non-success engine status", "settlement.incomplete.engine_status_not_success"],
   ] as const)("never writes when the manifest is not to be believed: %s", async (_name, reason) => {

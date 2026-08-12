@@ -18,7 +18,7 @@
 /**
  * @param {readonly {kind: string, tokens: number}[]} results one entry per attempted case
  * @param {number} tokens total tokens the run spent
- * @returns {{measured: boolean, reason: "measured"|"no_cases"|"model_unreached", errored: number, attempted: number}}
+ * @returns {{measured: boolean, reason: "measured"|"no_cases"|"model_unreached"|"harness_failed", errored: number, attempted: number}}
  */
 export function classifyMeasurement(results, tokens) {
   const attempted = results.length;
@@ -28,10 +28,14 @@ export function classifyMeasurement(results, tokens) {
   // read as success either, which is the trap on this side: a typo that selects nothing would
   // otherwise exit zero and look like a clean run of everything.
   if (attempted === 0) return { measured: false, reason: "no_cases", errored, attempted };
-  // Zero tokens means nothing reached the model even where cases ran; all-errored means the
-  // harness never got far enough to ask, which zero tokens usually but not always also shows.
-  if (tokens <= 0 || errored >= attempted) {
+  // Zero tokens means nothing reached the model even where cases ran. An all-error run that DID
+  // spend tokens reached a later harness stage and needs a different reason; v0.24.0 R3 exposed a
+  // scoring throw after 32k tokens, disproving the old assumption that every error was pre-model.
+  if (tokens <= 0) {
     return { measured: false, reason: "model_unreached", errored, attempted };
+  }
+  if (errored >= attempted) {
+    return { measured: false, reason: "harness_failed", errored, attempted };
   }
   return { measured: true, reason: "measured", errored, attempted };
 }

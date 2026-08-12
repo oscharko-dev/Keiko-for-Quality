@@ -28,7 +28,7 @@ export interface RuntimeConfig {
   readonly reviewTimeoutSeconds: number;
   /** Hard token ceiling for one review. */
   readonly tokenBudget: number;
-  /** Maximum findings this run may publish before the result is treated as implausible. */
+  /** Maximum findings this run may publish after deterministic verification and ranking. */
   readonly maxFindings: number;
   /**
    * Git rename-detection similarity threshold, as a percentage. Explicit because it changes

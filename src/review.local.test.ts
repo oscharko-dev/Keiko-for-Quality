@@ -246,6 +246,229 @@ describe("performLocalReview (issue #95)", () => {
     );
   });
 
+  it("completes 67 files after three targeted resume repairs and more than 50 combined raw findings", async () => {
+    const largeRepo = await mkdtemp(join(tmpdir(), "kfq-review-local-completion-"));
+    const largeGit = (args: readonly string[]): string =>
+      execFileSync("git", args, {
+        cwd: largeRepo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.test",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.test",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+        },
+      });
+    try {
+      largeGit(["init", "-q", "-b", "main"]);
+      await mkdir(join(largeRepo, "src"), { recursive: true });
+      const paths = Array.from({ length: 67 }, (_, index) => `src/file-${String(index)}.ts`);
+      for (const [index, path] of paths.entries()) {
+        await writeFile(join(largeRepo, path), `export const value = ${String(index)};\n`);
+      }
+      largeGit(["add", "-A"]);
+      largeGit(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+      const largeBase = largeGit(["rev-parse", "HEAD"]).trim();
+      for (const [index, path] of paths.entries()) {
+        await writeFile(join(largeRepo, path), `export const value = ${String(index + 100)};\n`);
+      }
+      largeGit(["add", "-A"]);
+      largeGit(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+      const largeHead = largeGit(["rev-parse", "HEAD"]).trim();
+
+      const rawFindings = (
+        count: number,
+        candidates: readonly string[],
+        offset: number,
+      ): readonly Record<string, unknown>[] =>
+        Array.from({ length: count }, (_unused, index) => ({
+          path: candidates[index % candidates.length],
+          content: `Distinct completion hypothesis ${String(index + offset)} with a concrete failure mode.`,
+          start_line: 1,
+          end_line: 1,
+          category: "bug",
+          severity: "medium",
+        }));
+      const failed = paths.slice(-3);
+      const engineDigest = "a".repeat(64);
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 67, total_tokens: 1_000, budget_exceeded: false },
+            comments: rawFindings(30, paths.slice(0, 30), 0),
+            warnings: failed.map((file) => ({
+              type: "subtask_error",
+              file,
+              message: "main_task did not complete",
+            })),
+          }),
+          ruleDigest: engineDigest,
+        })
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "success",
+            summary: { files_reviewed: 3, total_tokens: 500, budget_exceeded: false },
+            comments: rawFindings(25, failed, 30),
+            warnings: [],
+          }),
+          ruleDigest: engineDigest,
+        });
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performLocalReview(
+        {
+          base: commitSha(largeBase),
+          head: commitSha(largeHead),
+          repositoryPath: largeRepo,
+          config: CONFIG,
+          profile: PROFILE,
+          guidelines: { paths: [] },
+          env: {},
+          pathValue: process.env.PATH ?? "/usr/bin:/bin",
+        },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(report.reason).toBeUndefined();
+      expect(report.inventory).toStrictEqual({ total: 67, reviewable: 67, reviewed: 67 });
+      expect(report.findings).toHaveLength(8);
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      const resumed = runEngineMock.mock.calls[1]?.[0] as {
+        expectedReviewablePaths: readonly string[];
+      };
+      expect(resumed.expectedReviewablePaths).toEqual(failed);
+      const records = diagnostics.drain();
+      expect(records.some((record) => record.code === "settlement.incomplete.engine_error")).toBe(
+        false,
+      );
+      expect(records.find((record) => record.code === "engine.result.candidates")?.counts).toEqual({
+        generated: 55,
+      });
+      expect(
+        records.find((record) => record.code === "publish.candidates.planned")?.counts,
+      ).toEqual({
+        generated: 55,
+        sanitized: 55,
+        deduplicated: 33,
+      });
+      expect(records.find((record) => record.code === "publish.candidates.ranked")?.counts).toEqual(
+        {
+          verified: 16,
+          ranked: 8,
+          publication: 8,
+        },
+      );
+      // The local surface reports findings without calling GitHub, so only the action path emits
+      // `publish.pipeline.completed`; omitting an invented delivery count here is intentional.
+      expect(
+        records.find((record) => record.code === "publish.pipeline.completed"),
+      ).toBeUndefined();
+    } finally {
+      await rm(largeRepo, { recursive: true, force: true });
+    }
+  });
+
+  it("refutes the source-bound terminal-helper contradiction before any model call", async () => {
+    const helperRepo = await mkdtemp(join(tmpdir(), "kfq-review-local-helper-refutation-"));
+    const helperGit = (args: readonly string[]): string =>
+      execFileSync("git", args, {
+        cwd: helperRepo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.test",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.test",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+        },
+      });
+    const originalFetch = globalThis.fetch;
+    try {
+      helperGit(["init", "-q", "-b", "main"]);
+      await mkdir(join(helperRepo, "src"), { recursive: true });
+      const baseSource =
+        'import { existsSync } from "node:fs";\n\n' +
+        "export function windowsToolFromPath(pathValue, toolName) {\n" +
+        '  for (const directory of pathValue?.split(";").filter(Boolean) ?? []) {\n' +
+        "    const candidate = `${directory}/${toolName}`;\n" +
+        "    if (existsSync(candidate)) return candidate;\n" +
+        "  }\n" +
+        '  throw new Error("Windows tool is unavailable");\n' +
+        "}\n";
+      await writeFile(join(helperRepo, "src/windows-compiler.mjs"), baseSource);
+      helperGit(["add", "-A"]);
+      helperGit(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+      const helperBase = helperGit(["rev-parse", "HEAD"]).trim();
+      const headSource =
+        'import { spawn } from "node:child_process";\n' +
+        baseSource +
+        "\nexport function runWindowsCompiler(pathValue) {\n" +
+        '  if (process.platform !== "win32") return;\n' +
+        '  spawn(windowsToolFromPath(pathValue, "cl.exe"), ["/nologo"]);\n' +
+        "}\n";
+      await writeFile(join(helperRepo, "src/windows-compiler.mjs"), headSource);
+      helperGit(["add", "-A"]);
+      helperGit(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+      const helperHead = helperGit(["rev-parse", "HEAD"]).trim();
+
+      const engineDigest = "b".repeat(64);
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "success",
+          summary: { files_reviewed: 1, total_tokens: 100, budget_exceeded: false },
+          comments: [
+            {
+              path: "src/windows-compiler.mjs",
+              content: "The helper can fall through and pass an invalid command to spawn.",
+              start_line: 14,
+              end_line: 14,
+              category: "bug",
+              severity: "high",
+            },
+          ],
+        }),
+        ruleDigest: engineDigest,
+      });
+      let modelCalls = 0;
+      globalThis.fetch = (() => {
+        modelCalls += 1;
+        throw new Error("the deterministic refutation must precede every model call");
+      }) as typeof fetch;
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performLocalReview(
+        baseRequest({
+          base: commitSha(helperBase),
+          head: commitSha(helperHead),
+          repositoryPath: helperRepo,
+          config: { ...CONFIG, protocol: "openai", model: "gpt-oss-test" },
+          env: { MODEL_TOKEN: "fake-token" },
+        }),
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(report.findings).toEqual([]);
+      expect(modelCalls).toBe(0);
+      expect(
+        diagnostics.drain().find((record) => record.code === "publish.deterministic_refutation")
+          ?.counts,
+      ).toEqual({ terminal_helper_contract: 1 });
+    } finally {
+      globalThis.fetch = originalFetch;
+      await rm(helperRepo, { recursive: true, force: true });
+    }
+  });
+
   describe("audit reclassification", () => {
     const AUDIT_CONFIG: RuntimeConfig = { ...CONFIG, protocol: "openai", model: "gpt-oss-test" };
     const originalFetch = globalThis.fetch;

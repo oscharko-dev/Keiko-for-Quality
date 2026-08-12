@@ -65,6 +65,7 @@ test("redacts raw qualification reports to fixed identifiers, booleans, counts a
   const serialized = JSON.stringify(evidence);
 
   assert.equal(evidence.artifact, QUALIFICATION_EVIDENCE_ARTIFACT);
+  assert.equal(evidence.schemaVersion, 4);
   assert.equal(evidence.redacted, true);
   assert.equal(evidence.reason, "measured");
   assert.equal(evidence.results.length, CASES.length);
@@ -76,6 +77,7 @@ test("redacts raw qualification reports to fixed identifiers, booleans, counts a
   for (const forbidden of ["findings", "detail", "reply", "engine", "futureField"]) {
     assert.ok(!Object.hasOwn(evidence.results[0], forbidden), forbidden);
   }
+  assert.ok(evidence.results.every((result) => result.errorStage === null));
   assert.deepEqual(validateQualificationEvidence(evidence), {
     valid: true,
     complete: true,
@@ -120,6 +122,10 @@ test("the public schema fails closed for invalid result identities, kinds and co
     (evidence) => {
       evidence.results[0].rejectedSanitization = 1;
     },
+    (evidence) => {
+      evidence.results[0].kind = "error";
+      evidence.results[0].errorStage = "PRIVATE_FAILURE_DETAIL";
+    },
   ];
 
   for (const mutate of mutations) {
@@ -129,6 +135,28 @@ test("the public schema fails closed for invalid result identities, kinds and co
     assert.equal(validation.valid, false);
     assert.ok(validation.failures.includes("result_value"));
   }
+});
+
+test("redaction retains only a closed harness error stage", () => {
+  const raw = rawReport();
+  raw.results[0] = {
+    ...raw.results[0],
+    kind: "error",
+    pass: false,
+    errorStage: "publication",
+    findings: [],
+    detail: SECRET,
+    engine: { status: SECRET, stderr: SECRET },
+  };
+
+  const evidence = redactQualificationReport(raw);
+  assert.equal(evidence.results[0].errorStage, "publication");
+  assert.ok(!JSON.stringify(evidence).includes(SECRET));
+  assert.deepEqual(validateQualificationEvidence(evidence), {
+    valid: true,
+    complete: true,
+    failures: [],
+  });
 });
 
 test("the public binding distinguishes substantiation operating points", () => {
@@ -161,16 +189,16 @@ test("the normal promotion checker reads redacted evidence without private diagn
   }
 });
 
-test("the severe-recall floor tolerates four misses but rejects five of thirty", () => {
+test("the severe-recall floor tolerates four misses but rejects five of thirty-one", () => {
   const severe = CASES.filter(
     (testCase) =>
       testCase.defect !== null && ["critical", "high"].includes(testCase.defect.severity),
   );
-  assert.equal(severe.length, 30);
+  assert.equal(severe.length, 31);
 
   for (const [misses, expectedStatus, expectedRate] of [
-    [4, 0, "86.7%"],
-    [5, 1, "83.3%"],
+    [4, 0, "87.1%"],
+    [5, 1, "83.9%"],
   ]) {
     const directory = mkdtempSync(join(tmpdir(), "kfq-qualification-floor-test-"));
     const path = join(directory, "qualification.json");
@@ -220,6 +248,35 @@ test("the promotion checker explains a redacted regression with safe aggregate f
       checked.stdout,
       /kind=precision, findings=1, tokens=\d+, rejected=0, sanitizer=0, suppressed=\d+/u,
     );
+    assert.ok(!checked.stdout.includes(SECRET));
+    assert.ok(!checked.stderr.includes(SECRET));
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the promotion checker names a closed error stage without private text", () => {
+  const directory = mkdtempSync(join(tmpdir(), "kfq-qualification-stage-test-"));
+  const path = join(directory, "qualification.json");
+  try {
+    const raw = rawReport();
+    raw.results[0] = {
+      ...raw.results[0],
+      kind: "error",
+      pass: false,
+      errorStage: "deterministic_gate",
+      findings: [],
+      detail: SECRET,
+    };
+    writeFileSync(path, JSON.stringify(redactQualificationReport(raw)));
+
+    const checked = spawnSync(process.execPath, ["scripts/check-qualification.mjs", path], {
+      cwd: new URL("..", import.meta.url),
+      encoding: "utf8",
+    });
+    assert.equal(checked.status, 1);
+    assert.match(checked.stdout, /kind=error, stage=deterministic_gate, findings=0/u);
+    assert.match(checked.stderr, /FAIL publishable/u);
     assert.ok(!checked.stdout.includes(SECRET));
     assert.ok(!checked.stderr.includes(SECRET));
   } finally {

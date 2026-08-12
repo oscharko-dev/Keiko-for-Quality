@@ -290,6 +290,14 @@ and concurrency — is documented by the CLI itself, the reference rather than a
 npm run review -- --help
 ```
 
+`--max-findings` is a publication limit, not an engine-validity limit. A completed review remains
+complete when generation produces more raw hypotheses than this value: sanitization,
+deduplication, evidence verification, and ranking reduce the cohort before reporting. The final
+total never exceeds the configured value, deterministic contract findings consume that total
+first, at most sixteen model-authored candidates reach verification, and at most eight
+model-authored findings publish. Lower values reduce both bounded model cohorts as well; they do
+not turn candidate volume into `engine_error`.
+
 The process exit code carries the settlement outcome, never merely "did it crash":
 
 | Code | Meaning                                                               |
@@ -335,7 +343,7 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 6. **The seeded qualification is synthetic.** `corpus/run.mjs` now enters through
    `performLocalReview`, so generation, Truth/Challenge/Falsifier verification, classification,
    deterministic gates, sanitization, and deduplication match the shipped local product path. Its
-   42 small controlled changes still do not prove that a large real review can finish reliably;
+   44 small controlled changes still do not prove that a large real review can finish reliably;
    the consumer seed and completion gates cover that separate product property, while Historical
    Replay measures verifier decisions against independently corroborated findings.
 
@@ -369,9 +377,9 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 ## Measured quality
 
 "The reviews are good" is not a claim anyone can check, so there is a corpus that turns it into one.
-`corpus/cases.mjs` holds 42 two-commit fixtures spanning 50 changed files — 31 with exactly one
+`corpus/cases.mjs` holds 44 two-commit fixtures spanning 52 changed files — 32 with exactly one
 seeded defect (four of them cross-artifact: the defect is invisible in the diff of any single file,
-issue #80), 11 that are clean and must produce silence — run through the release-selected generation
+issue #80), 12 that are clean and must produce silence — run through the release-selected generation
 workflow against a real model. No mocks: the question is about judgement, and judgement is what a
 mock cannot stand in for.
 

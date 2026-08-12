@@ -750,6 +750,46 @@ describe("areIntraRunDuplicates", () => {
     expect(areIntraRunDuplicates(a, b)).toBe(false);
   });
 
+  it("collapses the two exact-line Keiko#3089 baseline paraphrases below the ordinary 0.50 band", () => {
+    const a = intraCandidate({
+      startLine: 261,
+      endLine: 261,
+      body:
+        "Adjust uncoveredFiles to match new files count. When files reduced from 421 to 415 but " +
+        "uncoveredFiles remains 3, coverage metrics become inconsistent, inflating reported " +
+        "coverage percentage. CI coverage checks may report false positives, hiding uncovered files.",
+    });
+    const b = intraCandidate({
+      startLine: 261,
+      endLine: 261,
+      body:
+        "Adjust uncoveredFiles after reducing files count. When files changed from 421 to 415 but " +
+        "uncoveredFiles stayed 3, package-coverage-baseline.json now has inconsistent file metrics, " +
+        "potentially referencing non-existent files. CI coverage validation may report inflated " +
+        "coverage or break downstream scripts that assume consistency.",
+    });
+
+    expect(areIntraRunDuplicates(a, b)).toBe(true);
+    expect(areIntraRunDuplicates(b, a)).toBe(true);
+    // Coordinate identity licenses the narrower band. One line of drift keeps the ordinary,
+    // publish-biased 0.50 threshold and therefore does not collapse this measured 0.458 pair.
+    expect(areIntraRunDuplicates(a, { ...b, startLine: 262, endLine: 262 })).toBe(false);
+  });
+
+  it("does not let an exact-line sentence template replace ten shared substance tokens", () => {
+    const a = intraCandidate({
+      body:
+        "Reject stale token before cache write when guard accepts expired sessions, grants " +
+        "unauthorized access, bypasses policy, leaks identity, and records audit failure alpha bravo.",
+    });
+    const b = intraCandidate({
+      body:
+        "Reject stale token before cache write when guard accepts oversized payloads, exhausts " +
+        "worker memory, blocks queues, drops requests, and triggers timeout gamma delta.",
+    });
+    expect(areIntraRunDuplicates(a, b)).toBe(false);
+  });
+
   it("is never a duplicate when either side carries a nonpositive anchor", () => {
     const anchored = intraCandidate();
     const zeroAnchor = intraCandidate({ startLine: 0, endLine: 0 });

@@ -917,6 +917,27 @@ describe("intra-run deduplication (v0.12.0)", () => {
     expect(api.created).toHaveLength(1);
   });
 
+  it("publishes only one of the two exact-line Keiko#3089 baseline retellings", async () => {
+    const first = variant(
+      "Adjust uncoveredFiles to match new files count. When files reduced from 421 to 415 but " +
+        "uncoveredFiles remains 3, coverage metrics become inconsistent, inflating reported " +
+        "coverage percentage. CI coverage checks may report false positives, hiding uncovered files.",
+      { startLine: 261, endLine: 261, category: "test" },
+    );
+    const second = variant(
+      "Adjust uncoveredFiles after reducing files count. When files changed from 421 to 415 but " +
+        "uncoveredFiles stayed 3, package-coverage-baseline.json now has inconsistent file metrics, " +
+        "potentially referencing non-existent files. CI coverage validation may report inflated " +
+        "coverage or break downstream scripts that assume consistency.",
+      { startLine: 261, endLine: 261, category: "bug" },
+    );
+
+    const outcome = await publishFindings(context, [first, second], diagnostics);
+
+    expect(outcome).toMatchObject({ published: 1, suppressed: 1, suppressedIntraRun: 1 });
+    expect(api.created).toHaveLength(1);
+  });
+
   /**
    * The bug this pins: clustering used to compare a new candidate only against a cluster's CURRENT
    * representative, not every member. Three candidates arriving in a chain — A~B share vocabulary,
@@ -1166,6 +1187,25 @@ describe("intra-run deduplication (v0.12.0)", () => {
  * rather than only through `publishFindings`, which the suite above already covers end to end.
  */
 describe("planPublication and executePublication", () => {
+  it("plans the parser ceiling without pairwise body tokenization", async () => {
+    const findings = Array.from({ length: 1_000 }, (_, index) =>
+      finding({
+        startLine: 12,
+        endLine: 12,
+        // Three shared tokens stay below the similarity floor. The long unique fourth token
+        // forces the old pairwise implementation to rescan hundreds of MB across 499,500 pairs;
+        // the bounded index prepares only the first 256 candidates and carries the rest as
+        // singleton clusters; every finding still reaches later ranking.
+        content: `alpha beta gamma ${`${String(index)}x`.repeat(250)}`,
+      }),
+    );
+
+    const plan = await planPublication(context, findings, createSilentDiagnostics());
+
+    expect(plan.survivors).toHaveLength(1_000);
+    expect(plan.counters.suppressedIntraRun).toBe(0);
+  }, 10_000);
+
   /**
    * An existing IDENTITY-authored, unresolved comment whose marker is keyed on `rule` — lets a
    * test seed a marker for a category a finding has not been given yet, which is exactly what the

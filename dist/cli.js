@@ -1,4 +1,4 @@
-// Keiko for Quality CLI 0.23.0 — generated bundle, do not edit.
+// Keiko for Quality CLI 0.24.0 — generated bundle, do not edit.
 // Source: https://github.com/oscharko-dev/Keiko-for-Quality
 
 // src/cli.ts
@@ -1000,11 +1000,6 @@ function commonDisqualifier(mode, result, profile, config) {
   }
   const overBudget = budgetDisqualifier(mode, result, config);
   if (overBudget !== void 0) return overBudget;
-  if (result.findings.length > config.maxFindings) {
-    return incomplete(mode, "settlement.incomplete.engine_error", [], {
-      findings: result.findings.length
-    });
-  }
   return void 0;
 }
 function settleReconciled(inventory, result, profile, config, memoizedPaths) {
@@ -1610,6 +1605,14 @@ var REASON_CODES = [
   // where it failed to judge. The production evidence gate withholds those candidates and marks the
   // review incomplete, so an outage can be neither a false quality improvement nor a false clean.
   "publish.substantiated",
+  // Source-bound contradictions decided before any model call. The record carries only one closed
+  // rule ID per numeric key and its count — never a path, source line, finding, or evidence text.
+  "publish.deterministic_refutation",
+  // Closed count-only cohort transitions. Together these distinguish sanitization/deduplication,
+  // verification/ranking, and actual delivery without carrying candidate or model prose.
+  "publish.candidates.planned",
+  "publish.candidates.ranked",
+  "publish.pipeline.completed",
   // Bounded resume (#57, v0.11.0): the engine run ended without a usable success — a thrown run
   // error or a non-success status — and was re-invoked exactly once. Emitted at most once per
   // review; "incomplete never reads as clean" survives the resume regardless of which of the two
@@ -1665,6 +1668,9 @@ var REASON_CODES = [
   // rather than a reason because diagnostics carry no free text: the alternative to this line is
   // not a better message, it is silently losing findings.
   "engine.result.findings_rejected",
+  // Raw hypotheses emitted by the completed engine/resume path. Observational only: candidate
+  // volume is never a settlement disqualifier.
+  "engine.result.candidates",
   // Run-level spend accounting (v0.12.0): one record per engine execution naming what the review
   // actually cost — the engine's own reported total plus the classification side-calls. The parts
   // stay separate because they answer different questions (engine behaviour vs. adapter-added
@@ -3041,6 +3047,12 @@ var PARALLEL_MAPPING_EVIDENCE_POLICY = [
   "sibling reads the first key's source; symmetric repetition is not evidence of correctness.",
   "SILENT when a shown contract or explicit translation table proves the cross-map intentional."
 ].join(" ");
+var HELPER_CONTROL_FLOW_EVIDENCE_POLICY = [
+  "Helper/import \u2014 SILENT: every helper exit shown returns required call argument or throws before",
+  "the consumer; never invent `undefined` after that throw. Imports do not execute exports; guarded",
+  "platform calls stay silent. REPORT: shown invalid return, fallthrough, or caught failure reaches",
+  "the consumer, or module evaluation runs unavailable platform work before the guard."
+].join(" ");
 var OUTPUT_SINK_SIGNAL = /\b(?:console|diagnostic|error|log(?:ger)?|telemetry)\b/iu;
 var SENSITIVE_VALUE_SIGNAL = /\b(?:authorization|credential|password|secret|session(?:id|identifier)?|token)\b/iu;
 var IDENTIFIER_SIGNAL = /^[\w$]+$/u;
@@ -3067,6 +3079,11 @@ var POLICY_ROWS = [
     relevant: (evidence) => /(?:\b(?:action|dependency|digest|image|pin)\b|uses:\s|@[0-9a-f]{40}\b)/iu.test(evidence)
   },
   {
+    label: "helper-control-flow",
+    text: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
+    relevant: (evidence) => /\b(?:spawn|fallthrough|platform|win32)\b/iu.test(evidence)
+  },
+  {
     label: "boundary-omission",
     text: BOUNDARY_OMISSION_EVIDENCE_POLICY,
     relevant: (evidence) => /(?:\b(?:boundary|clear(?:ed|ing|s)?|empty|index|offset|optional)\b|\?\?|\.slice\s*\()/iu.test(
@@ -3086,7 +3103,7 @@ var POLICY_ROWS = [
   {
     label: "diagnostic-context",
     text: DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
-    relevant: (evidence) => /\b(?:catch|console|diagnostic|error|log(?:ger)?|telemetry|throw)\b/iu.test(evidence)
+    relevant: (evidence) => /\b(?:catch|console|diagnostic|log(?:ger)?|telemetry)\b/iu.test(evidence)
   },
   {
     label: "trigger-guard",
@@ -3206,6 +3223,11 @@ var CATCH_ALL_RULE = [
   `- **parallel keyed mappings** \u2014 ${PARALLEL_MAPPING_EVIDENCE_POLICY}`,
   `- **sensitive values reaching output sinks** \u2014 ${SENSITIVE_OUTPUT_EVIDENCE_POLICY}`,
   `- **diagnostic context in error paths** \u2014 ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
+  `- **helper exits and module evaluation** \u2014 ${HELPER_CONTROL_FLOW_EVIDENCE_POLICY}`,
+  "- **before claiming two counters, baseline fields, or snapshot values must change together** \u2014",
+  "  trace the schema, producer, or consumer that establishes that dependency. Adjacency, similar",
+  "  names, and a changed total are not an invariant; independently computed counts may correctly",
+  "  stay unchanged when a neighbouring total changes.",
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
   "  or termination can recommend a fix that weakens correct code instead of improving it.",
@@ -3746,7 +3768,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v13";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v15";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;
@@ -7075,6 +7097,9 @@ var LINE_TOLERANCE = 2;
 var LINE_DRIFT_TOLERANCE = 40;
 var SIMILARITY_THRESHOLD = 0.5;
 var MIN_SHARED_TOKENS = 4;
+var MIN_INTRA_RUN_SHARED_TOKENS = MIN_SHARED_TOKENS;
+var EXACT_INTERVAL_SIMILARITY_THRESHOLD = 0.43;
+var MIN_EXACT_INTERVAL_SHARED_TOKENS = 10;
 var DISPOSITION_SIMILARITY_THRESHOLD = 0.43;
 var MIN_DISPOSITION_SHARED_TOKENS = 14;
 var RECURRENCE_THRESHOLD = 0.7;
@@ -7229,8 +7254,20 @@ function recurrenceBodiesMatch(candidateBody, existingBody) {
   );
   return shared >= MIN_RECURRENCE_SHARED_TOKENS && score >= RECURRENCE_THRESHOLD;
 }
-function areIntraRunDuplicates(a, b) {
-  return a.path === b.path && linesOverlap(a, b) && similarByContent(a.body, b.body);
+function prepareIntraRunCandidate(candidate) {
+  return {
+    ...candidate,
+    contentTokens: tokenize(candidate.body),
+    fencedCodeBlocks: codeBlocks(candidate.body)
+  };
+}
+function arePreparedIntraRunDuplicates(a, b) {
+  if (a.path !== b.path || !linesOverlap(a, b)) return false;
+  const sharesCode = [...a.fencedCodeBlocks].some((block) => b.fencedCodeBlocks.has(block));
+  if (sharesCode) return true;
+  const ordinary = tokenOverlap(a.contentTokens, b.contentTokens);
+  if (ordinary.shared >= MIN_SHARED_TOKENS && ordinary.score >= SIMILARITY_THRESHOLD) return true;
+  return a.startLine === b.startLine && a.endLine === b.endLine && ordinary.shared >= MIN_EXACT_INTERVAL_SHARED_TOKENS && ordinary.score >= EXACT_INTERVAL_SIMILARITY_THRESHOLD;
 }
 
 // src/publish/publisher.ts
@@ -7353,32 +7390,123 @@ function isBetterRepresentative(candidate, current) {
   if (candidateRank !== currentRank) return candidateRank > currentRank;
   return candidate.sanitizedBody.length > current.sanitizedBody.length;
 }
-function clusterIntraRunDuplicates(candidates) {
-  const clusters = [];
-  for (const candidate of candidates) {
-    const cluster = clusters.find(
-      (existing) => existing.members.some(
-        (member) => areIntraRunDuplicates(toCandidateForDedup(candidate), toCandidateForDedup(member))
-      )
-    );
-    if (cluster === void 0) {
-      clusters.push({ representative: candidate, members: [candidate] });
-      continue;
-    }
-    cluster.members.push(candidate);
-    if (isBetterRepresentative(candidate, cluster.representative)) {
-      cluster.representative = candidate;
+function pathPostings(index, path) {
+  const existing = index.get(path);
+  if (existing !== void 0) return existing;
+  const created = /* @__PURE__ */ new Map();
+  index.set(path, created);
+  return created;
+}
+function appendPosting(postings, value, candidate) {
+  const existing = postings.get(value);
+  if (existing === void 0) postings.set(value, [candidate]);
+  else existing.push(candidate);
+}
+function indexPreparedCandidate(index, member) {
+  const tokenPostings = pathPostings(index.tokens, member.similarity.path);
+  for (const token of member.similarity.contentTokens) appendPosting(tokenPostings, token, member);
+  const blockPostings = pathPostings(index.codeBlocks, member.similarity.path);
+  for (const block of member.similarity.fencedCodeBlocks)
+    appendPosting(blockPostings, block, member);
+}
+function tokenEligibleCandidates(prepared, index) {
+  const tokenHits = /* @__PURE__ */ new Map();
+  const tokenPostings = index.tokens.get(prepared.similarity.path);
+  if (tokenPostings !== void 0) {
+    for (const token of prepared.similarity.contentTokens) {
+      for (const prior of tokenPostings.get(token) ?? []) {
+        tokenHits.set(prior, (tokenHits.get(prior) ?? 0) + 1);
+      }
     }
   }
+  const eligible = /* @__PURE__ */ new Set();
+  for (const [prior, shared] of tokenHits) {
+    if (shared >= MIN_INTRA_RUN_SHARED_TOKENS) eligible.add(prior);
+  }
+  return eligible;
+}
+function addCodeBlockCandidates(eligible, prepared, index) {
+  const blockPostings = index.codeBlocks.get(prepared.similarity.path);
+  if (blockPostings === void 0) return;
+  for (const block of prepared.similarity.fencedCodeBlocks) {
+    for (const prior of blockPostings.get(block) ?? []) eligible.add(prior);
+  }
+}
+function earliestMatchingCluster(eligible, prepared) {
+  let selected;
+  for (const prior of eligible) {
+    if ((selected === void 0 || prior.cluster.index < selected.index) && arePreparedIntraRunDuplicates(prepared.similarity, prior.similarity)) {
+      selected = prior.cluster;
+    }
+  }
+  return selected;
+}
+function indexedMatchingCluster(prepared, index) {
+  const eligible = tokenEligibleCandidates(prepared, index);
+  addCodeBlockCandidates(eligible, prepared, index);
+  return earliestMatchingCluster(eligible, prepared);
+}
+var MAX_INTRA_RUN_DEDUP_CANDIDATES = 256;
+function singletonCluster(candidate, index) {
+  const cluster = { index, representative: candidate, members: [] };
+  cluster.members.push({
+    candidate,
+    // Never indexed or compared. Preserve one carrier shape for the final partition only.
+    similarity: {
+      ...toCandidateForDedup(candidate),
+      contentTokens: /* @__PURE__ */ new Set(),
+      fencedCodeBlocks: /* @__PURE__ */ new Set()
+    },
+    cluster
+  });
+  return cluster;
+}
+function newIndexedCluster(candidate, prepared, index, similarityIndex) {
+  const cluster = { index, representative: candidate, members: [] };
+  const member = { ...prepared, cluster };
+  cluster.members.push(member);
+  indexPreparedCandidate(similarityIndex, member);
+  return cluster;
+}
+function appendIndexedMember(cluster, prepared, index) {
+  const member = { ...prepared, cluster };
+  cluster.members.push(member);
+  indexPreparedCandidate(index, member);
+  if (isBetterRepresentative(prepared.candidate, cluster.representative)) {
+    cluster.representative = prepared.candidate;
+  }
+}
+function partitionClusters(clusters) {
   const representatives = [];
   const suppressed = [];
   for (const cluster of clusters) {
     representatives.push(cluster.representative);
     for (const member of cluster.members) {
-      if (member !== cluster.representative) suppressed.push(member);
+      if (member.candidate !== cluster.representative) suppressed.push(member.candidate);
     }
   }
   return { representatives, suppressed };
+}
+function clusterIntraRunDuplicates(candidates) {
+  const clusters = [];
+  const index = { tokens: /* @__PURE__ */ new Map(), codeBlocks: /* @__PURE__ */ new Map() };
+  for (const [candidateIndex, candidate] of candidates.entries()) {
+    if (candidateIndex >= MAX_INTRA_RUN_DEDUP_CANDIDATES) {
+      clusters.push(singletonCluster(candidate, clusters.length));
+      continue;
+    }
+    const prepared = {
+      candidate,
+      similarity: prepareIntraRunCandidate(toCandidateForDedup(candidate))
+    };
+    const cluster = indexedMatchingCluster(prepared, index);
+    if (cluster === void 0) {
+      clusters.push(newIndexedCluster(candidate, prepared, clusters.length, index));
+      continue;
+    }
+    appendIndexedMember(cluster, prepared, index);
+  }
+  return partitionClusters(clusters);
 }
 function planCrossRun(context, candidate, prefetch, counters, diagnostics) {
   const { finding, sanitizedBody } = candidate;
@@ -7416,9 +7544,11 @@ async function planPublication(context, findings, diagnostics, prefetch) {
   const resolvedPrefetch = prefetch ?? await prefetchExistingConversations(context);
   const counters = emptyCounters();
   const sanitized = [];
+  const rejectedSanitizationCandidates = [];
   for (const finding of findings) {
     const candidate = sanitizeOne(context, finding, counters, diagnostics);
-    if (candidate !== void 0) sanitized.push(candidate);
+    if (candidate === void 0) rejectedSanitizationCandidates.push(finding);
+    else sanitized.push(candidate);
   }
   const { representatives, suppressed: intraRunDuplicates } = clusterIntraRunDuplicates(sanitized);
   counters.suppressed += intraRunDuplicates.length;
@@ -7433,6 +7563,7 @@ async function planPublication(context, findings, diagnostics, prefetch) {
   }
   return {
     survivors,
+    rejectedSanitizationCandidates,
     prefetch: resolvedPrefetch,
     counters: {
       suppressed: counters.suppressed,
@@ -8218,18 +8349,26 @@ function buildChangeEvidence(headText, baseText, finding, options2 = {}) {
 // src/publish/pr-wide-selection.ts
 var MAX_FRESH_MODEL_FINDINGS_PER_PR = 8;
 var MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR = MAX_FRESH_MODEL_FINDINGS_PER_PR * 2;
-function selectPrWideFindings(survivors, modelOriginals, replacements = /* @__PURE__ */ new Map()) {
-  return selectModelWithLimit(
+function selectPrWideFindings(survivors, modelOriginals, maxFindings, replacements = /* @__PURE__ */ new Map()) {
+  return selectWithLimits(
     survivors,
     modelOriginals,
-    MAX_FRESH_MODEL_FINDINGS_PER_PR,
+    maxFindings,
+    Math.min(MAX_FRESH_MODEL_FINDINGS_PER_PR, maxFindings),
     replacements
   );
 }
-function selectVerificationCandidates(survivors, modelOriginals) {
-  return selectModelWithLimit(survivors, modelOriginals, MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR);
+function selectVerificationCandidates(survivors, modelOriginals, maxFindings) {
+  return selectWithLimits(
+    survivors,
+    modelOriginals,
+    maxFindings,
+    Math.min(MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR, maxFindings),
+    /* @__PURE__ */ new Map(),
+    "verification"
+  );
 }
-function selectModelWithLimit(survivors, modelOriginals, limit, replacements = /* @__PURE__ */ new Map()) {
+function selectWithLimits(survivors, modelOriginals, totalLimit, modelLimit, replacements = /* @__PURE__ */ new Map(), selectionStage = "publication") {
   const entries = survivors.map((survivor, index) => {
     const original = survivor.finding;
     const replacement = replacements.get(original);
@@ -8241,16 +8380,43 @@ function selectModelWithLimit(survivors, modelOriginals, limit, replacements = /
       modelAuthored: modelOriginals.has(original)
     };
   });
-  const selectedModelIndexes = new Set(
+  const selectedDeterministicIndexes = new Set(
+    entries.filter((entry) => !entry.modelAuthored).slice(0, totalLimit).map((entry) => entry.index)
+  );
+  const remainingTotal = Math.max(0, totalLimit - selectedDeterministicIndexes.size);
+  const selectedModelIndexes = selectionStage === "verification" ? selectedUntrustedModels(entries, Math.min(modelLimit, remainingTotal)) : selectedModels(entries, Math.min(modelLimit, remainingTotal));
+  return partitionSelection(entries, selectedDeterministicIndexes, selectedModelIndexes);
+}
+function selectedUntrustedModels(entries, limit) {
+  const models = entries.filter((entry) => entry.modelAuthored);
+  const unresolved = models.filter((entry) => needsClassification(entry.effectiveFinding));
+  const shaped = models.filter((entry) => !needsClassification(entry.effectiveFinding));
+  const unresolvedQuota = Math.min(unresolved.length, Math.ceil(limit / 2));
+  const shapedQuota = Math.min(shaped.length, limit - unresolvedQuota);
+  const selected = /* @__PURE__ */ new Set([
+    ...unresolved.slice(0, unresolvedQuota).map((entry) => entry.index),
+    ...shaped.slice(0, shapedQuota).map((entry) => entry.index)
+  ]);
+  if (selected.size === limit) return selected;
+  for (const entry of models) {
+    if (selected.size === limit) break;
+    selected.add(entry.index);
+  }
+  return selected;
+}
+function selectedModels(entries, limit) {
+  return new Set(
     entries.filter((entry) => entry.modelAuthored).sort((left, right) => {
       const rankDifference = severityRank2(right.effectiveFinding.severity) - severityRank2(left.effectiveFinding.severity);
       return rankDifference === 0 ? left.index - right.index : rankDifference;
     }).slice(0, limit).map((entry) => entry.index)
   );
+}
+function partitionSelection(entries, deterministicIndexes, modelIndexes) {
   const kept = [];
   const rankedOutOriginals = [];
   for (const entry of entries) {
-    if (!entry.modelAuthored || selectedModelIndexes.has(entry.index)) {
+    if (entry.modelAuthored && modelIndexes.has(entry.index) || !entry.modelAuthored && deterministicIndexes.has(entry.index)) {
       kept.push(entry.effective);
     } else {
       rankedOutOriginals.push(entry.original);
@@ -10301,6 +10467,8 @@ var TRUSTED_HUNK_EVIDENCE = Symbol("keiko-for-quality.trusted-hunk-evidence");
 var HEAD_ROW = /^H:([1-9]\d*)\| (.*)$/u;
 var BASE_ROW = /^B:([1-9]\d*)\| (.*)$/u;
 var CHANGED_HEAD_ROW = /^D:H:([1-9]\d*)\| \+(.*)$/u;
+var REPOSITORY_LABEL = /^H([1-8]) = (.+)$/u;
+var REPOSITORY_ROW = /^H([1-8]):([1-9]\d*)\| (.*)$/u;
 var IDENTIFIER4 = /^[A-Za-z_$][\w$]*$/u;
 var SENSITIVE_CONTEXT_FIELD = /(?:authorization|body|content|credential|password|payload|secret|session|token)/iu;
 var LOG_METHODS = /* @__PURE__ */ new Set(["debug", "error", "info", "log", "warn"]);
@@ -10352,11 +10520,64 @@ function dossierMatchesSources(text, head, base) {
   }
   return sourceRowsSeen > 0;
 }
+function defusedRepositoryLine(value) {
+  return value.replaceAll("<repository_evidence>", "<repository-evidence>").replaceAll("</repository_evidence>", "</repository-evidence>").replaceAll("<change_evidence>", "<change-evidence>").replaceAll("</change_evidence>", "</change-evidence>");
+}
+function hasExactHeadBinding(text, headCommit) {
+  return headCommit !== void 0 && /^[0-9a-f]{40}$/u.test(headCommit) && text.split("\n").includes(`Exact HEAD commit: ${headCommit}`);
+}
+function repositoryPaths(text) {
+  const paths = /* @__PURE__ */ new Map();
+  for (const row of text.split("\n")) {
+    const label = REPOSITORY_LABEL.exec(row);
+    if (label === null) continue;
+    const [number, encodedPath] = [label[1], label[2]];
+    if (number === void 0 || encodedPath === void 0 || paths.has(number)) return void 0;
+    const path = decodeEvidenceSourcePath(encodedPath);
+    if (path === void 0) return void 0;
+    paths.set(number, path);
+  }
+  return paths;
+}
+function boundRepositoryRow(match, paths, sources) {
+  const path = paths.get(match[1] ?? "");
+  const line = Number(match[2]);
+  const source = path === void 0 ? void 0 : sources.get(path);
+  const sourceLine2 = sourceRows(source)?.[line - 1];
+  return path !== void 0 && source !== void 0 && sourceLine2 !== void 0 && defusedRepositoryLine(sourceLine2) === match[3] ? [path, source] : void 0;
+}
+function boundRepositorySources(text, sources, headCommit) {
+  if (sources.size === 0) return /* @__PURE__ */ new Map();
+  if (!hasExactHeadBinding(text, headCommit)) return void 0;
+  const paths = repositoryPaths(text);
+  if (paths === void 0) return void 0;
+  const bound = /* @__PURE__ */ new Map();
+  for (const row of text.split("\n")) {
+    const match = REPOSITORY_ROW.exec(row);
+    if (match === null) continue;
+    const entry = boundRepositoryRow(match, paths, sources);
+    if (entry === void 0) return void 0;
+    bound.set(...entry);
+  }
+  return bound.size === sources.size ? bound : void 0;
+}
 function bindTrustedHunkEvidence(input) {
   const head = sourceRows(input.headSource);
   const base = sourceRows(input.baseSource);
   if (input.text === "" || !dossierMatchesSources(input.text, head, base)) return void 0;
-  return Object.freeze({ ...input, [TRUSTED_HUNK_EVIDENCE]: true });
+  const repositorySources = boundRepositorySources(
+    input.text,
+    input.headRepositorySources ?? /* @__PURE__ */ new Map(),
+    input.headCommit
+  );
+  if (repositorySources === void 0) return void 0;
+  return Object.freeze({
+    text: input.text,
+    headSource: input.headSource,
+    baseSource: input.baseSource,
+    headRepositorySources: repositorySources,
+    [TRUSTED_HUNK_EVIDENCE]: true
+  });
 }
 function carriesTrustedEvidenceBrand(value) {
   return Object.hasOwn(value, TRUSTED_HUNK_EVIDENCE) && Reflect.get(value, TRUSTED_HUNK_EVIDENCE) === true;
@@ -10900,12 +11121,404 @@ function enclosingRethrowingCatch(lines, addition) {
   }
   return false;
 }
-function closedClaimRefutation(finding, evidence) {
-  if (!carriesTrustedEvidenceBrand(evidence)) return void 0;
-  if (evidence.headSource === void 0 || evidence.baseSource === void 0) return void 0;
-  const changed = changedHeadLines(evidence.text);
-  const head = sourceLines(evidence.headSource, changed);
-  const base = sourceLines(evidence.baseSource, /* @__PURE__ */ new Set());
+function terminalHelperClaim(content) {
+  const claim = content.slice(0, MAX_CLAIM_CHARS);
+  const describesInvalidResult = [
+    /\bundefined\b/iu,
+    /\bnull\b/iu,
+    /fall(?:s|ing)?\s*through/iu,
+    /without\s+return/iu,
+    /invalid\s+(?:argument|command|path)/iu,
+    /fails?\s+to\s+return/iu
+  ].some((pattern) => pattern.test(claim));
+  return /\b(?:spawn|command|executable|tool|helper|path)\b/iu.test(claim) && describesInvalidResult;
+}
+function changedSpawnHelper(finding, lines) {
+  const matches = lines.flatMap((line) => {
+    if (!line.changed || !insideFinding(line.line, finding)) return [];
+    const name = /\bspawn\s*\(\s*([A-Za-z_$][\w$]*)\s*\(/u.exec(line.code)?.[1];
+    return name === void 0 ? [] : [{ name, line }];
+  });
+  return matches.length === 1 ? matches[0] : void 0;
+}
+function namedFunctionRange(lines, name) {
+  const expected = escaped(name);
+  const declaration = new RegExp(
+    String.raw`^\s*(?:export\s+)?function\s+${expected}\s*\([^)]*\)\s*(?::\s*[^\{]+)?\{\s*$`,
+    "u"
+  );
+  const openings = lines.flatMap((line, index) => declaration.test(line.code) ? [index] : []);
+  if (openings.length !== 1) return void 0;
+  const opening = openings[0];
+  const closing = opening === void 0 ? void 0 : matchingBrace2(lines, opening);
+  return opening === void 0 || closing === void 0 ? void 0 : { opening, closing };
+}
+function withoutOptionalSemicolon(value) {
+  const trimmed = value.trim();
+  return trimmed.endsWith(";") ? trimmed.slice(0, -1).trimEnd() : trimmed;
+}
+function isIdentifier(value) {
+  return /^[A-Za-z_$][\w$]*$/u.test(value);
+}
+function isStringLiteralExpression(value) {
+  const quote = value[0];
+  if (value.length < 2 || quote === void 0 || value.at(-1) !== quote) return false;
+  if (quote === '"' || quote === "'") return quotedLiteral(value) !== void 0;
+  if (quote !== "`") return false;
+  for (let index = 1; index < value.length - 1; index += 1) {
+    if (value[index] === "`") return false;
+    if (value[index] === "\\") index += 1;
+  }
+  return true;
+}
+function provenStringBinding(text) {
+  const statement = withoutOptionalSemicolon(text);
+  if (!statement.startsWith("const ")) return void 0;
+  const assignment = statement.indexOf("=", 6);
+  if (assignment < 0) return void 0;
+  const binding = statement.slice(6, assignment).trim();
+  const value = statement.slice(assignment + 1).trim();
+  return isIdentifier(binding) && isStringLiteralExpression(value) ? binding : void 0;
+}
+function provenStringBindings(lines) {
+  const bindings = /* @__PURE__ */ new Set();
+  for (const line of lines) {
+    const binding = provenStringBinding(line.text);
+    if (binding !== void 0) bindings.add(binding);
+  }
+  return bindings;
+}
+function validStringReturn(line, bindings) {
+  const returnAt = line.code.search(/\breturn\b/u);
+  if (returnAt < 0) return true;
+  const value = withoutOptionalSemicolon(line.text.slice(returnAt + "return".length)).trim();
+  if (value === "") return false;
+  if (bindings.has(value)) return true;
+  return isStringLiteralExpression(value);
+}
+function helperReturnsOrThrows(lines, range) {
+  const opening = lines[range.opening];
+  if (opening === void 0) return false;
+  const body = lines.slice(range.opening + 1, range.closing);
+  const stringBindings = provenStringBindings(body);
+  if (body.some(
+    (line) => /\b(?:async\s+function|catch|finally|function|yield)\b|=>/u.test(line.code)
+  ) || body.some((line) => !validStringReturn(line, stringBindings))) {
+    return false;
+  }
+  const returns = body.filter((line) => /\breturn\b/u.test(line.code));
+  if (returns.length === 0) return false;
+  const terminal = body.findLast((line) => line.code.trim() !== "");
+  if (terminal?.depth !== opening.depth + 1) return false;
+  const terminalStatement = withoutOptionalSemicolon(terminal.code);
+  return terminalStatement.startsWith("throw ") || terminalStatement.startsWith("return ");
+}
+function terminalHelperRefutation(finding, lines) {
+  if (!terminalHelperClaim(finding.content)) return void 0;
+  const consumer = changedSpawnHelper(finding, lines);
+  if (consumer === void 0) return void 0;
+  const range = namedFunctionRange(lines, consumer.name);
+  const consumerIndex = lines.indexOf(consumer.line);
+  if (range === void 0 || range.closing >= consumerIndex) return void 0;
+  const reassigned = new RegExp(
+    String.raw`\b${escaped(consumer.name)}\s*(?:(?:&&|\|\||\?\?)?=(?!=)|\+\+|--)`,
+    "u"
+  );
+  const shadowedParameter = new RegExp(
+    String.raw`(?:\bfunction\s+[A-Za-z_$][\w$]*\s*\([^)]*\b${escaped(consumer.name)}\b|\([^)]*\b${escaped(consumer.name)}\b[^)]*\)\s*=>)`,
+    "u"
+  );
+  if (
+    // Scan every line outside the proved helper body. A same-line parameter can shadow the call,
+    // and a later module-scope assignment can execute before an exported consumer is invoked.
+    lines.some(
+      (line, index) => (index < range.opening || index > range.closing) && (reassigned.test(line.code) || shadowedParameter.test(line.code))
+    )
+  ) {
+    return void 0;
+  }
+  if (!helperReturnsOrThrows(lines, range)) return void 0;
+  return { ruleId: "terminal_helper_contract", evidenceRefs: refsAt(consumer.line.line) };
+}
+function resetIsolationClaim(content) {
+  const claim = content.slice(0, MAX_CLAIM_CHARS);
+  return /(?:resetModules|module\s+(?:cache|registry)|state\s+bleed|cross[- ](?:test|case))/iu.test(
+    claim
+  ) && /(?:redundan|unnecess|remove|ineffective|insufficient|still\s+(?:cache|share|reuse)|does\s+not)/iu.test(
+    claim
+  );
+}
+function previousCodeLine(lines, index) {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const line = lines[cursor];
+    if (line !== void 0 && line.code.trim() !== "") return line;
+  }
+  return void 0;
+}
+function dynamicImportPairs(lines) {
+  const pairs = [];
+  let imports = 0;
+  for (const [index, line] of lines.entries()) {
+    const dynamicImports = [...line.text.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)/gu)];
+    if (dynamicImports.length === 0) continue;
+    if (dynamicImports.length !== 1) return void 0;
+    const target = /\bawait\s+import\(\s*["']([^"']+)["']\s*\)/u.exec(line.text)?.[1];
+    if (target === void 0) return void 0;
+    imports += 1;
+    const reset = previousCodeLine(lines, index);
+    if (reset?.depth !== line.depth || withoutOptionalSemicolon(reset.code) !== "vi.resetModules()") {
+      return void 0;
+    }
+    pairs.push({ target, reset, imported: line });
+  }
+  return imports === 0 ? void 0 : pairs;
+}
+function staticallyImportsTarget(lines, targets) {
+  return lines.some((line) => {
+    const statement = withoutOptionalSemicolon(line.text);
+    if (!statement.startsWith("import ")) return false;
+    const fromAt = statement.lastIndexOf(" from ");
+    const target = fromAt < 0 ? void 0 : quotedLiteral(statement.slice(fromAt + 6).trim());
+    return target !== void 0 && targets.has(target);
+  });
+}
+function namedImport(text) {
+  const statement = withoutOptionalSemicolon(text);
+  if (!statement.startsWith("import")) return void 0;
+  const specifiers = statement.slice("import".length).trimStart();
+  if (!specifiers.startsWith("{")) return void 0;
+  const closing = specifiers.indexOf("}");
+  if (closing < 0) return void 0;
+  const remainder = specifiers.slice(closing + 1).trim();
+  if (!remainder.startsWith("from ")) return void 0;
+  const source = quotedLiteral(remainder.slice("from ".length).trim());
+  if (source === void 0) return void 0;
+  const names = specifiers.slice(1, closing).split(",").map((specifier) => specifier.trim());
+  return { names, source };
+}
+function importsVitestViDirectly(lines) {
+  return lines.some((line) => {
+    const imported = namedImport(line.text);
+    return imported?.source === "vitest" && imported.names.includes("vi");
+  });
+}
+function resetIsolationRefutation(finding, lines) {
+  if (!resetIsolationClaim(finding.content)) return void 0;
+  const pairs = dynamicImportPairs(lines);
+  if (pairs === void 0) return void 0;
+  const targets = new Set(pairs.map((pair) => pair.target));
+  if (pairs.length < 2 || targets.size !== 1 || staticallyImportsTarget(lines, targets) || !importsVitestViDirectly(lines) || lines.some(
+    (line) => /\b(?:const|let|var|function|class)\s+vi\b/u.test(line.code) || /\bcatch\s*\(\s*vi\b/u.test(line.code) || /\bfunction\s+[A-Za-z_$][\w$]*\s*\([^)]*\bvi\b/u.test(line.code) || /[(,]\s*vi\s*[,)=:]/u.test(line.code) || /\bvi\s+as\s+[A-Za-z_$]/u.test(line.code)
+  )) {
+    return void 0;
+  }
+  const changed = pairs.find(
+    (pair) => (pair.reset.changed || pair.imported.changed) && (insideFinding(pair.reset.line, finding) || insideFinding(pair.imported.line, finding))
+  );
+  if (changed === void 0) return void 0;
+  return {
+    ruleId: "reset_before_dynamic_import",
+    evidenceRefs: refsAt(changed.reset.line)
+  };
+}
+function redactionClaim(content) {
+  const claim = content.slice(0, MAX_CLAIM_CHARS);
+  return /(?:redact|mask|saniti[sz]|leak|expos)/iu.test(claim) && /(?:secret|sensitive|deployment|suffix|model\s*id)/iu.test(claim);
+}
+function quotedLiteral(value) {
+  if (value.startsWith('"') && value.endsWith('"')) {
+    try {
+      const parsed = JSON.parse(value);
+      return typeof parsed === "string" ? parsed : void 0;
+    } catch {
+      return void 0;
+    }
+  }
+  if (!value.startsWith("'") || !value.endsWith("'") || value.slice(1, -1).includes("\\")) {
+    return void 0;
+  }
+  return value.slice(1, -1);
+}
+function afterWhitespace(text, offset) {
+  let cursor = offset;
+  while (/\s/u.test(text[cursor] ?? "")) cursor += 1;
+  return cursor;
+}
+function afterToken(text, offset, token) {
+  const cursor = afterWhitespace(text, offset);
+  return text.startsWith(token, cursor) ? cursor + token.length : void 0;
+}
+function identifierToken(text, offset) {
+  const start = afterWhitespace(text, offset);
+  let after = start;
+  while (identifierCharacter(text[after])) after += 1;
+  const value = text.slice(start, after);
+  return isIdentifier(value) ? { value, after } : void 0;
+}
+function quotedToken(text, offset) {
+  const start = afterWhitespace(text, offset);
+  const quote = text[start];
+  if (quote !== '"' && quote !== "'") return void 0;
+  for (let cursor = start + 1; cursor < text.length; cursor += 1) {
+    if (text[cursor] === "\\") {
+      cursor += 1;
+    } else if (text[cursor] === quote) {
+      return { value: text.slice(start, cursor + 1), after: cursor + 1 };
+    }
+  }
+  return void 0;
+}
+function completedExactAssertion(text, functionName, input, expected, line) {
+  const closing = afterToken(text, expected.after, ")");
+  if (closing === void 0 || withoutOptionalSemicolon(text.slice(closing)) !== "") {
+    return void 0;
+  }
+  const inputValue = quotedLiteral(input.value);
+  const expectedValue = quotedLiteral(expected.value);
+  if (inputValue === void 0 || expectedValue === void 0) return void 0;
+  return { functionName: functionName.value, input: inputValue, expected: expectedValue, line };
+}
+function parsedExactAssertion(text, line) {
+  const functionAt = afterToken(text, 0, "expect(");
+  if (functionAt === void 0) return void 0;
+  const functionName = identifierToken(text, functionAt);
+  if (functionName === void 0) return void 0;
+  const inputAt = afterToken(text, functionName.after, "(");
+  if (inputAt === void 0) return void 0;
+  const input = quotedToken(text, inputAt);
+  if (input === void 0) return void 0;
+  const expectedAt = afterToken(text, input.after, ")).toBe(");
+  if (expectedAt === void 0) return void 0;
+  const expected = quotedToken(text, expectedAt);
+  if (expected === void 0) return void 0;
+  return completedExactAssertion(text, functionName, input, expected, line);
+}
+function exactAssertionAtLine(line, finding) {
+  if (!line.changed || !insideFinding(line.line, finding)) return void 0;
+  return parsedExactAssertion(line.text, line);
+}
+function changedExactAssertion(finding, lines) {
+  const matches = lines.flatMap((line) => {
+    const match = exactAssertionAtLine(line, finding);
+    return match === void 0 ? [] : [match];
+  });
+  return matches.length === 1 ? matches[0] : void 0;
+}
+function normalizedRelativePath(from, target) {
+  if (!target.startsWith("./") && !target.startsWith("../")) return void 0;
+  const parts = [...from.split("/").slice(0, -1), ...target.split("/")];
+  const normalized = [];
+  for (const part of parts) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      if (normalized.length === 0) return void 0;
+      normalized.pop();
+    } else {
+      normalized.push(part);
+    }
+  }
+  return normalized.join("/");
+}
+function importedSource(evidence, finding, testLines, functionName) {
+  const imports = testLines.flatMap((line) => {
+    const imported = namedImport(line.text);
+    return imported?.names.filter((name) => name === functionName).length === 1 ? [imported.source] : [];
+  });
+  if (imports.length !== 1) return void 0;
+  const path = normalizedRelativePath(finding.path, imports[0] ?? "");
+  if (path === void 0) return void 0;
+  const javascriptExtension = [".js", ".cjs", ".mjs"].find((extension) => path.endsWith(extension));
+  const candidates = javascriptExtension === void 0 ? [path] : [
+    path,
+    `${path.slice(0, -javascriptExtension.length)}.ts`,
+    `${path.slice(0, -javascriptExtension.length)}.tsx`
+  ];
+  const matches = candidates.flatMap((candidate) => {
+    const source = evidence.headRepositorySources.get(candidate);
+    return source === void 0 ? [] : [source];
+  });
+  return matches.length === 1 ? matches[0] : void 0;
+}
+function shadowsImportedBinding(lines, functionName) {
+  const name = escaped(functionName);
+  const declaration = new RegExp(String.raw`\b(?:const|let|var|function|class)\s+${name}\b`, "u");
+  const parameter = new RegExp(
+    String.raw`(?:\bcatch\s*\(\s*${name}\b|\bfunction\s+[A-Za-z_$][\w$]*\s*\([^)]*\b${name}\b|(?:\(|,)\s*${name}\s*(?:[,)=:]))`,
+    "u"
+  );
+  return lines.some((line) => declaration.test(line.code) || parameter.test(line.code));
+}
+function soleSeparatorDeclaration(body, parameter) {
+  const declarationPattern = new RegExp(
+    String.raw`^\s*const\s+([A-Za-z_$][\w$]*)\s*=\s*${escaped(parameter)}\.indexOf\(\s*(["'][^"']+["'])\s*\)\s*;?\s*$`,
+    "u"
+  );
+  const declarations = body.flatMap((line) => {
+    const match = declarationPattern.exec(line.text);
+    const separator = match?.[2] === void 0 ? void 0 : quotedLiteral(match[2]);
+    return match?.[1] === void 0 || separator === void 0 ? [] : [{ binding: match[1], separator, line }];
+  });
+  return declarations.length === 1 ? declarations[0] : void 0;
+}
+function hasExactRedactionReturn(body, parameter, binding) {
+  const returnPattern = new RegExp(
+    String.raw`^\s*return\s+${escaped(binding)}\s*===\s*-1\s*\?\s*${escaped(parameter)}\s*:\s*${escaped(parameter)}\.slice\(\s*0\s*,\s*${escaped(binding)}\s*\)\s*;?\s*$`,
+    "u"
+  );
+  return body.filter((line) => returnPattern.test(line.code)).length === 1 && body.filter((line) => /\breturn\b/u.test(line.code)).length === 1;
+}
+function redactionBindingsAreStable(body, parameter, declaration) {
+  return !body.some(
+    (line) => mutatesIdentifier(line.code, parameter) || line !== declaration.line && mutatesIdentifier(line.code, declaration.binding)
+  );
+}
+function assertionMatchesSeparator(assertion, separator) {
+  const separatorIndex = assertion.input.indexOf(separator);
+  const expected = separatorIndex < 0 ? assertion.input : assertion.input.slice(0, separatorIndex);
+  return assertion.expected === expected;
+}
+function implementationProvesFirstSeparatorRedaction(source, assertion) {
+  const lines = sourceLines(source, /* @__PURE__ */ new Set());
+  const range = namedFunctionRange(lines, assertion.functionName);
+  if (range === void 0) return false;
+  const opening = lines[range.opening]?.code ?? "";
+  const parameter = new RegExp(
+    String.raw`\bfunction\s+${escaped(assertion.functionName)}\s*\(\s*([A-Za-z_$][\w$]*)`,
+    "u"
+  ).exec(opening)?.[1];
+  if (parameter === void 0) return false;
+  const body = lines.slice(range.opening + 1, range.closing);
+  const declaration = soleSeparatorDeclaration(body, parameter);
+  if (declaration === void 0 || declaration.separator === "") return false;
+  if (!hasExactRedactionReturn(body, parameter, declaration.binding) || !redactionBindingsAreStable(body, parameter, declaration)) {
+    return false;
+  }
+  return assertionMatchesSeparator(assertion, declaration.separator);
+}
+function redactionAssertionRefutation(finding, lines, evidence) {
+  if (!redactionClaim(finding.content) || !/(?:^|\.)test\.[cm]?[jt]sx?$/u.test(finding.path)) {
+    return void 0;
+  }
+  const assertion = changedExactAssertion(finding, lines);
+  if (assertion === void 0) return void 0;
+  const functionName = escaped(assertion.functionName);
+  if (shadowsImportedBinding(lines, assertion.functionName) || lines.some(
+    (line) => /\b(?:vi\.)?(?:mock|spyOn)\s*\(/u.test(line.code) || new RegExp(String.raw`\b${functionName}\s*=(?!=)`, "u").test(line.code)
+  )) {
+    return void 0;
+  }
+  const implementation = importedSource(evidence, finding, lines, assertion.functionName);
+  if (implementation === void 0 || !implementationProvesFirstSeparatorRedaction(implementation, assertion)) {
+    return void 0;
+  }
+  return {
+    ruleId: "redaction_assertion_proves_contract",
+    evidenceRefs: refsAt(assertion.line.line)
+  };
+}
+function diagnosticContextRefutation(finding, head, baseSource, changed) {
+  if (baseSource === void 0) return void 0;
+  const base = sourceLines(baseSource, /* @__PURE__ */ new Set());
   const index = soleSourceDifference(head, base, changed);
   if (index === void 0 || !insideFinding(index + 1, finding)) return void 0;
   const addition = addedPrimitiveContext(head, base, index);
@@ -10914,7 +11527,18 @@ function closedClaimRefutation(finding, evidence) {
   if (fn === void 0 || !primitiveParameterIsStable(head, addition, fn) || !enclosingRethrowingCatch(head, addition)) {
     return void 0;
   }
-  return { evidenceRefs: refutationRefsAt(addition.line.line) };
+  return {
+    ruleId: "diagnostic_context_noop",
+    evidenceRefs: refutationRefsAt(addition.line.line)
+  };
+}
+function closedClaimRefutation(finding, evidence) {
+  if (!carriesTrustedEvidenceBrand(evidence)) return void 0;
+  if (evidence.headSource === void 0) return void 0;
+  const changed = changedHeadLines(evidence.text);
+  const head = sourceLines(evidence.headSource, changed);
+  const sourceDecision = terminalHelperRefutation(finding, head) ?? resetIsolationRefutation(finding, head) ?? redactionAssertionRefutation(finding, head, evidence);
+  return sourceDecision ?? diagnosticContextRefutation(finding, head, evidence.baseSource, changed);
 }
 function closedClaimProof(finding, evidence) {
   if (!carriesTrustedEvidenceBrand(evidence)) return void 0;
@@ -10986,6 +11610,10 @@ var VERIFICATION_CLAIM_DECISION_POLICY = [
   "An existing guard in one caller does not make a missing invariant at an exported or shared",
   "boundary already handled. Use already_handled only when shown evidence proves the guard",
   "dominates every relevant entry to that boundary.",
+  "Two nearby counters, baseline fields, or snapshot values do not have to move together merely",
+  "because one changed. Confirm such a dependency only when cited schema, producer, or consumer",
+  "evidence proves the invariant. Adjacency, similar names, and a changed total are not proof; if",
+  "the shown computation counts the fields independently, the dependency claim is contradicted.",
   "When a user-input parser runs inside a try block and its caught error is passed directly to an",
   "error, diagnostic, logging, or telemetry sink, that shown catch-to-sink flow is sufficient",
   "disclosure evidence. The catch binding used as the sink argument is the claimed flow: do not",
@@ -12344,19 +12972,21 @@ function closedProofResult(finding, evidence, metrics) {
     reasonCode: "direct_proof"
   });
 }
-function closedRefutationResult(finding, evidence, metrics) {
-  if (closedClaimRefutation(finding, evidence) === void 0) return void 0;
+function closedRefutationResult(finding, evidence, metrics, refutationSink) {
+  const refutation = closedClaimRefutation(finding, evidence);
+  if (refutation === void 0) return void 0;
+  refutationSink?.(refutation.ruleId);
   metrics.truthRefuted += 1;
   return decidedResult(void 0, "refuted", metrics, {
     stage: "truth_initial",
     reasonCode: "not_introduced"
   });
 }
-function closedSourceDecision(finding, evidence, metrics) {
+function closedSourceDecision(finding, evidence, metrics, refutationSink) {
   if (typeof evidence === "string") return void 0;
-  return closedRefutationResult(finding, evidence, metrics) ?? closedProofResult(finding, evidence, metrics);
+  return closedRefutationResult(finding, evidence, metrics, refutationSink) ?? closedProofResult(finding, evidence, metrics);
 }
-async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) {
+async function judgeOne(finding, readHunk, deps, strictness, budget, retriever, refutationSink) {
   const dossier = buildDossier(finding.content);
   const metrics = emptyMetrics();
   if (!needsJudging(dossier)) {
@@ -12376,7 +13006,7 @@ async function judgeOne(finding, readHunk, deps, strictness, budget, retriever) 
       terminal: { stage: "preflight", reasonCode: "unreadable_hunk" }
     };
   }
-  const closedDecision = closedSourceDecision(finding, read, metrics);
+  const closedDecision = closedSourceDecision(finding, read, metrics, refutationSink);
   if (closedDecision !== void 0) return closedDecision;
   if (!budgetAllows2(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
     return undecidedResult(finding, strictness, metrics, true, {
@@ -12428,14 +13058,23 @@ function tallyJudgement(counts, judged) {
   if (judged.disposition === "undecided") counts.undecided += 1;
   if (judged.budgetBlocked) counts.budgetBlocked += 1;
 }
-async function substantiate(findings, readHunk, deps, strictness = resolveSubstantiationStrictness(), maxTokens, retrieveEvidence, historicalTraceSink) {
+async function substantiate(findings, readHunk, deps, strictness = resolveSubstantiationStrictness(), maxTokens, retrieveEvidence, ...sinks) {
+  const [historicalTraceSink, closedRefutationSink] = sinks;
   const kept = [];
   const counts = emptyCounts();
   const budget = { maximum: hardMaximum2(maxTokens), spent: 0, calls: 0 };
   for (const finding of findings) {
     const tokensBefore = budget.spent;
     const callsBefore = budget.calls;
-    const judged = await judgeOne(finding, readHunk, deps, strictness, budget, retrieveEvidence);
+    const judged = await judgeOne(
+      finding,
+      readHunk,
+      deps,
+      strictness,
+      budget,
+      retrieveEvidence,
+      closedRefutationSink
+    );
     if (judged.finding !== void 0) kept.push(judged.finding);
     tallyJudgement(counts, judged);
     historicalTraceSink?.({
@@ -12729,6 +13368,24 @@ function gitContext2(request) {
     pathValue: request.pathValue
   };
 }
+function recordPlannedCandidates(diagnostics, batch, plan) {
+  diagnostics.record("publish.candidates.planned", {
+    counts: {
+      generated: batch.findings.length,
+      sanitized: batch.findings.length - plan.counters.rejectedSanitization,
+      deduplicated: plan.survivors.length
+    }
+  });
+}
+function recordRankedCandidates(diagnostics, verification, batch, selected, plan) {
+  diagnostics.record("publish.candidates.ranked", {
+    counts: {
+      verified: verification.kept.filter((survivor) => batch.verify.has(survivor.finding)).length,
+      ranked: selected.kept.length,
+      publication: plan.survivors.length
+    }
+  });
+}
 function itemIndex(inventory) {
   return new Map(inventory.items.map((item) => [item.path, item]));
 }
@@ -12952,6 +13609,12 @@ function recordRejectedEngineFindings(parsed, diagnostics, headSha) {
     counts: { rejected: parsed.rejectedFindings }
   });
 }
+function recordEngineCandidateCount(parsed, diagnostics, headSha) {
+  diagnostics.record("engine.result.candidates", {
+    headSha,
+    counts: { generated: parsed.findings.length }
+  });
+}
 async function reviewEngineBinaryPath(request, workspace, diagnostics) {
   if (request.env.KFQ_SINGLE_SHOT === "1") return join4(workspace, "unused-by-staged-runner");
   return (await acquireEngine(workspace, diagnostics)).binaryPath;
@@ -12975,6 +13638,7 @@ async function executeEngine(request, deadline, inventory, memo, ledger, diagnos
     ledger.engine += engineTokens;
     requireReviewTime(deadline);
     recordRejectedEngineFindings(parsed, diagnostics, inventory.pair.head);
+    recordEngineCandidateCount(parsed, diagnostics, inventory.pair.head);
     const { result: classified, classifyTokens } = await repairEngineFindings(
       parsed,
       request,
@@ -13626,28 +14290,30 @@ function baseAnchorForFinding(read, finding) {
   const anchor = { startLine: finding.startLine, endLine: finding.endLine };
   return read.item.status === "D" ? anchor : mappedBaseRangeFromUnifiedDiff(read.unifiedDiff, anchor);
 }
-async function prepareFindingEvidence(run2, context, cache, ctx, finding) {
-  const read = await readFindingEvidence(run2, context, cache, ctx, finding);
-  if (read === void 0) return void 0;
-  const anchorSource = read.item.status === "D" ? read.sources.baseText : read.sources.headText;
-  const anchorText = sourceLines2(anchorSource, finding.startLine, finding.endLine);
-  if (anchorText === void 0) return void 0;
-  const findingAnchor = { startLine: finding.startLine, endLine: finding.endLine };
+function repositoryRequestForFinding(run2, context, read, finding, anchorText) {
   const baseFindingAnchor = baseAnchorForFinding(read, finding);
-  const repositoryRequest = {
+  return {
     repositoryPath: run2.request.repositoryPath,
     pathValue: run2.request.pathValue,
     head: run2.request.head,
     base: context.baseSha,
     reviewPath: read.path,
     baseReviewPath: read.item.oldPath ?? read.item.path,
-    findingAnchor,
+    findingAnchor: { startLine: finding.startLine, endLine: finding.endLine },
     ...baseFindingAnchor === void 0 ? {} : { baseFindingAnchor },
     findingContent: finding.content,
     anchorText,
     unifiedDiff: read.unifiedDiff,
     deadlineMs: run2.deadline.expiresAtMs
   };
+}
+async function prepareFindingEvidence(run2, context, cache, ctx, finding) {
+  const read = await readFindingEvidence(run2, context, cache, ctx, finding);
+  if (read === void 0) return void 0;
+  const anchorSource = read.item.status === "D" ? read.sources.baseText : read.sources.headText;
+  const anchorText = sourceLines2(anchorSource, finding.startLine, finding.endLine);
+  if (anchorText === void 0) return void 0;
+  const repositoryRequest = repositoryRequestForFinding(run2, context, read, finding, anchorText);
   const repositoryContext = await collectInitialRepositoryContext(repositoryRequest);
   const dossier = buildChangeEvidence(
     read.sources.headText,
@@ -13660,13 +14326,38 @@ async function prepareFindingEvidence(run2, context, cache, ctx, finding) {
     },
     { unifiedDiff: read.unifiedDiff, repositoryContext }
   );
+  const headRepositorySources = await readRenderedRepositorySources(run2, cache, ctx, dossier.text);
   return dossier.text === "" ? void 0 : {
     ...read.sources,
     text: dossier.text,
     unifiedDiff: read.unifiedDiff,
+    headRepositorySources,
     repositoryRequest,
     repositoryContext
   };
+}
+function renderedRepositoryPaths(text) {
+  const paths = [];
+  for (const row of text.split("\n")) {
+    const match = /^H[1-8] = (.+)$/u.exec(row);
+    if (match?.[1] === void 0) continue;
+    const path = decodeEvidenceSourcePath(match[1]);
+    if (path === void 0) return void 0;
+    paths.push(path);
+  }
+  return [...new Set(paths)];
+}
+async function readRenderedRepositorySources(run2, cache, ctx, dossier) {
+  const paths = renderedRepositoryPaths(dossier);
+  if (paths === void 0 || paths.length === 0) return /* @__PURE__ */ new Map();
+  const sources = /* @__PURE__ */ new Map();
+  for (const path of paths) {
+    requireReviewTime(run2.deadline);
+    const source = await readTextAtCommitCached(cache, ctx, run2.request.head, path);
+    if (source === void 0) return /* @__PURE__ */ new Map();
+    sources.set(path, source);
+  }
+  return sources;
 }
 async function evidenceForSurvivors(run2, context, modelFindings) {
   const cache = /* @__PURE__ */ new Map();
@@ -13750,7 +14441,33 @@ async function closedRuntimeFactsForChallenge(run2, prepared, finding, stage, ch
     deadlineMs: run2.deadline.expiresAtMs
   });
 }
-function recordSubstantiation(run2, outcome) {
+var UNDECIDED_STAGE_COUNT = {
+  preflight: "undecided_stage_preflight",
+  truth_initial: "undecided_stage_truth_initial",
+  truth_retrieval: "undecided_stage_truth_retrieval",
+  truth_followup: "undecided_stage_truth_followup",
+  challenge_planner: "undecided_stage_challenge_planner",
+  challenge_retrieval: "undecided_stage_challenge_retrieval",
+  falsifier: "undecided_stage_falsifier"
+};
+var UNDECIDED_REASON_COUNT = {
+  budget: "undecided_reason_budget",
+  request_transport_or_status: "undecided_reason_request",
+  usage_invalid: "undecided_reason_usage",
+  finish_reason_nonstop: "undecided_reason_finish",
+  json_or_envelope_invalid: "undecided_reason_json",
+  semantic_shape_invalid: "undecided_reason_shape",
+  retrieval_error: "undecided_reason_retrieval"
+};
+function incrementCount(counts, key) {
+  counts[key] = (counts[key] ?? 0) + 1;
+}
+function captureUndecidedTrace(counts, trace) {
+  if (trace.disposition !== "undecided") return;
+  incrementCount(counts, UNDECIDED_STAGE_COUNT[trace.stage]);
+  incrementCount(counts, UNDECIDED_REASON_COUNT[trace.reasonCode] ?? "undecided_reason_other");
+}
+function recordSubstantiation(run2, outcome, undecidedTraceCounts) {
   run2.ledger.classify += outcome.tokens;
   run2.diagnostics.record("publish.substantiated", {
     counts: {
@@ -13771,7 +14488,8 @@ function recordSubstantiation(run2, outcome) {
       challenge_failed: outcome.challengeFailed,
       undecided: outcome.undecided,
       budget_blocked: outcome.budgetBlocked,
-      tokens: outcome.tokens
+      tokens: outcome.tokens,
+      ...undecidedTraceCounts
     }
   });
 }
@@ -13780,8 +14498,31 @@ function trustedFindingEvidence(prepared) {
   return bindTrustedHunkEvidence({
     text: prepared.text,
     headSource: prepared.headText,
-    baseSource: prepared.baseText
+    baseSource: prepared.baseText,
+    headCommit: prepared.repositoryRequest.head,
+    headRepositorySources: prepared.headRepositorySources
   }) ?? "";
+}
+function incrementRefutationCount(counts, ruleId) {
+  counts[ruleId] = (counts[ruleId] ?? 0) + 1;
+}
+function recordDeterministicRefutations(diagnostics, counts) {
+  if (Object.keys(counts).length === 0) return;
+  diagnostics.record("publish.deterministic_refutation", { counts });
+}
+function judgeableFindings(modelFindings, evidence) {
+  return modelFindings.map((survivor) => {
+    const prepared = evidence.get(survivor.finding);
+    const path = survivor.finding.path;
+    return {
+      path,
+      basePath: prepared?.repositoryRequest.baseReviewPath ?? path,
+      content: survivor.finding.content,
+      startLine: survivor.finding.startLine,
+      endLine: survivor.finding.endLine,
+      original: survivor.finding
+    };
+  });
 }
 async function substantiateModelSurvivors(run2, context, modelFindings) {
   if (modelFindings.length === 0) return NO_SUBSTANTIATION;
@@ -13794,21 +14535,12 @@ async function substantiateModelSurvivors(run2, context, modelFindings) {
   );
   const evidence = await evidenceForSurvivors(run2, context, modelFindings);
   requireReviewTime(run2.deadline);
-  const judgeable = modelFindings.map((survivor) => {
-    const prepared = evidence.get(survivor.finding);
-    const path = survivor.finding.path;
-    return {
-      path,
-      basePath: prepared?.repositoryRequest.baseReviewPath ?? path,
-      content: survivor.finding.content,
-      startLine: survivor.finding.startLine,
-      endLine: survivor.finding.endLine,
-      original: survivor.finding
-    };
-  });
+  const judgeable = judgeableFindings(modelFindings, evidence);
   const evidenceByJudgeable = new Map(
     judgeable.map((finding) => [finding, trustedFindingEvidence(evidence.get(finding.original))])
   );
+  const undecidedTraceCounts = {};
+  const deterministicRefutations = {};
   const outcome = await substantiate(
     judgeable,
     (finding) => evidenceByJudgeable.get(finding) ?? "",
@@ -13817,9 +14549,16 @@ async function substantiateModelSurvivors(run2, context, modelFindings) {
     // fail-closed (`paranoid`); explicit sweep stages may vary it without creating a second path.
     resolveSubstantiationStrictness(run2.request.env),
     remaining,
-    evidenceRetriever(evidence, run2)
+    evidenceRetriever(evidence, run2),
+    (trace) => {
+      captureUndecidedTrace(undecidedTraceCounts, trace);
+    },
+    (ruleId) => {
+      incrementRefutationCount(deterministicRefutations, ruleId);
+    }
   );
-  recordSubstantiation(run2, outcome);
+  recordDeterministicRefutations(run2.diagnostics, deterministicRefutations);
+  recordSubstantiation(run2, outcome, undecidedTraceCounts);
   requireReviewTime(run2.deadline);
   return partitionSubstantiated(judgeable, outcome);
 }
@@ -13887,7 +14626,10 @@ function addPlanCounters(initial, final, evidenceSuppressed, rankedSuppressed, v
     suppressedRanked: rankedSuppressed,
     verificationUndecided,
     suppressedRecurrence: (initial.suppressedRecurrence ?? 0) + (final.suppressedRecurrence ?? 0),
-    rejectedSanitization: initial.rejectedSanitization + final.rejectedSanitization,
+    // The initial pass sees raw hypotheses before truth and PR-wide ranking. A malformed candidate
+    // that those stages refute or rank out was never a publication loss; only the selected final
+    // cohort can degrade completion when it remains unpublishable.
+    rejectedSanitization: final.rejectedSanitization,
     // Only the final cohort reaches a reader. Counting the initial pass too would double-count
     // every unchanged survivor merely because quality replacements require a second full plan.
     neutralized: final.neutralized ?? 0
@@ -13912,9 +14654,13 @@ async function auditSubstantiatedFresh(run2, fresh, substantiated) {
   const survivors = fresh.filter((survivor) => !substantiated.dropped.has(survivor.finding));
   return await auditEffectiveFreshSurvivors(run2, survivors, substantiated.repaired);
 }
-async function runPublicationQualityStages(run2, context, batch, initialPlan) {
+async function runPublicationQualityStages(run2, context, batch, candidates) {
   requireReviewTime(run2.deadline);
-  const verification = selectVerificationCandidates(initialPlan.survivors, batch.verify);
+  const verification = selectVerificationCandidates(
+    candidates,
+    batch.verify,
+    run2.request.config.maxFindings
+  );
   const modelFindings = verification.kept.filter((survivor) => batch.verify.has(survivor.finding));
   const substantiated = await substantiateModelSurvivors(run2, context, modelFindings);
   requireReviewTime(run2.deadline);
@@ -13935,6 +14681,7 @@ function finalizeAuditedPlan(inputs) {
   const {
     batch,
     initialPlan,
+    qualityCandidates,
     finalPlan,
     verification,
     selected,
@@ -13945,7 +14692,7 @@ function finalizeAuditedPlan(inputs) {
   const rankedOut = [...verification.rankedOutOriginals, ...selected.rankedOutOriginals];
   const uncacheablePaths = uncacheableModelPaths(
     batch.verify,
-    initialPlan.survivors,
+    qualityCandidates,
     substantiated.dropped,
     rankedOut,
     originalsInPlan(selected.kept, originals),
@@ -13965,20 +14712,36 @@ function finalizeAuditedPlan(inputs) {
     uncacheablePaths
   };
 }
+function candidatesForPublicationQuality(batch, plan) {
+  const survivors = new Map(plan.survivors.map((survivor) => [survivor.finding, survivor]));
+  const rejected = new Set(plan.rejectedSanitizationCandidates);
+  return batch.findings.flatMap((finding) => {
+    const survivor = survivors.get(finding);
+    if (survivor !== void 0) return [survivor];
+    return rejected.has(finding) ? [{ finding }] : [];
+  });
+}
 async function planAndAudit(run2, context, batch, prefetch) {
   requireReviewTime(run2.deadline);
   const initialPlan = await planPublication(context, batch.findings, run2.diagnostics, prefetch);
+  recordPlannedCandidates(run2.diagnostics, batch, initialPlan);
+  const qualityCandidates = candidatesForPublicationQuality(batch, initialPlan);
   const { verification, substantiated, auditedByOriginal } = await runPublicationQualityStages(
     run2,
     context,
     batch,
-    initialPlan
+    qualityCandidates
   );
   const combined = qualityReplacements(substantiated, auditedByOriginal);
   const substantiatedSurvivors = verification.kept.filter(
     (survivor) => !substantiated.dropped.has(survivor.finding)
   );
-  const selected = selectPrWideFindings(substantiatedSurvivors, batch.verify, combined);
+  const selected = selectPrWideFindings(
+    substantiatedSurvivors,
+    batch.verify,
+    run2.request.config.maxFindings,
+    combined
+  );
   const originals = originalByEffectiveFinding(substantiatedSurvivors, combined);
   const finalPlan = await replanSelectedFindings(
     context,
@@ -13986,10 +14749,12 @@ async function planAndAudit(run2, context, batch, prefetch) {
     run2.diagnostics,
     initialPlan.prefetch
   );
+  recordRankedCandidates(run2.diagnostics, verification, batch, selected, finalPlan);
   requireReviewTime(run2.deadline);
   return finalizeAuditedPlan({
     batch,
     initialPlan,
+    qualityCandidates,
     finalPlan,
     verification,
     selected,
@@ -14113,7 +14878,8 @@ async function localFindings(run2, inventory, batch) {
       uncacheablePaths: NO_UNCACHEABLE_PATHS,
       evidenceWithheld: 0,
       rankedOut: 0,
-      verificationUndecided: 0
+      verificationUndecided: 0,
+      rejectedSanitization: 0
     };
   }
   const context = localPublishContext(run2.request, inventory);
@@ -14125,14 +14891,16 @@ async function localFindings(run2, inventory, batch) {
     uncacheablePaths,
     evidenceWithheld: plan.counters.suppressedEvidence ?? 0,
     rankedOut: plan.counters.suppressedRanked ?? 0,
-    verificationUndecided: plan.counters.verificationUndecided ?? 0
+    verificationUndecided: plan.counters.verificationUndecided ?? 0,
+    rejectedSanitization: plan.counters.rejectedSanitization
   };
 }
 function localQuality(reported) {
   return {
     evidenceWithheld: reported.evidenceWithheld,
     rankedOut: reported.rankedOut,
-    verificationUndecided: reported.verificationUndecided
+    verificationUndecided: reported.verificationUndecided,
+    rejectedSanitization: reported.rejectedSanitization
   };
 }
 function emptyLocalReport(inventory, ruleDigest, engineVersion) {
@@ -14237,7 +15005,8 @@ function verificationIncompleteLocalReport(run2, inventory, memo, reported) {
     counts: {
       verification_undecided: reported.verificationUndecided,
       suppressed_evidence: reported.evidenceWithheld,
-      suppressed_ranked: reported.rankedOut
+      suppressed_ranked: reported.rankedOut,
+      rejected_sanitization: reported.rejectedSanitization
     }
   });
   return {
@@ -14315,7 +15084,7 @@ async function completeLocalReport(run2, inventory, settlement, memo) {
     }
     throw error;
   }
-  if (reported.verificationUndecided > 0) {
+  if (reported.verificationUndecided > 0 || reported.rejectedSanitization > 0) {
     return verificationIncompleteLocalReport(run2, inventory, memo, reported);
   }
   return verifiedCompleteLocalReport(run2, inventory, settlement, memo, reported);
@@ -14907,7 +15676,8 @@ Options:
   --file-timeout-seconds <n>     Per-file engine timeout. Default: 300.
   --review-timeout-seconds <n>   Whole-review wall-clock ceiling. Default: 1800.
   --token-budget <n>             Hard token ceiling for one review. Default: 2000000.
-  --max-findings <n>             Findings above this count are treated as implausible. Default: 50.
+  --max-findings <n>             Final total reported after verification/ranking; raw volume never
+                                  invalidates a completed review. Default: 50.
   --concurrency <n>              Engine review concurrency. Default: 4.
   --help, -h                     Print this help and exit 0.
 
