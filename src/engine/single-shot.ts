@@ -69,6 +69,17 @@ const DEFAULT_SEED = 42;
  *  request's own fault and retrying it verbatim buys nothing — the file becomes a warning. */
 const RETRIES_PER_FILE = 1;
 
+/**
+ * One alternate-seed retry when a mandatory examiner RESPONSE arrives but violates the closed
+ * claims schema. This is deliberately separate from `RETRIES_PER_FILE`: transport failures are
+ * retried with the same request, while an answer whose content cannot cross the trust boundary
+ * needs one different, still reproducible sample. More than one would turn malformed model output
+ * into an open-ended conversation; zero left a real 36-file completion run stuck on one file after
+ * the endpoint had returned a non-transport response (Keiko#2970, 2026-08-12).
+ */
+const EXAMINER_SHAPE_RETRIES = 1;
+const EXAMINER_SHAPE_RETRY_SEED_OFFSET = 10_000;
+
 /** Per-companion and whole-block character budgets for the `<companion_changes>` section. The
  *  block exists to kill the one-sided-pair false-positive class (37 of 52 findings on the first
  *  live release PR), and three bounded hunks do that; a whole package's diffs would just re-crowd
@@ -633,12 +644,22 @@ async function examine(
   seedOffset: number,
 ): Promise<readonly EngineComment[] | undefined> {
   const prompt = buildExaminerPrompt(role, context, risks, { view: evidenceView(dispatch) });
-  const result = await callStage(state, prompt, state.seed + seedOffset);
-  if (result.kind === "budget_blocked") state.mandatoryBudgetBlocked = true;
-  if (result.kind !== "success") return undefined;
-  const claims = parseStructuredClaims(result.content, new Set(dispatch.allowedAnchors));
-  if (claims === undefined) return undefined;
-  return claims.map((claim) => renderStructuredClaim(dispatch.path, claim));
+  const allowedAnchors = new Set(dispatch.allowedAnchors);
+  for (let attempt = 0; attempt <= EXAMINER_SHAPE_RETRIES; attempt += 1) {
+    const result = await callStage(
+      state,
+      prompt,
+      state.seed + seedOffset + attempt * EXAMINER_SHAPE_RETRY_SEED_OFFSET,
+    );
+    if (result.kind === "budget_blocked") state.mandatoryBudgetBlocked = true;
+    if (result.kind === "invalid_response") continue;
+    if (result.kind !== "success") return undefined;
+    const claims = parseStructuredClaims(result.content, allowedAnchors);
+    if (claims !== undefined) {
+      return claims.map((claim) => renderStructuredClaim(dispatch.path, claim));
+    }
+  }
+  return undefined;
 }
 
 /**

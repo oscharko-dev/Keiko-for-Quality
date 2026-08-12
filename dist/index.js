@@ -4648,7 +4648,7 @@ function withoutTrailingSlashes3(value) {
   return value.slice(0, end);
 }
 function transportStatus(status) {
-  return status === 429 || status >= 500;
+  return status === 408 || status === 429 || status >= 500;
 }
 async function endpointRequest(request, signal, fetchImpl) {
   try {
@@ -4690,7 +4690,9 @@ function completedContent(body) {
 async function settleEndpointResponse(response, ledger, upperBound) {
   if (!response.ok) {
     chargeUnreported(ledger, upperBound);
-    return { kind: transportStatus(response.status) ? "transport_failure" : "invalid_response" };
+    return {
+      kind: transportStatus(response.status) ? "transport_failure" : "request_rejected"
+    };
   }
   const body = await parsedBody(response);
   const usage = body === void 0 ? void 0 : reportedUsage(body, upperBound);
@@ -5408,6 +5410,8 @@ async function runEngine(options2, diagnostics) {
 // src/engine/single-shot.ts
 var DEFAULT_SEED = 42;
 var RETRIES_PER_FILE = 1;
+var EXAMINER_SHAPE_RETRIES = 1;
+var EXAMINER_SHAPE_RETRY_SEED_OFFSET = 1e4;
 var COMPANION_HUNK_CHARS = 1200;
 var COMPANION_BLOCK_CHARS = 4e3;
 var CORE_EXAMINER_SEED_OFFSET = 1e3;
@@ -5719,12 +5723,22 @@ async function planRisks(state, context) {
 }
 async function examine(state, dispatch, context, risks, role, seedOffset) {
   const prompt = buildExaminerPrompt(role, context, risks, { view: evidenceView(dispatch) });
-  const result = await callStage(state, prompt, state.seed + seedOffset);
-  if (result.kind === "budget_blocked") state.mandatoryBudgetBlocked = true;
-  if (result.kind !== "success") return void 0;
-  const claims = parseStructuredClaims(result.content, new Set(dispatch.allowedAnchors));
-  if (claims === void 0) return void 0;
-  return claims.map((claim) => renderStructuredClaim(dispatch.path, claim));
+  const allowedAnchors = new Set(dispatch.allowedAnchors);
+  for (let attempt = 0; attempt <= EXAMINER_SHAPE_RETRIES; attempt += 1) {
+    const result = await callStage(
+      state,
+      prompt,
+      state.seed + seedOffset + attempt * EXAMINER_SHAPE_RETRY_SEED_OFFSET
+    );
+    if (result.kind === "budget_blocked") state.mandatoryBudgetBlocked = true;
+    if (result.kind === "invalid_response") continue;
+    if (result.kind !== "success") return void 0;
+    const claims = parseStructuredClaims(result.content, allowedAnchors);
+    if (claims !== void 0) {
+      return claims.map((claim) => renderStructuredClaim(dispatch.path, claim));
+    }
+  }
+  return void 0;
 }
 async function reviewOneFile(state, dispatch) {
   const context = generationContext(state, dispatch);
@@ -15193,6 +15207,9 @@ async function repairEngineFindings(parsed, request, deadline, diagnostics, maxT
   return { result: { ...parsed, findings: outcome.findings }, classifyTokens: outcome.tokens };
 }
 var RESUME_SEED = 43;
+function targetedResumeSeed(round) {
+  return RESUME_SEED + round - 1;
+}
 var RESUME_FLOOR_FRACTION = 0.25;
 var ENGINE_STATUS_DIAGNOSTIC = {
   success: "engine.status.success",
@@ -15276,12 +15293,14 @@ async function decideAfterFirstAttempt(parsed, context) {
   if (!resumeWorthwhile(parsed.status)) return await settleFinishedRun(parsed, context);
   return void 0;
 }
-function gapShrank(before, result, reviewablePaths, diagnostics, round) {
+function gapAllowsAnotherRound(before, result, context, round) {
+  const { reviewablePaths, diagnostics, options: options2 } = context;
   const after = targetedGapPaths(result, reviewablePaths)?.size ?? 0;
   if (after === 0) return false;
   if (after >= before) {
     diagnostics.record("engine.resume_gap_not_shrinking", { counts: { round, before, after } });
-    return false;
+    const seedIsEnforced = options2.env.KFQ_SINGLE_SHOT === "1" || options2.config.protocol !== "anthropic";
+    return after === before && seedIsEnforced;
   }
   return true;
 }
@@ -15294,10 +15313,10 @@ async function settleFinishedRun(parsed, context) {
     const targeted = targetedGapPaths(standing, reviewablePaths);
     if (targeted === void 0) break;
     const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
-    const remaining = targetedRoundBudget(targeted.size, spent, options2);
+    const remaining = targetedRoundBudget(targeted.size, spent + ledger.engine, options2);
     if (remaining === void 0) {
       diagnostics.record("engine.resume_skipped_budget_exhausted", {
-        counts: { round, targeted: targeted.size, spent }
+        counts: { round, targeted: targeted.size, spent: spent + ledger.engine }
       });
       break;
     }
@@ -15311,12 +15330,14 @@ async function settleFinishedRun(parsed, context) {
       spent,
       standing,
       covered,
-      ledger
+      ledger,
+      targetedResumeSeed(round),
+      true
     );
     outcome = attempt;
     spent = attempt.engineTokens;
     standing = attempt.result;
-    if (!gapShrank(targeted.size, attempt.result, reviewablePaths, diagnostics, round)) break;
+    if (!gapAllowsAnotherRound(targeted.size, attempt.result, context, round)) break;
   }
   if (outcome === void 0) return finishedRunOutcome(diagnostics, parsed, options2);
   return outcome;
@@ -15328,12 +15349,12 @@ function finishedRunOutcome(diagnostics, parsed, options2) {
   });
   return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
 }
-async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger) {
+async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger, samplingSeed, preserveReviewedPathsOnFailure) {
   try {
     const second = await invokeEngine(
       {
         ...options2,
-        samplingSeed: RESUME_SEED,
+        samplingSeed,
         allottedBudget: remaining,
         expectedReviewablePaths: options2.expectedReviewablePaths.filter(
           (path) => !alreadyReviewedPaths.includes(path)
@@ -15357,7 +15378,11 @@ async function attemptResume(options2, diagnostics, remaining, firstAttemptToken
     }
     ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resume_failed", { counts: { spent: firstAttemptTokens } });
-    return { result: firstResult, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
+    return {
+      result: firstResult,
+      engineTokens: firstAttemptTokens,
+      alreadyReviewedPaths: preserveReviewedPathsOnFailure ? alreadyReviewedPaths : []
+    };
   }
 }
 async function runEngineWithOneResume(options2, diagnostics, ledger, reviewablePaths) {
@@ -15397,7 +15422,9 @@ async function runEngineWithOneResume(options2, diagnostics, ledger, reviewableP
     firstAttemptTokens,
     firstResult,
     alreadyReviewedPaths,
-    ledger
+    ledger,
+    RESUME_SEED,
+    false
   );
 }
 function mergeResumedResult(first, second, excludedPaths) {

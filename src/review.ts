@@ -2194,6 +2194,16 @@ async function repairEngineFindings(
 const RESUME_SEED = 43;
 
 /**
+ * A targeted round is a bounded second opinion, so each one must receive distinct deterministic
+ * entropy. Reusing `RESUME_SEED` for every round made a third attempt over the same one-file gap a
+ * byte-for-byte replay of the second. The sequence stays fixed for reproducibility and cannot grow
+ * past `TARGETED_GAP_MAX_ROUNDS`.
+ */
+function targetedResumeSeed(round: number): number {
+  return RESUME_SEED + round - 1;
+}
+
+/**
  * The resume's own floor: a FRACTION of THIS review's allotment, not the constant `ALLOTMENT_FLOOR`
  * above.
  *
@@ -2382,8 +2392,9 @@ const TARGETED_GAP_MAX_FRACTION = 0.5;
  * first real run showed a nineteen-file review losing two files, one round recovering one, and the
  * run settling incomplete over the single file that remained. A cap of one leaves exactly that
  * kind of run permanently unfinishable; an uncapped loop would re-buy a deterministic per-file
- * failure forever. Each round is bounded twice over anyway — by the shrinking gap it dispatches
- * and by the shrink check in `settleFinishedRun`, which stops the moment a round stops helping.
+ * failure forever. Each round is bounded by the shrinking gap it dispatches, the consumer's
+ * remaining token ceiling, the shared deadline, and this fixed cap. An unchanged gap may consume
+ * the next distinct-seed round only where the runner can actually enforce that seed.
  */
 const TARGETED_GAP_MAX_ROUNDS = 3;
 
@@ -2525,30 +2536,37 @@ async function decideAfterFirstAttempt(
  * rather than against the whole inventory. The decision itself lives in `targetedGapPaths`.
  */
 /**
- * Whether another round is justified: the gap must have SHRUNK.
+ * Whether another bounded round is justified: the gap must not have GROWN.
  *
- * A round that returns the same casualties — or more — is the deterministic per-file failure
- * `resumeWorthwhile` already refuses to re-buy, recognised one round later. Paying for it twice
- * more would reproduce the Keiko#3002 waste at a smaller scale, so the loop stops and says why.
- * A gap of zero also stops it, and silently: nothing was left unreviewed, which is the outcome
- * rounds exist to reach rather than a condition worth a diagnostic.
+ * A round that returns more casualties is getting worse and stops immediately. An equal non-empty
+ * gap is recorded, but may spend the next distinct-seed round within the fixed cap: the previous
+ * implementation both stopped here and reused seed 43, so its advertised three-round recovery
+ * could never give a transient one-file shape failure a genuine third opinion (Keiko#2970,
+ * 2026-08-12). A gap of zero stops silently: nothing remains to recover.
  */
-function gapShrank(
+function gapAllowsAnotherRound(
   before: number,
   result: EngineResult,
-  reviewablePaths: ReadonlySet<string>,
-  diagnostics: Diagnostics,
+  context: FinishedRunContext,
   round: number,
 ): boolean {
+  const { reviewablePaths, diagnostics, options } = context;
   const after = targetedGapPaths(result, reviewablePaths)?.size ?? 0;
   if (after === 0) return false;
   if (after >= before) {
     diagnostics.record("engine.resume_gap_not_shrinking", { counts: { round, before, after } });
-    return false;
+    const seedIsEnforced =
+      options.env.KFQ_SINGLE_SHOT === "1" || options.config.protocol !== "anthropic";
+    return after === before && seedIsEnforced;
   }
   return true;
 }
 
+/**
+ * Run bounded targeted rounds rather than one retry: the first completion measurement lost two
+ * files, recovered one, then stopped incomplete on the last. Each round buys only its shrinking
+ * gap, so a one-file second opinion is small beside the full review whose outcome it decides.
+ */
 async function settleFinishedRun(
   parsed: EngineResult,
   context: FinishedRunContext,
@@ -2558,23 +2576,18 @@ async function settleFinishedRun(
   let spent = firstAttemptTokens;
   let outcome: ResumeOutcome | undefined;
 
-  // Rounds, not a single retry, because one round measurably does not finish the job: on the
-  // completion gate's first real measurement a nineteen-file review lost two files, the targeted
-  // retry recovered ONE, and the run settled incomplete over the single file still missing. Each
-  // round costs only its own shrinking gap, so the second round on one file is a rounding error
-  // against the 1.6M-token review it decides.
   for (let round = 1; round <= TARGETED_GAP_MAX_ROUNDS; round += 1) {
     const targeted = targetedGapPaths(standing, reviewablePaths);
     if (targeted === undefined) break;
     const covered = [...reviewablePaths].filter((path) => !targeted.has(path));
-    const remaining = targetedRoundBudget(targeted.size, spent, options);
+    const remaining = targetedRoundBudget(targeted.size, spent + ledger.engine, options);
     // The consumer's ceiling has nothing left to fund a round with. Stopping here is the whole
     // point: a run that already overspent must not be handed an unbounded dispatch (see
     // `targetedRoundBudget`), and the gap it still reports is the next push's work, not this
     // run's to buy at any price.
     if (remaining === undefined) {
       diagnostics.record("engine.resume_skipped_budget_exhausted", {
-        counts: { round, targeted: targeted.size, spent },
+        counts: { round, targeted: targeted.size, spent: spent + ledger.engine },
       });
       break;
     }
@@ -2589,11 +2602,13 @@ async function settleFinishedRun(
       standing,
       covered,
       ledger,
+      targetedResumeSeed(round),
+      true,
     );
     outcome = attempt;
     spent = attempt.engineTokens;
     standing = attempt.result;
-    if (!gapShrank(targeted.size, attempt.result, reviewablePaths, diagnostics, round)) break;
+    if (!gapAllowsAnotherRound(targeted.size, attempt.result, context, round)) break;
   }
 
   if (outcome === undefined) return finishedRunOutcome(diagnostics, parsed, options);
@@ -2627,6 +2642,8 @@ async function attemptResume(
   firstResult: EngineResult | undefined,
   alreadyReviewedPaths: readonly string[],
   ledger: SpendLedger,
+  samplingSeed: number,
+  preserveReviewedPathsOnFailure: boolean,
 ): Promise<ResumeOutcome> {
   try {
     // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
@@ -2638,7 +2655,7 @@ async function attemptResume(
     const second = await invokeEngine(
       {
         ...options,
-        samplingSeed: RESUME_SEED,
+        samplingSeed,
         allottedBudget: remaining,
         expectedReviewablePaths: options.expectedReviewablePaths.filter(
           (path) => !alreadyReviewedPaths.includes(path),
@@ -2681,11 +2698,15 @@ async function attemptResume(
     // `engineTokens`, exactly as before.
     ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resume_failed", { counts: { spent: firstAttemptTokens } });
-    // The returned result is `firstResult` UNCHANGED — its own coverage already accounts for
-    // everything IT dispatched, so there is nothing narrower than usual for `settle()` to be told
-    // about here (unlike the merged-success path above, whose returned coverage comes from the
-    // SECOND attempt's narrower dispatch).
-    return { result: firstResult, engineTokens: firstAttemptTokens, alreadyReviewedPaths: [] };
+    // The returned result is `firstResult` UNCHANGED. A general resume fell back to the original
+    // full dispatch, whose coverage is self-contained, so its credited set stays empty. A targeted
+    // round fell back to the previous NARROW dispatch; `alreadyReviewedPaths` is then load-bearing
+    // coverage from earlier successful rounds and must survive this later process failure.
+    return {
+      result: firstResult,
+      engineTokens: firstAttemptTokens,
+      alreadyReviewedPaths: preserveReviewedPathsOnFailure ? alreadyReviewedPaths : [],
+    };
   }
 }
 
@@ -2758,6 +2779,8 @@ async function runEngineWithOneResume(
     firstResult,
     alreadyReviewedPaths,
     ledger,
+    RESUME_SEED,
+    false,
   );
 }
 

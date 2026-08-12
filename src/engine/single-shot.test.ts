@@ -684,7 +684,82 @@ describe("runSingleShotEngine staged generation", () => {
     expect(parsed.warnings).toHaveLength(1);
     expect(parsed.warnings[0]?.file).toBe("src/a.ts");
     expect(seen).toHaveLength(3); // planner + two core attempts
+    expect(seen.map((body) => body.seed)).toEqual([42, 1042, 1042]);
     expect(output.wireTokens).toBeGreaterThan(110); // unknown retry spend is conservatively charged
+  });
+
+  it("does not resample a request that the endpoint rejected as invalid", async () => {
+    const { repo, pair } = await makeRepo("kfq-core-request-rejected-", {
+      "src/a.ts": "new local\n",
+    });
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub(
+      (system) => (stage(system) === "planner" ? { status: 200, reply: "[]" } : { status: 400 }),
+      seen,
+    );
+
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+
+    expect(parseEngineResult(output.stdout).status).toBe("completed_with_errors");
+    expect(seen.map((body) => body.seed)).toEqual([42, 1042]);
+  });
+
+  it("retries one malformed core reply with distinct deterministic entropy", async () => {
+    const { repo, pair } = await makeRepo("kfq-core-shape-retry-", {
+      "src/a.ts": "keep\nconst local = value + 1;\n",
+    });
+    const seen: CapturedBody[] = [];
+    let coreAttempts = 0;
+    const fetchImpl = fetchStub((system) => {
+      const kind = stage(system);
+      if (kind === "planner") return { status: 200, reply: "[]" };
+      if (kind === "core") {
+        coreAttempts += 1;
+        return coreAttempts === 1
+          ? { status: 200, reply: "not-claims-json" }
+          : { status: 200, reply: "[]" };
+      }
+      return { status: 200, reply: "[]" };
+    }, seen);
+
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+
+    expect(parseEngineResult(output.stdout).status).toBe("success");
+    expect(seen.map((body) => body.seed)).toEqual([42, 1042, 11042]);
+  });
+
+  it("retries one truncated core completion but stays incomplete after two invalid replies", async () => {
+    const { repo, pair } = await makeRepo("kfq-core-shape-exhausted-", {
+      "src/a.ts": "keep\nconst local = value + 1;\n",
+    });
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub(
+      (system) =>
+        stage(system) === "planner"
+          ? { status: 200, reply: "[]" }
+          : { status: 200, reply: "[]", finishReason: "length" },
+      seen,
+    );
+
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+    const parsed = parseEngineResult(output.stdout);
+
+    expect(parsed.status).toBe("completed_with_errors");
+    expect(parsed.warnings).toHaveLength(1);
+    expect(parsed.warnings[0]?.file).toBe("src/a.ts");
+    expect(seen.map((body) => body.seed)).toEqual([42, 1042, 11042]);
   });
 
   it("reports an atomically blocked generation budget through the engine result contract", async () => {
@@ -875,6 +950,38 @@ describe("runSingleShotEngine staged generation", () => {
     );
     expect(seen.map((body) => body.seed)).toEqual([42, 1042, 2042]);
     expect(parseEngineResult(output.stdout).findings).toHaveLength(2);
+  });
+
+  it("keeps the core finding when a malformed integration reply needs its alternate seed", async () => {
+    const bigBody = Array.from(
+      { length: 160 },
+      (_, index) => `const line${String(index)} = ${String(index)};`,
+    ).join("\n");
+    const { repo, pair } = await makeRepo("kfq-integration-shape-retry-", {
+      "src/a.ts": `${bigBody}\n`,
+    });
+    const seen: CapturedBody[] = [];
+    let integrationAttempts = 0;
+    const fetchImpl = fetchStub((system) => {
+      const kind = stage(system);
+      if (kind === "planner") return { status: 200, reply: "[]" };
+      if (kind === "core") return { status: 200, reply: claim({ start: 3, end: 3 }) };
+      integrationAttempts += 1;
+      return integrationAttempts === 1
+        ? { status: 200, reply: "malformed-integration-claims" }
+        : { status: 200, reply: "[]" };
+    }, seen);
+
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+    const parsed = parseEngineResult(output.stdout);
+
+    expect(parsed.status).toBe("success");
+    expect(parsed.findings).toHaveLength(1);
+    expect(seen.map((body) => body.seed)).toEqual([42, 1042, 2042, 12042]);
   });
 
   it("never rewrites a sanitizer-rejected deterministic body with a fourth model role", async () => {
