@@ -540,17 +540,13 @@ interface IssueCommentConnection {
   readonly nodes?: readonly unknown[];
 }
 
-interface CompleteIssueCommentConnection extends IssueCommentConnection {
-  readonly totalCount: number;
-  readonly pageInfo: CompletePageInfo;
-  readonly nodes: readonly unknown[];
-}
+type PaginatedConnection = ThreadConnection | IssueCommentConnection;
 
-interface CompleteThreadConnection extends ThreadConnection {
+type CompleteConnection<T extends PaginatedConnection> = T & {
   readonly totalCount: number;
   readonly pageInfo: CompletePageInfo;
   readonly nodes: readonly unknown[];
-}
+};
 
 interface SearchPullRequest {
   readonly number?: number;
@@ -568,6 +564,12 @@ interface SearchResults {
   readonly nodes?: readonly unknown[];
 }
 
+type CompleteSearchResults = SearchResults & {
+  readonly issueCount: number;
+  readonly pageInfo: CompletePageInfo;
+  readonly nodes: readonly unknown[];
+};
+
 function validPageInfo(pageInfo: PageInfo | undefined): pageInfo is CompletePageInfo {
   if (typeof pageInfo?.hasNextPage !== "boolean") return false;
   if (pageInfo.endCursor !== null && typeof pageInfo.endCursor !== "string") return false;
@@ -575,11 +577,18 @@ function validPageInfo(pageInfo: PageInfo | undefined): pageInfo is CompletePage
   return pageInfo.endCursor !== null && pageInfo.endCursor.length > 0;
 }
 
-function validSearchResults(search: SearchResults | undefined): search is SearchResults & {
-  readonly issueCount: number;
-  readonly pageInfo: CompletePageInfo;
-  readonly nodes: readonly unknown[];
-} {
+function validConnection<T extends PaginatedConnection>(
+  connection: T | undefined,
+): connection is CompleteConnection<T> {
+  return (
+    Array.isArray(connection?.nodes) &&
+    Number.isSafeInteger(connection.totalCount) &&
+    (connection.totalCount ?? -1) >= 0 &&
+    validPageInfo(connection.pageInfo)
+  );
+}
+
+function validSearchResults(search: SearchResults | undefined): search is CompleteSearchResults {
   return (
     Array.isArray(search?.nodes) &&
     search.issueCount !== undefined &&
@@ -596,10 +605,7 @@ interface SearchPopulationState {
 }
 
 function acceptSearchPopulation(
-  search: SearchResults & {
-    readonly issueCount: number;
-    readonly nodes: readonly unknown[];
-  },
+  search: CompleteSearchResults,
   state: SearchPopulationState,
 ): readonly BoundSearchPullRequest[] | undefined {
   state.expectedTotal ??= search.issueCount;
@@ -742,19 +748,8 @@ interface ThreadPopulationState {
   readonly tally: ThreadTally;
 }
 
-function validThreadConnection(
-  connection: ThreadConnection | undefined,
-): connection is CompleteThreadConnection {
-  return (
-    Array.isArray(connection?.nodes) &&
-    Number.isSafeInteger(connection.totalCount) &&
-    (connection.totalCount ?? -1) >= 0 &&
-    validPageInfo(connection.pageInfo)
-  );
-}
-
 function threadPageDecision(
-  connection: CompleteThreadConnection,
+  connection: CompleteConnection<ThreadConnection>,
   state: ThreadPopulationState,
 ): PageDecision {
   if (state.seenIds.size > (state.expectedTotal ?? -1)) return "invalid";
@@ -770,7 +765,7 @@ function acceptThreadPage(
   nowMs: number,
   state: ThreadPopulationState,
 ): PageDecision {
-  if (!validThreadConnection(connection)) return "invalid";
+  if (!validConnection(connection)) return "invalid";
   state.expectedTotal ??= connection.totalCount;
   if (connection.totalCount !== state.expectedTotal) return "invalid";
   for (const node of connection.nodes) {
@@ -857,24 +852,14 @@ interface SettlementTally {
 
 const SUMMARY_TITLE = "**Keiko for Quality — run summary**";
 const SUMMARY_MARKER = /<!-- keiko-for-quality:v1:[0-9a-f]{32} -->/u;
-const SUMMARY_HEADLINE =
-  /^<img src="https:\/\/raw\.githubusercontent\.com\/oscharko-dev\/Keiko-for-Quality\/[0-9a-f]{40}\/\.github\/assets\/kq\/out-(complete|incomplete|abandoned)\.svg" height="20" alt="(COMPLETE|INCOMPLETE|ABANDONED)">( \(`([a-z0-9._]+)`\))? · head `([0-9a-f]{7})` · (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z) · engine `v[0-9]+\.[0-9]+\.[0-9]+`(?: · action `[^`]+`)?$/u;
+const SUMMARY_IMAGE_PREFIX =
+  '<img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/';
+const SUMMARY_IMAGE_MIDDLE = "/.github/assets/kq/out-";
+const SUMMARY_IMAGE_SUFFIX = '.svg" height="20" alt="';
+const SUMMARY_TAIL_PREFIX = " · head `";
 /** v0.6.0-v0.22.x summaries used text glyphs before the pinned design-system chips. They remain
  *  valid historical product records; refusing them would silently select only newer reviews and
  *  inflate the apparent completion rate. */
-const LEGACY_SUMMARY_HEADLINE =
-  /^(✅ complete|⏳ abandoned|⚠️ incomplete(?: \(`([a-z0-9._]+)`\))) · head `([0-9a-f]{7})` · (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z) · engine `v[0-9]+\.[0-9]+\.[0-9]+`(?: · action `[^`]+`)?$/u;
-
-function validIssueCommentConnection(
-  connection: IssueCommentConnection | undefined,
-): connection is CompleteIssueCommentConnection {
-  return (
-    Array.isArray(connection?.nodes) &&
-    Number.isSafeInteger(connection.totalCount) &&
-    (connection.totalCount ?? -1) >= 0 &&
-    validPageInfo(connection.pageInfo)
-  );
-}
 
 type SummaryClassification =
   | { readonly kind: "summary"; readonly record: SettlementRecord }
@@ -886,38 +871,137 @@ interface ParsedSummaryHeadline {
   readonly eventMs: number;
 }
 
-function parsedCurrentHeadline(headline: string): ParsedSummaryHeadline | undefined {
-  const match = SUMMARY_HEADLINE.exec(headline);
-  if (match === null) return undefined;
-  const outcome = match[1] as SettlementOutcome;
-  const alt = match[2]?.toLowerCase();
-  const reason = match[4];
-  const eventMs = parsedTimestamp(match[6]);
+function hasOnlyCharacters(value: string, allowed: (code: number) => boolean): boolean {
+  if (value.length === 0) return false;
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (code === undefined || !allowed(code)) return false;
+  }
+  return true;
+}
+
+function isLowerHex(value: string, length: number): boolean {
+  return (
+    value.length === length &&
+    hasOnlyCharacters(value, (code) => (code >= 48 && code <= 57) || (code >= 97 && code <= 102))
+  );
+}
+
+function isReason(value: string): boolean {
+  return hasOnlyCharacters(
+    value,
+    (code) =>
+      (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 46 || code === 95,
+  );
+}
+
+function isVersion(value: string): boolean {
+  const components = value.split(".");
+  return (
+    components.length === 3 &&
+    components.every((component) =>
+      hasOnlyCharacters(component, (code) => code >= 48 && code <= 57),
+    )
+  );
+}
+
+function isSummaryHead(value: string | undefined): boolean {
+  return (
+    value !== undefined &&
+    value.startsWith("head `") &&
+    value.endsWith("`") &&
+    isLowerHex(value.slice(6, -1), 7)
+  );
+}
+
+function isSummaryEngine(value: string | undefined): boolean {
+  return (
+    value !== undefined &&
+    value.startsWith("engine `v") &&
+    value.endsWith("`") &&
+    isVersion(value.slice(9, -1))
+  );
+}
+
+function isSummaryAction(value: string | undefined): boolean {
+  return (
+    value === undefined ||
+    (value.startsWith("action `") &&
+      value.endsWith("`") &&
+      value.length > "action ``".length &&
+      !value.slice(8, -1).includes("`"))
+  );
+}
+
+function parsedSummaryTail(tail: string): number | undefined {
+  const headEnd = tail.indexOf(" · ");
+  if (headEnd === -1) return undefined;
+  const timestampEnd = tail.indexOf(" · ", headEnd + 3);
+  if (timestampEnd === -1) return undefined;
+  const engineEnd = tail.indexOf(" · ", timestampEnd + 3);
+  const head = tail.slice(0, headEnd);
+  const timestamp = tail.slice(headEnd + 3, timestampEnd);
+  const engine = tail.slice(timestampEnd + 3, engineEnd === -1 ? tail.length : engineEnd);
+  const action = engineEnd === -1 ? undefined : tail.slice(engineEnd + 3);
+  if (!isSummaryHead(head) || !isSummaryEngine(engine)) return undefined;
+  if (!isSummaryAction(action)) return undefined;
+  return parsedTimestamp(timestamp);
+}
+
+function parsedReasonAndTail(remainder: string, outcome: SettlementOutcome): number | undefined {
+  let reason: string | undefined;
+  let tail = remainder;
+  if (remainder.startsWith(" (`")) {
+    const closing = remainder.indexOf("`)");
+    if (closing === -1) return undefined;
+    reason = remainder.slice(3, closing);
+    tail = remainder.slice(closing + 2);
+  }
   if (
-    alt !== outcome ||
     (outcome === "incomplete") !== (reason !== undefined) ||
-    eventMs === undefined
+    (reason !== undefined && !isReason(reason))
   ) {
     return undefined;
   }
-  return { outcome, eventMs };
+  if (!tail.startsWith(SUMMARY_TAIL_PREFIX)) return undefined;
+  return parsedSummaryTail(tail.slice(3));
+}
+
+function parsedCurrentHeadline(headline: string): ParsedSummaryHeadline | undefined {
+  if (!headline.startsWith(SUMMARY_IMAGE_PREFIX)) return undefined;
+  const afterSha = headline.slice(SUMMARY_IMAGE_PREFIX.length);
+  const middle = afterSha.indexOf(SUMMARY_IMAGE_MIDDLE);
+  if (middle === -1 || !isLowerHex(afterSha.slice(0, middle), 40)) return undefined;
+  const afterImage = afterSha.slice(middle + SUMMARY_IMAGE_MIDDLE.length);
+  for (const outcome of ["complete", "incomplete", "abandoned"] as const) {
+    const image = `${outcome}${SUMMARY_IMAGE_SUFFIX}${outcome.toUpperCase()}">`;
+    if (!afterImage.startsWith(image)) continue;
+    const eventMs = parsedReasonAndTail(afterImage.slice(image.length), outcome);
+    if (eventMs !== undefined) return { outcome, eventMs };
+  }
+  return undefined;
+}
+
+function legacyOutcomeAndRemainder(
+  headline: string,
+): { readonly outcome: SettlementOutcome; readonly remainder: string } | undefined {
+  const complete = "✅ complete";
+  if (headline.startsWith(complete))
+    return { outcome: "complete", remainder: headline.slice(complete.length) };
+  const abandoned = "⏳ abandoned";
+  if (headline.startsWith(abandoned))
+    return { outcome: "abandoned", remainder: headline.slice(abandoned.length) };
+  const incomplete = "⚠️ incomplete";
+  if (headline.startsWith(incomplete))
+    return { outcome: "incomplete", remainder: headline.slice(incomplete.length) };
+  return undefined;
 }
 
 function parsedLegacyHeadline(headline: string): ParsedSummaryHeadline | undefined {
-  const match = LEGACY_SUMMARY_HEADLINE.exec(headline);
-  if (match === null) return undefined;
-  const label = match[1];
-  const outcome: SettlementOutcome = label?.startsWith("✅")
-    ? "complete"
-    : label?.startsWith("⏳")
-      ? "abandoned"
-      : "incomplete";
-  const reason = match[2];
-  const eventMs = parsedTimestamp(match[4]);
-  if ((outcome === "incomplete") !== (reason !== undefined) || eventMs === undefined) {
-    return undefined;
-  }
-  return { outcome, eventMs };
+  const parsed = legacyOutcomeAndRemainder(headline);
+  if (parsed === undefined) return undefined;
+  const eventMs = parsedReasonAndTail(parsed.remainder, parsed.outcome);
+  return eventMs === undefined ? undefined : { outcome: parsed.outcome, eventMs };
 }
 
 function isBotSummary(comment: IssueCommentNode): SummaryClassification | undefined {
@@ -984,7 +1068,7 @@ function acceptCommentPage(
   connection: IssueCommentConnection | undefined,
   state: CommentPopulationState,
 ): PageDecision {
-  if (!validIssueCommentConnection(connection)) return "invalid";
+  if (!validConnection(connection)) return "invalid";
   state.expectedTotal ??= connection.totalCount;
   if (connection.totalCount !== state.expectedTotal) return "invalid";
   for (const node of connection.nodes) {
@@ -1172,6 +1256,59 @@ async function fetchSearchPage(
   return reply?.data?.search;
 }
 
+interface ReviewMetricAvailability {
+  findingsKnown: boolean;
+  settlementsKnown: boolean;
+}
+
+function unavailableReviewStats(): ReviewStats {
+  return { findings: {}, settlements: {} };
+}
+
+function completedReviewStats(
+  availability: ReviewMetricAvailability,
+  tally: ThreadTally,
+  prsWithFindings: ReadonlySet<number>,
+  settlementTally: SettlementTally,
+  nowMs: number,
+): ReviewStats {
+  return {
+    findings: availability.findingsKnown ? finishedStats(tally, prsWithFindings) : {},
+    settlements: availability.settlementsKnown
+      ? finishedSettlementStats(settlementTally, nowMs)
+      : {},
+  };
+}
+
+async function collectSearchPageStats(
+  search: CompleteSearchResults,
+  population: SearchPopulationState,
+  context: FindingCollectionContext,
+  availability: ReviewMetricAvailability,
+  tally: ThreadTally,
+  prsWithFindings: Set<number>,
+  settlementTally: SettlementTally,
+): Promise<boolean> {
+  const pullRequests = acceptSearchPopulation(search, population);
+  if (pullRequests === undefined) return false;
+  if (availability.findingsKnown) {
+    availability.findingsKnown = await tallySearchPullRequests(
+      pullRequests,
+      context,
+      tally,
+      prsWithFindings,
+    );
+  }
+  if (availability.settlementsKnown) {
+    availability.settlementsKnown = await tallySearchSettlements(
+      pullRequests,
+      context,
+      settlementTally,
+    );
+  }
+  return true;
+}
+
 async function collectReviewStats(
   owner: string,
   repo: string,
@@ -1189,32 +1326,32 @@ async function collectReviewStats(
   const settlementTally: SettlementTally = { records: 0, complete: 0 };
   const prsWithFindings = new Set<number>();
   const population: SearchPopulationState = { seenPullRequests: new Set() };
-  let findingsKnown = true;
-  let settlementsKnown = true;
+  const availability: ReviewMetricAvailability = { findingsKnown: true, settlementsKnown: true };
   let after: string | null = null;
   for (let page = 1; page <= MAX_SEARCH_PAGES; page += 1) {
     const search = await fetchSearchPage(q, after, token, fetchImpl);
-    if (!validSearchResults(search)) return { findings: {}, settlements: {} };
-    const pullRequests = acceptSearchPopulation(search, population);
-    if (pullRequests === undefined) return { findings: {}, settlements: {} };
-    if (findingsKnown) {
-      findingsKnown = await tallySearchPullRequests(pullRequests, context, tally, prsWithFindings);
-    }
-    if (settlementsKnown) {
-      settlementsKnown = await tallySearchSettlements(pullRequests, context, settlementTally);
-    }
+    if (!validSearchResults(search)) return unavailableReviewStats();
+    if (
+      !(await collectSearchPageStats(
+        search,
+        population,
+        context,
+        availability,
+        tally,
+        prsWithFindings,
+        settlementTally,
+      ))
+    )
+      return unavailableReviewStats();
     const continuation = searchContinuation(search, population);
     if (continuation.kind === "complete") {
-      return {
-        findings: findingsKnown ? finishedStats(tally, prsWithFindings) : {},
-        settlements: settlementsKnown ? finishedSettlementStats(settlementTally, nowMs) : {},
-      };
+      return completedReviewStats(availability, tally, prsWithFindings, settlementTally, nowMs);
     }
-    if (continuation.kind === "invalid") return { findings: {}, settlements: {} };
+    if (continuation.kind === "invalid") return unavailableReviewStats();
     after = continuation.cursor;
   }
   // The window outran the safety ceiling: absent beats publishing a floor as the truth.
-  return { findings: {}, settlements: {} };
+  return unavailableReviewStats();
 }
 
 export async function collectCardData(

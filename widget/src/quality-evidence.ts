@@ -148,7 +148,7 @@ export function parseCardQualityEvidence(
   value: unknown,
   qualityVersion: string,
 ): CardQualityEvidence | undefined {
-  if (!/^v[0-9]+\.[0-9]+\.[0-9]+$/u.test(qualityVersion)) return undefined;
+  if (!/^v\d+\.\d+\.\d+$/u.test(qualityVersion)) return undefined;
   const evidence = evidenceRecords(value);
   if (!validEvidenceBinding(evidence) || evidence === undefined) return undefined;
   const holdout = parsedEvidenceCounts(evidence);
@@ -175,7 +175,7 @@ function evidencePath(tree: JsonRecord, version: string): string | undefined {
   if (tree.truncated !== false || !Array.isArray(tree.tree)) return undefined;
   const escapedVersion = version.replaceAll(".", String.raw`\.`);
   const pattern = new RegExp(
-    String.raw`^corpus/evidence/historical-replay-[0-9]{4}-[0-9]{2}-[0-9]{2}-${escapedVersion}\.json$`,
+    String.raw`^corpus/evidence/historical-replay-\d{4}-\d{2}-\d{2}-${escapedVersion}\.json$`,
     "u",
   );
   const matches = tree.tree.flatMap((entry) => {
@@ -200,7 +200,7 @@ function blobText(blob: JsonRecord): string | undefined {
   }
   try {
     const decoded = atob(blob.content.replaceAll("\n", ""));
-    const bytes = Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+    const bytes = Uint8Array.from(decoded, (character) => character.codePointAt(0) ?? 0);
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
   } catch {
     return undefined;
@@ -209,9 +209,7 @@ function blobText(blob: JsonRecord): string | undefined {
 
 function releaseVersion(latest: JsonRecord | undefined): string | undefined {
   const version = latest?.tag_name;
-  return typeof version === "string" && /^v[0-9]+\.[0-9]+\.[0-9]+$/u.test(version)
-    ? version
-    : undefined;
+  return typeof version === "string" && /^v\d+\.\d+\.\d+$/u.test(version) ? version : undefined;
 }
 
 function evidenceBlobSha(tree: JsonRecord | undefined, version: string): string | undefined {
@@ -219,7 +217,7 @@ function evidenceBlobSha(tree: JsonRecord | undefined, version: string): string 
   const path = evidencePath(tree, version);
   if (path === undefined || !Array.isArray(tree.tree)) return undefined;
   const node = tree.tree.map(record).find((entry) => entry?.path === path);
-  return typeof node?.sha === "string" && /^[0-9a-f]{40}$/u.test(node.sha) ? node.sha : undefined;
+  return typeof node?.sha === "string" && /^[\da-f]{40}$/u.test(node.sha) ? node.sha : undefined;
 }
 
 function parsedBlobEvidence(
