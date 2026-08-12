@@ -164,9 +164,9 @@ export function executeReleaseEvidenceCli({
       `check-release-evidence: PASS - v${expected.version} binds ` +
         `${expected.head} / ${expected.tree}`,
     );
-  } catch (caught) {
+  } catch (error_) {
     error(
-      `check-release-evidence: FAIL - ${caught instanceof Error ? caught.message : String(caught)}`,
+      `check-release-evidence: FAIL - ${error_ instanceof Error ? error_.message : String(error_)}`,
     );
     error(USAGE);
     setExitCode(1);
