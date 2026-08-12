@@ -62,7 +62,7 @@ describe("required self-review settlement gate", () => {
     const review = stepBlock("Review");
     const gate = stepBlock("Require a complete settlement");
 
-    assert.match(workflow, /^on:\n {2}pull_request_target:/mu);
+    assert.match(workflow, /^on:\n +pull_request_target:/mu);
     assert.match(
       stepBlock("Check out protected base"),
       /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/u,
