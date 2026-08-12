@@ -3278,7 +3278,7 @@ function incrementCount(counts: Record<string, number>, key: string): void {
   counts[key] = (counts[key] ?? 0) + 1;
 }
 
-/** Closed stage/reason counters diagnose incomplete verification without logging reviewed text. */
+/** Closed stage/reason counters diagnose an undecided hypothesis without logging reviewed text. */
 function captureUndecidedTrace(
   counts: Record<string, number>,
   trace: SubstantiationTerminalTrace,
@@ -3385,10 +3385,11 @@ function judgeableFindings(
  * sense that no replacement is invented — under production's paranoid policy it is withheld.
  *
  * This call is deliberately fail-closed for the OpenAI-compatible production path. A missing file,
- * unreachable judge, malformed verdict, or fabricated evidence line withholds the fresh candidate
- * and increments `undecided`; the caller turns that count into an incomplete review instead of a
- * false clean result. Anthropic retains the pre-existing no-audit path until this independent judge
- * has a native protocol adapter; Keiko's measured/deployed `gpt-oss-120b` path is OpenAI-compatible.
+ * unreachable judge, malformed verdict, or fabricated evidence line withholds the raw hypothesis
+ * and increments `undecided`; the caller exposes that count, leaves its path uncached, and never
+ * publishes it as a finding. File coverage may still be complete. Anthropic retains the pre-existing
+ * no-audit path until this independent judge has a native protocol adapter; Keiko's measured/deployed
+ * `gpt-oss-120b` path is OpenAI-compatible.
  */
 async function substantiateModelSurvivors(
   run: PipelineRun,

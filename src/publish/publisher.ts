@@ -92,8 +92,9 @@ export interface PublishOutcome {
   /** Verified fresh findings outside the PR-wide publication set. */
   readonly suppressedRanked?: number;
   /**
-   * Fresh candidates withheld because evidence or the independent judge was unavailable. Unlike a
-   * content rejection, any non-zero value degrades settlement so an outage cannot look clean.
+   * Raw model hypotheses withheld because evidence or the independent judge was unavailable.
+   * They never become findings, their paths remain retryable, and the count stays visible even
+   * when complete file coverage lets the review itself settle complete.
    */
   readonly verificationUndecided?: number;
   /**

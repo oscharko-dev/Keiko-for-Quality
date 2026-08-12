@@ -4261,6 +4261,7 @@ describe("performReview: review-cache memoization end to end", () => {
       const report = await performReview(request, diagnostics);
 
       expect(report.outcome).toBe("complete");
+      expect(report.reason).toBeUndefined();
       expect(report.publish).toMatchObject({
         published: 0,
         suppressedEvidence: 1,

@@ -1602,8 +1602,9 @@ var REASON_CODES = [
   // vague, or contradicted — and a vague one gets exactly one repair before it is dropped. The
   // counts are the whole point of the code: `kept` and `repaired` say what a reader received,
   // `dropped_vague` and `dropped_unsupported` say what this stage removed, and `undecided` says
-  // where it failed to judge. The production evidence gate withholds those candidates and marks the
-  // review incomplete, so an outage can be neither a false quality improvement nor a false clean.
+  // where it failed to judge. The production evidence gate withholds those raw hypotheses, exposes
+  // the count, and leaves their paths retryable; it does not erase completed file coverage or turn
+  // an unverified hypothesis into a finding.
   "publish.substantiated",
   // Source-bound contradictions decided before any model call. The record carries only one closed
   // rule ID per numeric key and its count — never a path, source line, finding, or evidence text.
