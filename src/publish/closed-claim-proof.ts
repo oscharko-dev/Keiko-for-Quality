@@ -1251,7 +1251,7 @@ function namedImport(text: string): NamedImport | undefined {
 function importsVitestViDirectly(lines: readonly SourceLine[]): boolean {
   return lines.some((line) => {
     const imported = namedImport(line.text);
-    return imported?.source === "vitest" && imported.names.some((name) => name === "vi");
+    return imported?.source === "vitest" && imported.names.includes("vi");
   });
 }
 

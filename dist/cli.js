@@ -11163,7 +11163,7 @@ function namedImport(text) {
 function importsVitestViDirectly(lines) {
   return lines.some((line) => {
     const imported = namedImport(line.text);
-    return imported?.source === "vitest" && imported.names.some((name) => name === "vi");
+    return imported?.source === "vitest" && imported.names.includes("vi");
   });
 }
 function resetIsolationRefutation(finding, lines) {
