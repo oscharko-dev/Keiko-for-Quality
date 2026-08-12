@@ -1951,6 +1951,79 @@ describe("performReview: review-cache memoization end to end", () => {
       ).toEqual([undefined, 43, 44]);
     });
 
+    it("never credits a shrinking gap reported by an untrustworthy targeted result", async () => {
+      const mixedRepo = await mkdtemp(join(tmpdir(), "kfq-untrusted-targeted-gap-"));
+      try {
+        git(["init", "-q", "-b", "main"], mixedRepo);
+        await mkdir(join(mixedRepo, "src"), { recursive: true });
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 1;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "base", "--no-gpg-sign"], mixedRepo);
+        const mixedBase = git(["rev-parse", "HEAD"], mixedRepo).trim();
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 2;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "head", "--no-gpg-sign"], mixedRepo);
+        const mixedHead = git(["rev-parse", "HEAD"], mixedRepo).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        runEngineMock
+          .mockResolvedValueOnce({
+            stdout: finishedWithFailures(["src/b.ts", "src/c.ts"], 4),
+            ruleDigest: engineDigest,
+          })
+          .mockResolvedValueOnce({
+            stdout: JSON.stringify({
+              status: "failed",
+              summary: { files_reviewed: 2, total_tokens: 20_000, budget_exceeded: false },
+              comments: [],
+              warnings: [
+                {
+                  type: "subtask_error",
+                  file: "src/b.ts",
+                  message: "single_shot core examiner failed",
+                },
+              ],
+            }),
+            ruleDigest: engineDigest,
+          })
+          // Before the trust boundary, the apparently smaller gap bought this third round; its
+          // process failure then credited src/c.ts even though the failed result never proved it.
+          .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit", 1_000));
+        const request = baseRequest(undefined);
+        vi.spyOn(request.client, "getPullRequest").mockResolvedValue({
+          headSha: commitSha(mixedHead),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        });
+
+        const report = await performLocalReview(
+          {
+            ...request,
+            base: commitSha(mixedBase),
+            head: commitSha(mixedHead),
+            repositoryPath: mixedRepo,
+            config: { ...CONFIG, protocol: "openai" },
+          },
+          createSilentDiagnostics(),
+        );
+
+        expect(report).toMatchObject({
+          outcome: "incomplete",
+          reason: "settlement.incomplete.engine_status_not_success",
+          inventory: { reviewable: 4, reviewed: 2 },
+        });
+        expect(runEngineMock).toHaveBeenCalledTimes(2);
+      } finally {
+        await rm(mixedRepo, { recursive: true, force: true });
+      }
+    });
+
     it("replays the exact 36-file completion failure as gap 3 to 1 to 1 to 0", async () => {
       const replayRepo = await mkdtemp(join(tmpdir(), "kfq-completion-36-"));
       const git = (args: readonly string[]): string =>

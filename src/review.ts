@@ -2558,11 +2558,13 @@ async function decideAfterFirstAttempt(
 /**
  * Whether another bounded round is justified: the gap must not have GROWN.
  *
- * A round that returns more casualties is getting worse and stops immediately. An equal non-empty
- * gap is recorded, but may spend the next distinct-seed round within the fixed cap: the previous
- * implementation both stopped here and reused seed 43, so its advertised three-round recovery
- * could never give a transient one-file shape failure a genuine third opinion (Keiko#2970,
- * 2026-08-12). A gap of zero stops silently: nothing remains to recover.
+ * A round whose status makes its result untrustworthy stops before its apparent gap can credit any
+ * path or seed another round. Otherwise, a round that returns more casualties is getting worse and
+ * stops immediately. An equal non-empty gap is recorded, but may spend the next distinct-seed
+ * round within the fixed cap: the previous implementation both stopped here and reused seed 43,
+ * so its advertised three-round recovery could never give a transient one-file shape failure a
+ * genuine third opinion (Keiko#2970, 2026-08-12). A gap of zero stops silently: nothing remains to
+ * recover.
  */
 function gapAllowsAnotherRound(
   before: number,
@@ -2571,6 +2573,9 @@ function gapAllowsAnotherRound(
   round: number,
 ): boolean {
   const { reviewablePaths, diagnostics, options } = context;
+  if (result.budgetExceeded || result.status === "skipped" || resumeWorthwhile(result.status)) {
+    return false;
+  }
   const after = targetedGapPaths(result, reviewablePaths)?.size ?? 0;
   if (after === 0) return false;
   if (after >= before) {

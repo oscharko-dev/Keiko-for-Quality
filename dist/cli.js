@@ -14174,6 +14174,9 @@ async function decideAfterFirstAttempt(parsed, context) {
 }
 function gapAllowsAnotherRound(before, result, context, round) {
   const { reviewablePaths, diagnostics, options: options2 } = context;
+  if (result.budgetExceeded || result.status === "skipped" || resumeWorthwhile(result.status)) {
+    return false;
+  }
   const after = targetedGapPaths(result, reviewablePaths)?.size ?? 0;
   if (after === 0) return false;
   if (after >= before) {
