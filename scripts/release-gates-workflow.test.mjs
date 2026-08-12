@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 
@@ -7,6 +7,50 @@ const workflow = readFileSync(
   resolve(import.meta.dirname, "..", ".github/workflows/release-gates.yml"),
   "utf8",
 );
+
+const workflowsDirectory = resolve(import.meta.dirname, "..", ".github/workflows");
+
+/**
+ * GitHub evaluates expressions before handing a `run:` value to the shell.  A
+ * workflow_dispatch input is therefore untrusted shell data even when the
+ * command later quotes the interpolation.  Keep the expression at an `env:`
+ * boundary and expand the resulting shell variable instead.
+ *
+ * This intentionally inspects the YAML source rather than a parsed value: a
+ * YAML parser cannot tell whether GitHub interpolated untrusted data before
+ * Bash received it.
+ */
+function runBlocks(source) {
+  const lines = source.split("\n");
+  const blocks = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = /^(\s*)run:\s*(.*)$/u.exec(lines[index]);
+    if (!match) continue;
+
+    const indentation = match[1].length;
+    const block = [lines[index]];
+    for (let next = index + 1; next < lines.length; next += 1) {
+      const line = lines[next];
+      if (line.trim() && /^\s*/u.exec(line)[0].length <= indentation) break;
+      block.push(line);
+    }
+    blocks.push(block.join("\n"));
+  }
+
+  return blocks;
+}
+
+/** Rejects an input-context reference anywhere inside a GitHub expression in shell code. */
+function assertNoDispatchInputsInShell(source, filename) {
+  for (const block of runBlocks(source)) {
+    assert.doesNotMatch(
+      block,
+      /\$\{\{(?:(?!\}\})[\s\S])*(?:github\.event\.)?inputs(?:\.|\[)(?:(?!\}\})[\s\S])*\}\}/u,
+      `${filename} must move workflow_dispatch inputs into env: before a run: block`,
+    );
+  }
+}
 
 function jobSection(jobName) {
   const lines = workflow.split("\n");
@@ -45,14 +89,33 @@ describe("paid release-gate workflow contract", () => {
   });
 
   it("keeps the four version-scoped release evidence artifacts", () => {
-    assert.match(workflow, /qualification-\$\(date -u \+%F\)-v\$\{\{ inputs\.version \}\}\.json/u);
-    assert.match(
-      workflow,
-      /historical-replay-\$\(date -u \+%F\)-v\$\{\{ inputs\.version \}\}\.json/u,
-    );
-    assert.match(workflow, /seed-gate-\$\(date -u \+%F\)-v\$\{\{ inputs\.version \}\}\.md/u);
-    assert.match(workflow, /completion-\$\(date -u \+%F\)-v\$\{\{ inputs\.version \}\}\.md/u);
+    assert.match(workflow, /qualification-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.json/u);
+    assert.match(workflow, /historical-replay-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.json/u);
+    assert.match(workflow, /seed-gate-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.md/u);
+    assert.match(workflow, /completion-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.md/u);
     assert.equal([...workflow.matchAll(/if-no-files-found: error/gu)].length, 4);
+  });
+
+  it("never passes workflow_dispatch inputs directly to a shell", () => {
+    for (const filename of readdirSync(workflowsDirectory)) {
+      if (!/\.ya?ml$/u.test(filename)) continue;
+      const source = readFileSync(resolve(workflowsDirectory, filename), "utf8");
+      assertNoDispatchInputsInShell(source, filename);
+    }
+  });
+
+  it("rejects dispatch inputs hidden inside compound shell expressions", () => {
+    for (const expression of [
+      "${{ inputs.version || '0.0.0' }}",
+      "${{ format('{0}', inputs.version) }}",
+      "${{ github.event.inputs['version'] || '0.0.0' }}",
+    ]) {
+      assert.throws(
+        () =>
+          assertNoDispatchInputsInShell(`steps:\n  run: |\n    echo ${expression}`, "fixture.yml"),
+        /must move workflow_dispatch inputs into env/u,
+      );
+    }
   });
 
   it("replays the complete calibrated population with a zero-token plan first", () => {

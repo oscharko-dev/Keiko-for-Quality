@@ -95,6 +95,7 @@ jobs:
 
       - name: Run and score the full qualification corpus
         env:
+          EXPECTED_VERSION: ${{ inputs.version }}
           OCR_BINARY: ${{ runner.temp }}/ocr
           OCR_REPORT: ${{ runner.temp }}/qualification-raw.json
           OCR_LLM_URL: ${{ secrets.KFQ_MODEL_ENDPOINT }}
@@ -111,7 +112,7 @@ jobs:
           fi
           test -s "${OCR_REPORT}"
           npm run check:qualification -- "${OCR_REPORT}"
-          out="${GITHUB_WORKSPACE}/corpus/evidence/qualification-$(date -u +%F)-v${{ inputs.version }}.json"
+          out="${GITHUB_WORKSPACE}/corpus/evidence/qualification-$(date -u +%F)-v${EXPECTED_VERSION}.json"
           npm run qualification:evidence -- --raw "${OCR_REPORT}" --out "${out}"
 
       - name: Upload redacted qualification evidence
@@ -197,6 +198,7 @@ jobs:
 
       - name: Execute the calibrated historical replay
         env:
+          EXPECTED_VERSION: ${{ inputs.version }}
           OCR_LLM_MODEL: gpt-oss-120b
           OCR_LLM_URL: ${{ secrets.KFQ_MODEL_ENDPOINT }}
           OCR_LLM_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
@@ -204,7 +206,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          out="${GITHUB_WORKSPACE}/corpus/evidence/historical-replay-$(date -u +%F)-v${{ inputs.version }}.json"
+          out="${GITHUB_WORKSPACE}/corpus/evidence/historical-replay-$(date -u +%F)-v${EXPECTED_VERSION}.json"
           node corpus/historical-replay.mjs \
             --execute \
             --harvest "${RUNNER_TEMP}/historical-harvest.json" \
@@ -256,6 +258,7 @@ jobs:
 
       - name: Run every consumer seed case
         env:
+          EXPECTED_VERSION: ${{ inputs.version }}
           KFQ_MODEL_ENDPOINT: ${{ secrets.KFQ_MODEL_ENDPOINT }}
           KFQ_MODEL_ID: gpt-oss-120b
           KFQ_MODEL_PROTOCOL: openai
@@ -265,7 +268,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          out="${GITHUB_WORKSPACE}/corpus/evidence/seed-gate-$(date -u +%F)-v${{ inputs.version }}.md"
+          out="${GITHUB_WORKSPACE}/corpus/evidence/seed-gate-$(date -u +%F)-v${EXPECTED_VERSION}.md"
           npm run corpus:seed -- \
             --repo "${CONSUMER_REPO}" \
             --attempts 2 \
@@ -328,6 +331,7 @@ jobs:
 
       - name: Run 41-file, 19-file, and 79-file completion attempts
         env:
+          EXPECTED_VERSION: ${{ inputs.version }}
           KFQ_MODEL_ENDPOINT: ${{ secrets.KFQ_MODEL_ENDPOINT }}
           KFQ_MODEL_ID: gpt-oss-120b
           KFQ_MODEL_PROTOCOL: openai
@@ -337,7 +341,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          out="${GITHUB_WORKSPACE}/corpus/evidence/completion-$(date -u +%F)-v${{ inputs.version }}.md"
+          out="${GITHUB_WORKSPACE}/corpus/evidence/completion-$(date -u +%F)-v${EXPECTED_VERSION}.md"
           npm run corpus:completion -- \
             --repo "${CONSUMER_REPO}" \
             --pr 2970 \
