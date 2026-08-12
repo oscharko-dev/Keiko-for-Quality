@@ -116,6 +116,84 @@ function requireReleaseChannel() {
   return { channel, recoveryReason };
 }
 
+/** A copy/pasteable shell argument whose exact value cannot be reparsed as syntax. */
+function quoteReleaseArgument(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+const FORMATTED_RELEASE_PHASES = new Set(["attest", "release", "publish", "repin"]);
+const SHA_RELEASE_PHASES = new Set(["publish", "repin"]);
+
+function requireFormattableReleaseCommand({ phase, version, sha, releaseChannel }) {
+  if (!FORMATTED_RELEASE_PHASES.has(phase)) {
+    throw new Error("cannot format unsupported release phase");
+  }
+  if (parseVersion(version) === undefined) throw new Error("cannot format invalid release version");
+  const requiresSha = SHA_RELEASE_PHASES.has(phase);
+  if (requiresSha !== (typeof sha === "string")) {
+    throw new Error("cannot format release command with phase-inappropriate SHA");
+  }
+  if (requiresSha && !/^[0-9a-f]{40}$/u.test(sha)) {
+    throw new Error("cannot format invalid release SHA");
+  }
+  const validation = validateReleaseChannel(releaseChannel);
+  if (!validation.valid) {
+    throw new Error(`cannot format invalid release channel: ${validation.failures.join(", ")}`);
+  }
+}
+
+function formattedChannelArguments(releaseChannel) {
+  if (releaseChannel.channel !== "recovery") return [];
+  return [
+    "--channel",
+    quoteReleaseArgument(releaseChannel.channel),
+    "--recovery-reason",
+    quoteReleaseArgument(releaseChannel.recoveryReason),
+  ];
+}
+
+/**
+ * One formatter owns every operator hand-off in the release chain. Recovery is never implicit:
+ * both closed flags travel together to every following phase, while standard keeps the historical
+ * command shape without redundant channel flags.
+ */
+export function formatReleaseCommand({ phase, version, sha, releaseChannel }) {
+  requireFormattableReleaseCommand({ phase, version, sha, releaseChannel });
+  const arguments_ = ["npm", "run", "release", "--", phase];
+  arguments_.push("--version", quoteReleaseArgument(version));
+  if (sha !== undefined) arguments_.push("--sha", quoteReleaseArgument(sha));
+  arguments_.push(...formattedChannelArguments(releaseChannel));
+  return arguments_.join(" ");
+}
+
+/** `prep` cannot choose a channel before the measurements have produced their verdict. */
+export function formatPostPrepInstruction(version) {
+  if (parseVersion(version) === undefined) throw new Error("cannot format invalid release version");
+  return (
+    `After all four measurements for v${version}, use their gate result to select standard or ` +
+    "recovery. Invoke attestation only with that channel's complete required arguments."
+  );
+}
+
+/** The main squash SHA does not exist until the release PR merges, so this stays non-executable. */
+export function formatPendingPublishInstruction({ version, releaseChannel }) {
+  requireFormattableReleaseCommand({
+    phase: "release",
+    version,
+    sha: undefined,
+    releaseChannel,
+  });
+  const channelArguments = formattedChannelArguments(releaseChannel);
+  const channelClause =
+    channelArguments.length === 0
+      ? "the standard channel (no channel flags)"
+      : `these channel arguments: ${channelArguments.join(" ")}`;
+  return (
+    `After the PR merges, invoke publish for v${version} with its full 40-character main squash ` +
+    `SHA and ${channelClause}.`
+  );
+}
+
 function requireCleanWorktree() {
   if (run("git", ["status", "--porcelain"]).trim() !== "") {
     fail("the worktree has uncommitted changes — commit or stash them first");
@@ -270,7 +348,7 @@ function phasePrep() {
   console.log(
     `candidate committed for v${version}. Land it on dev, run all four measurements on that clean ` +
       "commit, redact the private qualification OCR_REPORT with qualification:evidence, leave " +
-      "the four public reports uncommitted, then run: attest",
+      `the four public reports uncommitted. ${formatPostPrepInstruction(version)}`,
   );
 }
 
@@ -293,8 +371,9 @@ function phaseAttest() {
     "-m",
     releaseChannelMessage(releaseChannel),
   ]);
+  const nextCommand = formatReleaseCommand({ phase: "release", version, releaseChannel });
   console.log(
-    `evidence committed for v${version}. Land this evidence-only PR on dev, then run: release`,
+    `evidence committed for v${version}. Land this evidence-only PR on dev, then run: ${nextCommand}`,
   );
 }
 
@@ -398,8 +477,9 @@ function phaseRelease() {
   if (mine !== theirs) fail(`release tree ${mine} does not match dev's ${theirs}`);
 
   run("git", ["push", "-u", "origin", `release/v${version}`]);
+  const nextInstruction = formatPendingPublishInstruction({ version, releaseChannel });
   console.log(
-    `release/v${version} pushed, tree identical to dev. Open the PR into main, then: publish`,
+    `release/v${version} pushed, tree identical to dev. Open the PR into main. ${nextInstruction}`,
   );
 }
 
@@ -546,7 +626,13 @@ function phasePublish() {
     }
   }
   phaseCheck();
-  console.log(`${tag} tagged, released, and reconciled. Next: repin --sha ${sha}`);
+  const nextCommand = formatReleaseCommand({
+    phase: "repin",
+    version,
+    sha,
+    releaseChannel,
+  });
+  console.log(`${tag} tagged, released, and reconciled. Next: ${nextCommand}`);
 }
 
 function phaseRepin() {
