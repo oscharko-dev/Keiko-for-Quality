@@ -35,7 +35,7 @@ describe("selectPrWideFindings", () => {
     const originals = [cached, ...fresh.slice(0, 5), deterministic, ...fresh.slice(5)];
     const survivors = originals.map(planned);
 
-    const selected = selectPrWideFindings(survivors, new Set([cached, ...fresh]));
+    const selected = selectPrWideFindings(survivors, new Set([cached, ...fresh]), 50);
 
     expect(selected.kept).toEqual([
       survivors[0],
@@ -63,7 +63,7 @@ describe("selectPrWideFindings", () => {
     ];
     const survivors = originals.map(planned);
 
-    const selected = selectPrWideFindings(survivors, new Set(originals));
+    const selected = selectPrWideFindings(survivors, new Set(originals), 50);
 
     expect(selected.kept).toEqual(survivors.slice(2));
     expect(selected.rankedOutOriginals).toEqual(originals.slice(0, 2));
@@ -75,7 +75,7 @@ describe("selectPrWideFindings", () => {
     );
     const survivors = originals.map(planned);
 
-    const selected = selectPrWideFindings(survivors, new Set(originals));
+    const selected = selectPrWideFindings(survivors, new Set(originals), 50);
 
     expect(selected.kept).toEqual(survivors.slice(0, 8));
     expect(selected.rankedOutOriginals).toEqual(originals.slice(8));
@@ -91,6 +91,7 @@ describe("selectPrWideFindings", () => {
     const selected = selectPrWideFindings(
       survivors,
       new Set(originals),
+      50,
       new Map([[promotedOriginal, promotedReplacement]]),
     );
 
@@ -115,7 +116,7 @@ describe("selectPrWideFindings", () => {
       [deterministicOriginal, deterministicReplacement],
     ]);
 
-    const selected = selectPrWideFindings(survivors, new Set(fresh), replacements);
+    const selected = selectPrWideFindings(survivors, new Set(fresh), 50, replacements);
 
     expect(selected.kept).toEqual([
       { ...survivors[0], finding: deterministicReplacement },
@@ -138,7 +139,7 @@ describe("selectPrWideFindings", () => {
     ];
     const survivors = originals.map(planned);
 
-    const selected = selectPrWideFindings(survivors, new Set(originals));
+    const selected = selectPrWideFindings(survivors, new Set(originals), 50);
 
     expect(selected.kept).toEqual([
       survivors[0],
@@ -162,6 +163,7 @@ describe("selectPrWideFindings", () => {
     const selected = selectPrWideFindings(
       survivors,
       new Set([original, other]),
+      50,
       new Map([[original, replacement]]),
     );
 
@@ -174,7 +176,7 @@ describe("selectPrWideFindings", () => {
 });
 
 describe("selectVerificationCandidates", () => {
-  it("bounds verifier work across cached and fresh model claims without counting deterministic findings", () => {
+  it("bounds verifier work across cached and fresh model claims after deterministic priority", () => {
     const cached = finding("cached-before-verification", "critical");
     const deterministic = finding("deterministic-before-verification", undefined);
     const fresh = Array.from({ length: 20 }, (_, index) =>
@@ -182,7 +184,7 @@ describe("selectVerificationCandidates", () => {
     );
     const survivors = [cached, deterministic, ...fresh].map(planned);
 
-    const selected = selectVerificationCandidates(survivors, new Set([cached, ...fresh]));
+    const selected = selectVerificationCandidates(survivors, new Set([cached, ...fresh]), 50);
 
     expect(selected.kept[0]).toBe(survivors[0]);
     expect(selected.kept[1]).toBe(survivors[1]);
@@ -191,4 +193,50 @@ describe("selectVerificationCandidates", () => {
       fresh.slice(MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR - 1),
     );
   });
+
+  it.each([1, 3, 50])(
+    "reduces the verifier cohort to the consumer's total limit %i after deterministic priority",
+    (maxFindings) => {
+      const deterministic = finding("deterministic", "low");
+      const model = Array.from({ length: 60 }, (_, index) =>
+        finding(`model-${String(index)}`, "high"),
+      );
+      const survivors = [model[0]!, deterministic, ...model.slice(1)].map(planned);
+
+      const selected = selectVerificationCandidates(survivors, new Set(model), maxFindings);
+
+      expect(selected.kept).toHaveLength(1 + Math.min(16, maxFindings - 1));
+      expect(selected.kept.some((entry) => entry.finding === deterministic)).toBe(true);
+      expect(selected.kept.filter((entry) => model.includes(entry.finding))).toHaveLength(
+        Math.max(0, Math.min(16, maxFindings - 1)),
+      );
+    },
+  );
+});
+
+describe("consumer publication limit", () => {
+  it.each([1, 3, 50])(
+    "never keeps more than maxFindings=%i and gives deterministic findings priority",
+    (maxFindings) => {
+      const deterministic = Array.from({ length: 2 }, (_, index) =>
+        finding(`deterministic-${String(index)}`, "low"),
+      );
+      const model = Array.from({ length: 60 }, (_, index) =>
+        finding(`model-${String(index)}`, "critical"),
+      );
+      const survivors = [...model.slice(0, 1), ...deterministic, ...model.slice(1)].map(planned);
+
+      const selected = selectPrWideFindings(survivors, new Set(model), maxFindings);
+
+      expect(selected.kept.length).toBeLessThanOrEqual(maxFindings);
+      expect(
+        selected.kept.filter((entry) => model.includes(entry.finding)).length,
+      ).toBeLessThanOrEqual(
+        Math.min(8, Math.max(0, maxFindings - Math.min(deterministic.length, maxFindings))),
+      );
+      expect(selected.kept.filter((entry) => deterministic.includes(entry.finding))).toEqual(
+        deterministic.slice(0, maxFindings).map(planned),
+      );
+    },
+  );
 });

@@ -25,6 +25,7 @@ import { LIMITS as ENGINE_RESULT_LIMITS } from "../engine/result.js";
 import {
   closedClaimProof,
   closedClaimRefutation,
+  type ClosedRefutationRuleId,
   type TrustedHunkEvidence,
 } from "./closed-claim-proof.js";
 import { MAX_EVIDENCE_CHARS, extractEvidenceIdentifiers } from "./evidence.js";
@@ -2533,8 +2534,11 @@ function closedRefutationResult<T extends JudgeableFinding>(
   finding: T,
   evidence: TrustedHunkEvidence,
   metrics: CandidateMetrics,
+  refutationSink: ((ruleId: ClosedRefutationRuleId) => void) | undefined,
 ): JudgedOne<T> | undefined {
-  if (closedClaimRefutation(finding, evidence) === undefined) return undefined;
+  const refutation = closedClaimRefutation(finding, evidence);
+  if (refutation === undefined) return undefined;
+  refutationSink?.(refutation.ruleId);
   metrics.truthRefuted += 1;
   return decidedResult<T>(undefined, "refuted", metrics, {
     stage: "truth_initial",
@@ -2546,10 +2550,11 @@ function closedSourceDecision<T extends JudgeableFinding>(
   finding: T,
   evidence: string | TrustedHunkEvidence,
   metrics: CandidateMetrics,
+  refutationSink: ((ruleId: ClosedRefutationRuleId) => void) | undefined,
 ): JudgedOne<T> | undefined {
   if (typeof evidence === "string") return undefined;
   return (
-    closedRefutationResult(finding, evidence, metrics) ??
+    closedRefutationResult(finding, evidence, metrics, refutationSink) ??
     closedProofResult(finding, evidence, metrics)
   );
 }
@@ -2561,6 +2566,7 @@ async function judgeOne<T extends JudgeableFinding>(
   strictness: SubstantiationStrictness,
   budget: CallBudget,
   retriever: EvidenceRetriever<T> | undefined,
+  refutationSink: ((ruleId: ClosedRefutationRuleId) => void) | undefined,
 ): Promise<JudgedOne<T>> {
   const dossier = buildDossier(finding.content);
   const metrics = emptyMetrics();
@@ -2585,7 +2591,7 @@ async function judgeOne<T extends JudgeableFinding>(
   // transition. Refutation is checked first because a fully proven clean diff must never be kept by
   // a claim-specific positive proof. Every other shape continues through the full independent model
   // workflow below.
-  const closedDecision = closedSourceDecision(finding, read, metrics);
+  const closedDecision = closedSourceDecision(finding, read, metrics, refutationSink);
   if (closedDecision !== undefined) return closedDecision;
   if (!budgetAllows(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
     return undecidedResult(finding, strictness, metrics, true, {
@@ -2664,6 +2670,7 @@ export async function substantiate<T extends JudgeableFinding>(
   maxTokens?: number,
   retrieveEvidence?: EvidenceRetriever<T>,
   historicalTraceSink?: SubstantiationTraceSink,
+  closedRefutationSink?: (ruleId: ClosedRefutationRuleId) => void,
 ): Promise<SubstantiationOutcome<T>> {
   const kept: T[] = [];
   const counts = emptyCounts();
@@ -2672,7 +2679,15 @@ export async function substantiate<T extends JudgeableFinding>(
   for (const finding of findings) {
     const tokensBefore = budget.spent;
     const callsBefore = budget.calls;
-    const judged = await judgeOne(finding, readHunk, deps, strictness, budget, retrieveEvidence);
+    const judged = await judgeOne(
+      finding,
+      readHunk,
+      deps,
+      strictness,
+      budget,
+      retrieveEvidence,
+      closedRefutationSink,
+    );
     if (judged.finding !== undefined) kept.push(judged.finding);
     tallyJudgement(counts, judged);
     historicalTraceSink?.({

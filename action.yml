@@ -89,8 +89,9 @@ inputs:
     default: "2000000"
   max_findings:
     description: >-
-      Findings above this count are treated as implausible and settle the run as incomplete, on the
-      basis that a flood is more likely a misconfigured model than a genuinely terrible change.
+      Maximum findings published for one review after sanitization, deduplication, evidence
+      verification, and ranking. Deterministically proven findings take priority; model-authored
+      findings are additionally capped at eight and at most sixteen reach verification.
     required: false
     default: "50"
   rename_detection_percent:

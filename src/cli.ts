@@ -636,7 +636,8 @@ Options:
   --file-timeout-seconds <n>     Per-file engine timeout. Default: 300.
   --review-timeout-seconds <n>   Whole-review wall-clock ceiling. Default: 1800.
   --token-budget <n>             Hard token ceiling for one review. Default: 2000000.
-  --max-findings <n>             Findings above this count are treated as implausible. Default: 50.
+  --max-findings <n>             Final total reported after verification/ranking; raw volume never
+                                  invalidates a completed review. Default: 50.
   --concurrency <n>              Engine review concurrency. Default: 4.
   --help, -h                     Print this help and exit 0.
 

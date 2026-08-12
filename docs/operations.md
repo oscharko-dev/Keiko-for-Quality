@@ -290,6 +290,14 @@ and concurrency — is documented by the CLI itself, the reference rather than a
 npm run review -- --help
 ```
 
+`--max-findings` is a publication limit, not an engine-validity limit. A completed review remains
+complete when generation produces more raw hypotheses than this value: sanitization,
+deduplication, evidence verification, and ranking reduce the cohort before reporting. The final
+total never exceeds the configured value, deterministic contract findings consume that total
+first, at most sixteen model-authored candidates reach verification, and at most eight
+model-authored findings publish. Lower values reduce both bounded model cohorts as well; they do
+not turn candidate volume into `engine_error`.
+
 The process exit code carries the settlement outcome, never merely "did it crash":
 
 | Code | Meaning                                                               |

@@ -628,11 +628,9 @@ interface IntraRunClusterResult {
  * audit running between `planPublication` and `executePublication` (see `PlannedFinding`).
  *
  * O(n^2) in the number of sanitized findings: a candidate is compared against at most one
- * representative per existing cluster. That is bounded in practice by `config.maxFindings` (50 by
- * default, 500 at the outside) — `settle` (`engine/settle.ts`) already discards any engine result
- * over that ceiling as implausible before publication ever runs, so the parser's own 1,000-finding
- * cap (`engine/result.ts`) never reaches this function. Quadratic is fine at that bound, so this
- * stays a plain nested scan rather than earning an index.
+ * representative per existing cluster. The engine parser's own 1,000-finding ceiling bounds this
+ * stage; `maxFindings` now limits the selected publication result rather than invalidating raw
+ * hypotheses. The scan stays deliberately simple because even that defensive maximum is bounded.
  */
 function clusterIntraRunDuplicates(
   candidates: readonly SanitizedCandidate[],
@@ -644,9 +642,7 @@ function clusterIntraRunDuplicates(
     // happens to hold that role right now lets a real duplicate of an EARLIER, since-demoted
     // member dodge suppression the moment a later member takes over as representative.
     // `areIntraRunDuplicates` is symmetric, so this only widens what a cluster can absorb, never
-    // narrows it. Bounded by the same finding-count ceiling `settle.ts` already enforces before
-    // any of this runs, so the worst case (candidates × members-so-far, up from candidates ×
-    // clusters) stays a small constant multiple of it, not an unbounded blowup.
+    // narrows it. The parser's defensive maximum keeps the worst case finite.
     // Every member, not just the current representative: the representative can change as a
     // cluster grows (`isBetterRepresentative` below), and comparing only against whichever member
     // happens to hold that role right now lets a real duplicate of an EARLIER, since-demoted
