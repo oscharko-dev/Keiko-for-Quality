@@ -857,9 +857,12 @@ const SUMMARY_IMAGE_PREFIX =
 const SUMMARY_IMAGE_MIDDLE = "/.github/assets/kq/out-";
 const SUMMARY_IMAGE_SUFFIX = '.svg" height="20" alt="';
 const SUMMARY_TAIL_PREFIX = " · head `";
-/** v0.6.0-v0.22.x summaries used text glyphs before the pinned design-system chips. They remain
- *  valid historical product records; refusing them would silently select only newer reviews and
- *  inflate the apparent completion rate. */
+const LEGACY_ICON_TITLE_SUFFIX = '/.github/assets/kq/reviewer.svg" width="18" height="18" alt=""> ';
+const LEGACY_ICON_OUTCOME_SUFFIX = '.svg" width="12" height="12" alt=""> ';
+/** v0.6.0-v0.20.x summaries used text glyphs and v0.21.0 briefly used an icon plus adjacent text
+ *  before the pinned design-system chips. They remain valid historical product records; refusing
+ *  either released grammar would silently select only newer reviews and inflate the apparent
+ *  completion rate. */
 
 type SummaryClassification =
   | { readonly kind: "summary"; readonly record: SettlementRecord }
@@ -982,6 +985,21 @@ function parsedCurrentHeadline(headline: string): ParsedSummaryHeadline | undefi
   return undefined;
 }
 
+function parsedIconTextHeadline(headline: string): ParsedSummaryHeadline | undefined {
+  if (!headline.startsWith(SUMMARY_IMAGE_PREFIX)) return undefined;
+  const afterSha = headline.slice(SUMMARY_IMAGE_PREFIX.length);
+  const middle = afterSha.indexOf(SUMMARY_IMAGE_MIDDLE);
+  if (middle === -1 || !isLowerHex(afterSha.slice(0, middle), 40)) return undefined;
+  const afterImage = afterSha.slice(middle + SUMMARY_IMAGE_MIDDLE.length);
+  for (const outcome of ["complete", "incomplete", "abandoned"] as const) {
+    const imageAndText = `${outcome}${LEGACY_ICON_OUTCOME_SUFFIX}${outcome}`;
+    if (!afterImage.startsWith(imageAndText)) continue;
+    const eventMs = parsedReasonAndTail(afterImage.slice(imageAndText.length), outcome);
+    if (eventMs !== undefined) return { outcome, eventMs };
+  }
+  return undefined;
+}
+
 function legacyOutcomeAndRemainder(
   headline: string,
 ): { readonly outcome: SettlementOutcome; readonly remainder: string } | undefined {
@@ -1030,16 +1048,30 @@ function summaryHeadline(body: string): string | undefined {
   return body.split("\n")[2];
 }
 
+function hasSummaryTitle(body: string): boolean {
+  if (body.startsWith(`${SUMMARY_TITLE}\n\n`)) return true;
+  if (!body.startsWith(SUMMARY_IMAGE_PREFIX)) return false;
+  const titleEnd = body.indexOf("\n\n");
+  if (titleEnd === -1) return false;
+  const afterSha = body.slice(SUMMARY_IMAGE_PREFIX.length, titleEnd);
+  return (
+    isLowerHex(afterSha.slice(0, 40), 40) &&
+    afterSha.slice(40) === `${LEGACY_ICON_TITLE_SUFFIX}${SUMMARY_TITLE}`
+  );
+}
+
 export function parseSummaryRecord(comment: IssueCommentNode): SummaryClassification {
   const body = comment.body;
-  if (typeof body !== "string" || !body.startsWith(`${SUMMARY_TITLE}\n\n`))
-    return { kind: "other" };
+  if (typeof body !== "string" || !hasSummaryTitle(body)) return { kind: "other" };
   const identity = isBotSummary(comment);
   if (identity !== undefined) return identity;
   const databaseId = summaryMetadata(comment, body);
   const headline = summaryHeadline(body);
   if (databaseId === undefined || headline === undefined) return { kind: "invalid" };
-  const parsed = parsedCurrentHeadline(headline) ?? parsedLegacyHeadline(headline);
+  const parsed =
+    parsedCurrentHeadline(headline) ??
+    parsedIconTextHeadline(headline) ??
+    parsedLegacyHeadline(headline);
   if (parsed === undefined) return { kind: "invalid" };
   return {
     kind: "summary",

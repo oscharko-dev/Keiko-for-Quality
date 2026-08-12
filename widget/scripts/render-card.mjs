@@ -29,10 +29,11 @@ const { createGitHubRequestBudget } = await import("../src/request-budget.ts");
 
 const requests = createGitHubRequestBudget(fetch);
 const nowMs = Date.now();
-const [repositoryData, qualityEvidence] = await Promise.all([
-  collectCardData(owner, repo, token, requests, nowMs),
-  loadReleasedQualityEvidence(token),
-]);
+// Repository truth gets the shared budget first. Evidence then uses only the remaining requests,
+// exactly as the Worker path does; it cannot exceed the global ceiling or survive a collection
+// that already exhausted and discarded the repository population.
+const repositoryData = await collectCardData(owner, repo, token, requests, nowMs);
+const qualityEvidence = await loadReleasedQualityEvidence(token, requests.fetch);
 const data = withQualityEvidence(repositoryData, qualityEvidence);
 await mkdir(join(outDir, owner), { recursive: true });
 await writeFile(join(outDir, owner, `${repo}.svg`), renderCard(data, "dark"));

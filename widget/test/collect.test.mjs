@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { collectCardData as collectCardDataWithBudget } from "../src/collect.ts";
+import {
+  collectCardData as collectCardDataWithBudget,
+  parseSummaryRecord,
+} from "../src/collect.ts";
 import { createGitHubRequestBudget } from "../src/request-budget.ts";
 
 /**
@@ -125,18 +128,25 @@ function searchPage(threadLists, options = {}) {
 }
 
 const ASSET_SHA = "6b59f533afef15820991b3a0470ddc22c6c6d436";
+const ICON_TEXT_ASSET_SHA = "1869ec1ce1f4fa465d5a0d512f11f18b76ba9a9c";
 
 function summaryComment(outcome, eventTimestamp, options = {}) {
-  const { legacy = false, databaseId = nextCommentId, author = BOT } = options;
+  const { legacy = false, iconText = false, databaseId = nextCommentId, author = BOT } = options;
   nextCommentId += 1;
   const reason = "settlement.incomplete.coverage_gap";
-  const outcomeText = legacy
-    ? outcome === "complete"
-      ? "✅ complete"
-      : outcome === "abandoned"
-        ? "⏳ abandoned"
-        : `⚠️ incomplete (\`${reason}\`)`
-    : `<img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/${ASSET_SHA}/.github/assets/kq/out-${outcome}.svg" height="20" alt="${outcome.toUpperCase()}">${outcome === "incomplete" ? ` (\`${reason}\`)` : ""}`;
+  const reasonText = outcome === "incomplete" ? ` (\`${reason}\`)` : "";
+  const outcomeText = iconText
+    ? `<img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/${ICON_TEXT_ASSET_SHA}/.github/assets/kq/out-${outcome}.svg" width="12" height="12" alt=""> ${outcome}${reasonText}`
+    : legacy
+      ? outcome === "complete"
+        ? "✅ complete"
+        : outcome === "abandoned"
+          ? "⏳ abandoned"
+          : `⚠️ incomplete (\`${reason}\`)`
+      : `<img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/${ASSET_SHA}/.github/assets/kq/out-${outcome}.svg" height="20" alt="${outcome.toUpperCase()}">${reasonText}`;
+  const title = iconText
+    ? `<img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/${ICON_TEXT_ASSET_SHA}/.github/assets/kq/reviewer.svg" width="18" height="18" alt=""> **Keiko for Quality — run summary**`
+    : "**Keiko for Quality — run summary**";
   return {
     id: `COMMENT_${String(databaseId)}`,
     databaseId,
@@ -144,12 +154,27 @@ function summaryComment(outcome, eventTimestamp, options = {}) {
     createdAt: eventTimestamp,
     updatedAt: eventTimestamp,
     body:
-      "**Keiko for Quality — run summary**\n\n" +
+      `${title}\n\n` +
       `${outcomeText} · head \`abcdef0\` · ${eventTimestamp} · engine \`v1.8.4\` · action \`${ASSET_SHA}\`\n\n` +
       "| Metric | Count |\n| --- | ---: |\n| Total paths | 1 |\n\n" +
       "<!-- keiko-for-quality:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
   };
 }
+
+test("parses every released v0.21.0 icon-plus-text settlement headline", () => {
+  for (const outcome of ["complete", "incomplete", "abandoned"]) {
+    const parsed = parseSummaryRecord(summaryComment(outcome, RECENT, { iconText: true }));
+    assert.equal(parsed.kind, "summary");
+    assert.equal(parsed.record?.outcome, outcome);
+    assert.equal(parsed.record?.eventMs, Date.parse(RECENT));
+  }
+});
+
+test("rejects malformed lookalikes of the released icon-plus-text grammar", () => {
+  const malformed = summaryComment("complete", RECENT, { iconText: true });
+  malformed.body = malformed.body.replace('width="12"', 'width="13"');
+  assert.equal(parseSummaryRecord(malformed).kind, "invalid");
+});
 
 test("counts exact-window runs and reports workflow status, never review settlement", async () => {
   const data = await collectCardData(

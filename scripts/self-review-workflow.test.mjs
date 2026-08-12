@@ -11,22 +11,51 @@ const workflow = readFileSync(
 const lines = workflow.split("\n");
 
 function stepBlock(name) {
-  const start = lines.indexOf(`      - name: ${name}`);
+  const start = lines.findIndex((line) => {
+    const match = /^(\s*)- name: (.+)$/u.exec(line);
+    return match?.[2] === name;
+  });
   assert(start >= 0, `${name} step must exist`);
-  const nextStepOffset = lines.slice(start + 1).findIndex((line) => /^ {6}- /u.test(line));
+  const indentation = /^(\s*)-/u.exec(lines[start])?.[1];
+  assert(indentation !== undefined, `${name} step indentation must be readable`);
+  const nextStepOffset = lines
+    .slice(start + 1)
+    .findIndex((line) => line.startsWith(`${indentation}- `));
   const end = nextStepOffset < 0 ? lines.length : start + 1 + nextStepOffset;
   return lines.slice(start, end).join("\n");
 }
 
 function runScript(step) {
   const stepLines = step.split("\n");
-  const run = stepLines.indexOf("        run: |");
+  const run = stepLines.findIndex((line) => /^\s+run: \|$/u.test(line));
   assert(run >= 0, "settlement gate must be an inline protected-base script");
-  return stepLines
-    .slice(run + 1)
-    .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+  const runIndentation = /^\s*/u.exec(stepLines[run])?.[0].length ?? 0;
+  const scriptLines = stepLines.slice(run + 1);
+  const contentIndentation = Math.min(
+    ...scriptLines
+      .filter((line) => line.trim().length > 0)
+      .map((line) => /^\s*/u.exec(line)?.[0].length ?? 0),
+  );
+  assert(contentIndentation > runIndentation, "inline script must be nested below run");
+  return scriptLines
+    .map((line) => {
+      if (line.trim().length === 0) return "";
+      assert(
+        /^\s*/u.exec(line)?.[0].length >= contentIndentation,
+        "every inline script line must share the block indentation",
+      );
+      return line.slice(contentIndentation);
+    })
     .join("\n");
 }
+
+const expectedGateScript = [
+  'if [ "$REVIEW_OUTCOME" != "complete" ]; then',
+  '  echo "::error::Keiko for Quality did not settle this self-review as complete."',
+  "  exit 1",
+  "fi",
+  "",
+].join("\n");
 
 describe("required self-review settlement gate", () => {
   it("reads the pinned action's output after reviewing from the protected base", () => {
@@ -38,7 +67,7 @@ describe("required self-review settlement gate", () => {
       stepBlock("Check out protected base"),
       /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/u,
     );
-    assert.match(review, /\n {8}id: review\n/u);
+    assert.match(review, /^\s+id: review$/mu);
     assert.match(review, /uses: oscharko-dev\/Keiko-for-Quality@[0-9a-f]{40}/u);
     assert(workflow.indexOf(gate) > workflow.indexOf(review));
     assert.match(gate, /REVIEW_OUTCOME: \$\{\{ steps\.review\.outputs\.outcome \}\}/u);
@@ -75,6 +104,6 @@ describe("required self-review settlement gate", () => {
     assert.doesNotMatch(gate, /continue-on-error/u);
     assert.doesNotMatch(gate, /secrets\.|github\.token|GH_TOKEN|KFQ_MODEL_TOKEN/u);
     assert.doesNotMatch(gate, /\b(?:curl|gh)\b|issues\/comments|summary_comment_url/u);
-    assert.doesNotMatch(runScript(gate), /REVIEW_OUTCOME[^\n]*(?:echo|printf)/u);
+    assert.equal(runScript(gate), expectedGateScript);
   });
 });
