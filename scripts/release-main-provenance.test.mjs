@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { releaseDevBindingMessage } from "./release-lib.mjs";
+import { releaseChannelMessage, releaseDevBindingMessage } from "./release-lib.mjs";
 import {
   executeReleaseMainProvenanceCli,
   runReleaseMainProvenance,
@@ -53,11 +53,21 @@ test("accepts the immutable governed dev tree after dev advances", () => {
     const governedCommit = git(repository, ["rev-parse", "HEAD^{commit}"]);
     const governedTree = git(repository, ["rev-parse", "HEAD^{tree}"]);
     const binding = releaseDevBindingMessage({ commit: governedCommit, tree: governedTree });
+    const channel = releaseChannelMessage({ channel: "standard" });
     git(repository, ["remote", "add", "origin", origin]);
     git(repository, ["push", "-u", "origin", "dev"]);
 
     git(repository, ["switch", "-c", "main"]);
-    git(repository, ["commit", "--allow-empty", "-m", "release: v9.9.9", "-m", binding]);
+    git(repository, [
+      "commit",
+      "--allow-empty",
+      "-m",
+      "release: v9.9.9",
+      "-m",
+      binding,
+      "-m",
+      channel,
+    ]);
     git(repository, ["switch", "dev"]);
     writeFileSync(join(repository, "later.txt"), "dev advanced\n");
     git(repository, ["add", "later.txt"]);
@@ -69,13 +79,18 @@ test("accepts the immutable governed dev tree after dev advances", () => {
     const logs = [];
     assert.deepEqual(
       runReleaseMainProvenance({ log: (message) => logs.push(message), root: repository }),
-      { commit: governedCommit, tree: governedTree },
+      {
+        commit: governedCommit,
+        tree: governedTree,
+        channel: "standard",
+        recoveryReason: undefined,
+      },
     );
     assert.match(logs[0], new RegExp(`matches governed dev ${governedCommit}`, "u"));
 
     writeFileSync(join(repository, "governed.txt"), "release tree drifted\n");
     git(repository, ["add", "governed.txt"]);
-    git(repository, ["commit", "-m", "release: v9.9.10", "-m", binding]);
+    git(repository, ["commit", "-m", "release: v9.9.10", "-m", binding, "-m", channel]);
     assert.throws(
       () => runReleaseMainProvenance({ log: () => undefined, root: repository }),
       /main tree does not match the immutable governed dev tree/u,
@@ -101,7 +116,7 @@ test("CLI reports an invalid binding without an uncaught stack", () => {
 
 test("rejects unbound text, a non-dev commit, and a forged tree binding", () => {
   const binding = { commit: "a".repeat(40), tree: "b".repeat(40) };
-  const message = releaseDevBindingMessage(binding);
+  const message = `${releaseDevBindingMessage(binding)}\n${releaseChannelMessage({ channel: "standard" })}`;
   assert.throws(
     () =>
       runReleaseMainProvenance({
@@ -125,5 +140,13 @@ test("rejects unbound text, a non-dev commit, and a forged tree binding", () => 
         log: () => undefined,
       }),
     /bound release tree does not match the bound dev commit/u,
+  );
+  assert.throws(
+    () =>
+      runReleaseMainProvenance({
+        execute: provenanceExecutor({ message: releaseDevBindingMessage(binding) }),
+        log: () => undefined,
+      }),
+    /release channel binding is invalid/u,
   );
 });

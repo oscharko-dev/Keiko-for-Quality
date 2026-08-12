@@ -72,7 +72,9 @@ quality claims:
   incomplete-review notices.
 - **What measured quality has actually shipped?** `HOLDOUT PREC` is the chronological holdout
   precision from the newest published release's historical replay, labelled with that release
-  version. The present population is Keiko-based and is not claimed as universal accuracy.
+  version. It is a measurement, not a promotion badge: a recovery release may publish only while
+  its historical quality promotion is explicitly withheld. The present population is Keiko-based
+  and is not claimed as universal accuracy.
 - **Is the snapshot fresh?** `DATA AS OF` is the exact UTC collection time, so a failed scheduled
   refresh cannot continue looking current.
 

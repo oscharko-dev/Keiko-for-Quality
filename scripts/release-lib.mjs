@@ -20,6 +20,30 @@ const VERSION = /^(\d+)\.(\d+)\.(\d+)$/u;
 const GIT_OBJECT_ID = /^[0-9a-f]{40}$/u;
 const RELEASE_DEV_COMMIT_TRAILER = "Keiko-Release-Dev-Commit";
 const RELEASE_DEV_TREE_TRAILER = "Keiko-Release-Dev-Tree";
+const RELEASE_CHANNEL_TRAILER = "Keiko-Release-Channel";
+const RECOVERY_QUALITY_REASON_TRAILER = "Keiko-Recovery-Quality-Reason";
+
+/**
+ * A recovery release is deliberately narrower than a normal quality promotion.  It exists to
+ * ship an availability fix when all serving safety evidence is green while a known historical
+ * quality floor remains red.  Adding a new exception is a product decision, not an operator flag:
+ * unknown reasons therefore fail closed here.
+ */
+export const RECOVERY_QUALITY_REASONS = Object.freeze(["historical_holdout_fixed_retention_low"]);
+
+export function validateReleaseChannel({ channel, recoveryReason }) {
+  const failures = [];
+  if (channel === "standard") {
+    if (recoveryReason !== undefined) failures.push("standard_release_has_recovery_reason");
+  } else if (channel === "recovery") {
+    if (!RECOVERY_QUALITY_REASONS.includes(recoveryReason)) {
+      failures.push("recovery_quality_reason_unrecognized");
+    }
+  } else {
+    failures.push("release_channel_invalid");
+  }
+  return { valid: failures.length === 0, failures };
+}
 
 export function parseVersion(raw) {
   if (typeof raw !== "string" || !VERSION.test(raw)) return undefined;
@@ -71,6 +95,49 @@ export function releaseDevBindingMessage(binding) {
   const parsed = parseReleaseDevBinding(message);
   if (!parsed.valid) throw new TypeError("release dev binding requires full lowercase Git ids");
   return message;
+}
+
+/** The signed release commit records whether it is a normal promotion or a narrow recovery. */
+export function releaseChannelMessage({ channel, recoveryReason }) {
+  const validation = validateReleaseChannel({ channel, recoveryReason });
+  if (!validation.valid) throw new TypeError("release channel is invalid");
+  const reason =
+    channel === "recovery" ? `\n${RECOVERY_QUALITY_REASON_TRAILER}: ${recoveryReason}` : "";
+  return `${RELEASE_CHANNEL_TRAILER}: ${channel}${reason}`;
+}
+
+/** Human-visible release text mirrors the closed trailer without turning recovery into promotion. */
+export function releaseChannelDispositionMessage({ channel, recoveryReason }) {
+  const validation = validateReleaseChannel({ channel, recoveryReason });
+  if (!validation.valid) throw new TypeError("release channel is invalid");
+  return channel === "recovery"
+    ? `Quality promotion withheld: ${recoveryReason}`
+    : "Quality promotion: green";
+}
+
+export function parseReleaseChannelMessage(message) {
+  const channel = exactTrailerValues(message, RELEASE_CHANNEL_TRAILER);
+  const reason = exactTrailerValues(message, RECOVERY_QUALITY_REASON_TRAILER);
+  if (channel.length !== 1 || reason.length > 1) {
+    return { valid: false, failures: ["release_channel_binding_invalid"] };
+  }
+  const recoveryReason = reason.length === 1 ? reason[0] : undefined;
+  const validation = validateReleaseChannel({ channel: channel[0], recoveryReason });
+  return validation.valid
+    ? { valid: true, failures: [], channel: channel[0], recoveryReason }
+    : { valid: false, failures: validation.failures };
+}
+
+/** The CLI may not relabel an already-merged release commit after its evidence was reviewed. */
+export function validateReleaseChannelBinding(message, expected) {
+  const parsed = parseReleaseChannelMessage(message);
+  if (!parsed.valid) return { valid: false, failures: parsed.failures };
+  const failures = [];
+  if (parsed.channel !== expected.channel) failures.push("release_channel_binding_mismatch");
+  if (parsed.recoveryReason !== expected.recoveryReason) {
+    failures.push("recovery_quality_reason_binding_mismatch");
+  }
+  return { valid: failures.length === 0, failures };
 }
 
 /**
@@ -442,17 +509,43 @@ function validateReplayCohort(historicalRoot, cohort, failures) {
   }
 }
 
-/** Machine-checkable provenance and promotion floor for the two quality measurements. */
-export function validateQualityEvidence(qualification, historicalReplay, expected) {
+/** Machine-checkable provenance for the two quality measurements, without a promotion claim. */
+export function validateQualityEvidenceBinding(qualification, historicalReplay, expected) {
   const failures = [];
   const qualificationRoot = record(qualification);
   const historicalRoot = record(historicalReplay);
   validateQualificationQualityEvidence(qualificationRoot, expected, failures);
   validateHistoricalBinding(historicalRoot, expected, failures);
+  return { valid: failures.length === 0, failures };
+}
+
+/** Machine-checkable provenance and normal-promotion floor for the two quality measurements. */
+export function validateQualityEvidence(qualification, historicalReplay, expected) {
+  const binding = validateQualityEvidenceBinding(qualification, historicalReplay, expected);
+  const failures = [...binding.failures];
+  const historicalRoot = record(historicalReplay);
   for (const cohort of ["all", "holdout"]) {
     validateReplayCohort(historicalRoot, cohort, failures);
   }
   return { valid: failures.length === 0, failures };
+}
+
+/**
+ * Recovery never turns a failed quality promotion green. It accepts only a fully valid, exactly
+ * bound evidence set whose *only* quality-promotion failure is the explicitly recorded reason.
+ */
+export function validateRecoveryQualityEvidence(qualification, historicalReplay, expected, reason) {
+  const channel = validateReleaseChannel({ channel: "recovery", recoveryReason: reason });
+  const binding = validateQualityEvidenceBinding(qualification, historicalReplay, expected);
+  const quality = validateQualityEvidence(qualification, historicalReplay, expected);
+  const unexpected = quality.failures.filter((failure) => failure !== reason);
+  const failures = [...channel.failures, ...binding.failures];
+  if (quality.failures.length === 0) failures.push("recovery_quality_reason_not_observed");
+  if (quality.failures.length > 0 && !quality.failures.includes(reason)) {
+    failures.push("recovery_quality_reason_mismatch");
+  }
+  if (unexpected.length > 0) failures.push(...unexpected.map((failure) => `recovery_${failure}`));
+  return { valid: failures.length === 0, failures, withheldReason: reason };
 }
 
 /**

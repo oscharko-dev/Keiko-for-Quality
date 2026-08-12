@@ -17,6 +17,8 @@ import {
   parseVersion,
   validateGateEvidence,
   validateQualityEvidence,
+  validateRecoveryQualityEvidence,
+  validateReleaseChannel,
 } from "./release-lib.mjs";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -25,14 +27,17 @@ const USAGE =
   "usage: node scripts/check-release-evidence.mjs " +
   "--version X.Y.Z --head <40-hex> --tree <40-hex> " +
   "--seed <report.md> --completion <report.md> " +
-  "--qualification <report.json> --historical <report.json>";
+  "--qualification <report.json> --historical <report.json> " +
+  "[--channel standard|recovery] [--recovery-reason <closed-reason>]";
 const PATH_FLAGS = new Map([
   ["--seed", { key: "seed", suffix: ".md" }],
   ["--completion", { key: "completion", suffix: ".md" }],
   ["--qualification", { key: "qualification", suffix: ".json" }],
   ["--historical", { key: "historicalReplay", suffix: ".json" }],
 ]);
-const VALUE_FLAGS = new Set(["--version", "--head", "--tree", ...PATH_FLAGS.keys()]);
+const REQUIRED_VALUE_FLAGS = new Set(["--version", "--head", "--tree", ...PATH_FLAGS.keys()]);
+const OPTIONAL_VALUE_FLAGS = new Set(["--channel", "--recovery-reason"]);
+const VALUE_FLAGS = new Set([...REQUIRED_VALUE_FLAGS, ...OPTIONAL_VALUE_FLAGS]);
 
 function evidencePath(raw, suffix, flag) {
   if (typeof raw !== "string" || raw === "" || raw.includes("\0") || !raw.endsWith(suffix)) {
@@ -41,8 +46,8 @@ function evidencePath(raw, suffix, flag) {
   return resolve(raw);
 }
 
-/** Strict parsing: unknown, positional, duplicate, and valueless arguments all fail closed. */
-export function parseReleaseEvidenceArgs(argv) {
+function parseFlagValues(argv) {
+  if (argv.length % 2 !== 0) throw new Error(`missing value for ${String(argv.at(-1))}`);
   const values = new Map();
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index];
@@ -54,17 +59,40 @@ export function parseReleaseEvidenceArgs(argv) {
     }
     values.set(flag, value);
   }
+  return values;
+}
 
-  for (const flag of VALUE_FLAGS) {
+function requireValues(values, flags) {
+  for (const flag of flags) {
     if (!values.has(flag)) throw new Error(`missing required argument: ${flag}`);
   }
+}
 
+function releaseIdentity(values) {
   const version = parseVersion(values.get("--version"));
   if (version === undefined) throw new Error("--version must be X.Y.Z");
   const head = values.get("--head");
   const tree = values.get("--tree");
   if (!GIT_OBJECT_ID.test(head ?? "")) throw new Error("--head must be a full lowercase Git id");
   if (!GIT_OBJECT_ID.test(tree ?? "")) throw new Error("--tree must be a full lowercase Git id");
+  return { version, head, tree };
+}
+
+function releaseChannel(values) {
+  const channel = values.get("--channel") ?? "standard";
+  const recoveryReason = values.get("--recovery-reason");
+  const validation = validateReleaseChannel({ channel, recoveryReason });
+  if (!validation.valid) {
+    throw new Error(`release channel is invalid: ${validation.failures.join(", ")}`);
+  }
+  return { channel, recoveryReason };
+}
+
+/** Strict parsing: unknown, positional, duplicate, and valueless arguments all fail closed. */
+export function parseReleaseEvidenceArgs(argv) {
+  const values = parseFlagValues(argv);
+  requireValues(values, REQUIRED_VALUE_FLAGS);
+  const expected = releaseIdentity(values);
 
   const paths = {};
   for (const [flag, { key, suffix }] of PATH_FLAGS) {
@@ -73,7 +101,7 @@ export function parseReleaseEvidenceArgs(argv) {
   if (new Set(Object.values(paths)).size !== PATH_FLAGS.size) {
     throw new Error("each evidence argument must name a different file");
   }
-  return { expected: { version, head, tree }, paths };
+  return { expected, paths, ...releaseChannel(values) };
 }
 
 function readJson(path, label, read) {
@@ -124,9 +152,15 @@ function defaultQualificationCheck(path) {
 export function checkDownloadedReleaseEvidence({
   expected,
   paths,
+  channel = "standard",
+  recoveryReason,
   read = readFileSync,
   checkQualification = defaultQualificationCheck,
 }) {
+  const channelValidation = validateReleaseChannel({ channel, recoveryReason });
+  if (!channelValidation.valid) {
+    throw new Error(`release channel is invalid: ${channelValidation.failures.join(", ")}`);
+  }
   requireVersionedEvidenceNames(paths, expected.version);
   const seed = readText(paths.seed, "seed", read);
   const completion = readText(paths.completion, "completion", read);
@@ -134,7 +168,10 @@ export function checkDownloadedReleaseEvidence({
   const historicalReplay = readJson(paths.historicalReplay, "historical replay", read);
 
   const gate = validateGateEvidence(seed, completion, expected);
-  const quality = validateQualityEvidence(qualification, historicalReplay, expected);
+  const quality =
+    channel === "recovery"
+      ? validateRecoveryQualityEvidence(qualification, historicalReplay, expected, recoveryReason)
+      : validateQualityEvidence(qualification, historicalReplay, expected);
   const failures = [
     ...gate.failures.map((failure) => `gate:${failure}`),
     ...quality.failures.map((failure) => `quality:${failure}`),
@@ -161,8 +198,11 @@ export function executeReleaseEvidenceCli({
     const input = parseReleaseEvidenceArgs(argv);
     const expected = check(input);
     log(
-      `check-release-evidence: PASS - v${expected.version} binds ` +
-        `${expected.head} / ${expected.tree}`,
+      `check-release-evidence: PASS - ${input.channel} v${expected.version} binds ` +
+        `${expected.head} / ${expected.tree}` +
+        (input.channel === "recovery"
+          ? `; quality promotion withheld: ${input.recoveryReason}`
+          : ""),
     );
   } catch (error_) {
     error(

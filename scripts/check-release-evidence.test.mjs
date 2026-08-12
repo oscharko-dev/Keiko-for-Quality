@@ -74,6 +74,36 @@ function reports() {
   };
 }
 
+function recomputeHistoricalMetrics(population) {
+  const { confusionMatrix, eligibleDecisions, groundTruth } = population;
+  const kept = confusionMatrix.truePositive + confusionMatrix.falsePositive;
+  population.metrics.precision = kept === 0 ? null : confusionMatrix.truePositive / kept;
+  population.metrics.fixedRetention = confusionMatrix.truePositive / groundTruth.fixedConfirmed;
+  population.metrics.decisionCoverage =
+    (eligibleDecisions.keep + eligibleDecisions.drop) / population.eligible;
+}
+
+function holdoutRetentionRed(source) {
+  const evidence = JSON.parse(JSON.stringify(source));
+  for (const population of [evidence.score.all.after, evidence.score.chronological.holdout.after]) {
+    population.confusionMatrix.truePositive -= 2;
+    population.confusionMatrix.falseNegative += 2;
+    population.eligibleDecisions.keep -= 2;
+    population.eligibleDecisions.drop += 2;
+    recomputeHistoricalMetrics(population);
+  }
+  for (const decisions of [
+    evidence.execution.populationDecisions,
+    evidence.execution.corroboratedDecisions,
+  ]) {
+    decisions.keep -= 2;
+    decisions.drop += 2;
+  }
+  evidence.execution.stageCounters.confirmed -= 2;
+  evidence.execution.stageCounters.droppedInsufficientEvidence += 2;
+  return evidence;
+}
+
 function writeReports(directory, overrides = {}) {
   const content = { ...reports(), ...overrides };
   const paths = {
@@ -118,6 +148,8 @@ test("strictly parses one version, immutable head/tree, and four distinct eviden
   assert.deepEqual(parseReleaseEvidenceArgs(argv(paths)), {
     expected: { version: VERSION, head: HEAD, tree: TREE },
     paths: Object.fromEntries(Object.entries(paths).map(([key, path]) => [key, resolve(path)])),
+    channel: "standard",
+    recoveryReason: undefined,
   });
 });
 
@@ -212,6 +244,75 @@ test("rejects red gates and every candidate identity mismatch before promotion",
   }
 });
 
+test("recovery keeps safety gates hard and records the only permitted withheld quality reason", () => {
+  const directory = mkdtempSync(join(tmpdir(), "kfq-release-recovery-"));
+  try {
+    const base = reports();
+    const paths = writeReports(directory, {
+      historicalReplay: holdoutRetentionRed(base.historicalReplay),
+    });
+    const reason = "historical_holdout_fixed_retention_low";
+    assert.deepEqual(
+      checkDownloadedReleaseEvidence({
+        expected: { version: VERSION, head: HEAD, tree: TREE },
+        paths,
+        channel: "recovery",
+        recoveryReason: reason,
+        checkQualification: () => undefined,
+      }),
+      { version: VERSION, head: HEAD, tree: TREE },
+    );
+    assert.throws(
+      () =>
+        checkDownloadedReleaseEvidence({
+          expected: { version: VERSION, head: HEAD, tree: TREE },
+          paths,
+          checkQualification: () => undefined,
+        }),
+      /quality:historical_holdout_fixed_retention_low/u,
+      "a recovery exception must not leak into the default standard channel",
+    );
+    assert.throws(
+      () =>
+        checkDownloadedReleaseEvidence({
+          expected: { version: VERSION, head: HEAD, tree: TREE },
+          paths: writeReports(directory, {
+            completion: base.completion.replace("100.0%** (3/3", "66.7%** (2/3"),
+          }),
+          channel: "recovery",
+          recoveryReason: reason,
+          checkQualification: () => undefined,
+        }),
+      /completion_below_threshold/u,
+    );
+    assert.throws(
+      () =>
+        checkDownloadedReleaseEvidence({
+          expected: { version: VERSION, head: HEAD, tree: TREE },
+          paths,
+          channel: "recovery",
+          recoveryReason: "unknown_failure",
+          checkQualification: () => undefined,
+        }),
+      /release channel is invalid/u,
+    );
+    assert.throws(
+      () =>
+        checkDownloadedReleaseEvidence({
+          expected: { version: VERSION, head: HEAD, tree: TREE },
+          paths: { ...paths, seed: join(directory, "missing.md") },
+          channel: "recovery",
+          recoveryReason: reason,
+          checkQualification: () => undefined,
+        }),
+      /expected exactly four version-scoped/u,
+      "a missing artifact is never treated as an omitted optional gate",
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("the real CLI applies the existing qualification promotion floor without spending tokens", () => {
   const directory = mkdtempSync(join(tmpdir(), "kfq-release-evidence-cli-"));
   try {
@@ -222,7 +323,10 @@ test("the real CLI applies the existing qualification promotion floor without sp
       encoding: "utf8",
     });
     assert.equal(passing.status, 0, `${passing.stdout}\n${passing.stderr}`);
-    assert.match(passing.stdout, new RegExp(`PASS - v${VERSION} binds ${HEAD} / ${TREE}`, "u"));
+    assert.match(
+      passing.stdout,
+      new RegExp(`PASS - standard v${VERSION} binds ${HEAD} / ${TREE}`, "u"),
+    );
 
     const failingPaths = writeReports(directory, {
       qualification: qualificationEvidence({ precisionMisses: 3 }),

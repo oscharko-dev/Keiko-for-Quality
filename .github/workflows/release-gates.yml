@@ -15,6 +15,18 @@ on:
         description: "Release candidate version (X.Y.Z)"
         required: true
         type: string
+      channel:
+        description: "standard keeps every quality-promotion floor; recovery requires an explicit withheld reason"
+        required: true
+        default: standard
+        type: choice
+        options:
+          - standard
+          - recovery
+      recovery_reason:
+        description: "Required only for recovery: historical_holdout_fixed_retention_low"
+        required: false
+        type: string
       confirm:
         description: "Type RUN_RELEASE_GATES to authorize all four paid gates"
         required: true
@@ -39,6 +51,8 @@ jobs:
         env:
           EXPECTED_REVIEWER_SHA: ${{ inputs.expected_reviewer_sha }}
           EXPECTED_VERSION: ${{ inputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RECOVERY_REASON: ${{ inputs.recovery_reason }}
           CONFIRM: ${{ inputs.confirm }}
           DISPATCH_SHA: ${{ github.sha }}
           DISPATCH_REF: ${{ github.ref }}
@@ -50,6 +64,13 @@ jobs:
           [[ "${EXPECTED_REVIEWER_SHA}" == "${DISPATCH_SHA}" ]]
           [[ "${EXPECTED_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "${CONFIRM}" == "RUN_RELEASE_GATES" ]]
+          if [[ "${RELEASE_CHANNEL}" == "standard" ]]; then
+            [[ -z "${RECOVERY_REASON}" ]]
+          elif [[ "${RELEASE_CHANNEL}" == "recovery" ]]; then
+            [[ "${RECOVERY_REASON}" == "historical_holdout_fixed_retention_low" ]]
+          else
+            exit 1
+          fi
 
       - name: Check out the exact candidate
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -360,7 +381,7 @@ jobs:
           retention-days: 90
 
   promotion:
-    name: release promotion gate
+    name: release evidence gate
     needs:
       - preflight
       - qualification
@@ -410,6 +431,8 @@ jobs:
           EVIDENCE_ROOT: ${{ runner.temp }}/release-evidence
           EXPECTED_HEAD: ${{ inputs.expected_reviewer_sha }}
           EXPECTED_VERSION: ${{ inputs.version }}
+          RELEASE_CHANNEL: ${{ inputs.channel }}
+          RECOVERY_REASON: ${{ inputs.recovery_reason }}
         shell: bash
         run: |
           set -euo pipefail
@@ -439,6 +462,10 @@ jobs:
           require_single_evidence completion "${completion[@]}"
           [[ "$(git rev-parse HEAD)" == "${EXPECTED_HEAD}" ]]
           candidate_tree=$(git rev-parse HEAD^{tree})
+          channel_args=(--channel "${RELEASE_CHANNEL}")
+          if [[ "${RELEASE_CHANNEL}" == "recovery" ]]; then
+            channel_args+=(--recovery-reason "${RECOVERY_REASON}")
+          fi
 
           node scripts/check-release-evidence.mjs \
             --version "${EXPECTED_VERSION}" \
@@ -447,4 +474,5 @@ jobs:
             --qualification "${qualification[0]}" \
             --historical "${historical[0]}" \
             --seed "${seed[0]}" \
-            --completion "${completion[0]}"
+            --completion "${completion[0]}" \
+            "${channel_args[@]}"
