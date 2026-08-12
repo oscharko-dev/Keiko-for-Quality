@@ -7953,6 +7953,7 @@ var LINE_TOLERANCE = 2;
 var LINE_DRIFT_TOLERANCE = 40;
 var SIMILARITY_THRESHOLD = 0.5;
 var MIN_SHARED_TOKENS = 4;
+var MIN_INTRA_RUN_SHARED_TOKENS = MIN_SHARED_TOKENS;
 var EXACT_INTERVAL_SIMILARITY_THRESHOLD = 0.43;
 var MIN_EXACT_INTERVAL_SHARED_TOKENS = 10;
 var DISPOSITION_SIMILARITY_THRESHOLD = 0.43;
@@ -8045,10 +8046,6 @@ function similarByContent(a, b) {
   const { score, shared } = tokenOverlap(tokenize(a), tokenize(b));
   return shared >= MIN_SHARED_TOKENS && score >= SIMILARITY_THRESHOLD;
 }
-function similarAtExactInterval(a, b) {
-  const { score, shared } = tokenOverlap(tokenize(a), tokenize(b));
-  return shared >= MIN_EXACT_INTERVAL_SHARED_TOKENS && score >= EXACT_INTERVAL_SIMILARITY_THRESHOLD;
-}
 function bodiesAreSimilar(candidateBody, existingBody) {
   return similarByContent(candidateBody, stripComposedArtifacts(existingBody));
 }
@@ -8113,10 +8110,20 @@ function recurrenceBodiesMatch(candidateBody, existingBody) {
   );
   return shared >= MIN_RECURRENCE_SHARED_TOKENS && score >= RECURRENCE_THRESHOLD;
 }
-function areIntraRunDuplicates(a, b) {
+function prepareIntraRunCandidate(candidate) {
+  return {
+    ...candidate,
+    contentTokens: tokenize(candidate.body),
+    fencedCodeBlocks: codeBlocks(candidate.body)
+  };
+}
+function arePreparedIntraRunDuplicates(a, b) {
   if (a.path !== b.path || !linesOverlap(a, b)) return false;
-  if (similarByContent(a.body, b.body)) return true;
-  return a.startLine === b.startLine && a.endLine === b.endLine && similarAtExactInterval(a.body, b.body);
+  const sharesCode = [...a.fencedCodeBlocks].some((block) => b.fencedCodeBlocks.has(block));
+  if (sharesCode) return true;
+  const ordinary = tokenOverlap(a.contentTokens, b.contentTokens);
+  if (ordinary.shared >= MIN_SHARED_TOKENS && ordinary.score >= SIMILARITY_THRESHOLD) return true;
+  return a.startLine === b.startLine && a.endLine === b.endLine && ordinary.shared >= MIN_EXACT_INTERVAL_SHARED_TOKENS && ordinary.score >= EXACT_INTERVAL_SIMILARITY_THRESHOLD;
 }
 
 // src/publish/publisher.ts
@@ -8296,32 +8303,123 @@ function isBetterRepresentative(candidate, current) {
   if (candidateRank !== currentRank) return candidateRank > currentRank;
   return candidate.sanitizedBody.length > current.sanitizedBody.length;
 }
-function clusterIntraRunDuplicates(candidates) {
-  const clusters = [];
-  for (const candidate of candidates) {
-    const cluster = clusters.find(
-      (existing) => existing.members.some(
-        (member) => areIntraRunDuplicates(toCandidateForDedup(candidate), toCandidateForDedup(member))
-      )
-    );
-    if (cluster === void 0) {
-      clusters.push({ representative: candidate, members: [candidate] });
-      continue;
-    }
-    cluster.members.push(candidate);
-    if (isBetterRepresentative(candidate, cluster.representative)) {
-      cluster.representative = candidate;
+function pathPostings(index, path) {
+  const existing = index.get(path);
+  if (existing !== void 0) return existing;
+  const created = /* @__PURE__ */ new Map();
+  index.set(path, created);
+  return created;
+}
+function appendPosting(postings, value, candidate) {
+  const existing = postings.get(value);
+  if (existing === void 0) postings.set(value, [candidate]);
+  else existing.push(candidate);
+}
+function indexPreparedCandidate(index, member) {
+  const tokenPostings = pathPostings(index.tokens, member.similarity.path);
+  for (const token of member.similarity.contentTokens) appendPosting(tokenPostings, token, member);
+  const blockPostings = pathPostings(index.codeBlocks, member.similarity.path);
+  for (const block of member.similarity.fencedCodeBlocks)
+    appendPosting(blockPostings, block, member);
+}
+function tokenEligibleCandidates(prepared, index) {
+  const tokenHits = /* @__PURE__ */ new Map();
+  const tokenPostings = index.tokens.get(prepared.similarity.path);
+  if (tokenPostings !== void 0) {
+    for (const token of prepared.similarity.contentTokens) {
+      for (const prior of tokenPostings.get(token) ?? []) {
+        tokenHits.set(prior, (tokenHits.get(prior) ?? 0) + 1);
+      }
     }
   }
+  const eligible = /* @__PURE__ */ new Set();
+  for (const [prior, shared] of tokenHits) {
+    if (shared >= MIN_INTRA_RUN_SHARED_TOKENS) eligible.add(prior);
+  }
+  return eligible;
+}
+function addCodeBlockCandidates(eligible, prepared, index) {
+  const blockPostings = index.codeBlocks.get(prepared.similarity.path);
+  if (blockPostings === void 0) return;
+  for (const block of prepared.similarity.fencedCodeBlocks) {
+    for (const prior of blockPostings.get(block) ?? []) eligible.add(prior);
+  }
+}
+function earliestMatchingCluster(eligible, prepared) {
+  let selected;
+  for (const prior of eligible) {
+    if ((selected === void 0 || prior.cluster.index < selected.index) && arePreparedIntraRunDuplicates(prepared.similarity, prior.similarity)) {
+      selected = prior.cluster;
+    }
+  }
+  return selected;
+}
+function indexedMatchingCluster(prepared, index) {
+  const eligible = tokenEligibleCandidates(prepared, index);
+  addCodeBlockCandidates(eligible, prepared, index);
+  return earliestMatchingCluster(eligible, prepared);
+}
+var MAX_INTRA_RUN_DEDUP_CANDIDATES = 256;
+function singletonCluster(candidate, index) {
+  const cluster = { index, representative: candidate, members: [] };
+  cluster.members.push({
+    candidate,
+    // Never indexed or compared. Preserve one carrier shape for the final partition only.
+    similarity: {
+      ...toCandidateForDedup(candidate),
+      contentTokens: /* @__PURE__ */ new Set(),
+      fencedCodeBlocks: /* @__PURE__ */ new Set()
+    },
+    cluster
+  });
+  return cluster;
+}
+function newIndexedCluster(candidate, prepared, index, similarityIndex) {
+  const cluster = { index, representative: candidate, members: [] };
+  const member = { ...prepared, cluster };
+  cluster.members.push(member);
+  indexPreparedCandidate(similarityIndex, member);
+  return cluster;
+}
+function appendIndexedMember(cluster, prepared, index) {
+  const member = { ...prepared, cluster };
+  cluster.members.push(member);
+  indexPreparedCandidate(index, member);
+  if (isBetterRepresentative(prepared.candidate, cluster.representative)) {
+    cluster.representative = prepared.candidate;
+  }
+}
+function partitionClusters(clusters) {
   const representatives = [];
   const suppressed = [];
   for (const cluster of clusters) {
     representatives.push(cluster.representative);
     for (const member of cluster.members) {
-      if (member !== cluster.representative) suppressed.push(member);
+      if (member.candidate !== cluster.representative) suppressed.push(member.candidate);
     }
   }
   return { representatives, suppressed };
+}
+function clusterIntraRunDuplicates(candidates) {
+  const clusters = [];
+  const index = { tokens: /* @__PURE__ */ new Map(), codeBlocks: /* @__PURE__ */ new Map() };
+  for (const [candidateIndex, candidate] of candidates.entries()) {
+    if (candidateIndex >= MAX_INTRA_RUN_DEDUP_CANDIDATES) {
+      clusters.push(singletonCluster(candidate, clusters.length));
+      continue;
+    }
+    const prepared = {
+      candidate,
+      similarity: prepareIntraRunCandidate(toCandidateForDedup(candidate))
+    };
+    const cluster = indexedMatchingCluster(prepared, index);
+    if (cluster === void 0) {
+      clusters.push(newIndexedCluster(candidate, prepared, clusters.length, index));
+      continue;
+    }
+    appendIndexedMember(cluster, prepared, index);
+  }
+  return partitionClusters(clusters);
 }
 function planCrossRun(context, candidate, prefetch, counters, diagnostics) {
   const { finding, sanitizedBody } = candidate;
@@ -9265,10 +9363,12 @@ function selectVerificationCandidates(survivors, modelOriginals, maxFindings) {
     survivors,
     modelOriginals,
     maxFindings,
-    Math.min(MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR, maxFindings)
+    Math.min(MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR, maxFindings),
+    /* @__PURE__ */ new Map(),
+    "verification"
   );
 }
-function selectWithLimits(survivors, modelOriginals, totalLimit, modelLimit, replacements = /* @__PURE__ */ new Map()) {
+function selectWithLimits(survivors, modelOriginals, totalLimit, modelLimit, replacements = /* @__PURE__ */ new Map(), selectionStage = "publication") {
   const entries = survivors.map((survivor, index) => {
     const original = survivor.finding;
     const replacement = replacements.get(original);
@@ -9284,8 +9384,25 @@ function selectWithLimits(survivors, modelOriginals, totalLimit, modelLimit, rep
     entries.filter((entry) => !entry.modelAuthored).slice(0, totalLimit).map((entry) => entry.index)
   );
   const remainingTotal = Math.max(0, totalLimit - selectedDeterministicIndexes.size);
-  const selectedModelIndexes = selectedModels(entries, Math.min(modelLimit, remainingTotal));
+  const selectedModelIndexes = selectionStage === "verification" ? selectedUntrustedModels(entries, Math.min(modelLimit, remainingTotal)) : selectedModels(entries, Math.min(modelLimit, remainingTotal));
   return partitionSelection(entries, selectedDeterministicIndexes, selectedModelIndexes);
+}
+function selectedUntrustedModels(entries, limit) {
+  const models = entries.filter((entry) => entry.modelAuthored);
+  const unresolved = models.filter((entry) => needsClassification(entry.effectiveFinding));
+  const shaped = models.filter((entry) => !needsClassification(entry.effectiveFinding));
+  const unresolvedQuota = Math.min(unresolved.length, Math.ceil(limit / 2));
+  const shapedQuota = Math.min(shaped.length, limit - unresolvedQuota);
+  const selected = /* @__PURE__ */ new Set([
+    ...unresolved.slice(0, unresolvedQuota).map((entry) => entry.index),
+    ...shaped.slice(0, shapedQuota).map((entry) => entry.index)
+  ]);
+  if (selected.size === limit) return selected;
+  for (const entry of models) {
+    if (selected.size === limit) break;
+    selected.add(entry.index);
+  }
+  return selected;
 }
 function selectedModels(entries, limit) {
   return new Set(
@@ -12111,7 +12228,7 @@ function terminalHelperRefutation(finding, lines) {
     String.raw`(?:\bfunction\s+[A-Za-z_$][\w$]*\s*\([^)]*\b${escaped(consumer.name)}\b|\([^)]*\b${escaped(consumer.name)}\b[^)]*\)\s*=>)`,
     "u"
   );
-  if (lines.slice(0, consumerIndex).some(
+  if (lines.slice(0, consumerIndex + 1).some(
     (line, index) => (index < range.opening || index > range.closing) && (reassigned.test(line.code) || shadowedParameter.test(line.code))
   )) {
     return void 0;

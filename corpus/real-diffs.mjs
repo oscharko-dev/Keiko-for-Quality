@@ -67,8 +67,7 @@ const { parseGuidelinePaths } = await import("../src/config/guidelines.ts");
  * content — which is how this script found the Windows-null-device finding this header comment used
  * to cite as its own headline discovery. `planPublication` (like production) never surfaces a
  * rejected finding's body or reason outside the sanitizer itself; only a COUNT is observable, via
- * the final degraded-publication settlement's count after Truth/Falsifier and PR-wide ranking
- * (see `PUBLICATION_DEGRADED` below). `corpus/run.mjs`'s own
+ * the local report's final count after Truth/Falsifier and PR-wide ranking. `corpus/run.mjs`'s own
  * `rejectedSanitization` counter has carried this exact limitation for as long as it has existed
  * ("there is nothing honest to put in each element beyond a placeholder") — this script now matches
  * that, rather than being the one place in this repository that could still see through the
@@ -264,14 +263,10 @@ export async function buildLocalReviewRequest({ ctx, repo, commit, profile, conf
 // own `MainDeps.runLocalReview` injection.
 // -------------------------------------------------------------------------------------------------
 
-/** The final degraded-publication settlement carries the selected sanitizer losses after
- *  Truth/Falsifier and PR-wide ranking. Earlier sanitizer diagnostics describe raw hypotheses and
- *  must not be promoted into publication failures when quality work legitimately removes them. */
-const PUBLICATION_DEGRADED = "settlement.incomplete.publication_degraded";
-
-export function countRejectedSanitization(records) {
-  const record = records.findLast((candidate) => candidate.code === PUBLICATION_DEGRADED);
-  const count = record?.counts?.rejected_sanitization;
+/** Final selected sanitizer losses from the local report. Earlier sanitizer diagnostics describe
+ *  raw hypotheses and must not become failures when quality work legitimately removes them. */
+export function countRejectedSanitization(report) {
+  const count = report.quality?.rejectedSanitization;
   return Number.isSafeInteger(count) && count >= 0 ? count : 0;
 }
 
@@ -292,7 +287,8 @@ export async function reviewCommit(deps, commit) {
   });
   const diagnostics = deps.createDiagnostics(() => {});
   const report = await deps.runLocalReview(request, diagnostics);
-  return { report, unpublishable: countRejectedSanitization(diagnostics.drain()) };
+  diagnostics.drain();
+  return { report, unpublishable: countRejectedSanitization(report) };
 }
 
 // -------------------------------------------------------------------------------------------------

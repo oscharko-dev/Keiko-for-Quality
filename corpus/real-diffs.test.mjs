@@ -202,23 +202,13 @@ test("buildEngineRuntimeConfig rejects a non-https OCR_LLM_URL", () => {
 // countRejectedSanitization — pure.
 // ---------------------------------------------------------------------------------------------
 
-test("countRejectedSanitization reads only the final settlement rollup", () => {
-  const records = [
-    { code: "publish.finding_rejected_sanitization" },
-    { code: "publish.finding_published" },
-    { code: "publish.finding_rejected_sanitization" },
-    { code: "run.started" },
-    {
-      code: "settlement.incomplete.publication_degraded",
-      counts: { rejected_sanitization: 1 },
-    },
-  ];
-  assert.equal(countRejectedSanitization(records), 1);
+test("countRejectedSanitization reads only the final local-report count", () => {
+  assert.equal(countRejectedSanitization({ quality: { rejectedSanitization: 1 } }), 1);
 });
 
-test("countRejectedSanitization returns 0 for an empty or unrelated record list", () => {
-  assert.equal(countRejectedSanitization([]), 0);
-  assert.equal(countRejectedSanitization([{ code: "run.started" }]), 0);
+test("countRejectedSanitization returns 0 for a report without the final count", () => {
+  assert.equal(countRejectedSanitization({}), 0);
+  assert.equal(countRejectedSanitization({ quality: {} }), 0);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -426,10 +416,13 @@ test("reviewCommit builds a real request, calls the injected runLocalReview exac
       diagnostics.record("publish.finding_rejected_sanitization", {});
       diagnostics.record("publish.finding_published", {});
       diagnostics.record("publish.finding_rejected_sanitization", {});
-      diagnostics.record("settlement.incomplete.publication_degraded", {
-        counts: { rejected_sanitization: 1 },
-      });
       return baseReport({
+        quality: {
+          evidenceWithheld: 0,
+          rankedOut: 0,
+          verificationUndecided: 0,
+          rejectedSanitization: 1,
+        },
         findings: [
           {
             path: "src/a.ts",

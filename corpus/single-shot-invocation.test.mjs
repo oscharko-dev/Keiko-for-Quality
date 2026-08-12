@@ -174,6 +174,12 @@ test("publication-quality local results ignore provisional sanitizer rejects", (
           body: "Fix the bound.\n\nWhen input is empty, the index is negative.",
         },
       ],
+      quality: {
+        evidenceWithheld: 0,
+        rankedOut: 0,
+        verificationUndecided: 0,
+        rejectedSanitization: 0,
+      },
       spend: { engine: 10, classify: 5, total: 15, allotted: 100 },
       inventory: { total: 2, reviewable: 2, reviewed: 2 },
       ruleDigest: "a".repeat(64),
@@ -207,12 +213,18 @@ test("publication-quality local results ignore provisional sanitizer rejects", (
   assert.deepEqual(plan.counters, { rejectedSanitization: 0, suppressedIntraRun: 1 });
 });
 
-test("publication-quality local results retain the final sanitizer loss from settlement", () => {
+test("publication-quality local results retain final sanitizer loss under an earlier engine reason", () => {
   const { plan } = qualificationOutcomeFromLocalReview(
     {
       outcome: "incomplete",
-      reason: "settlement.incomplete.publication_degraded",
+      reason: "settlement.incomplete.budget_exceeded",
       findings: [],
+      quality: {
+        evidenceWithheld: 0,
+        rankedOut: 0,
+        verificationUndecided: 0,
+        rejectedSanitization: 1,
+      },
       spend: { engine: 10, classify: 5, total: 15, allotted: 100 },
       inventory: { total: 1, reviewable: 1, reviewed: 1 },
       ruleDigest: "c".repeat(64),
@@ -220,13 +232,7 @@ test("publication-quality local results retain the final sanitizer loss from set
       cacheHits: 0,
       cacheMisses: 1,
     },
-    [
-      { code: "publish.finding_rejected_sanitization" },
-      {
-        code: "settlement.incomplete.publication_degraded",
-        counts: { rejected_sanitization: 1 },
-      },
-    ],
+    [{ code: "publish.finding_rejected_sanitization" }],
   );
 
   assert.equal(plan.counters.rejectedSanitization, 1);

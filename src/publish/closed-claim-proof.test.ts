@@ -349,6 +349,23 @@ describe("trusted closed claim proof", () => {
     ).toBeUndefined();
   });
 
+  it("falls back when an arrow parameter shadows the helper on the consumer line", () => {
+    const head = [
+      'import { spawn } from "node:child_process";',
+      "export function helper() {",
+      '  return "cl.exe";',
+      "}",
+      "export const run = (helper) => spawn(helper(), []);",
+    ];
+
+    expect(
+      closedClaimRefutation(
+        finding("The helper can return undefined and pass an invalid command to spawn.", 5),
+        evidence(head, [5], head),
+      ),
+    ).toBeUndefined();
+  });
+
   it("proves a changed duplicate write on a stable native Map inside an input loop", () => {
     expect(mapProof()).toEqual({
       evidenceRefs: ["D:H:5", "H:5"],

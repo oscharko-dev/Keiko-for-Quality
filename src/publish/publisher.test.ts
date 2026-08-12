@@ -1187,6 +1187,25 @@ describe("intra-run deduplication (v0.12.0)", () => {
  * rather than only through `publishFindings`, which the suite above already covers end to end.
  */
 describe("planPublication and executePublication", () => {
+  it("plans the parser ceiling without pairwise body tokenization", async () => {
+    const findings = Array.from({ length: 1_000 }, (_, index) =>
+      finding({
+        startLine: 12,
+        endLine: 12,
+        // Three shared tokens stay below the similarity floor. The long unique fourth token
+        // forces the old pairwise implementation to rescan hundreds of MB across 499,500 pairs;
+        // the bounded index prepares only the first 256 candidates and carries the rest as
+        // singleton clusters; every finding still reaches later ranking.
+        content: `alpha beta gamma ${`${String(index)}x`.repeat(250)}`,
+      }),
+    );
+
+    const plan = await planPublication(context, findings, createSilentDiagnostics());
+
+    expect(plan.survivors).toHaveLength(1_000);
+    expect(plan.counters.suppressedIntraRun).toBe(0);
+  }, 10_000);
+
   /**
    * An existing IDENTITY-authored, unresolved comment whose marker is keyed on `rule` — lets a
    * test seed a marker for a category a finding has not been given yet, which is exactly what the

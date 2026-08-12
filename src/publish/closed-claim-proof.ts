@@ -1149,7 +1149,10 @@ function terminalHelperRefutation(
   );
   if (
     lines
-      .slice(0, consumerIndex)
+      // Include the consumer itself: `(helper) => spawn(helper(), args)` introduces a same-line
+      // shadow before the call. Stopping one line early binds that call to an unrelated earlier
+      // declaration and can turn a real invalid-command finding into a deterministic refutation.
+      .slice(0, consumerIndex + 1)
       .some(
         (line, index) =>
           (index < range.opening || index > range.closing) &&

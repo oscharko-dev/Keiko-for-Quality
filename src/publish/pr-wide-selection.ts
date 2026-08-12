@@ -1,4 +1,4 @@
-import { FINDING_SEVERITIES } from "../engine/classify.js";
+import { FINDING_SEVERITIES, needsClassification } from "../engine/classify.js";
 import type { EngineFinding } from "../engine/result.js";
 
 /**
@@ -79,6 +79,8 @@ export function selectVerificationCandidates<Candidate extends FindingCandidate>
     modelOriginals,
     maxFindings,
     Math.min(MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR, maxFindings),
+    new Map(),
+    "verification",
   );
 }
 
@@ -88,6 +90,7 @@ function selectWithLimits<Candidate extends FindingCandidate>(
   totalLimit: number,
   modelLimit: number,
   replacements: ReadonlyMap<EngineFinding, EngineFinding> = new Map(),
+  selectionStage: "publication" | "verification" = "publication",
 ): PrWideSelection<Candidate> {
   const entries: readonly SelectionEntry<Candidate>[] = survivors.map((survivor, index) => {
     const original = survivor.finding;
@@ -108,8 +111,42 @@ function selectWithLimits<Candidate extends FindingCandidate>(
       .map((entry) => entry.index),
   );
   const remainingTotal = Math.max(0, totalLimit - selectedDeterministicIndexes.size);
-  const selectedModelIndexes = selectedModels(entries, Math.min(modelLimit, remainingTotal));
+  const selectedModelIndexes =
+    selectionStage === "verification"
+      ? selectedUntrustedModels(entries, Math.min(modelLimit, remainingTotal))
+      : selectedModels(entries, Math.min(modelLimit, remainingTotal));
   return partitionSelection(entries, selectedDeterministicIndexes, selectedModelIndexes);
+}
+
+/**
+ * Verification admission must not trust the very classification it exists to audit. A large raw
+ * cohort can skip the early per-finding repair cost bound, and letting model-authored "critical"
+ * labels choose all sixteen slots can hide an unclassified real defect behind false hypotheses.
+ *
+ * Split the bounded cohort evenly between unresolved and already-shaped classifications, then fill
+ * unused capacity from the other lane. Within each lane input order wins. This is deterministic,
+ * keeps both shapes represented whenever they exist, and uses neither category nor severity as a
+ * truth signal. The independently audited severity is used only by final publication ranking.
+ */
+function selectedUntrustedModels<Candidate extends FindingCandidate>(
+  entries: readonly SelectionEntry<Candidate>[],
+  limit: number,
+): ReadonlySet<number> {
+  const models = entries.filter((entry) => entry.modelAuthored);
+  const unresolved = models.filter((entry) => needsClassification(entry.effectiveFinding));
+  const shaped = models.filter((entry) => !needsClassification(entry.effectiveFinding));
+  const unresolvedQuota = Math.min(unresolved.length, Math.ceil(limit / 2));
+  const shapedQuota = Math.min(shaped.length, limit - unresolvedQuota);
+  const selected = new Set([
+    ...unresolved.slice(0, unresolvedQuota).map((entry) => entry.index),
+    ...shaped.slice(0, shapedQuota).map((entry) => entry.index),
+  ]);
+  if (selected.size === limit) return selected;
+  for (const entry of models) {
+    if (selected.size === limit) break;
+    selected.add(entry.index);
+  }
+  return selected;
 }
 
 function selectedModels<Candidate extends FindingCandidate>(

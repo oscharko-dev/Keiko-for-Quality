@@ -176,6 +176,25 @@ describe("selectPrWideFindings", () => {
 });
 
 describe("selectVerificationCandidates", () => {
+  it("keeps an unresolved classification behind sixteen model-labelled critical hypotheses", () => {
+    const labelled = Array.from({ length: 16 }, (_, index) =>
+      finding(`labelled-${String(index)}`, "critical"),
+    );
+    const unresolved = finding("unresolved-real-defect", undefined);
+    const survivors = [...labelled, unresolved].map(planned);
+
+    const selected = selectVerificationCandidates(
+      survivors,
+      new Set([...labelled, unresolved]),
+      50,
+    );
+
+    expect(selected.kept).toHaveLength(MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR);
+    expect(selected.kept.some((entry) => entry.finding === unresolved)).toBe(true);
+    expect(selected.rankedOutOriginals).toHaveLength(1);
+    expect(labelled).toContain(selected.rankedOutOriginals[0]);
+  });
+
   it("bounds verifier work across cached and fresh model claims after deterministic priority", () => {
     const cached = finding("cached-before-verification", "critical");
     const deterministic = finding("deterministic-before-verification", undefined);

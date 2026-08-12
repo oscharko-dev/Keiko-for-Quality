@@ -336,6 +336,8 @@ export interface LocalReviewReport {
     readonly evidenceWithheld: number;
     readonly rankedOut: number;
     readonly verificationUndecided: number;
+    /** Selected findings that remained unsafe at the final publication boundary. */
+    readonly rejectedSanitization: number;
   };
   /** This run's real spend, mirroring the `run.spend` diagnostic the action path records. */
   readonly spend: {
@@ -4673,6 +4675,7 @@ function localQuality(reported: ReportedLocalFindings): NonNullable<LocalReviewR
     evidenceWithheld: reported.evidenceWithheld,
     rankedOut: reported.rankedOut,
     verificationUndecided: reported.verificationUndecided,
+    rejectedSanitization: reported.rejectedSanitization,
   };
 }
 
