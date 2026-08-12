@@ -90,8 +90,9 @@ inputs:
   max_findings:
     description: >-
       Maximum findings published for one review after sanitization, deduplication, evidence
-      verification, and ranking. Deterministically proven findings take priority; model-authored
-      findings are additionally capped at eight and at most sixteen reach verification.
+      verification, and ranking. It also caps the total verification shortlist: deterministically
+      proven findings take priority, at most min(16, max_findings) model-authored candidates reach
+      verification, and no more than eight model-authored findings are published.
     required: false
     default: "50"
   rename_detection_percent:

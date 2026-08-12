@@ -11218,8 +11218,8 @@ function terminalHelperRefutation(finding, lines) {
   const consumer = changedSpawnHelper(finding, lines);
   if (consumer === void 0) return void 0;
   const range = namedFunctionRange(lines, consumer.name);
-  if (range === void 0 || range.closing >= lines.indexOf(consumer.line)) return void 0;
   const consumerIndex = lines.indexOf(consumer.line);
+  if (range === void 0 || range.closing >= consumerIndex) return void 0;
   const reassigned = new RegExp(
     String.raw`\b${escaped(consumer.name)}\s*(?:(?:&&|\|\||\?\?)?=(?!=)|\+\+|--)`,
     "u"
@@ -11228,9 +11228,13 @@ function terminalHelperRefutation(finding, lines) {
     String.raw`(?:\bfunction\s+[A-Za-z_$][\w$]*\s*\([^)]*\b${escaped(consumer.name)}\b|\([^)]*\b${escaped(consumer.name)}\b[^)]*\)\s*=>)`,
     "u"
   );
-  if (lines.slice(0, consumerIndex + 1).some(
-    (line, index) => (index < range.opening || index > range.closing) && (reassigned.test(line.code) || shadowedParameter.test(line.code))
-  )) {
+  if (
+    // Scan every line outside the proved helper body. A same-line parameter can shadow the call,
+    // and a later module-scope assignment can execute before an exported consumer is invoked.
+    lines.some(
+      (line, index) => (index < range.opening || index > range.closing) && (reassigned.test(line.code) || shadowedParameter.test(line.code))
+    )
+  ) {
     return void 0;
   }
   if (!helperReturnsOrThrows(lines, range)) return void 0;

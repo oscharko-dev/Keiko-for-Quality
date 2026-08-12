@@ -1137,8 +1137,8 @@ function terminalHelperRefutation(
   const consumer = changedSpawnHelper(finding, lines);
   if (consumer === undefined) return undefined;
   const range = namedFunctionRange(lines, consumer.name);
-  if (range === undefined || range.closing >= lines.indexOf(consumer.line)) return undefined;
   const consumerIndex = lines.indexOf(consumer.line);
+  if (range === undefined || range.closing >= consumerIndex) return undefined;
   const reassigned = new RegExp(
     String.raw`\b${escaped(consumer.name)}\s*(?:(?:&&|\|\||\?\?)?=(?!=)|\+\+|--)`,
     "u",
@@ -1148,16 +1148,13 @@ function terminalHelperRefutation(
     "u",
   );
   if (
-    lines
-      // Include the consumer itself: `(helper) => spawn(helper(), args)` introduces a same-line
-      // shadow before the call. Stopping one line early binds that call to an unrelated earlier
-      // declaration and can turn a real invalid-command finding into a deterministic refutation.
-      .slice(0, consumerIndex + 1)
-      .some(
-        (line, index) =>
-          (index < range.opening || index > range.closing) &&
-          (reassigned.test(line.code) || shadowedParameter.test(line.code)),
-      )
+    // Scan every line outside the proved helper body. A same-line parameter can shadow the call,
+    // and a later module-scope assignment can execute before an exported consumer is invoked.
+    lines.some(
+      (line, index) =>
+        (index < range.opening || index > range.closing) &&
+        (reassigned.test(line.code) || shadowedParameter.test(line.code)),
+    )
   ) {
     return undefined;
   }

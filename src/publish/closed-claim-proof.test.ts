@@ -366,6 +366,24 @@ describe("trusted closed claim proof", () => {
     ).toBeUndefined();
   });
 
+  it("falls back when the helper is reassigned after the consumer declaration", () => {
+    const head = [
+      'import { spawn } from "node:child_process";',
+      "export function helper() {",
+      '  return "cl.exe";',
+      "}",
+      "export const run = () => spawn(helper(), []);",
+      "helper = () => undefined;",
+    ];
+
+    expect(
+      closedClaimRefutation(
+        finding("The helper can return undefined and pass an invalid command to spawn.", 5),
+        evidence(head, [5], head),
+      ),
+    ).toBeUndefined();
+  });
+
   it("proves a changed duplicate write on a stable native Map inside an input loop", () => {
     expect(mapProof()).toEqual({
       evidenceRefs: ["D:H:5", "H:5"],
@@ -621,20 +639,22 @@ describe("trusted closed claim proof", () => {
       'import { describe, expect, it, vi } from "vitest";',
       'import { entryCount, lookup } from "./cache.js";',
       'describe("cache", () => {',
-      '  it("first", () => {',
+      '  it("first", async () => {',
       "    vi.resetModules();",
+      '    await import("./cache.js");',
       '    lookup("a");',
       "  });",
-      '  it("second", () => {',
+      '  it("second", async () => {',
       "    vi.resetModules();",
+      '    await import("./cache.js");',
       "    expect(entryCount()).toBe(0);",
       "  });",
       "});",
     ];
     expect(
       closedClaimRefutation(
-        finding("Remove the redundant reset because the module cache is shared.", 9),
-        evidence(head, [2, 9], head),
+        finding("Remove the redundant reset because the module cache is shared.", 10),
+        evidence(head, [2, 10], head),
       ),
     ).toBeUndefined();
   });
