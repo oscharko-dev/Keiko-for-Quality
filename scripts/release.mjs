@@ -117,8 +117,10 @@ function requireReleaseChannel() {
 }
 
 /** A copy/pasteable shell argument whose exact value cannot be reparsed as syntax. */
+const SHELL_SINGLE_QUOTE_ESCAPE = String.raw`'\''`;
+
 function quoteReleaseArgument(value) {
-  return `'${value.replaceAll("'", String.raw`'\''`)}'`;
+  return `'${value.replaceAll("'", SHELL_SINGLE_QUOTE_ESCAPE)}'`;
 }
 
 const FORMATTED_RELEASE_PHASES = new Set(["attest", "release", "publish", "repin"]);
