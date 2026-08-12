@@ -46,8 +46,8 @@ function evidencePath(raw, suffix, flag) {
   return resolve(raw);
 }
 
-/** Strict parsing: unknown, positional, duplicate, and valueless arguments all fail closed. */
-export function parseReleaseEvidenceArgs(argv) {
+function parseFlagValues(argv) {
+  if (argv.length % 2 !== 0) throw new Error(`missing value for ${String(argv.at(-1))}`);
   const values = new Map();
   for (let index = 0; index < argv.length; index += 2) {
     const flag = argv[index];
@@ -59,17 +59,40 @@ export function parseReleaseEvidenceArgs(argv) {
     }
     values.set(flag, value);
   }
+  return values;
+}
 
-  for (const flag of REQUIRED_VALUE_FLAGS) {
+function requireValues(values, flags) {
+  for (const flag of flags) {
     if (!values.has(flag)) throw new Error(`missing required argument: ${flag}`);
   }
+}
 
+function releaseIdentity(values) {
   const version = parseVersion(values.get("--version"));
   if (version === undefined) throw new Error("--version must be X.Y.Z");
   const head = values.get("--head");
   const tree = values.get("--tree");
   if (!GIT_OBJECT_ID.test(head ?? "")) throw new Error("--head must be a full lowercase Git id");
   if (!GIT_OBJECT_ID.test(tree ?? "")) throw new Error("--tree must be a full lowercase Git id");
+  return { version, head, tree };
+}
+
+function releaseChannel(values) {
+  const channel = values.get("--channel") ?? "standard";
+  const recoveryReason = values.get("--recovery-reason");
+  const validation = validateReleaseChannel({ channel, recoveryReason });
+  if (!validation.valid) {
+    throw new Error(`release channel is invalid: ${validation.failures.join(", ")}`);
+  }
+  return { channel, recoveryReason };
+}
+
+/** Strict parsing: unknown, positional, duplicate, and valueless arguments all fail closed. */
+export function parseReleaseEvidenceArgs(argv) {
+  const values = parseFlagValues(argv);
+  requireValues(values, REQUIRED_VALUE_FLAGS);
+  const expected = releaseIdentity(values);
 
   const paths = {};
   for (const [flag, { key, suffix }] of PATH_FLAGS) {
@@ -78,13 +101,7 @@ export function parseReleaseEvidenceArgs(argv) {
   if (new Set(Object.values(paths)).size !== PATH_FLAGS.size) {
     throw new Error("each evidence argument must name a different file");
   }
-  const channel = values.get("--channel") ?? "standard";
-  const recoveryReason = values.get("--recovery-reason");
-  const channelValidation = validateReleaseChannel({ channel, recoveryReason });
-  if (!channelValidation.valid) {
-    throw new Error(`release channel is invalid: ${channelValidation.failures.join(", ")}`);
-  }
-  return { expected: { version, head, tree }, paths, channel, recoveryReason };
+  return { expected, paths, ...releaseChannel(values) };
 }
 
 function readJson(path, label, read) {

@@ -679,39 +679,59 @@ const REQUIRED_PHASE_FLAGS = {
  * Release commands are a security boundary, not a convenience CLI.  A typo must not silently
  * select the standard channel, and a flag meaningful in one phase must not leak into another.
  */
-export function parseReleaseCli(argv) {
+function invalidReleaseCli(failure) {
+  return { valid: false, failures: [failure] };
+}
+
+function releasePhase(argv) {
   const phase = argv[0];
-  if (typeof phase !== "string" || !Object.hasOwn(PHASES, phase)) {
-    return { valid: false, failures: ["release_phase_invalid"] };
-  }
-  const arguments_ = argv.slice(1);
-  if (arguments_.length % 2 !== 0) return { valid: false, failures: ["release_argument_missing"] };
+  return typeof phase === "string" && Object.hasOwn(PHASES, phase) ? phase : undefined;
+}
+
+function parsePhaseValues(phase, arguments_) {
+  if (arguments_.length % 2 !== 0) return invalidReleaseCli("release_argument_missing");
   const values = new Map();
   for (let index = 0; index < arguments_.length; index += 2) {
     const flag = arguments_[index];
     const value = arguments_[index + 1];
     if (typeof flag !== "string" || !PHASE_FLAGS[phase].has(flag)) {
-      return { valid: false, failures: ["release_flag_unknown_or_phase_forbidden"] };
+      return invalidReleaseCli("release_flag_unknown_or_phase_forbidden");
     }
-    if (values.has(flag)) return { valid: false, failures: ["release_flag_duplicate"] };
+    if (values.has(flag)) return invalidReleaseCli("release_flag_duplicate");
     if (typeof value !== "string" || value === "" || value.startsWith("--")) {
-      return { valid: false, failures: ["release_argument_missing"] };
+      return invalidReleaseCli("release_argument_missing");
     }
     values.set(flag, value);
   }
+  return { valid: true, failures: [], values };
+}
+
+function validatePhaseValues(phase, values) {
   for (const flag of REQUIRED_PHASE_FLAGS[phase]) {
-    if (!values.has(flag)) return { valid: false, failures: ["release_required_flag_missing"] };
+    if (!values.has(flag)) return invalidReleaseCli("release_required_flag_missing");
   }
   if (values.has("--version") && parseVersion(values.get("--version")) === undefined) {
-    return { valid: false, failures: ["release_version_invalid"] };
+    return invalidReleaseCli("release_version_invalid");
   }
   if (values.has("--sha") && !/^[0-9a-f]{40}$/u.test(values.get("--sha"))) {
-    return { valid: false, failures: ["release_sha_invalid"] };
+    return invalidReleaseCli("release_sha_invalid");
   }
   const channel = values.get("--channel") ?? "standard";
   const recoveryReason = values.get("--recovery-reason");
   const channelValidation = validateReleaseChannel({ channel, recoveryReason });
-  if (!channelValidation.valid) return { valid: false, failures: channelValidation.failures };
+  return channelValidation.valid
+    ? { valid: true, failures: [] }
+    : { valid: false, failures: channelValidation.failures };
+}
+
+export function parseReleaseCli(argv) {
+  const phase = releasePhase(argv);
+  if (phase === undefined) return invalidReleaseCli("release_phase_invalid");
+  const arguments_ = argv.slice(1);
+  const parsed = parsePhaseValues(phase, arguments_);
+  if (!parsed.valid || parsed.values === undefined) return parsed;
+  const validation = validatePhaseValues(phase, parsed.values);
+  if (!validation.valid) return validation;
   return { valid: true, failures: [], phase, arguments_ };
 }
 
