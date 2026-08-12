@@ -25,6 +25,7 @@ import { LIMITS as ENGINE_RESULT_LIMITS } from "../engine/result.js";
 import {
   closedClaimProof,
   closedClaimRefutation,
+  type ClosedRefutationRuleId,
   type TrustedHunkEvidence,
 } from "./closed-claim-proof.js";
 import { MAX_EVIDENCE_CHARS, extractEvidenceIdentifiers } from "./evidence.js";
@@ -138,6 +139,10 @@ export const VERIFICATION_CLAIM_DECISION_POLICY = [
   "An existing guard in one caller does not make a missing invariant at an exported or shared",
   "boundary already handled. Use already_handled only when shown evidence proves the guard",
   "dominates every relevant entry to that boundary.",
+  "Two nearby counters, baseline fields, or snapshot values do not have to move together merely",
+  "because one changed. Confirm such a dependency only when cited schema, producer, or consumer",
+  "evidence proves the invariant. Adjacency, similar names, and a changed total are not proof; if",
+  "the shown computation counts the fields independently, the dependency claim is contradicted.",
   "When a user-input parser runs inside a try block and its caught error is passed directly to an",
   "error, diagnostic, logging, or telemetry sink, that shown catch-to-sink flow is sufficient",
   "disclosure evidence. The catch binding used as the sink argument is the claimed flow: do not",
@@ -2533,8 +2538,11 @@ function closedRefutationResult<T extends JudgeableFinding>(
   finding: T,
   evidence: TrustedHunkEvidence,
   metrics: CandidateMetrics,
+  refutationSink: ((ruleId: ClosedRefutationRuleId) => void) | undefined,
 ): JudgedOne<T> | undefined {
-  if (closedClaimRefutation(finding, evidence) === undefined) return undefined;
+  const refutation = closedClaimRefutation(finding, evidence);
+  if (refutation === undefined) return undefined;
+  refutationSink?.(refutation.ruleId);
   metrics.truthRefuted += 1;
   return decidedResult<T>(undefined, "refuted", metrics, {
     stage: "truth_initial",
@@ -2546,10 +2554,11 @@ function closedSourceDecision<T extends JudgeableFinding>(
   finding: T,
   evidence: string | TrustedHunkEvidence,
   metrics: CandidateMetrics,
+  refutationSink: ((ruleId: ClosedRefutationRuleId) => void) | undefined,
 ): JudgedOne<T> | undefined {
   if (typeof evidence === "string") return undefined;
   return (
-    closedRefutationResult(finding, evidence, metrics) ??
+    closedRefutationResult(finding, evidence, metrics, refutationSink) ??
     closedProofResult(finding, evidence, metrics)
   );
 }
@@ -2561,6 +2570,7 @@ async function judgeOne<T extends JudgeableFinding>(
   strictness: SubstantiationStrictness,
   budget: CallBudget,
   retriever: EvidenceRetriever<T> | undefined,
+  refutationSink: ((ruleId: ClosedRefutationRuleId) => void) | undefined,
 ): Promise<JudgedOne<T>> {
   const dossier = buildDossier(finding.content);
   const metrics = emptyMetrics();
@@ -2585,7 +2595,7 @@ async function judgeOne<T extends JudgeableFinding>(
   // transition. Refutation is checked first because a fully proven clean diff must never be kept by
   // a claim-specific positive proof. Every other shape continues through the full independent model
   // workflow below.
-  const closedDecision = closedSourceDecision(finding, read, metrics);
+  const closedDecision = closedSourceDecision(finding, read, metrics, refutationSink);
   if (closedDecision !== undefined) return closedDecision;
   if (!budgetAllows(budget, substantiationOnePathTokenUpperBound(finding, evidence))) {
     return undecidedResult(finding, strictness, metrics, true, {
@@ -2663,8 +2673,12 @@ export async function substantiate<T extends JudgeableFinding>(
   strictness: SubstantiationStrictness = resolveSubstantiationStrictness(),
   maxTokens?: number,
   retrieveEvidence?: EvidenceRetriever<T>,
-  historicalTraceSink?: SubstantiationTraceSink,
+  ...sinks: readonly [
+    historicalTraceSink?: SubstantiationTraceSink,
+    closedRefutationSink?: (ruleId: ClosedRefutationRuleId) => void,
+  ]
 ): Promise<SubstantiationOutcome<T>> {
+  const [historicalTraceSink, closedRefutationSink] = sinks;
   const kept: T[] = [];
   const counts = emptyCounts();
   const budget: CallBudget = { maximum: hardMaximum(maxTokens), spent: 0, calls: 0 };
@@ -2672,7 +2686,15 @@ export async function substantiate<T extends JudgeableFinding>(
   for (const finding of findings) {
     const tokensBefore = budget.spent;
     const callsBefore = budget.calls;
-    const judged = await judgeOne(finding, readHunk, deps, strictness, budget, retrieveEvidence);
+    const judged = await judgeOne(
+      finding,
+      readHunk,
+      deps,
+      strictness,
+      budget,
+      retrieveEvidence,
+      closedRefutationSink,
+    );
     if (judged.finding !== undefined) kept.push(judged.finding);
     tallyJudgement(counts, judged);
     historicalTraceSink?.({

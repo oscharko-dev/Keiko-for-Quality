@@ -69,6 +69,17 @@ const DEFAULT_SEED = 42;
  *  request's own fault and retrying it verbatim buys nothing — the file becomes a warning. */
 const RETRIES_PER_FILE = 1;
 
+/**
+ * One alternate-seed retry when a mandatory examiner RESPONSE arrives but violates the closed
+ * claims schema. This is deliberately separate from `RETRIES_PER_FILE`: transport failures are
+ * retried with the same request, while an answer whose content cannot cross the trust boundary
+ * needs one different, still reproducible sample. More than one would turn malformed model output
+ * into an open-ended conversation; zero left a real 36-file completion run stuck on one file after
+ * the endpoint had returned a non-transport response (Keiko#2970, 2026-08-12).
+ */
+const EXAMINER_SHAPE_RETRIES = 1;
+const EXAMINER_SHAPE_RETRY_SEED_OFFSET = 10_000;
+
 /** Per-companion and whole-block character budgets for the `<companion_changes>` section. The
  *  block exists to kill the one-sided-pair false-positive class (37 of 52 findings on the first
  *  live release PR), and three bounded hunks do that; a whole package's diffs would just re-crowd
@@ -119,6 +130,11 @@ interface EngineWarningShape {
   readonly file: string;
   readonly message: string;
 }
+
+type ExaminerOutcome =
+  | { readonly kind: "accepted"; readonly comments: readonly EngineComment[] }
+  | { readonly kind: "retryable_failure" }
+  | { readonly kind: "request_rejected" };
 
 /**
  * One parsed unified-diff hunk, rendered PR-Agent style: `__new hunk__` carries every kept line
@@ -603,11 +619,13 @@ async function callStage(
   return result;
 }
 
-function warnExaminer(state: RunState, path: string, role: string): void {
+function warnExaminer(state: RunState, path: string, role: string, requestRejected: boolean): void {
   state.warnings.push({
     type: "subtask_error",
     file: path,
-    message: `single_shot ${role} examiner failed`,
+    message: requestRejected
+      ? `single_shot ${role} examiner request rejected`
+      : `single_shot ${role} examiner failed`,
   });
 }
 
@@ -631,14 +649,28 @@ async function examine(
   risks: readonly RiskHypothesis[],
   role: typeof CORE_ROLE | typeof INTEGRATION_ROLE,
   seedOffset: number,
-): Promise<readonly EngineComment[] | undefined> {
+): Promise<ExaminerOutcome> {
   const prompt = buildExaminerPrompt(role, context, risks, { view: evidenceView(dispatch) });
-  const result = await callStage(state, prompt, state.seed + seedOffset);
-  if (result.kind === "budget_blocked") state.mandatoryBudgetBlocked = true;
-  if (result.kind !== "success") return undefined;
-  const claims = parseStructuredClaims(result.content, new Set(dispatch.allowedAnchors));
-  if (claims === undefined) return undefined;
-  return claims.map((claim) => renderStructuredClaim(dispatch.path, claim));
+  const allowedAnchors = new Set(dispatch.allowedAnchors);
+  for (let attempt = 0; attempt <= EXAMINER_SHAPE_RETRIES; attempt += 1) {
+    const result = await callStage(
+      state,
+      prompt,
+      state.seed + seedOffset + attempt * EXAMINER_SHAPE_RETRY_SEED_OFFSET,
+    );
+    if (result.kind === "budget_blocked") state.mandatoryBudgetBlocked = true;
+    if (result.kind === "invalid_response") continue;
+    if (result.kind === "request_rejected") return { kind: "request_rejected" };
+    if (result.kind !== "success") return { kind: "retryable_failure" };
+    const claims = parseStructuredClaims(result.content, allowedAnchors);
+    if (claims !== undefined) {
+      return {
+        kind: "accepted",
+        comments: claims.map((claim) => renderStructuredClaim(dispatch.path, claim)),
+      };
+    }
+  }
+  return { kind: "retryable_failure" };
 }
 
 /**
@@ -650,13 +682,13 @@ async function reviewOneFile(state: RunState, dispatch: FileDispatch): Promise<v
   const context = generationContext(state, dispatch);
   const risks = await planRisks(state, context);
   const core = await examine(state, dispatch, context, risks, CORE_ROLE, CORE_EXAMINER_SEED_OFFSET);
-  if (core === undefined) {
-    warnExaminer(state, dispatch.path, CORE_ROLE);
+  if (core.kind !== "accepted") {
+    warnExaminer(state, dispatch.path, CORE_ROLE, core.kind === "request_rejected");
     return;
   }
   state.coreExaminations += 1;
 
-  let combined = core;
+  let combined = core.comments;
   if (shouldRunIntegrationExaminer(context)) {
     const integration = await examine(
       state,
@@ -666,11 +698,11 @@ async function reviewOneFile(state: RunState, dispatch: FileDispatch): Promise<v
       INTEGRATION_ROLE,
       INTEGRATION_EXAMINER_SEED_OFFSET,
     );
-    if (integration === undefined) {
-      warnExaminer(state, dispatch.path, INTEGRATION_ROLE);
+    if (integration.kind !== "accepted") {
+      warnExaminer(state, dispatch.path, INTEGRATION_ROLE, integration.kind === "request_rejected");
     } else {
       state.integrationExaminations += 1;
-      combined = unionComments(core, integration);
+      combined = unionComments(core.comments, integration.comments);
     }
   }
   state.comments.push(...combined);

@@ -160,7 +160,7 @@ test("staged binding ignores a fetched but unused classic engine", () => {
   );
 });
 
-test("publication-quality local results retain only scorer-compatible findings and counters", () => {
+test("publication-quality local results ignore provisional sanitizer rejects", () => {
   const { result, plan } = qualificationOutcomeFromLocalReview(
     {
       outcome: "complete",
@@ -174,6 +174,12 @@ test("publication-quality local results retain only scorer-compatible findings a
           body: "Fix the bound.\n\nWhen input is empty, the index is negative.",
         },
       ],
+      quality: {
+        evidenceWithheld: 0,
+        rankedOut: 0,
+        verificationUndecided: 0,
+        rejectedSanitization: 0,
+      },
       spend: { engine: 10, classify: 5, total: 15, allotted: 100 },
       inventory: { total: 2, reviewable: 2, reviewed: 2 },
       ruleDigest: "a".repeat(64),
@@ -204,7 +210,32 @@ test("publication-quality local results retain only scorer-compatible findings a
     },
   ]);
   assert.equal(plan.survivors[0]?.sanitizedBody, result.comments[0]?.content);
-  assert.deepEqual(plan.counters, { rejectedSanitization: 1, suppressedIntraRun: 1 });
+  assert.deepEqual(plan.counters, { rejectedSanitization: 0, suppressedIntraRun: 1 });
+});
+
+test("publication-quality local results retain final sanitizer loss under an earlier engine reason", () => {
+  const { plan } = qualificationOutcomeFromLocalReview(
+    {
+      outcome: "incomplete",
+      reason: "settlement.incomplete.budget_exceeded",
+      findings: [],
+      quality: {
+        evidenceWithheld: 0,
+        rankedOut: 0,
+        verificationUndecided: 0,
+        rejectedSanitization: 1,
+      },
+      spend: { engine: 10, classify: 5, total: 15, allotted: 100 },
+      inventory: { total: 1, reviewable: 1, reviewed: 1 },
+      ruleDigest: "c".repeat(64),
+      engineVersion: "v1",
+      cacheHits: 0,
+      cacheMisses: 1,
+    },
+    [{ code: "publish.finding_rejected_sanitization" }],
+  );
+
+  assert.equal(plan.counters.rejectedSanitization, 1);
 });
 
 test("an incomplete local budget stop remains an explicit budget-pressure result", () => {

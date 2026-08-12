@@ -5,6 +5,7 @@ import {
   DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
+  HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
   MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   PARALLEL_MAPPING_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
@@ -21,6 +22,7 @@ describe("shared claim-decision policy", () => {
       [
         `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
         `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
+        `- helper-control-flow: ${HELPER_CONTROL_FLOW_EVIDENCE_POLICY}`,
         `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
         `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
         `- sensitive-output: ${SENSITIVE_OUTPUT_EVIDENCE_POLICY}`,
@@ -58,6 +60,19 @@ describe("shared claim-decision policy", () => {
           "figma: isJiraConnectorAuthorized(config),\njira: isFigmaConnectorAuthorized(config),",
         first: PARALLEL_MAPPING_EVIDENCE_POLICY,
       },
+      {
+        evidence: 'const compiler = windowsToolFromPath(env.PATH, "cl.exe"); spawn(compiler);',
+        first: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
+      },
+      {
+        evidence: [
+          'import { spawn } from "node:child_process";',
+          'throw new Error("Windows tool is unavailable");',
+          'if (process.platform !== "win32") return;',
+          'spawn(windowsToolFromPath(pathValue, "cl.exe"));',
+        ].join("\n"),
+        first: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
+      },
     ];
     for (const sample of samples) {
       const rendered = renderExaminerClaimDecisionPolicy(sample.evidence);
@@ -72,6 +87,7 @@ describe("shared claim-decision policy", () => {
         TRIGGER_AND_GUARD_EVIDENCE_POLICY,
         MIRRORED_VALIDATOR_EVIDENCE_POLICY,
         PARALLEL_MAPPING_EVIDENCE_POLICY,
+        HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
       ]) {
         expect(rendered.split(policy)).toHaveLength(2);
       }
@@ -166,6 +182,22 @@ describe("shared claim-decision policy", () => {
     );
     expect(TEST_ISOLATION_EVIDENCE_POLICY).toContain(
       "A removed per-case reset before a later dynamic import is reportable",
+    );
+  });
+
+  it("distinguishes fail-closed helper exits and inert imports from real execution paths", () => {
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain(
+      "SILENT: every helper exit shown returns required call argument or throws before the consumer",
+    );
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain(
+      "never invent `undefined` after that throw",
+    );
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain("Imports do not execute exports");
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain(
+      "REPORT: shown invalid return, fallthrough, or caught failure reaches the consumer",
+    );
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain(
+      "module evaluation runs unavailable platform work before the guard",
     );
   });
 });

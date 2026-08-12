@@ -63,7 +63,7 @@ vi.mock("./publish/runtime-facts.js", async (importOriginal) => ({
   collectClosedRuntimeFactsAtCommit: collectClosedRuntimeFactsAtCommitMock,
 }));
 
-const { computeAllottedBudget, performReview } = await import("./review.js");
+const { computeAllottedBudget, performLocalReview, performReview } = await import("./review.js");
 const { EngineRunError } = await import("./engine/run.js");
 
 /**
@@ -1572,7 +1572,7 @@ describe("performReview: review-cache memoization end to end", () => {
         ruleDigest: engineDigest,
       });
       // The retry still cannot finish it — the gap stands, but it was paid for once, not never.
-      runEngineMock.mockResolvedValueOnce({
+      runEngineMock.mockResolvedValue({
         stdout: finishedWithFailures(["src/b.ts"], 1),
         ruleDigest: engineDigest,
       });
@@ -1597,6 +1597,111 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(codes).not.toContain("engine.resume_skipped_run_completed");
       expect(report.outcome).toBe("incomplete");
       expect(report.reason).toBe("settlement.incomplete.coverage_gap");
+    });
+
+    it("never rebuys a staged file whose request was permanently rejected", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "completed_with_errors",
+          summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+          comments: [],
+          warnings: [
+            {
+              type: "subtask_error",
+              file: "src/b.ts",
+              message: "single_shot core examiner request rejected",
+            },
+          ],
+        }),
+        ruleDigest: engineDigest,
+      });
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(
+        {
+          ...baseRequest(undefined),
+          config: { ...CONFIG, protocol: "openai" },
+        },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("incomplete");
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
+      expect(diagnostics.drain().map((record) => record.code)).not.toContain(
+        "engine.resumed_gap_targeted",
+      );
+    });
+
+    it("does not retry transient peers by falsely crediting a permanently rejected path", async () => {
+      const mixedRepo = await mkdtemp(join(tmpdir(), "kfq-mixed-retry-causes-"));
+      try {
+        git(["init", "-q", "-b", "main"], mixedRepo);
+        await mkdir(join(mixedRepo, "src"), { recursive: true });
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 1;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "base", "--no-gpg-sign"], mixedRepo);
+        const mixedBase = git(["rev-parse", "HEAD"], mixedRepo).trim();
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 2;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "head", "--no-gpg-sign"], mixedRepo);
+        const mixedHead = git(["rev-parse", "HEAD"], mixedRepo).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        runEngineMock.mockResolvedValue({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 4, total_tokens: 60_000, budget_exceeded: false },
+            comments: [],
+            warnings: [
+              {
+                type: "subtask_error",
+                file: "src/b.ts",
+                message: "single_shot core examiner request rejected",
+              },
+              {
+                type: "subtask_error",
+                file: "src/c.ts",
+                message: "single_shot core examiner failed",
+              },
+            ],
+          }),
+          ruleDigest: engineDigest,
+        });
+        const request = baseRequest(undefined);
+        vi.spyOn(request.client, "getPullRequest").mockResolvedValue({
+          headSha: commitSha(mixedHead),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        });
+        const diagnostics = createSilentDiagnostics();
+
+        const report = await performReview(
+          {
+            ...request,
+            base: commitSha(mixedBase),
+            head: commitSha(mixedHead),
+            repositoryPath: mixedRepo,
+            config: { ...CONFIG, protocol: "openai" },
+          },
+          diagnostics,
+        );
+
+        expect(report.outcome).toBe("incomplete");
+        expect(runEngineMock).toHaveBeenCalledTimes(1);
+        expect(diagnostics.drain().map((record) => record.code)).not.toContain(
+          "engine.resumed_gap_targeted",
+        );
+      } finally {
+        await rm(mixedRepo, { recursive: true, force: true });
+      }
     });
 
     it("settles complete when the targeted retry closes the gap", async () => {
@@ -1774,24 +1879,319 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(second.allottedBudget).toBe(200_000);
     });
 
-    it("keeps retrying while the gap shrinks, and stops the moment it does not", async () => {
+    it("uses every bounded distinct-seed round before accepting an unchanged one-file gap", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      // Round 0 loses one of two paths; round 1 returns the SAME casualty. That is the
-      // deterministic per-file failure, recognised one round later — the loop must stop there
-      // rather than buying two more rounds of the identical answer.
+      // Every round loses the same one of two paths. Different fixed seeds make each attempt a
+      // genuine bounded second opinion, but the hard cap still keeps a persistent failure honest.
       runEngineMock.mockResolvedValue({
         stdout: finishedWithFailures(["src/b.ts"], 2),
         ruleDigest: engineDigest,
       });
 
       const diagnostics = createSilentDiagnostics();
-      await performReview(baseRequest(undefined), diagnostics);
+      await performReview(
+        { ...baseRequest(undefined), config: { ...CONFIG, protocol: "openai" } },
+        diagnostics,
+      );
 
-      // First dispatch plus exactly one targeted round — never the cap of three.
-      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      expect(runEngineMock).toHaveBeenCalledTimes(4);
+      expect(
+        runEngineMock.mock.calls.map((call) => (call[0] as { samplingSeed?: number }).samplingSeed),
+      ).toEqual([undefined, 43, 44, 45]);
       const codes = diagnostics.drain().map((record) => record.code);
       expect(codes).toContain("engine.resume_gap_not_shrinking");
+    });
+
+    it("lets a distinct-seed round recover the one-file gap that the previous round repeated", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+            comments: [],
+            warnings: [
+              { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+            ],
+          }),
+          ruleDigest: engineDigest,
+        })
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 1, total_tokens: 20_000, budget_exceeded: false },
+            comments: [],
+            warnings: [
+              { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+            ],
+          }),
+          ruleDigest: engineDigest,
+        })
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "success",
+            summary: { files_reviewed: 1, total_tokens: 20_000, budget_exceeded: false },
+            comments: [],
+            warnings: [],
+          }),
+          ruleDigest: engineDigest,
+        });
+
+      const report = await performReview(
+        { ...baseRequest(undefined), config: { ...CONFIG, protocol: "openai" } },
+        createSilentDiagnostics(),
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(report.reason).toBeUndefined();
+      expect(
+        runEngineMock.mock.calls.map((call) => (call[0] as { samplingSeed?: number }).samplingSeed),
+      ).toEqual([undefined, 43, 44]);
+    });
+
+    it("never credits a shrinking gap reported by an untrustworthy targeted result", async () => {
+      const mixedRepo = await mkdtemp(join(tmpdir(), "kfq-untrusted-targeted-gap-"));
+      try {
+        git(["init", "-q", "-b", "main"], mixedRepo);
+        await mkdir(join(mixedRepo, "src"), { recursive: true });
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 1;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "base", "--no-gpg-sign"], mixedRepo);
+        const mixedBase = git(["rev-parse", "HEAD"], mixedRepo).trim();
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 2;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "head", "--no-gpg-sign"], mixedRepo);
+        const mixedHead = git(["rev-parse", "HEAD"], mixedRepo).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        runEngineMock
+          .mockResolvedValueOnce({
+            stdout: finishedWithFailures(["src/b.ts", "src/c.ts"], 4),
+            ruleDigest: engineDigest,
+          })
+          .mockResolvedValueOnce({
+            stdout: JSON.stringify({
+              status: "failed",
+              summary: { files_reviewed: 2, total_tokens: 20_000, budget_exceeded: false },
+              comments: [],
+              warnings: [
+                {
+                  type: "subtask_error",
+                  file: "src/b.ts",
+                  message: "single_shot core examiner failed",
+                },
+              ],
+            }),
+            ruleDigest: engineDigest,
+          })
+          // Before the trust boundary, the apparently smaller gap bought this third round; its
+          // process failure then credited src/c.ts even though the failed result never proved it.
+          .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit", 1_000));
+        const request = baseRequest(undefined);
+        vi.spyOn(request.client, "getPullRequest").mockResolvedValue({
+          headSha: commitSha(mixedHead),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        });
+
+        const report = await performLocalReview(
+          {
+            ...request,
+            base: commitSha(mixedBase),
+            head: commitSha(mixedHead),
+            repositoryPath: mixedRepo,
+            config: { ...CONFIG, protocol: "openai" },
+          },
+          createSilentDiagnostics(),
+        );
+
+        expect(report).toMatchObject({
+          outcome: "incomplete",
+          reason: "settlement.incomplete.engine_status_not_success",
+          inventory: { reviewable: 4, reviewed: 2 },
+        });
+        expect(runEngineMock).toHaveBeenCalledTimes(2);
+      } finally {
+        await rm(mixedRepo, { recursive: true, force: true });
+      }
+    });
+
+    it("replays the exact 36-file completion failure as gap 3 to 1 to 1 to 0", async () => {
+      const replayRepo = await mkdtemp(join(tmpdir(), "kfq-completion-36-"));
+      const git = (args: readonly string[]): string =>
+        execFileSync("git", [...args], {
+          cwd: replayRepo,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            GIT_AUTHOR_NAME: "t",
+            GIT_AUTHOR_EMAIL: "t@example.test",
+            GIT_COMMITTER_NAME: "t",
+            GIT_COMMITTER_EMAIL: "t@example.test",
+            GIT_CONFIG_GLOBAL: "/dev/null",
+            GIT_CONFIG_SYSTEM: "/dev/null",
+          },
+        });
+      try {
+        git(["init", "-q", "-b", "main"]);
+        await mkdir(join(replayRepo, "src"), { recursive: true });
+        for (let index = 0; index < 36; index += 1) {
+          await writeFile(join(replayRepo, "src", `file-${String(index)}.ts`), "old\n");
+        }
+        git(["add", "."]);
+        git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+        const replayBase = git(["rev-parse", "HEAD"]).trim();
+        for (let index = 0; index < 36; index += 1) {
+          await writeFile(join(replayRepo, "src", `file-${String(index)}.ts`), "new\n");
+        }
+        git(["add", "."]);
+        git(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+        const replayHead = git(["rev-parse", "HEAD"]).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        const result = (
+          filesReviewed: number,
+          failedPaths: readonly string[],
+          totalTokens: number,
+        ): string =>
+          JSON.stringify({
+            status: failedPaths.length === 0 ? "success" : "completed_with_errors",
+            summary: { files_reviewed: filesReviewed, total_tokens: totalTokens },
+            comments: [],
+            warnings: failedPaths.map((file) => ({
+              type: "subtask_error",
+              file,
+              message: "single_shot core examiner failed",
+            })),
+          });
+        runEngineMock
+          .mockResolvedValueOnce({
+            stdout: result(36, ["src/file-33.ts", "src/file-34.ts", "src/file-35.ts"], 100_000),
+            ruleDigest: engineDigest,
+          })
+          .mockResolvedValueOnce({
+            stdout: result(3, ["src/file-35.ts"], 30_000),
+            ruleDigest: engineDigest,
+          })
+          .mockResolvedValueOnce({
+            stdout: result(1, ["src/file-35.ts"], 10_000),
+            ruleDigest: engineDigest,
+          })
+          .mockResolvedValueOnce({
+            stdout: result(1, [], 10_000),
+            ruleDigest: engineDigest,
+          });
+        const request = baseRequest(undefined);
+        vi.spyOn(request.client, "getPullRequest").mockResolvedValue({
+          headSha: commitSha(replayHead),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        });
+        const diagnostics = createSilentDiagnostics();
+
+        const report = await performReview(
+          {
+            ...request,
+            base: commitSha(replayBase),
+            head: commitSha(replayHead),
+            repositoryPath: replayRepo,
+            config: { ...CONFIG, protocol: "openai" },
+          },
+          diagnostics,
+        );
+
+        expect(report).toMatchObject({ outcome: "complete", reviewablePaths: 36 });
+        expect(
+          runEngineMock.mock.calls.map(
+            (call) => (call[0] as { samplingSeed?: number }).samplingSeed,
+          ),
+        ).toEqual([undefined, 43, 44, 45]);
+        expect(
+          diagnostics.drain().find((record) => record.code === "run.spend")?.counts?.engine,
+        ).toBe(150_000);
+      } finally {
+        await rm(replayRepo, { recursive: true, force: true });
+      }
+    });
+
+    it("charges a failed round before deciding whether the next one still fits", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+            comments: [],
+            warnings: [
+              { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+            ],
+          }),
+          ruleDigest: engineDigest,
+        })
+        .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit", 1_800_000));
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(
+        { ...baseRequest(undefined), config: { ...CONFIG, protocol: "openai" } },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("incomplete");
+      expect(runEngineMock).toHaveBeenCalledTimes(2);
+      expect(diagnostics.drain().map((record) => record.code)).toContain(
+        "engine.resume_skipped_budget_exhausted",
+      );
+      expect(
+        diagnostics.drain().find((record) => record.code === "run.spend")?.counts?.engine,
+      ).toBe(1_860_000);
+    });
+
+    it("preserves earlier coverage when a later targeted round throws", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const failed = JSON.stringify({
+        status: "completed_with_errors",
+        summary: { files_reviewed: 1, total_tokens: 20_000, budget_exceeded: false },
+        comments: [],
+        warnings: [
+          { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+        ],
+      });
+      runEngineMock
+        .mockResolvedValueOnce({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+            comments: [],
+            warnings: [
+              { type: "subtask_error", file: "src/b.ts", message: "main_task did not complete" },
+            ],
+          }),
+          ruleDigest: engineDigest,
+        })
+        .mockResolvedValueOnce({ stdout: failed, ruleDigest: engineDigest })
+        .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit", 1_000))
+        .mockRejectedValueOnce(new EngineRunError("engine.run.nonzero_exit", 1_000));
+
+      const report = await performLocalReview(
+        { ...baseRequest(undefined), config: { ...CONFIG, protocol: "openai" } },
+        createSilentDiagnostics(),
+      );
+
+      expect(report.outcome).toBe("incomplete");
+      expect(report.inventory).toMatchObject({ reviewable: 2, reviewed: 1 });
+      expect(runEngineMock).toHaveBeenCalledTimes(4);
     });
 
     it("still refuses a wholesale retry when the failures are not a minority", async () => {
@@ -2143,20 +2543,13 @@ describe("performReview: review-cache memoization end to end", () => {
   });
 
   /**
-   * The classification cost bomb (order guard): `repairEngineFindings` runs BEFORE `settle`, and the
-   * engine's own result parser accepts up to 1,000 findings while `config.maxFindings` (50 here) is
-   * only enforced inside `settle`'s `commonDisqualifier`. Left unchecked, a runaway or
-   * prompt-injected result with hundreds of findings would pay repair's model calls per finding for a
-   * run `settle` disqualifies as implausible either way. These use the openai protocol (unlike this
-   * file's shared `CONFIG`, which is anthropic and would skip classification for an unrelated reason)
-   * so a fetch call would genuinely happen if the guard did not intervene.
-   *
-   * The classification AUDIT (v0.12.0, moved to the publication path — see the
-   * "classification audit moves to the publication path" describe block below) needs no analogous
-   * guard of its own here: `settle`'s `commonDisqualifier` discards a disqualified result's findings
-   * outright (`findings: []`), so by the time publication could run the audit, there is nothing left
-   * for it to see. The second test below still proves the END-TO-END spend stays bounded at exactly
-   * `maxFindings`, repair and audit together — see its own updated comment.
+   * The classification cost guard: `repairEngineFindings` runs before settlement and planning, while
+   * the parser intentionally accepts up to 1,000 raw hypotheses. `maxFindings` is now solely the
+   * FINAL publication ceiling, so a larger raw cohort must settle normally and continue through the
+   * bounded publication pipeline. What it must not do is pay one early repair call for every raw,
+   * candidate-shaped hypothesis. The verifier shortlist (sixteen model candidates maximum) and
+   * later audit provide the bounded downstream work. These tests use the openai protocol so both the
+   * skipped repair and the still-running verification are observable separately.
    */
   describe("performReview: classification flood guard (order guard)", () => {
     const OPENAI_CONFIG: RuntimeConfig = { ...CONFIG, protocol: "openai", model: "gpt-oss-test" };
@@ -2195,35 +2588,81 @@ describe("performReview: review-cache memoization end to end", () => {
       return { ...request, config: OPENAI_CONFIG, env: { MODEL_TOKEN: "fake-token" } };
     }
 
-    it("never calls the classify endpoint over maxFindings, and settle still disqualifies the run", async () => {
+    function refutingEndpoint(counters: { repair: number; verification: number }): typeof fetch {
+      return ((_url: string, init?: { body?: string }) => {
+        const parsedBody = JSON.parse(init?.body ?? "{}") as {
+          messages?: { content?: string }[];
+        };
+        const prompt = parsedBody.messages?.[0]?.content ?? "";
+        let content: string;
+        if (prompt.includes("Classify one code-review finding.")) {
+          counters.repair += 1;
+          content = JSON.stringify({ category: "bug", severity: "medium" });
+        } else if (prompt.includes("Verify the truth of one AI-generated")) {
+          counters.verification += 1;
+          content = JSON.stringify({
+            verdict: "refuted",
+            reason_code: "contradicted",
+            evidence_refs: ["H:1"],
+            lookup_terms: [],
+          });
+        } else if (prompt.includes("Make the final truth decision")) {
+          counters.verification += 1;
+          content = JSON.stringify({
+            verdict: "refuted",
+            reason_code: "contradicted",
+            evidence_refs: ["H:1"],
+          });
+        } else {
+          content = JSON.stringify({ category: "bug", severity: "medium" });
+        }
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              choices: [{ finish_reason: "stop", message: { content } }],
+              usage: { total_tokens: 10 },
+            }),
+            { status: 200 },
+          ),
+        );
+      }) as typeof fetch;
+    }
+
+    it("skips mass repair above maxFindings without invalidating the completed review", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      // maxFindings + 1 — one past the threshold `settle.ts`'s own `commonDisqualifier` enforces.
       runEngineMock.mockResolvedValue({
         stdout: manyFindingsStdout(OPENAI_CONFIG.maxFindings + 1, 2),
         ruleDigest: engineDigest,
       });
 
-      let classifyCalls = 0;
-      globalThis.fetch = (() => {
-        classifyCalls += 1;
-        return Promise.resolve(new Response("{}", { status: 200 }));
-      }) as typeof fetch;
+      const counters = { repair: 0, verification: 0 };
+      globalThis.fetch = refutingEndpoint(counters);
 
       const diagnostics = createSilentDiagnostics();
       const report = await performReview(openaiRequest(), diagnostics);
 
-      // `settle` disqualifies a >maxFindings result as implausible regardless of this guard — the
-      // guard changes only WHETHER it is classified first, never whether `settle` accepts it.
-      expect(report.outcome).toBe("incomplete");
-      expect(report.reason).toBe("settlement.incomplete.engine_error");
-      expect(classifyCalls).toBe(0);
+      expect(report.outcome).toBe("complete");
+      expect(report.reason).toBeUndefined();
+      // The 51 raw hypotheses collapse to two fingerprints before verification; each receives the
+      // initial and terminal truth decisions. The separate selector tests pin the sixteen-candidate
+      // ceiling when the cohort remains distinct.
+      expect(counters).toStrictEqual({ repair: 0, verification: 4 });
 
-      const spend = diagnostics.drain().find((record) => record.code === "run.spend");
-      expect(spend?.counts).toStrictEqual({ engine: 100, classify: 0, total: 100 });
+      const records = diagnostics.drain();
+      expect(records.find((record) => record.code === "engine.result.candidates")?.counts).toEqual({
+        generated: 51,
+      });
+      expect(records.find((record) => record.code === "publish.candidates.ranked")?.counts).toEqual(
+        {
+          verified: 2,
+          ranked: 0,
+          publication: 0,
+        },
+      );
     });
 
-    it("still classifies at exactly maxFindings — the guard's threshold is '>', matching settle's own", async () => {
+    it("still runs early repair at exactly maxFindings", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       runEngineMock.mockResolvedValue({
@@ -2231,32 +2670,14 @@ describe("performReview: review-cache memoization end to end", () => {
         ruleDigest: engineDigest,
       });
 
-      let classifyCalls = 0;
-      globalThis.fetch = (() => {
-        classifyCalls += 1;
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              choices: [{ message: { content: '{"category":"bug","severity":"medium"}' } }],
-              usage: { total_tokens: 10 },
-            }),
-            { status: 200 },
-          ),
-        );
-      }) as typeof fetch;
+      const counters = { repair: 0, verification: 0 };
+      globalThis.fetch = refutingEndpoint(counters);
 
       const diagnostics = createSilentDiagnostics();
       await performReview(openaiRequest(), diagnostics);
 
-      // Exact call/token counts belong to `classify.test.ts`, which already pins repair's and
-      // audit's own retry and voting behaviour; what THIS guard controls is only whether any of it
-      // runs at all, so a non-zero count is the whole claim being tested. Unchanged by the audit's
-      // v0.12.0 move to the publication path: none of these findings collide with an existing
-      // marker (a fresh pull request, `baseRequest`'s empty `listReviewComments`), so every one of
-      // them survives planning and is still a candidate for the audit exactly as it was before the
-      // move — the fetch count (and the fact `classify` end up non-zero on `run.spend`, which now
-      // sums repair AND audit together, v0.12.0) is identical either way.
-      expect(classifyCalls).toBeGreaterThan(0);
+      expect(counters.repair).toBe(OPENAI_CONFIG.maxFindings);
+      expect(counters.verification).toBe(4);
       const spend = diagnostics.drain().find((record) => record.code === "run.spend");
       expect(spend?.counts?.classify).toBeGreaterThan(0);
     });
@@ -3347,6 +3768,108 @@ describe("performReview: review-cache memoization end to end", () => {
       return { impl, callCount: () => calls };
     }
 
+    it("does not let two low-ranked HTML hypotheses destroy a 136-candidate completed review", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const safe = Array.from({ length: 134 }, (_, index) => ({
+        path: "src/a.ts",
+        content: withChallengeProbe(
+          `When alpha${String(index)} occurs, beta${String(index)} corrupts gamma${String(index)}, ` +
+            `delta${String(index)}, epsilon${String(index)}, zeta${String(index)}, eta${String(index)}, ` +
+            `theta${String(index)}, iota${String(index)}, kappa${String(index)}, lambda${String(index)}, ` +
+            `mu${String(index)}, nu${String(index)}, xi${String(index)}, omicron${String(index)}, ` +
+            `pi${String(index)}, rho${String(index)}, and sigma${String(index)}.`,
+        ),
+        category: "bug",
+        severity: "high",
+      }));
+      const rejected = [
+        {
+          path: "src/a.ts",
+          content: "When markup is copied, <script>one</script> remains in this candidate body.",
+          category: "bug",
+          severity: "low",
+        },
+        {
+          path: "src/a.ts",
+          content: "When markup is copied, <widget>two</widget> remains in this candidate body.",
+          category: "bug",
+          severity: "low",
+        },
+      ];
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout([...safe, ...rejected], 2),
+        ruleDigest: engineDigest,
+      });
+      const { impl } = classifyFetchMock({ auditPair: { category: "bug", severity: "high" } });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(auditRequest(client), diagnostics);
+      const records = diagnostics.drain();
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({
+        published: 8,
+        rejectedSanitization: 0,
+        suppressedRanked: 128,
+      });
+      expect(created).toHaveLength(8);
+      expect(created.some((comment) => comment.body.includes("<script>"))).toBe(false);
+      expect(
+        records.find((record) => record.code === "publish.candidates.planned")?.counts,
+      ).toStrictEqual({ generated: 136, sanitized: 134, deduplicated: 134 });
+    });
+
+    it("still fails closed when a selected and verified finding remains unsafe to publish", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const body = withChallengeProbe(
+        "When markup is copied, <script>alert(1)</script> remains in this selected candidate body.",
+      );
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: body, category: "bug", severity: "high" }],
+          2,
+        ),
+        ruleDigest: engineDigest,
+      });
+      const { impl } = classifyFetchMock({ auditPair: { category: "bug", severity: "high" } });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+
+      const report = await performReview(auditRequest(client), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("incomplete");
+      expect(report.reason).toBe("settlement.incomplete.publication_degraded");
+      expect(report.publish).toMatchObject({ published: 0, rejectedSanitization: 1 });
+      expect(created.some((comment) => comment.body.includes("<script>"))).toBe(false);
+    });
+
+    it("lets Truth refute a selected unsafe hypothesis without degrading publication", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const body =
+        "When markup is copied, <script>alert(1)</script> allegedly changes runtime behavior here.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: body, category: "bug", severity: "high" }],
+          2,
+        ),
+        ruleDigest: engineDigest,
+      });
+      const { impl } = classifyFetchMock({ judgeVerdict: "unsupported" });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+
+      const report = await performReview(auditRequest(client), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({ published: 0, rejectedSanitization: 0 });
+      expect(created).toHaveLength(0);
+    });
+
     it("binds a closed runtime fact to the exact reviewed commit and requires its T ref", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
@@ -3636,6 +4159,48 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(spend?.counts).toStrictEqual({ engine: 100, classify: 0, total: 100 });
     });
 
+    it("never caches an unclassified suppressed path when a raw flood skips early repair", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY = withChallengeProbe(
+        "This handler swallows the write error and reports success to the caller regardless.",
+      );
+      const rawFlood = Array.from({ length: AUDIT_CONFIG.maxFindings + 1 }, () => ({
+        path: "src/a.ts",
+        content: BODY,
+      }));
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(rawFlood, 2, 100),
+        ruleDigest: engineDigest,
+      });
+
+      const { impl, callCount } = classifyFetchMock({
+        auditPair: { category: "bug", severity: "medium" },
+      });
+      globalThis.fetch = impl;
+      const client = successfulClient([seededMarker("general", BODY)]);
+      const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+
+      const report = await performReview(
+        auditRequest(client.client, empty),
+        createSilentDiagnostics(),
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({
+        published: 0,
+        suppressed: AUDIT_CONFIG.maxFindings + 1,
+        suppressedIntraRun: AUDIT_CONFIG.maxFindings,
+        suppressedExactDuplicate: 1,
+      });
+      expect(callCount()).toBe(0);
+      expect(client.created).toHaveLength(0);
+      const entries = report.updatedCacheStore?.entries ?? [];
+      expect(entries.some((entry) => String(entry.headBlob) === headBlobA)).toBe(false);
+      expect(report.cacheAppended).toBe(1);
+      expect(entries).toHaveLength(1);
+    });
+
     it("audits a surviving fresh finding once via the fast path and publishes it with the audited classification", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
@@ -3677,10 +4242,23 @@ describe("performReview: review-cache memoization end to end", () => {
       // see and cite the real repository line returned for the planner's bounded lookup.
       expect(challengePrompt).not.toContain('"verdict":"confirmed"');
       expect(falsifierPrompt).toContain("R4:H:1| export const challengeGuard = true;");
-      // Truth + planner + falsifier precede the one fast-path classification-audit vote.
+      // Truth + falsifier + referee precede the one fast-path classification-audit vote.
       expect(callCount()).toBe(4);
 
       const records = diagnostics.drain();
+      expect(records.find((r) => r.code === "publish.candidates.planned")?.counts).toEqual({
+        generated: 1,
+        sanitized: 1,
+        deduplicated: 1,
+      });
+      expect(records.find((r) => r.code === "publish.candidates.ranked")?.counts).toEqual({
+        verified: 1,
+        ranked: 1,
+        publication: 1,
+      });
+      expect(records.find((r) => r.code === "publish.pipeline.completed")?.counts).toEqual({
+        published: 1,
+      });
       const audited = records.find((r) => r.code === "classify.audited");
       expect(audited?.counts).toStrictEqual({ changed: 0, tokens: 37 });
       const substantiated = records.find((r) => r.code === "publish.substantiated");
@@ -4050,7 +4628,7 @@ describe("performReview: review-cache memoization end to end", () => {
       ).toBe(false);
     });
 
-    it("fails closed when the remaining budget cannot finish verification and never audits or caches the finding", async () => {
+    it("withholds an unverified finding without making a fully covered review incomplete or caching its path", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       const BODY =
@@ -4082,20 +4660,32 @@ describe("performReview: review-cache memoization end to end", () => {
       const diagnostics = createSilentDiagnostics();
       const report = await performReview(request, diagnostics);
 
-      expect(report.outcome).toBe("incomplete");
-      expect(report.reason).toBe("settlement.incomplete.publication_degraded");
+      expect(report.outcome).toBe("complete");
+      expect(report.reason).toBeUndefined();
       expect(report.publish).toMatchObject({
         published: 0,
         suppressedEvidence: 1,
         verificationUndecided: 1,
       });
-      // The path-anchored incomplete notice may be present, but the unverified finding may not.
+      // The undecided hypothesis never reaches a reader and does not produce a false incomplete
+      // notice for a review that covered both files.
       expect(created.some((comment) => comment.body.includes(BODY))).toBe(false);
-      expect(report.cacheAppended).toBe(0);
-      expect(report.updatedCacheStore).toBeUndefined();
+      // src/a.ts remains retryable because its sole model verdict was undecided. The independently
+      // reviewed clean path is still admitted, so the next run does not repay the entire review.
+      expect(report.cacheAppended).toBe(1);
+      const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+      const cachedBlobs = (report.updatedCacheStore?.entries ?? []).map((entry) =>
+        String(entry.headBlob),
+      );
+      expect(cachedBlobs).not.toContain(headBlobA);
+      expect(cachedBlobs).toContain(headBlobB);
       expect(callCount()).toBe(0);
 
       const records = diagnostics.drain();
+      expect(records.some((record) => record.code === "settlement.complete")).toBe(true);
+      expect(
+        records.some((record) => record.code === "settlement.incomplete.publication_degraded"),
+      ).toBe(false);
       expect(records.find((r) => r.code === "classify.audited")).toBeUndefined();
       const substantiated = records.find((r) => r.code === "publish.substantiated");
       expect(substantiated?.counts).toMatchObject({
@@ -4106,6 +4696,45 @@ describe("performReview: review-cache memoization end to end", () => {
         challenge_failed: 0,
         undecided: 1,
         budget_blocked: 1,
+      });
+    });
+
+    it("records a closed verifier stage and reason while the covered review stays complete", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY = withChallengeProbe(
+        "When the compiler lookup fails, this call passes an invalid command to spawn.",
+      );
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: BODY, category: "bug", severity: "high" }],
+          2,
+          100,
+        ),
+        ruleDigest: engineDigest,
+      });
+      const { impl, callCount } = classifyFetchMock({ refereeEvidenceRef: "R4:H:999" });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(auditRequest(client), diagnostics);
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({
+        published: 0,
+        suppressedEvidence: 1,
+        verificationUndecided: 1,
+      });
+      expect(created.some((comment) => comment.body.includes(BODY))).toBe(false);
+      expect(callCount()).toBe(3);
+      const substantiated = diagnostics
+        .drain()
+        .find((record) => record.code === "publish.substantiated");
+      expect(substantiated?.counts).toMatchObject({
+        undecided: 1,
+        undecided_stage_falsifier: 1,
+        undecided_reason_shape: 1,
       });
     });
 
@@ -4173,8 +4802,9 @@ describe("performReview: review-cache memoization end to end", () => {
       });
       globalThis.fetch = impl;
       const { client, created } = successfulClient([]);
+      const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
       const request = {
-        ...auditRequest(client),
+        ...auditRequest(client, empty),
         config: { ...AUDIT_CONFIG, tokenBudget: 8_000 },
       };
       const diagnostics = createSilentDiagnostics();
@@ -4182,10 +4812,22 @@ describe("performReview: review-cache memoization end to end", () => {
       const report = await performReview(request, diagnostics);
 
       // Neither classification repair nor the larger evidence request fits. The pipeline invents
-      // no classification, publishes no unverified claim, and reports incomplete instead of clean.
-      expect(report.outcome).toBe("incomplete");
+      // no classification and publishes no unverified claim, while the fully covered review stays
+      // complete and reports the withheld candidate in its quality telemetry.
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({
+        published: 0,
+        suppressedEvidence: 1,
+        verificationUndecided: 1,
+      });
       expect(created.some((comment) => comment.body.includes(BODY))).toBe(false);
-      expect(report.cacheAppended).toBe(0);
+      expect(report.cacheAppended).toBe(1);
+      const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+      const cachedBlobs = (report.updatedCacheStore?.entries ?? []).map((entry) =>
+        String(entry.headBlob),
+      );
+      expect(cachedBlobs).not.toContain(headBlobA);
+      expect(cachedBlobs).toContain(headBlobB);
       expect(callCount()).toBe(0);
 
       const records = diagnostics.drain();
@@ -4456,7 +5098,7 @@ describe("performReview: review-cache memoization end to end", () => {
       );
     });
 
-    it("fails closed without a cache write when evidence is invented or the verifier transport fails", async () => {
+    it("withholds invented or transport-undecidable evidence and retries only the affected path", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       const BODY =
@@ -4489,21 +5131,26 @@ describe("performReview: review-cache memoization end to end", () => {
           diagnostics,
         );
 
-        expect(report.outcome, failure).toBe("incomplete");
-        expect(report.reason, failure).toBe("settlement.incomplete.publication_degraded");
+        expect(report.outcome, failure).toBe("complete");
         expect(report.publish, failure).toMatchObject({
           published: 0,
           suppressed: 1,
           suppressedEvidence: 1,
           verificationUndecided: 1,
         });
-        // `created` may contain the honest incomplete notice, but never the unverified finding.
+        // The verifier never admitted the hypothesis, so neither a finding nor an incomplete
+        // notice is published for the otherwise fully covered review.
         expect(
           created.some((comment) => comment.body.includes(BODY)),
           failure,
         ).toBe(false);
-        expect(report.cacheAppended, failure).toBe(0);
-        expect(report.updatedCacheStore, failure).toBeUndefined();
+        expect(report.cacheAppended, failure).toBe(1);
+        const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+        const cachedBlobs = (report.updatedCacheStore?.entries ?? []).map((entry) =>
+          String(entry.headBlob),
+        );
+        expect(cachedBlobs, failure).not.toContain(headBlobA);
+        expect(cachedBlobs, failure).toContain(headBlobB);
         const substantiated = diagnostics
           .drain()
           .find((record) => record.code === "publish.substantiated");

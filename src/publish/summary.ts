@@ -188,6 +188,8 @@ export function buildSummaryReport(
     suppressedDispositioned: publish.suppressedDispositioned,
     // Same optional-field fallback as `suppressedIntraRun` above, for the same reason.
     suppressedRecurrence: publish.suppressedRecurrence ?? 0,
+    suppressedEvidence: publish.suppressedEvidence ?? 0,
+    verificationUndecided: publish.verificationUndecided ?? 0,
     // The four counters `publicationDegraded` (review.ts) actually decides on — see
     // `SummaryCounts`'s own doc comment. `apiFailures` alone needs the same optional-field
     // fallback as `suppressedIntraRun`/`suppressedRecurrence` above; the other three have always

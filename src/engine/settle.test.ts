@@ -239,24 +239,25 @@ describe("settle", () => {
       });
     });
 
-    it("treats a flood of findings as an engine failure rather than a terrible change", () => {
-      const findings = Array.from({ length: CONFIG.maxFindings + 1 }, () => ({
-        path: repoPath("src/a.ts"),
-        content: "x",
-        startLine: 1,
-        endLine: 1,
-        severity: undefined,
-        category: undefined,
-      }));
-      const outcome = settle(inventory(["src/a.ts"]), result({ findings }), PROFILE, CONFIG);
-      expect(outcome).toMatchObject({
-        status: "incomplete",
-        reason: "settlement.incomplete.engine_error",
-      });
-      // The flood itself must never reach publication: the settlement just declared it implausible,
-      // and publishing it anyway would spam the pull request with the very output it distrusts —
-      // at two API calls per finding.
-      expect(outcome.findings).toStrictEqual([]);
+    it.each([96, 119])("settles all 67 reviewed files despite %i raw findings", (findingCount) => {
+      const paths = Array.from({ length: 67 }, (_, index) => `src/${String(index)}.ts`);
+      const findings = Array.from({ length: findingCount }, (_, index) =>
+        finding(paths[index % paths.length] ?? "src/0.ts"),
+      );
+      const coverage = paths.map((path) => ({ path }));
+      const outcome = settle(
+        inventory(paths),
+        result({
+          filesReviewed: paths.length,
+          coverage: { selected: coverage, completed: coverage, reused: [], failed: [], waived: [] },
+          findings,
+        }),
+        PROFILE,
+        CONFIG,
+      );
+
+      expect(outcome).toMatchObject({ status: "complete", mode: "reconciled" });
+      expect(outcome.findings).toHaveLength(findingCount);
     });
   });
 });
@@ -291,6 +292,25 @@ describe("counted settlement (no manifest)", () => {
     const outcome = settle(inventory(["src/a.ts"]), released(), PROFILE, CONFIG);
     expect(outcome.mode).toBe("counted");
   });
+
+  it.each([96, 119])(
+    "settles the release-engine shape at 67/67 files despite %i raw findings",
+    (findingCount) => {
+      const paths = Array.from({ length: 67 }, (_, index) => `src/${String(index)}.ts`);
+      const findings = Array.from({ length: findingCount }, (_, index) =>
+        finding(paths[index % paths.length] ?? "src/0.ts"),
+      );
+      const outcome = settle(
+        inventory(paths),
+        released({ filesReviewed: paths.length, findings }),
+        PROFILE,
+        CONFIG,
+      );
+
+      expect(outcome).toMatchObject({ status: "complete", mode: "counted" });
+      expect(outcome.findings).toHaveLength(findingCount);
+    },
+  );
 
   // The check that still catches the engine's path filters disagreeing with the review profile.
   it("detects that fewer files were reviewed than the inventory requires", () => {

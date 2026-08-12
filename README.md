@@ -22,13 +22,13 @@
 <p align="center">
   <a href="https://github.com/oscharko-dev/Keiko-for-Quality/pulls?q=is%3Apr"><picture>
     <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/quality-cards/cards/oscharko-dev/Keiko-for-Quality-light.svg">
-    <img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/quality-cards/cards/oscharko-dev/Keiko-for-Quality.svg" width="340" alt="Reviewed by Keiko for Quality — trailing-30-day review runs, findings, current resolution rate, and workflow-health metrics for this repository">
+    <img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/quality-cards/cards/oscharko-dev/Keiko-for-Quality.svg" width="340" alt="Reviewed by Keiko for Quality — current trailing-30-day PR settlements, findings, released historical-holdout precision, and data timestamp">
   </picture></a>
 </p>
 
 <p align="center">
-  <sub>Scheduled 30-day snapshot, refreshed every three hours. Unknown values appear as an em
-  dash; workflow success is not a review verdict.</sub>
+  <sub>Scheduled 30-day snapshot, refreshed every three hours. The card prints its exact data time;
+  unknown or incomplete populations appear as an em dash.</sub>
 </p>
 
 <p align="center">
@@ -62,19 +62,27 @@ changes branch protection.
 
 ## Monitoring
 
-The monitoring card answers three practical questions without inventing certainty:
+The monitoring card answers four practical questions without turning operational proxies into
+quality claims:
 
-- **Is it running?** Completed, non-cancelled, non-skipped review runs and their success rate cover
-  the exact trailing 30 days; the status chip reflects the latest counted workflow conclusion.
+- **Does it finish?** One current, maintained run summary per PR is counted when its own event
+  timestamp is in the exact trailing 30 days. `PRs complete` is the share whose real settlement is
+  `complete`; the chip shows the newest real settlement.
 - **What is it finding?** Findings are review threads created in that same window, excluding fixed
   incomplete-review notices.
-- **Are conversations being resolved?** Resolution rate, open threads, and pull requests with
-  findings use the current state of those threads.
+- **What measured quality has actually shipped?** `HOLDOUT PREC` is the chronological holdout
+  precision from the newest published release's historical replay, labelled with that release
+  version. It is a measurement, not a promotion badge: a recovery release may publish only while
+  its historical quality promotion is explicitly withheld. The present population is Keiko-based
+  and is not claimed as universal accuracy.
+- **Is the snapshot fresh?** `DATA AS OF` is the exact UTC collection time, so a failed scheduled
+  refresh cannot continue looking current.
 
-`Resolved` means the GitHub thread is currently resolved; it does not claim that code changed.
-If GitHub cannot provide a complete population, the affected metric becomes an em dash instead of
-a plausible-looking zero. The pull request's run summary remains the authority for whether one
-specific review completed.
+Workflow success and thread-resolution percentage are not displayed as quality. If GitHub cannot
+provide a complete paginated population, if a bot summary cannot be parsed, or if released evidence
+cannot be bound to one immutable release artifact, the affected metric becomes an em dash instead of
+a plausible-looking partial value. The pull request's run summary remains the authority for one
+specific review.
 
 ## Quickstart
 
@@ -135,7 +143,7 @@ specific review completed.
                GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
                git fetch --no-tags --no-recurse-submodules origin "pull/${PR}/head"
 
-         - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.23.0
+         - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.24.0
            env:
              KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
            with:

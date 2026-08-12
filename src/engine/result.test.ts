@@ -604,6 +604,12 @@ describe("parseEngineResult", () => {
       expect(warningWith("subtask_error", undefined)?.cause).toBe("other");
     });
 
+    it("keeps a staged request rejection closed and non-retryable", () => {
+      expect(
+        warningWith("subtask_error", "single_shot core examiner request rejected")?.cause,
+      ).toBe("non_retryable");
+    });
+
     it("leaves every other warning type unclassified rather than guessing at one", () => {
       expect(
         warningWith("token_threshold_exceeded", "prompt tokens exceed")?.cause,

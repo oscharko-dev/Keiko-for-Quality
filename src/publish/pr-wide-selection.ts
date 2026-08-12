@@ -1,6 +1,5 @@
-import { FINDING_SEVERITIES } from "../engine/classify.js";
+import { FINDING_SEVERITIES, needsClassification } from "../engine/classify.js";
 import type { EngineFinding } from "../engine/result.js";
-import type { PlannedFinding } from "./publisher.js";
 
 /**
  * Maximum model-authored findings that one pull request may publish in one run.
@@ -16,68 +15,145 @@ export const MAX_FRESH_MODEL_FINDINGS_PER_PR = 8;
 /** Bounded first-stage shortlist for evidence verification, twice the publication ceiling. */
 export const MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR = MAX_FRESH_MODEL_FINDINGS_PER_PR * 2;
 
-export interface PrWideSelection {
+/** The only shape ranking needs. Publication candidates carry a sanitized body as well; a raw
+ *  sanitizer rejection deliberately does not. Keeping selection generic lets the verification
+ *  shortlist judge both without pretending rejected prose is publishable. */
+export interface FindingCandidate {
+  readonly finding: EngineFinding;
+}
+
+export interface PrWideSelection<Candidate extends FindingCandidate> {
   /** Survivors in their original order, with audited/repaired replacements applied. */
-  readonly kept: readonly PlannedFinding[];
-  /** Originals removed by the cap, in their original order and identity. */
+  readonly kept: readonly Candidate[];
+  /** Originals removed by either the total or model-authored cap, in input order and identity. */
   readonly rankedOutOriginals: readonly EngineFinding[];
   readonly rankedOutCount: number;
 }
 
+interface SelectionEntry<Candidate extends FindingCandidate> {
+  readonly original: EngineFinding;
+  readonly effective: Candidate;
+  readonly effectiveFinding: EngineFinding;
+  readonly index: number;
+  readonly modelAuthored: boolean;
+}
+
 /**
- * Applies the pull-request-wide cap to every model-authored candidate in this run, including
- * replayed generation-cache findings. Deterministic gate findings stay outside the cohort.
+ * Applies one pull-request-wide total cap to every candidate in this run. Deterministic gate
+ * findings consume that total first; model-authored candidates use the remaining capacity and are
+ * additionally subject to the smaller model ceiling.
  *
  * `modelOriginals` and `replacements` are deliberately keyed by object identity. Audit and repair
  * produce new objects, but authorship belongs to the finding that entered the publication pipeline;
  * looking it up after replacement would silently exempt every changed finding. Cache hits consume
- * the same slots as fresh model output because both must pass the same current-run verifier and
- * ranking decision; only deterministic findings are exempt.
+ * the same model slots as fresh output because both must pass the same current-run verifier and
+ * ranking decision. Deterministic findings have priority, not exemption from the consumer's total.
  *
  * Ranking chooses the best eight using the effective (replacement) severity. Both returned lists
  * then follow input order: severity decides membership, never publication order. An equal-severity
  * tie is therefore resolved by the earliest input position and stays deterministic.
  */
-export function selectPrWideFindings(
-  survivors: readonly PlannedFinding[],
+export function selectPrWideFindings<Candidate extends FindingCandidate>(
+  survivors: readonly Candidate[],
   modelOriginals: ReadonlySet<EngineFinding>,
+  maxFindings: number,
   replacements: ReadonlyMap<EngineFinding, EngineFinding> = new Map(),
-): PrWideSelection {
-  return selectModelWithLimit(
+): PrWideSelection<Candidate> {
+  return selectWithLimits(
     survivors,
     modelOriginals,
-    MAX_FRESH_MODEL_FINDINGS_PER_PR,
+    maxFindings,
+    Math.min(MAX_FRESH_MODEL_FINDINGS_PER_PR, maxFindings),
     replacements,
   );
 }
 
-/** Shortlists model candidates before verification; only deterministic findings remain exempt. */
-export function selectVerificationCandidates(
-  survivors: readonly PlannedFinding[],
+/** Shortlists a total-bounded cohort before verification, giving deterministic findings priority. */
+export function selectVerificationCandidates<Candidate extends FindingCandidate>(
+  survivors: readonly Candidate[],
   modelOriginals: ReadonlySet<EngineFinding>,
-): PrWideSelection {
-  return selectModelWithLimit(survivors, modelOriginals, MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR);
+  maxFindings: number,
+): PrWideSelection<Candidate> {
+  return selectWithLimits(
+    survivors,
+    modelOriginals,
+    maxFindings,
+    Math.min(MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR, maxFindings),
+    new Map(),
+    "verification",
+  );
 }
 
-function selectModelWithLimit(
-  survivors: readonly PlannedFinding[],
+function selectWithLimits<Candidate extends FindingCandidate>(
+  survivors: readonly Candidate[],
   modelOriginals: ReadonlySet<EngineFinding>,
-  limit: number,
+  totalLimit: number,
+  modelLimit: number,
   replacements: ReadonlyMap<EngineFinding, EngineFinding> = new Map(),
-): PrWideSelection {
-  const entries = survivors.map((survivor, index) => {
+  selectionStage: "publication" | "verification" = "publication",
+): PrWideSelection<Candidate> {
+  const entries: readonly SelectionEntry<Candidate>[] = survivors.map((survivor, index) => {
     const original = survivor.finding;
     const replacement = replacements.get(original);
     return {
       original,
-      effective: replacement === undefined ? survivor : { ...survivor, finding: replacement },
+      effective:
+        replacement === undefined ? survivor : ({ ...survivor, finding: replacement } as Candidate),
       effectiveFinding: replacement ?? original,
       index,
       modelAuthored: modelOriginals.has(original),
     };
   });
+  const selectedDeterministicIndexes = new Set(
+    entries
+      .filter((entry) => !entry.modelAuthored)
+      .slice(0, totalLimit)
+      .map((entry) => entry.index),
+  );
+  const remainingTotal = Math.max(0, totalLimit - selectedDeterministicIndexes.size);
+  const selectedModelIndexes =
+    selectionStage === "verification"
+      ? selectedUntrustedModels(entries, Math.min(modelLimit, remainingTotal))
+      : selectedModels(entries, Math.min(modelLimit, remainingTotal));
+  return partitionSelection(entries, selectedDeterministicIndexes, selectedModelIndexes);
+}
 
-  const selectedModelIndexes = new Set(
+/**
+ * Verification admission must not trust the very classification it exists to audit. A large raw
+ * cohort can skip the early per-finding repair cost bound, and letting model-authored "critical"
+ * labels choose all sixteen slots can hide an unclassified real defect behind false hypotheses.
+ *
+ * Split the bounded cohort evenly between unresolved and already-shaped classifications, then fill
+ * unused capacity from the other lane. Within each lane input order wins. This is deterministic,
+ * keeps both shapes represented whenever they exist, and uses neither category nor severity as a
+ * truth signal. The independently audited severity is used only by final publication ranking.
+ */
+function selectedUntrustedModels<Candidate extends FindingCandidate>(
+  entries: readonly SelectionEntry<Candidate>[],
+  limit: number,
+): ReadonlySet<number> {
+  const models = entries.filter((entry) => entry.modelAuthored);
+  const unresolved = models.filter((entry) => needsClassification(entry.effectiveFinding));
+  const shaped = models.filter((entry) => !needsClassification(entry.effectiveFinding));
+  const unresolvedQuota = Math.min(unresolved.length, Math.ceil(limit / 2));
+  const shapedQuota = Math.min(shaped.length, limit - unresolvedQuota);
+  const selected = new Set([
+    ...unresolved.slice(0, unresolvedQuota).map((entry) => entry.index),
+    ...shaped.slice(0, shapedQuota).map((entry) => entry.index),
+  ]);
+  if (selected.size === limit) return selected;
+  for (const entry of models) {
+    if (selected.size === limit) break;
+    selected.add(entry.index);
+  }
+  return selected;
+}
+
+function selectedModels<Candidate extends FindingCandidate>(
+  entries: readonly SelectionEntry<Candidate>[],
+  limit: number,
+): ReadonlySet<number> {
+  return new Set(
     entries
       .filter((entry) => entry.modelAuthored)
       .sort((left, right) => {
@@ -89,17 +165,25 @@ function selectModelWithLimit(
       .slice(0, limit)
       .map((entry) => entry.index),
   );
+}
 
-  const kept: PlannedFinding[] = [];
+function partitionSelection<Candidate extends FindingCandidate>(
+  entries: readonly SelectionEntry<Candidate>[],
+  deterministicIndexes: ReadonlySet<number>,
+  modelIndexes: ReadonlySet<number>,
+): PrWideSelection<Candidate> {
+  const kept: Candidate[] = [];
   const rankedOutOriginals: EngineFinding[] = [];
   for (const entry of entries) {
-    if (!entry.modelAuthored || selectedModelIndexes.has(entry.index)) {
+    if (
+      (entry.modelAuthored && modelIndexes.has(entry.index)) ||
+      (!entry.modelAuthored && deterministicIndexes.has(entry.index))
+    ) {
       kept.push(entry.effective);
     } else {
       rankedOutOriginals.push(entry.original);
     }
   }
-
   return {
     kept,
     rankedOutOriginals,

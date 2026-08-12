@@ -8,24 +8,40 @@ import {
 } from "./closed-claim-proof.js";
 import type { JudgeableFinding } from "./substantiate.js";
 
-function finding(content: string, startLine: number, endLine = startLine): JudgeableFinding {
-  return { path: "src/parser.ts", content, startLine, endLine };
+function finding(
+  content: string,
+  startLine: number,
+  endLine = startLine,
+  path = "src/parser.ts",
+): JudgeableFinding {
+  return { path, content, startLine, endLine };
 }
 
 function evidence(
   headLines: readonly string[],
   changedLines: readonly number[],
   baseLines?: readonly string[],
+  repositorySources: ReadonlyMap<string, string> = new Map(),
 ): TrustedHunkEvidence {
+  const headCommit = "a".repeat(40);
+  const repositoryRows = [...repositorySources].flatMap(([path, source], pathIndex) => [
+    `H${String(pathIndex + 1)} = ${path}`,
+    ...source
+      .split("\n")
+      .map((line, lineIndex) => `H${String(pathIndex + 1)}:${String(lineIndex + 1)}| ${line}`),
+  ]);
   const rows = [
     ...headLines.map((line, index) => `H:${String(index + 1)}| ${line}`),
     ...(baseLines ?? []).map((line, index) => `B:${String(index + 1)}| ${line}`),
     ...changedLines.map((line) => `D:H:${String(line)}| +${headLines[line - 1] ?? ""}`),
+    ...(repositoryRows.length === 0 ? [] : [`Exact HEAD commit: ${headCommit}`, ...repositoryRows]),
   ].join("\n");
   const bound = bindTrustedHunkEvidence({
     text: rows,
     headSource: headLines.join("\n"),
     baseSource: baseLines?.join("\n"),
+    headCommit,
+    headRepositorySources: repositorySources,
   });
   if (bound === undefined) throw new Error("test evidence must bind");
   return bound;
@@ -219,6 +235,36 @@ describe("trusted closed claim proof", () => {
     ).toBeDefined();
   });
 
+  it("rejects repository rows that do not match the exact bound HEAD source", () => {
+    const headCommit = "a".repeat(40);
+    expect(
+      bindTrustedHunkEvidence({
+        text: [
+          'H:1| import { redact } from "./redact.js";',
+          'D:H:1| +import { redact } from "./redact.js";',
+          `Exact HEAD commit: ${headCommit}`,
+          "H1 = src/redact.ts",
+          "H1:1| export function redact(value: string): string {",
+          "H1:2|   return value;",
+          "H1:3| }",
+        ].join("\n"),
+        headSource: 'import { redact } from "./redact.js";',
+        baseSource: undefined,
+        headCommit,
+        headRepositorySources: new Map([
+          [
+            "src/redact.ts",
+            [
+              "export function redact(value: string): string {",
+              '  return value.split(" secret=")[0] ?? value;',
+              "}",
+            ].join("\n"),
+          ],
+        ]),
+      }),
+    ).toBeUndefined();
+  });
+
   it("proves a changed caught binding passed directly to an error sink", () => {
     expect(closedClaimProof(DISCLOSURE_CLAIM, catchEvidence("window.reportError(error);"))).toEqual(
       { evidenceRefs: ["D:H:4", "H:4"] },
@@ -282,6 +328,62 @@ describe("trusted closed claim proof", () => {
     ).toBeUndefined();
   });
 
+  it("falls back when the helper binding is shadowed before the consumer", () => {
+    const head = [
+      'import { spawn } from "node:child_process";',
+      'import { existsSync } from "node:fs";',
+      "export function windowsToolFromPath(pathValue, toolName) {",
+      "  const candidate = `${pathValue}/${toolName}`;",
+      "  if (existsSync(candidate)) return candidate;",
+      '  throw new Error("Windows tool is unavailable");',
+      "}",
+      "export function runWindowsCompiler(windowsToolFromPath) {",
+      '  spawn(windowsToolFromPath("path", "cl.exe"), ["/nologo"]);',
+      "}",
+    ];
+    expect(
+      closedClaimRefutation(
+        finding("The helper can fall through and pass an invalid command to spawn.", 9),
+        evidence(head, [8, 9, 10], head),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("falls back when an arrow parameter shadows the helper on the consumer line", () => {
+    const head = [
+      'import { spawn } from "node:child_process";',
+      "export function helper() {",
+      '  return "cl.exe";',
+      "}",
+      "export const run = (helper) => spawn(helper(), []);",
+    ];
+
+    expect(
+      closedClaimRefutation(
+        finding("The helper can return undefined and pass an invalid command to spawn.", 5),
+        evidence(head, [5], head),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("falls back when the helper is reassigned after the consumer declaration", () => {
+    const head = [
+      'import { spawn } from "node:child_process";',
+      "export function helper() {",
+      '  return "cl.exe";',
+      "}",
+      "export const run = () => spawn(helper(), []);",
+      "helper = () => undefined;",
+    ];
+
+    expect(
+      closedClaimRefutation(
+        finding("The helper can return undefined and pass an invalid command to spawn.", 5),
+        evidence(head, [5], head),
+      ),
+    ).toBeUndefined();
+  });
+
   it("proves a changed duplicate write on a stable native Map inside an input loop", () => {
     expect(mapProof()).toEqual({
       evidenceRefs: ["D:H:5", "H:5"],
@@ -335,7 +437,10 @@ describe("trusted closed claim proof", () => {
         finding("Remove the attempt field because logging it changes error handling.", 5),
         diagnosticContextEvidence(),
       ),
-    ).toEqual({ evidenceRefs: ["D:H:5", "H:5", "B:5"] });
+    ).toEqual({
+      ruleId: "diagnostic_context_noop",
+      evidenceRefs: ["D:H:5", "H:5", "B:5"],
+    });
   });
 
   it("does not mistake a primitive comparison for reassignment", () => {
@@ -344,7 +449,10 @@ describe("trusted closed claim proof", () => {
         finding("Remove the attempt field because logging it changes error handling.", 6),
         diagnosticContextEvidence({ setup: ["  if (attempt === 0) return;"] }),
       ),
-    ).toEqual({ evidenceRefs: ["D:H:6", "H:6", "B:6"] });
+    ).toEqual({
+      ruleId: "diagnostic_context_noop",
+      evidenceRefs: ["D:H:6", "H:6", "B:6"],
+    });
   });
 
   it("accepts a nested first log argument and a defaulted primitive parameter", () => {
@@ -356,7 +464,10 @@ describe("trusted closed claim proof", () => {
           baseMessage: "formatMessage(error)",
         }),
       ),
-    ).toEqual({ evidenceRefs: ["D:H:5", "H:5", "B:5"] });
+    ).toEqual({
+      ruleId: "diagnostic_context_noop",
+      evidenceRefs: ["D:H:5", "H:5", "B:5"],
+    });
   });
 
   it.each(["**=", "<<=", ">>=", ">>>="])("rejects a parameter mutated with %s", (operator) => {
@@ -396,6 +507,447 @@ describe("trusted closed claim proof", () => {
         diagnosticContextEvidence(),
       ),
     ).toBeUndefined();
+  });
+
+  it("refutes a helper fallthrough claim when every reachable exit returns or throws", () => {
+    const base = [
+      'import { existsSync } from "node:fs";',
+      "",
+      "export function windowsToolFromPath(pathValue, toolName) {",
+      '  for (const directory of pathValue?.split(";").filter(Boolean) ?? []) {',
+      "    const candidate = `${directory}/${toolName}`;",
+      "    if (existsSync(candidate)) return candidate;",
+      "  }",
+      '  throw new Error("Windows tool is unavailable");',
+      "}",
+    ];
+    const head = [
+      'import { spawn } from "node:child_process";',
+      ...base,
+      "",
+      "export function runWindowsCompiler(pathValue) {",
+      '  if (process.platform !== "win32") return;',
+      '  spawn(windowsToolFromPath(pathValue, "cl.exe"), ["/nologo"]);',
+      "}",
+    ];
+
+    expect(
+      closedClaimRefutation(
+        finding("The helper can fall through and pass an invalid command to spawn.", 14),
+        evidence(head, [1, 11, 12, 13, 14, 15], base),
+      ),
+    ).toEqual({
+      ruleId: "terminal_helper_contract",
+      evidenceRefs: ["D:H:14", "H:14"],
+    });
+  });
+
+  it.each([
+    ["an actual undefined return", "  return undefined;"],
+    ["a real fallthrough", "  // no terminal return"],
+    ["a non-string terminal value", "  return false;"],
+  ])("does not refute %s", (_name, terminal) => {
+    const head = [
+      'import { spawn } from "node:child_process";',
+      'import { existsSync } from "node:fs";',
+      "",
+      "export function windowsToolFromPath(pathValue, toolName) {",
+      '  for (const directory of pathValue?.split(";").filter(Boolean) ?? []) {',
+      "    const candidate = directory + toolName;",
+      "    if (existsSync(candidate)) return candidate;",
+      "  }",
+      terminal,
+      "}",
+      "",
+      "export function runWindowsCompiler(pathValue) {",
+      '  if (process.platform !== "win32") return;',
+      '  spawn(windowsToolFromPath(pathValue, "cl.exe"), ["/nologo"]);',
+      "}",
+    ];
+    expect(
+      closedClaimRefutation(
+        finding("The helper can fall through and pass an invalid command to spawn.", 14),
+        evidence(head, [9, 14], head),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("does not let a nested literal declaration prove a return from another scope", () => {
+    const head = [
+      'import { spawn } from "node:child_process";',
+      "",
+      "export function windowsToolFromPath(preferBundled) {",
+      "  let command;",
+      "  if (preferBundled) {",
+      '    const command = "cl.exe";',
+      "    void command;",
+      "  }",
+      "  return command;",
+      "}",
+      "",
+      "export function runWindowsCompiler(preferBundled) {",
+      "  spawn(windowsToolFromPath(preferBundled), []);",
+      "}",
+    ];
+
+    expect(
+      closedClaimRefutation(
+        finding("The helper can return undefined and pass an invalid command to spawn.", 13),
+        evidence(head, [13], head),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("refutes a reset-removal claim when each test resets immediately before dynamic import", () => {
+    const base = [
+      'import { describe, expect, it, vi } from "vitest";',
+      "",
+      'describe("cache", () => {',
+      '  it("memoizes", async () => {',
+      "    vi.resetModules();",
+      '    const { lookup } = await import("./cache.js");',
+      '    expect(lookup("a")).toBe(lookup("a"));',
+      "  });",
+      "});",
+    ];
+    const head = [
+      ...base.slice(0, 8),
+      "",
+      '  it("isolates cases", async () => {',
+      "    vi.resetModules();",
+      '    const { entryCount, lookup } = await import("./cache.js");',
+      "    expect(entryCount()).toBe(0);",
+      '    lookup("b");',
+      "    expect(entryCount()).toBe(1);",
+      "  });",
+      "});",
+    ];
+
+    expect(
+      closedClaimRefutation(
+        finding(
+          "Remove the redundant vi.resetModules() because the module cache is still shared.",
+          11,
+        ),
+        evidence(head, [9, 10, 11, 12, 13, 14, 15, 16], base),
+      ),
+    ).toEqual({
+      ruleId: "reset_before_dynamic_import",
+      evidenceRefs: ["D:H:11", "H:11"],
+    });
+  });
+
+  it("falls back when a later dynamic import has no immediately preceding reset", () => {
+    const head = [
+      'import { describe, expect, it, vi } from "vitest";',
+      'describe("cache", () => {',
+      '  it("first", async () => {',
+      "    vi.resetModules();",
+      '    const { lookup } = await import("./cache.js");',
+      '    lookup("a");',
+      "  });",
+      '  it("second", async () => {',
+      '    const { entryCount } = await import("./cache.js");',
+      "    expect(entryCount()).toBe(0);",
+      "  });",
+      "});",
+    ];
+    expect(
+      closedClaimRefutation(
+        finding("Remove the redundant vi.resetModules() because the module cache is shared.", 9),
+        evidence(head, [9], head),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("falls back when both reset/import pairs are inside the same test", () => {
+    const head = [
+      'import { expect, it, vi } from "vitest";',
+      'it("uses two module instances in one case", async () => {',
+      "  vi.resetModules();",
+      '  const first = await import("./cache.js");',
+      '  first.lookup("a");',
+      "  vi.resetModules();",
+      '  const second = await import("./cache.js");',
+      "  expect(second.entryCount()).toBe(0);",
+      "});",
+    ];
+
+    expect(
+      closedClaimRefutation(
+        finding("Remove resetModules because the module cache is still shared across tests.", 6),
+        evidence(head, [6, 7], head),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("falls back when a static import bypasses retained resets", () => {
+    const head = [
+      'import { describe, expect, it, vi } from "vitest";',
+      'import { entryCount, lookup } from "./cache.js";',
+      'describe("cache", () => {',
+      '  it("first", async () => {',
+      "    vi.resetModules();",
+      '    await import("./cache.js");',
+      '    lookup("a");',
+      "  });",
+      '  it("second", async () => {',
+      "    vi.resetModules();",
+      '    await import("./cache.js");',
+      "    expect(entryCount()).toBe(0);",
+      "  });",
+      "});",
+    ];
+    expect(
+      closedClaimRefutation(
+        finding("Remove the redundant reset because the module cache is shared.", 10),
+        evidence(head, [2, 10], head),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("falls back when the target import is cached before the reset", () => {
+    const head = [
+      'import { describe, expect, it, vi } from "vitest";',
+      'const cachedModule = import("./cache.js");',
+      'describe("cache", () => {',
+      '  it("first", async () => {',
+      "    vi.resetModules();",
+      '    const { lookup } = await import("./cache.js");',
+      '    lookup("a");',
+      "  });",
+      '  it("second", async () => {',
+      "    vi.resetModules();",
+      '    const { entryCount } = await import("./cache.js");',
+      "    expect(entryCount()).toBe(0);",
+      "  });",
+      "});",
+      "void cachedModule;",
+    ];
+    expect(
+      closedClaimRefutation(
+        finding("Remove the reset because the module cache is still shared.", 10),
+        evidence(head, [2, 10], head),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("falls back when vi is imported only under an alias", () => {
+    const head = [
+      'import { vi as runner } from "vitest";',
+      'describe("cache", () => {',
+      '  it("first", async () => {',
+      "    vi.resetModules();",
+      '    await import("./cache.js");',
+      "  });",
+      '  it("second", async () => {',
+      "    vi.resetModules();",
+      '    await import("./cache.js");',
+      "  });",
+      "});",
+      "void runner;",
+    ];
+    expect(
+      closedClaimRefutation(
+        finding("Remove resetModules because the module cache is still shared.", 8),
+        evidence(head, [8, 9], head),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("refutes a leak claim only when a changed exact assertion and bound HEAD implementation prove redaction", () => {
+    const base = [
+      'import { redactModelId } from "./redact.js";',
+      'it("redacts", () => {',
+      '  expect(redactModelId("family#secret")).toBe("family");',
+      "});",
+    ];
+    const head = [
+      ...base,
+      'it("redacts multiple suffixes", () => {',
+      '  expect(redactModelId("family#secret#extra")).toBe("family");',
+      "});",
+    ];
+    const implementation = [
+      "export function redactModelId(modelId: string): string {",
+      '  const separator = modelId.indexOf("#");',
+      "  return separator === -1 ? modelId : modelId.slice(0, separator);",
+      "}",
+    ].join("\n");
+    const bound = evidence(head, [5, 6, 7], base, new Map([["src/redact.ts", implementation]]));
+
+    expect(
+      closedClaimRefutation(
+        finding(
+          "The changed assertion shows modelId can leak a deployment secret.",
+          6,
+          6,
+          "src/redact.test.ts",
+        ),
+        bound,
+      ),
+    ).toEqual({
+      ruleId: "redaction_assertion_proves_contract",
+      evidenceRefs: ["D:H:6", "H:6"],
+    });
+  });
+
+  it("does not refute a finding about removed redaction regression coverage", () => {
+    const base = [
+      'import { redactModelId } from "./redact.js";',
+      'it("redacts", () => {',
+      '  expect(redactModelId("family#secret")).toBe("family");',
+      "});",
+    ];
+    const head = [
+      'import { redactModelId } from "./redact.js";',
+      'it("redacts", () => {',
+      '  expect(redactModelId("family")).toBe("family");',
+      "});",
+    ];
+    const implementation = [
+      "export function redactModelId(modelId: string): string {",
+      '  const separator = modelId.indexOf("#");',
+      "  return separator === -1 ? modelId : modelId.slice(0, separator);",
+      "}",
+    ].join("\n");
+
+    expect(
+      closedClaimRefutation(
+        finding(
+          "The changed test removed regression coverage for redacting a secret suffix.",
+          3,
+          3,
+          "src/redact.test.ts",
+        ),
+        evidence(head, [3], base, new Map([["src/redact.ts", implementation]])),
+      ),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    [
+      "a loosened exclusion assertion",
+      '  expect(redactModelId("family#secret#extra")).not.toBe("family#secret#extra");',
+      "  return separator === -1 ? modelId : modelId.slice(0, separator);",
+    ],
+    [
+      "an implementation that retains the suffix",
+      '  expect(redactModelId("family#secret#extra")).toBe("family");',
+      "  return modelId;",
+    ],
+    [
+      "an implementation with an earlier leaking return",
+      '  expect(redactModelId("family#secret#extra")).toBe("family");',
+      '  if (modelId.includes("secret")) return modelId;\n  return separator === -1 ? modelId : modelId.slice(0, separator);',
+    ],
+  ])("falls back for %s", (_name, assertion, implementationReturn) => {
+    const head = [
+      'import { redactModelId } from "./redact.js";',
+      'it("redacts", () => {',
+      assertion,
+      "});",
+    ];
+    const implementation = [
+      "export function redactModelId(modelId: string): string {",
+      '  const separator = modelId.indexOf("#");',
+      implementationReturn,
+      "}",
+    ].join("\n");
+    expect(
+      closedClaimRefutation(
+        finding(
+          "The changed assertion shows modelId can leak a deployment secret.",
+          3,
+          3,
+          "src/redact.test.ts",
+        ),
+        evidence(head, [3], head, new Map([["src/redact.ts", implementation]])),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("falls back when the asserted function is imported through a different alias binding", () => {
+    const head = [
+      'import { otherRedactor as redactModelId } from "./redact.js";',
+      'it("redacts", () => {',
+      '  expect(redactModelId("family#secret")).toBe("family");',
+      "});",
+    ];
+    const implementation = [
+      "export function redactModelId(modelId: string): string {",
+      '  const separator = modelId.indexOf("#");',
+      "  return separator === -1 ? modelId : modelId.slice(0, separator);",
+      "}",
+    ].join("\n");
+    expect(
+      closedClaimRefutation(
+        finding(
+          "The changed assertion shows modelId can leak a deployment secret.",
+          3,
+          3,
+          "src/redact.test.ts",
+        ),
+        evidence(head, [3], head, new Map([["src/redact.ts", implementation]])),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("falls back when a local test binding shadows the exact imported implementation", () => {
+    const head = [
+      'import { redactModelId } from "./redact.js";',
+      'it("redacts", () => {',
+      '  const redactModelId = (_value: string): string => "family";',
+      '  expect(redactModelId("family#secret")).toBe("family");',
+      "});",
+    ];
+    const implementation = [
+      "export function redactModelId(modelId: string): string {",
+      '  const separator = modelId.indexOf("#");',
+      "  return separator === -1 ? modelId : modelId.slice(0, separator);",
+      "}",
+    ].join("\n");
+    expect(
+      closedClaimRefutation(
+        finding(
+          "The changed assertion shows modelId can leak a deployment secret.",
+          4,
+          4,
+          "src/redact.test.ts",
+        ),
+        evidence(head, [4], head, new Map([["src/redact.ts", implementation]])),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("uses the bound implementation to prove an exact empty-input assertion", () => {
+    const head = [
+      'import { redactModelId } from "./redact.js";',
+      'it("preserves empty input", () => {',
+      '  expect(redactModelId("")).toBe("");',
+      "});",
+    ];
+    const implementation = [
+      "export function redactModelId(modelId: string): string {",
+      '  const separator = modelId.indexOf("#");',
+      "  return separator === -1 ? modelId : modelId.slice(0, separator);",
+      "}",
+    ].join("\n");
+
+    expect(
+      closedClaimRefutation(
+        finding(
+          "The changed model ID assertion can expose a deployment secret.",
+          3,
+          3,
+          "src/redact.test.ts",
+        ),
+        evidence(head, [3], head, new Map([["src/redact.ts", implementation]])),
+      ),
+    ).toEqual({
+      ruleId: "redaction_assertion_proves_contract",
+      evidenceRefs: ["D:H:3", "H:3"],
+    });
   });
 
   it("requires the trusted brand to be an own property", () => {

@@ -99,7 +99,7 @@ const NO_COVERED_PATHS: ReadonlySet<string> = new Set();
  * Two different facts wear the same "incomplete" label. A budget overrun or a coverage gap means
  * the engine did not reach every file — but what it did reach, it judged properly, and discarding
  * those verdicts costs the whole review again on the next push. A rejected schema, a bad terminal
- * state, an implausible finding count, or a failed coverage entry mean the manifest itself is not
+ * state or a failed coverage entry mean the manifest itself is not
  * to be believed, so nothing it says about any file may be replayed later with confidence it
  * never earned.
  *
@@ -294,8 +294,8 @@ function dispatchedMinusFailed(
  * Checked before the status and terminal-state branches because it explains them; checked after
  * `settleReconciled`'s schema branch because an unrecognised manifest schema means the coverage
  * this carries is not readable either. It leaves `commonDisqualifier`'s own ordering untouched:
- * an unlisted warning and a finding flood are not caused by a budget stop, so their precedence on
- * the success path is unchanged.
+ * an unlisted warning is not caused by a budget stop, so its precedence on the success path is
+ * unchanged.
  */
 function budgetDisqualifier(
   mode: SettlementMode,
@@ -363,18 +363,6 @@ function commonDisqualifier(
   }
   const overBudget = budgetDisqualifier(mode, result, config);
   if (overBudget !== undefined) return overBudget;
-  // A result carrying more findings than the consumer believes plausible is more likely a
-  // misconfigured model or a prompt-injection success than a genuinely terrible change.
-  if (result.findings.length > config.maxFindings) {
-    // Deliberately carries NO findings, unlike every other incomplete branch: this branch's whole
-    // claim is that a flood past the consumer's ceiling is a misconfigured model or a successful
-    // prompt injection rather than a genuinely terrible change — publishing the flood anyway would
-    // act on the very output just declared implausible, at two API calls per finding. The count in
-    // `counts` still tells the operator how large the flood was.
-    return incomplete(mode, "settlement.incomplete.engine_error", [], {
-      findings: result.findings.length,
-    });
-  }
   return undefined;
 }
 
@@ -559,7 +547,7 @@ export function settle(
   //
   // With nothing dispatched, the engine's own account says nothing about this change's coverage:
   // every reviewable path is covered by a replayed verdict by construction. The disqualifiers
-  // still apply — a warning or an implausible finding count is about the run, not about dispatch.
+  // still apply — a warning is about the run, not about dispatch.
   if (unreviewedByEngine(inventory, memoizedPaths) === 0) {
     const mode: SettlementMode = result.manifestPresent ? "reconciled" : "counted";
     return (

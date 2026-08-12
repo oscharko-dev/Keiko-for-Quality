@@ -6,10 +6,13 @@
  *   contains `keiko-for-quality` or ends in `self-review.yml`) created in the exact trailing
  *   thirty days. Skipped and cancelled runs are not reviews — superseded pushes cancel their runs
  *   under the consumer's concurrency group — and do not count.
- * - `runStatus`/`lastRunHours`: from the newest counted run. This is explicitly the GitHub
- *   workflow conclusion (`RUN OK`/`RUN NOT OK`), never the review settlement; only the run summary
- *   on the pull request can prove `complete` or `incomplete`.
+ * - `runStatus`/`lastRunHours`: retained as low-level workflow telemetry only. Neither value is
+ *   rendered as review quality.
  * - `runSuccessPct`: the share of counted runs whose GitHub conclusion is `success`.
+ * - `summaryRecords30d`/`completionPct`/`settlementStatus`: from the reviewer's maintained,
+ *   marker-bound run-summary issue comment. One current record per pull request is counted when
+ *   that summary's own event timestamp is in the window. `complete` is the actual product
+ *   settlement, not a green workflow conclusion.
  * - `findings`: reviewer-bot review threads whose first comment was created inside that same exact
  *   window, fixed-template incomplete-review notices excluded. The coarse
  *   pull-request search window is only candidate discovery; every thread is filtered by its full
@@ -473,13 +476,21 @@ const SEARCH_QUERY =
   `query($q:String!,$after:String){search(query:$q,type:ISSUE,first:${String(SEARCH_PAGE_SIZE)},after:$after){` +
   "issueCount pageInfo{hasNextPage endCursor}nodes{... on PullRequest{number " +
   "reviewThreads(first:100){totalCount pageInfo{hasNextPage endCursor}" +
-  "nodes{id isResolved comments(first:1){nodes{author{login} body createdAt}}}}}}}}";
+  "nodes{id isResolved comments(first:1){nodes{author{login} body createdAt}}}}" +
+  "comments(first:100){totalCount pageInfo{hasNextPage endCursor}" +
+  "nodes{id databaseId author{login} body createdAt updatedAt}}}}}}";
 
 /** Follow-up pages of one pull request's threads, for the overflow case above. */
 const THREADS_QUERY =
   "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){" +
   "pullRequest(number:$n){reviewThreads(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor}" +
   "nodes{id isResolved comments(first:1){nodes{author{login} body createdAt}}}}}}}";
+
+/** Follow-up pages of one pull request's issue comments, used only when it has over 100. */
+const COMMENTS_QUERY =
+  "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){" +
+  "pullRequest(number:$n){comments(first:100,after:$after){totalCount " +
+  "pageInfo{hasNextPage endCursor}nodes{id databaseId author{login} body createdAt updatedAt}}}}}";
 
 /** Thread pages per pull request past the first — 10 covers a 1,100-thread pull request. */
 const MAX_THREAD_PAGES = 10;
@@ -514,15 +525,33 @@ interface ThreadConnection {
   readonly nodes?: readonly unknown[];
 }
 
-interface CompleteThreadConnection extends ThreadConnection {
+interface IssueCommentNode {
+  readonly id?: string;
+  readonly databaseId?: number;
+  readonly author?: { readonly login?: string } | null;
+  readonly body?: string;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+}
+
+interface IssueCommentConnection {
+  readonly totalCount?: number;
+  readonly pageInfo?: PageInfo;
+  readonly nodes?: readonly unknown[];
+}
+
+type PaginatedConnection = ThreadConnection | IssueCommentConnection;
+
+type CompleteConnection<T extends PaginatedConnection> = T & {
   readonly totalCount: number;
   readonly pageInfo: CompletePageInfo;
   readonly nodes: readonly unknown[];
-}
+};
 
 interface SearchPullRequest {
   readonly number?: number;
   readonly reviewThreads?: ThreadConnection;
+  readonly comments?: IssueCommentConnection;
 }
 
 interface BoundSearchPullRequest extends SearchPullRequest {
@@ -535,6 +564,12 @@ interface SearchResults {
   readonly nodes?: readonly unknown[];
 }
 
+type CompleteSearchResults = SearchResults & {
+  readonly issueCount: number;
+  readonly pageInfo: CompletePageInfo;
+  readonly nodes: readonly unknown[];
+};
+
 function validPageInfo(pageInfo: PageInfo | undefined): pageInfo is CompletePageInfo {
   if (typeof pageInfo?.hasNextPage !== "boolean") return false;
   if (pageInfo.endCursor !== null && typeof pageInfo.endCursor !== "string") return false;
@@ -542,11 +577,18 @@ function validPageInfo(pageInfo: PageInfo | undefined): pageInfo is CompletePage
   return pageInfo.endCursor !== null && pageInfo.endCursor.length > 0;
 }
 
-function validSearchResults(search: SearchResults | undefined): search is SearchResults & {
-  readonly issueCount: number;
-  readonly pageInfo: CompletePageInfo;
-  readonly nodes: readonly unknown[];
-} {
+function validConnection<T extends PaginatedConnection>(
+  connection: T | undefined,
+): connection is CompleteConnection<T> {
+  return (
+    Array.isArray(connection?.nodes) &&
+    Number.isSafeInteger(connection.totalCount) &&
+    (connection.totalCount ?? -1) >= 0 &&
+    validPageInfo(connection.pageInfo)
+  );
+}
+
+function validSearchResults(search: SearchResults | undefined): search is CompleteSearchResults {
   return (
     Array.isArray(search?.nodes) &&
     search.issueCount !== undefined &&
@@ -563,10 +605,7 @@ interface SearchPopulationState {
 }
 
 function acceptSearchPopulation(
-  search: SearchResults & {
-    readonly issueCount: number;
-    readonly nodes: readonly unknown[];
-  },
+  search: CompleteSearchResults,
   state: SearchPopulationState,
 ): readonly BoundSearchPullRequest[] | undefined {
   state.expectedTotal ??= search.issueCount;
@@ -676,6 +715,18 @@ interface FindingStats {
   readonly prsWithFindings?: number;
 }
 
+interface SettlementStats {
+  readonly summaryRecords30d?: number;
+  readonly completionPct?: number;
+  readonly settlementStatus?: CardData["settlementStatus"];
+  readonly lastReviewHours?: number;
+}
+
+interface ReviewStats {
+  readonly findings: FindingStats;
+  readonly settlements: SettlementStats;
+}
+
 function finishedStats(tally: ThreadTally, prsWithFindings: ReadonlySet<number>): FindingStats {
   const { findings, resolved } = tally;
   return {
@@ -697,19 +748,8 @@ interface ThreadPopulationState {
   readonly tally: ThreadTally;
 }
 
-function validThreadConnection(
-  connection: ThreadConnection | undefined,
-): connection is CompleteThreadConnection {
-  return (
-    Array.isArray(connection?.nodes) &&
-    Number.isSafeInteger(connection.totalCount) &&
-    (connection.totalCount ?? -1) >= 0 &&
-    validPageInfo(connection.pageInfo)
-  );
-}
-
 function threadPageDecision(
-  connection: CompleteThreadConnection,
+  connection: CompleteConnection<ThreadConnection>,
   state: ThreadPopulationState,
 ): PageDecision {
   if (state.seenIds.size > (state.expectedTotal ?? -1)) return "invalid";
@@ -725,7 +765,7 @@ function acceptThreadPage(
   nowMs: number,
   state: ThreadPopulationState,
 ): PageDecision {
-  if (!validThreadConnection(connection)) return "invalid";
+  if (!validConnection(connection)) return "invalid";
   state.expectedTotal ??= connection.totalCount;
   if (connection.totalCount !== state.expectedTotal) return "invalid";
   for (const node of connection.nodes) {
@@ -779,6 +819,396 @@ interface FindingCollectionContext {
   readonly fetchImpl: typeof fetch;
   readonly since: number;
   readonly nowMs: number;
+}
+
+interface CommentsPage {
+  readonly data?: {
+    readonly repository?: {
+      readonly pullRequest?: { readonly comments?: IssueCommentConnection };
+    };
+  };
+  readonly errors?: readonly unknown[];
+}
+
+type SettlementOutcome = Exclude<CardData["settlementStatus"], undefined>;
+
+interface SettlementRecord {
+  readonly databaseId: number;
+  readonly eventMs: number;
+  readonly outcome: SettlementOutcome;
+}
+
+interface CommentPopulationState {
+  readonly seenIds: Set<string>;
+  readonly summaries: SettlementRecord[];
+  expectedTotal?: number;
+}
+
+interface SettlementTally {
+  records: number;
+  complete: number;
+  latest?: SettlementRecord;
+}
+
+const SUMMARY_TITLE = "**Keiko for Quality — run summary**";
+const SUMMARY_MARKER = /<!-- keiko-for-quality:v1:[0-9a-f]{32} -->/u;
+const SUMMARY_IMAGE_PREFIX =
+  '<img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/';
+const SUMMARY_IMAGE_MIDDLE = "/.github/assets/kq/out-";
+const SUMMARY_IMAGE_SUFFIX = '.svg" height="20" alt="';
+const SUMMARY_TAIL_PREFIX = " · head `";
+const LEGACY_ICON_TITLE_SUFFIX = '/.github/assets/kq/reviewer.svg" width="18" height="18" alt=""> ';
+const LEGACY_ICON_OUTCOME_SUFFIX = '.svg" width="12" height="12" alt=""> ';
+/** v0.6.0-v0.20.x summaries used text glyphs and v0.21.0 briefly used an icon plus adjacent text
+ *  before the pinned design-system chips. They remain valid historical product records; refusing
+ *  either released grammar would silently select only newer reviews and inflate the apparent
+ *  completion rate. */
+
+type SummaryClassification =
+  | { readonly kind: "summary"; readonly record: SettlementRecord }
+  | { readonly kind: "other" }
+  | { readonly kind: "invalid" };
+
+interface ParsedSummaryHeadline {
+  readonly outcome: SettlementOutcome;
+  readonly eventMs: number;
+}
+
+function hasOnlyCharacters(value: string, allowed: (code: number) => boolean): boolean {
+  if (value.length === 0) return false;
+  for (const character of value) {
+    const code = character.codePointAt(0);
+    if (code === undefined || !allowed(code)) return false;
+  }
+  return true;
+}
+
+function isLowerHex(value: string, length: number): boolean {
+  return (
+    value.length === length &&
+    hasOnlyCharacters(value, (code) => (code >= 48 && code <= 57) || (code >= 97 && code <= 102))
+  );
+}
+
+function isReason(value: string): boolean {
+  return hasOnlyCharacters(
+    value,
+    (code) =>
+      (code >= 97 && code <= 122) || (code >= 48 && code <= 57) || code === 46 || code === 95,
+  );
+}
+
+function isVersion(value: string): boolean {
+  const components = value.split(".");
+  return (
+    components.length === 3 &&
+    components.every((component) =>
+      hasOnlyCharacters(component, (code) => code >= 48 && code <= 57),
+    )
+  );
+}
+
+function isSummaryHead(value: string | undefined): boolean {
+  return (
+    value !== undefined &&
+    value.startsWith("head `") &&
+    value.endsWith("`") &&
+    isLowerHex(value.slice(6, -1), 7)
+  );
+}
+
+function isSummaryEngine(value: string | undefined): boolean {
+  return (
+    value !== undefined &&
+    value.startsWith("engine `v") &&
+    value.endsWith("`") &&
+    isVersion(value.slice(9, -1))
+  );
+}
+
+function isSummaryAction(value: string | undefined): boolean {
+  return (
+    value === undefined ||
+    (value.startsWith("action `") &&
+      value.endsWith("`") &&
+      value.length > "action ``".length &&
+      !value.slice(8, -1).includes("`"))
+  );
+}
+
+function parsedSummaryTail(tail: string): number | undefined {
+  const headEnd = tail.indexOf(" · ");
+  if (headEnd === -1) return undefined;
+  const timestampEnd = tail.indexOf(" · ", headEnd + 3);
+  if (timestampEnd === -1) return undefined;
+  const engineEnd = tail.indexOf(" · ", timestampEnd + 3);
+  const head = tail.slice(0, headEnd);
+  const timestamp = tail.slice(headEnd + 3, timestampEnd);
+  const engine = tail.slice(timestampEnd + 3, engineEnd === -1 ? tail.length : engineEnd);
+  const action = engineEnd === -1 ? undefined : tail.slice(engineEnd + 3);
+  if (!isSummaryHead(head) || !isSummaryEngine(engine)) return undefined;
+  if (!isSummaryAction(action)) return undefined;
+  return parsedTimestamp(timestamp);
+}
+
+function parsedReasonAndTail(remainder: string, outcome: SettlementOutcome): number | undefined {
+  let reason: string | undefined;
+  let tail = remainder;
+  if (remainder.startsWith(" (`")) {
+    const closing = remainder.indexOf("`)");
+    if (closing === -1) return undefined;
+    reason = remainder.slice(3, closing);
+    tail = remainder.slice(closing + 2);
+  }
+  if (
+    (outcome === "incomplete") !== (reason !== undefined) ||
+    (reason !== undefined && !isReason(reason))
+  ) {
+    return undefined;
+  }
+  if (!tail.startsWith(SUMMARY_TAIL_PREFIX)) return undefined;
+  return parsedSummaryTail(tail.slice(3));
+}
+
+function parsedCurrentHeadline(headline: string): ParsedSummaryHeadline | undefined {
+  if (!headline.startsWith(SUMMARY_IMAGE_PREFIX)) return undefined;
+  const afterSha = headline.slice(SUMMARY_IMAGE_PREFIX.length);
+  const middle = afterSha.indexOf(SUMMARY_IMAGE_MIDDLE);
+  if (middle === -1 || !isLowerHex(afterSha.slice(0, middle), 40)) return undefined;
+  const afterImage = afterSha.slice(middle + SUMMARY_IMAGE_MIDDLE.length);
+  for (const outcome of ["complete", "incomplete", "abandoned"] as const) {
+    const image = `${outcome}${SUMMARY_IMAGE_SUFFIX}${outcome.toUpperCase()}">`;
+    if (!afterImage.startsWith(image)) continue;
+    const eventMs = parsedReasonAndTail(afterImage.slice(image.length), outcome);
+    if (eventMs !== undefined) return { outcome, eventMs };
+  }
+  return undefined;
+}
+
+function parsedIconTextHeadline(headline: string): ParsedSummaryHeadline | undefined {
+  if (!headline.startsWith(SUMMARY_IMAGE_PREFIX)) return undefined;
+  const afterSha = headline.slice(SUMMARY_IMAGE_PREFIX.length);
+  const middle = afterSha.indexOf(SUMMARY_IMAGE_MIDDLE);
+  if (middle === -1 || !isLowerHex(afterSha.slice(0, middle), 40)) return undefined;
+  const afterImage = afterSha.slice(middle + SUMMARY_IMAGE_MIDDLE.length);
+  for (const outcome of ["complete", "incomplete", "abandoned"] as const) {
+    const imageAndText = `${outcome}${LEGACY_ICON_OUTCOME_SUFFIX}${outcome}`;
+    if (!afterImage.startsWith(imageAndText)) continue;
+    const eventMs = parsedReasonAndTail(afterImage.slice(imageAndText.length), outcome);
+    if (eventMs !== undefined) return { outcome, eventMs };
+  }
+  return undefined;
+}
+
+function legacyOutcomeAndRemainder(
+  headline: string,
+): { readonly outcome: SettlementOutcome; readonly remainder: string } | undefined {
+  const complete = "✅ complete";
+  if (headline.startsWith(complete))
+    return { outcome: "complete", remainder: headline.slice(complete.length) };
+  const abandoned = "⏳ abandoned";
+  if (headline.startsWith(abandoned))
+    return { outcome: "abandoned", remainder: headline.slice(abandoned.length) };
+  const incomplete = "⚠️ incomplete";
+  if (headline.startsWith(incomplete))
+    return { outcome: "incomplete", remainder: headline.slice(incomplete.length) };
+  return undefined;
+}
+
+function parsedLegacyHeadline(headline: string): ParsedSummaryHeadline | undefined {
+  const parsed = legacyOutcomeAndRemainder(headline);
+  if (parsed === undefined) return undefined;
+  const eventMs = parsedReasonAndTail(parsed.remainder, parsed.outcome);
+  return eventMs === undefined ? undefined : { outcome: parsed.outcome, eventMs };
+}
+
+function isBotSummary(comment: IssueCommentNode): SummaryClassification | undefined {
+  if (comment.author?.login === BOT_LOGIN_GRAPHQL) return undefined;
+  return comment.author?.login === undefined ? { kind: "invalid" } : { kind: "other" };
+}
+
+function summaryMetadata(comment: IssueCommentNode, body: string): number | undefined {
+  const { databaseId, createdAt, updatedAt } = comment;
+  if (
+    typeof databaseId !== "number" ||
+    !Number.isSafeInteger(databaseId) ||
+    databaseId <= 0 ||
+    typeof createdAt !== "string" ||
+    parsedTimestamp(createdAt) === undefined ||
+    typeof updatedAt !== "string" ||
+    parsedTimestamp(updatedAt) === undefined ||
+    !SUMMARY_MARKER.test(body)
+  ) {
+    return undefined;
+  }
+  return databaseId;
+}
+
+function summaryHeadline(body: string): string | undefined {
+  return body.split("\n")[2];
+}
+
+function hasSummaryTitle(body: string): boolean {
+  if (body.startsWith(`${SUMMARY_TITLE}\n\n`)) return true;
+  if (!body.startsWith(SUMMARY_IMAGE_PREFIX)) return false;
+  const titleEnd = body.indexOf("\n\n");
+  if (titleEnd === -1) return false;
+  const afterSha = body.slice(SUMMARY_IMAGE_PREFIX.length, titleEnd);
+  return (
+    isLowerHex(afterSha.slice(0, 40), 40) &&
+    afterSha.slice(40) === `${LEGACY_ICON_TITLE_SUFFIX}${SUMMARY_TITLE}`
+  );
+}
+
+export function parseSummaryRecord(comment: IssueCommentNode): SummaryClassification {
+  const body = comment.body;
+  if (typeof body !== "string" || !hasSummaryTitle(body)) return { kind: "other" };
+  const identity = isBotSummary(comment);
+  if (identity !== undefined) return identity;
+  const databaseId = summaryMetadata(comment, body);
+  const headline = summaryHeadline(body);
+  if (databaseId === undefined || headline === undefined) return { kind: "invalid" };
+  const parsed =
+    parsedCurrentHeadline(headline) ??
+    parsedIconTextHeadline(headline) ??
+    parsedLegacyHeadline(headline);
+  if (parsed === undefined) return { kind: "invalid" };
+  return {
+    kind: "summary",
+    record: {
+      databaseId,
+      eventMs: parsed.eventMs,
+      outcome: parsed.outcome,
+    },
+  };
+}
+
+function acceptCommentNode(value: unknown, state: CommentPopulationState): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const comment = value as IssueCommentNode;
+  if (typeof comment.id !== "string" || comment.id.length === 0 || state.seenIds.has(comment.id)) {
+    return false;
+  }
+  state.seenIds.add(comment.id);
+  const classification = parseSummaryRecord(comment);
+  if (classification.kind === "invalid") return false;
+  if (classification.kind === "summary") state.summaries.push(classification.record);
+  return true;
+}
+
+function acceptCommentPage(
+  connection: IssueCommentConnection | undefined,
+  state: CommentPopulationState,
+): PageDecision {
+  if (!validConnection(connection)) return "invalid";
+  state.expectedTotal ??= connection.totalCount;
+  if (connection.totalCount !== state.expectedTotal) return "invalid";
+  for (const node of connection.nodes) {
+    if (!acceptCommentNode(node, state)) return "invalid";
+  }
+  if (state.seenIds.size > state.expectedTotal) return "invalid";
+  if (!connection.pageInfo.hasNextPage) {
+    return state.seenIds.size === state.expectedTotal ? "complete" : "invalid";
+  }
+  return state.seenIds.size < state.expectedTotal ? "continue" : "invalid";
+}
+
+async function fetchCommentPage(
+  context: FindingCollectionContext,
+  prNumber: number,
+  after: string | null,
+): Promise<IssueCommentConnection | undefined> {
+  const reply = await json<CommentsPage>(
+    context.fetchImpl,
+    "https://api.github.com/graphql",
+    context.token,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        query: COMMENTS_QUERY,
+        variables: { o: context.owner, r: context.repo, n: prNumber, after },
+      }),
+    },
+  );
+  if (reply?.errors !== undefined) return undefined;
+  return reply?.data?.repository?.pullRequest?.comments;
+}
+
+function newestSettlement(records: readonly SettlementRecord[]): SettlementRecord | undefined {
+  return records.reduce<SettlementRecord | undefined>(
+    (latest, record) =>
+      latest === undefined || record.databaseId > latest.databaseId ? record : latest,
+    undefined,
+  );
+}
+
+async function pullRequestSettlement(
+  pr: BoundSearchPullRequest,
+  context: FindingCollectionContext,
+): Promise<SettlementRecord | undefined | false> {
+  const state: CommentPopulationState = { seenIds: new Set(), summaries: [] };
+  if (!(await collectSettlementPages(pr, context, state))) return false;
+  const latest = newestSettlement(state.summaries);
+  if (latest !== undefined && latest.eventMs > context.nowMs) return false;
+  if (latest === undefined || latest.eventMs < context.since) return undefined;
+  return latest;
+}
+
+async function collectSettlementPages(
+  pr: BoundSearchPullRequest,
+  context: FindingCollectionContext,
+  state: CommentPopulationState,
+): Promise<boolean> {
+  let connection = pr.comments;
+  let decision = acceptCommentPage(connection, state);
+  for (let page = 1; decision === "continue" && page <= MAX_THREAD_PAGES; page += 1) {
+    connection = await fetchCommentPage(
+      context,
+      pr.number,
+      connection?.pageInfo?.endCursor ?? null,
+    );
+    decision = acceptCommentPage(connection, state);
+  }
+  return decision === "complete";
+}
+
+function newerSettlement(
+  current: SettlementRecord | undefined,
+  candidate: SettlementRecord,
+): SettlementRecord {
+  if (current === undefined || candidate.eventMs > current.eventMs) return candidate;
+  if (candidate.eventMs === current.eventMs && candidate.databaseId > current.databaseId) {
+    return candidate;
+  }
+  return current;
+}
+
+async function tallySearchSettlements(
+  pullRequests: readonly BoundSearchPullRequest[],
+  context: FindingCollectionContext,
+  tally: SettlementTally,
+): Promise<boolean> {
+  for (const pr of pullRequests) {
+    const record = await pullRequestSettlement(pr, context);
+    if (record === false) return false;
+    if (record === undefined) continue;
+    tally.records += 1;
+    if (record.outcome === "complete") tally.complete += 1;
+    tally.latest = newerSettlement(tally.latest, record);
+  }
+  return true;
+}
+
+function finishedSettlementStats(tally: SettlementTally, nowMs: number): SettlementStats {
+  if (tally.records === 0) return { summaryRecords30d: 0 };
+  const latest = tally.latest;
+  if (latest === undefined) return {};
+  return {
+    summaryRecords30d: tally.records,
+    completionPct: (tally.complete / tally.records) * 100,
+    settlementStatus: latest.outcome,
+    lastReviewHours: (nowMs - latest.eventMs) / HOUR_MS,
+  };
 }
 
 interface OverflowThreadsRequest extends FindingCollectionContext {
@@ -858,37 +1288,102 @@ async function fetchSearchPage(
   return reply?.data?.search;
 }
 
-async function collectFindingStats(
+interface ReviewMetricAvailability {
+  findingsKnown: boolean;
+  settlementsKnown: boolean;
+}
+
+function unavailableReviewStats(): ReviewStats {
+  return { findings: {}, settlements: {} };
+}
+
+function completedReviewStats(
+  availability: ReviewMetricAvailability,
+  tally: ThreadTally,
+  prsWithFindings: ReadonlySet<number>,
+  settlementTally: SettlementTally,
+  nowMs: number,
+): ReviewStats {
+  return {
+    findings: availability.findingsKnown ? finishedStats(tally, prsWithFindings) : {},
+    settlements: availability.settlementsKnown
+      ? finishedSettlementStats(settlementTally, nowMs)
+      : {},
+  };
+}
+
+async function collectSearchPageStats(
+  search: CompleteSearchResults,
+  population: SearchPopulationState,
+  context: FindingCollectionContext,
+  availability: ReviewMetricAvailability,
+  tally: ThreadTally,
+  prsWithFindings: Set<number>,
+  settlementTally: SettlementTally,
+): Promise<boolean> {
+  const pullRequests = acceptSearchPopulation(search, population);
+  if (pullRequests === undefined) return false;
+  if (availability.findingsKnown) {
+    availability.findingsKnown = await tallySearchPullRequests(
+      pullRequests,
+      context,
+      tally,
+      prsWithFindings,
+    );
+  }
+  if (availability.settlementsKnown) {
+    availability.settlementsKnown = await tallySearchSettlements(
+      pullRequests,
+      context,
+      settlementTally,
+    );
+  }
+  return true;
+}
+
+async function collectReviewStats(
   owner: string,
   repo: string,
   token: string,
   fetchImpl: typeof fetch,
   since: number,
   nowMs: number,
-): Promise<FindingStats> {
+): Promise<ReviewStats> {
   const context: FindingCollectionContext = { owner, repo, token, fetchImpl, since, nowMs };
   const day = new Date(since).toISOString().slice(0, 10);
   // The inclusive coarse boundary prevents a thread created exactly at 00:00Z from disappearing;
   // classifyThread still applies the exact millisecond window locally.
   const q = `repo:${owner}/${repo} is:pr updated:>=${day}`;
   const tally: ThreadTally = { findings: 0, resolved: 0 };
+  const settlementTally: SettlementTally = { records: 0, complete: 0 };
   const prsWithFindings = new Set<number>();
   const population: SearchPopulationState = { seenPullRequests: new Set() };
+  const availability: ReviewMetricAvailability = { findingsKnown: true, settlementsKnown: true };
   let after: string | null = null;
   for (let page = 1; page <= MAX_SEARCH_PAGES; page += 1) {
     const search = await fetchSearchPage(q, after, token, fetchImpl);
-    if (!validSearchResults(search)) return {};
-    const pullRequests = acceptSearchPopulation(search, population);
-    if (pullRequests === undefined) return {};
-    const complete = await tallySearchPullRequests(pullRequests, context, tally, prsWithFindings);
-    if (!complete) return {};
+    if (!validSearchResults(search)) return unavailableReviewStats();
+    if (
+      !(await collectSearchPageStats(
+        search,
+        population,
+        context,
+        availability,
+        tally,
+        prsWithFindings,
+        settlementTally,
+      ))
+    )
+      return unavailableReviewStats();
     const continuation = searchContinuation(search, population);
-    if (continuation.kind === "complete") return finishedStats(tally, prsWithFindings);
-    if (continuation.kind === "invalid") return {};
+    if (continuation.kind === "complete") {
+      return completedReviewStats(availability, tally, prsWithFindings, settlementTally, nowMs);
+    }
+    if (continuation.kind === "invalid") return unavailableReviewStats();
     after = continuation.cursor;
   }
   // The window outran the safety ceiling: absent beats publishing a floor as the truth.
-  return {};
+  return unavailableReviewStats();
 }
 
 export async function collectCardData(
@@ -900,34 +1395,46 @@ export async function collectCardData(
 ): Promise<CardData> {
   const since = nowMs - 30 * DAY_MS;
   const base = `https://api.github.com/repos/${owner}/${repo}`;
-  const [runs, findingStats] = await Promise.all([
+  const [runs, reviewStats] = await Promise.all([
     collectRunStats(base, token, requests.fetch, nowMs, since),
-    collectFindingStats(owner, repo, token, requests.fetch, since, nowMs),
+    collectReviewStats(owner, repo, token, requests.fetch, since, nowMs),
   ]);
   if (requests.exhausted) return { owner, repo };
-  // Field-by-field under exactOptionalPropertyTypes: a metric is either present or absent —
-  // an explicit `undefined` never enters CardData, matching the card's em-dash contract.
-  const data: {
-    owner: string;
-    repo: string;
-    runs30d?: number;
-    runSuccessPct?: number;
-    findings?: number;
-    resolvedPct?: number;
-    openThreads?: number;
-    prsWithFindings?: number;
-    runStatus?: Exclude<CardData["runStatus"], undefined>;
-    lastRunHours?: number;
-  } = { owner, repo };
-  if (runs.runs30d !== undefined) data.runs30d = runs.runs30d;
-  if (runs.runSuccessPct !== undefined) data.runSuccessPct = runs.runSuccessPct;
-  if (runs.runStatus !== undefined) data.runStatus = runs.runStatus;
-  if (runs.lastRunHours !== undefined) data.lastRunHours = runs.lastRunHours;
-  if (findingStats.findings !== undefined) data.findings = findingStats.findings;
-  if (findingStats.resolvedPct !== undefined) data.resolvedPct = findingStats.resolvedPct;
-  if (findingStats.openThreads !== undefined) data.openThreads = findingStats.openThreads;
-  if (findingStats.prsWithFindings !== undefined) {
-    data.prsWithFindings = findingStats.prsWithFindings;
-  }
-  return data;
+  return cardData(owner, repo, nowMs, runs, reviewStats);
+}
+
+type CardMetrics = Omit<CardData, "owner" | "repo">;
+
+function presentMetric<Key extends keyof CardMetrics>(
+  key: Key,
+  value: CardMetrics[Key],
+): Pick<CardMetrics, Key> | Record<never, never> {
+  return value === undefined ? {} : ({ [key]: value } as Pick<CardMetrics, Key>);
+}
+
+function cardData(
+  owner: string,
+  repo: string,
+  nowMs: number,
+  runs: RunStats,
+  reviewStats: ReviewStats,
+): CardData {
+  const { findings, settlements } = reviewStats;
+  return {
+    owner,
+    repo,
+    dataAsOf: new Date(nowMs).toISOString(),
+    ...presentMetric("runs30d", runs.runs30d),
+    ...presentMetric("runSuccessPct", runs.runSuccessPct),
+    ...presentMetric("runStatus", runs.runStatus),
+    ...presentMetric("lastRunHours", runs.lastRunHours),
+    ...presentMetric("findings", findings.findings),
+    ...presentMetric("resolvedPct", findings.resolvedPct),
+    ...presentMetric("openThreads", findings.openThreads),
+    ...presentMetric("prsWithFindings", findings.prsWithFindings),
+    ...presentMetric("summaryRecords30d", settlements.summaryRecords30d),
+    ...presentMetric("completionPct", settlements.completionPct),
+    ...presentMetric("settlementStatus", settlements.settlementStatus),
+    ...presentMetric("lastReviewHours", settlements.lastReviewHours),
+  };
 }

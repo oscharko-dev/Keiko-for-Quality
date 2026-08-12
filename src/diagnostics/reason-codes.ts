@@ -183,9 +183,18 @@ export const REASON_CODES = [
   // vague, or contradicted — and a vague one gets exactly one repair before it is dropped. The
   // counts are the whole point of the code: `kept` and `repaired` say what a reader received,
   // `dropped_vague` and `dropped_unsupported` say what this stage removed, and `undecided` says
-  // where it failed to judge. The production evidence gate withholds those candidates and marks the
-  // review incomplete, so an outage can be neither a false quality improvement nor a false clean.
+  // where it failed to judge. The production evidence gate withholds those raw hypotheses, exposes
+  // the count, and leaves their paths retryable; it does not erase completed file coverage or turn
+  // an unverified hypothesis into a finding.
   "publish.substantiated",
+  // Source-bound contradictions decided before any model call. The record carries only one closed
+  // rule ID per numeric key and its count — never a path, source line, finding, or evidence text.
+  "publish.deterministic_refutation",
+  // Closed count-only cohort transitions. Together these distinguish sanitization/deduplication,
+  // verification/ranking, and actual delivery without carrying candidate or model prose.
+  "publish.candidates.planned",
+  "publish.candidates.ranked",
+  "publish.pipeline.completed",
 
   // Bounded resume (#57, v0.11.0): the engine run ended without a usable success — a thrown run
   // error or a non-success status — and was re-invoked exactly once. Emitted at most once per
@@ -248,6 +257,9 @@ export const REASON_CODES = [
   // rather than a reason because diagnostics carry no free text: the alternative to this line is
   // not a better message, it is silently losing findings.
   "engine.result.findings_rejected",
+  // Raw hypotheses emitted by the completed engine/resume path. Observational only: candidate
+  // volume is never a settlement disqualifier.
+  "engine.result.candidates",
 
   // Run-level spend accounting (v0.12.0): one record per engine execution naming what the review
   // actually cost — the engine's own reported total plus the classification side-calls. The parts

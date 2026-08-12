@@ -278,6 +278,8 @@ describe("buildSummaryReport", () => {
         suppressedExactDuplicate: 1,
         suppressedSimilar: 2,
         suppressedDispositioned: 1,
+        suppressedEvidence: 9,
+        verificationUndecided: 3,
         rejectedSanitization: 5,
         rejectedPlacement: 6,
         readbackFailures: 7,
@@ -297,6 +299,8 @@ describe("buildSummaryReport", () => {
     expect(summary.counts.suppressedExactDuplicate).toBe(r.publish?.suppressedExactDuplicate);
     expect(summary.counts.suppressedSimilar).toBe(r.publish?.suppressedSimilar);
     expect(summary.counts.suppressedDispositioned).toBe(r.publish?.suppressedDispositioned);
+    expect(summary.counts.suppressedEvidence).toBe(r.publish?.suppressedEvidence);
+    expect(summary.counts.verificationUndecided).toBe(r.publish?.verificationUndecided);
     // The four counters that actually decide complete vs. incomplete (`publicationDegraded`,
     // review.ts) — previously computed but never surfaced on the one comment meant to answer
     // "what happened this run" without a log.
@@ -325,6 +329,8 @@ describe("buildSummaryReport", () => {
     expect(summary.counts.suppressedExactDuplicate).toBe(0);
     expect(summary.counts.suppressedSimilar).toBe(0);
     expect(summary.counts.suppressedDispositioned).toBe(0);
+    expect(summary.counts.suppressedEvidence).toBe(0);
+    expect(summary.counts.verificationUndecided).toBe(0);
     expect(summary.counts.rejectedSanitization).toBe(0);
     expect(summary.counts.rejectedPlacement).toBe(0);
     expect(summary.counts.readbackFailures).toBe(0);

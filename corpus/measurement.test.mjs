@@ -25,6 +25,17 @@ test("a run where every case threw before the model is NOT measured", () => {
   assert.equal(attempted, 3);
 });
 
+test("an all-error run that spent tokens reports a harness failure, not an unreachable model", () => {
+  const lateThrow = { kind: "error", tokens: 500 };
+  const measurement = classifyMeasurement([lateThrow, lateThrow], 1_000);
+  assert.deepEqual(measurement, {
+    measured: false,
+    reason: "harness_failed",
+    errored: 2,
+    attempted: 2,
+  });
+});
+
 test("zero tokens is not measured even when cases did not throw", () => {
   // The engine can exit cleanly having dispatched nothing — a budget of zero, an empty inventory,
   // a stub. Cases that produced no model call cannot score the model.

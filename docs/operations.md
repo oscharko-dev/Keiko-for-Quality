@@ -290,6 +290,21 @@ and concurrency — is documented by the CLI itself, the reference rather than a
 npm run review -- --help
 ```
 
+`--max-findings` is a publication limit, not an engine-validity limit. A completed review remains
+complete when generation produces more raw hypotheses than this value: sanitization,
+deduplication, evidence verification, and ranking reduce the cohort before reporting. The final
+total never exceeds the configured value, deterministic contract findings consume that total
+first, at most sixteen model-authored candidates reach verification, and at most eight
+model-authored findings publish. Lower values reduce both bounded model cohorts as well; they do
+not turn candidate volume into `engine_error`.
+
+Completion describes file coverage, not a claim that every raw hypothesis became a finding. When
+independent verification cannot decide one candidate, that candidate is withheld, its path remains
+uncached for a later retry, and the completed run reports both the evidence-withheld total and the
+undecided subset in its quality data and GitHub summary. A failure to deliver an already verified
+finding — sanitization, placement, read-back, or GitHub API failure — still settles incomplete,
+because the reader did not receive something the review had established.
+
 The process exit code carries the settlement outcome, never merely "did it crash":
 
 | Code | Meaning                                                               |
@@ -335,7 +350,7 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 6. **The seeded qualification is synthetic.** `corpus/run.mjs` now enters through
    `performLocalReview`, so generation, Truth/Challenge/Falsifier verification, classification,
    deterministic gates, sanitization, and deduplication match the shipped local product path. Its
-   42 small controlled changes still do not prove that a large real review can finish reliably;
+   44 small controlled changes still do not prove that a large real review can finish reliably;
    the consumer seed and completion gates cover that separate product property, while Historical
    Replay measures verifier decisions against independently corroborated findings.
 
@@ -369,9 +384,9 @@ Stated plainly, because a reviewer that overstates its coverage is worse than no
 ## Measured quality
 
 "The reviews are good" is not a claim anyone can check, so there is a corpus that turns it into one.
-`corpus/cases.mjs` holds 42 two-commit fixtures spanning 50 changed files — 31 with exactly one
+`corpus/cases.mjs` holds 44 two-commit fixtures spanning 52 changed files — 32 with exactly one
 seeded defect (four of them cross-artifact: the defect is invisible in the diff of any single file,
-issue #80), 11 that are clean and must produce silence — run through the release-selected generation
+issue #80), 12 that are clean and must produce silence — run through the release-selected generation
 workflow against a real model. No mocks: the question is about judgement, and judgement is what a
 mock cannot stand in for.
 
@@ -386,6 +401,31 @@ Four things are scored separately, because they fail for different reasons:
 
 Publishability is scored with `sanitizeFindingBody` itself, not a copy of its rules — a corpus that
 restated them would keep passing after the real ones moved.
+
+The promotion checker treats this small synthetic corpus as a safety net, not as proof of production
+precision: severe recall must reach 85%, every finding must remain publishable, and at least 80% of
+the twelve clean fixtures must stay silent. The 80% precision floor means ten of twelve pass while
+three false-positive fixtures fail the release. Real-world precision comes from the independent,
+calibrated historical replay and its chronological holdout; a stochastic 12/12 synthetic result is
+reported as measured, never presented as a 95% production-quality claim.
+
+Those measurements answer different questions. Synthetic precision asks whether a clean fixture
+stays silent. Historical precision asks what share of the policy's kept, corroborated findings were
+actually fixed; fixed-finding retention asks what share of all corroborated fixes the policy kept.
+Promotion requires a real-history precision gain without buying it by discarding useful findings:
+both the complete cohort and its chronological holdout need at least 75% retention and 75% decision
+coverage. The complete calibrated cohort has seventeen fixed-confirmed findings, so thirteen kept
+(76.5%) pass the retention floor while twelve (70.6%) fail.
+
+The normal release channel has no exception to those floors. A narrowly named `recovery` channel
+exists only to restore serving reliability after a production availability incident. It still
+requires the exact immutable candidate, a green qualification safety net, every consumer seed, and
+three of three full-coverage completion attempts. Its historical report must be complete, valid and
+bound to that same tree, and the sole permitted withheld-quality reason is
+`historical_holdout_fixed_retention_low`. The signed release evidence and release commit say
+“quality promotion withheld”; neither the release workflow nor the monitoring card may present it
+as a green quality promotion. Any other quality, binding, seed, qualification or completion failure
+stops recovery exactly as it stops a normal release.
 
 Three of the cases carry text inside the diff that instructs the reviewer to stay silent, to honour
 a forged security waiver, or to append a tracking URL to its comment. They exist because the rule
