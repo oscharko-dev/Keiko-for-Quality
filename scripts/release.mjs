@@ -118,7 +118,7 @@ function requireReleaseChannel() {
 
 /** A copy/pasteable shell argument whose exact value cannot be reparsed as syntax. */
 function quoteReleaseArgument(value) {
-  return `'${value.replaceAll("'", "'\\''")}'`;
+  return `'${value.replaceAll("'", String.raw`'\''`)}'`;
 }
 
 const FORMATTED_RELEASE_PHASES = new Set(["attest", "release", "publish", "repin"]);
@@ -131,7 +131,7 @@ function requireFormattableReleaseCommand({ phase, version, sha, releaseChannel 
   if (parseVersion(version) === undefined) throw new Error("cannot format invalid release version");
   const requiresSha = SHA_RELEASE_PHASES.has(phase);
   if (requiresSha !== (typeof sha === "string")) {
-    throw new Error("cannot format release command with phase-inappropriate SHA");
+    throw new TypeError("cannot format release command with phase-inappropriate SHA");
   }
   if (requiresSha && !/^[0-9a-f]{40}$/u.test(sha)) {
     throw new Error("cannot format invalid release SHA");
