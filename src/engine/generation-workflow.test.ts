@@ -25,6 +25,7 @@ import {
   DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY,
   EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES,
+  HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
   MIRRORED_VALIDATOR_EVIDENCE_POLICY,
   PARALLEL_MAPPING_EVIDENCE_POLICY,
   REFERENCE_TRANSITION_EVIDENCE_POLICY,
@@ -62,7 +63,7 @@ function occurrenceCount(value: string, needle: string): number {
 
 describe("risk planner", () => {
   it("pins the manually bumped cache identity", () => {
-    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v13");
+    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v15");
   });
 
   it("sees the complete qualified rule but never receives the whole file", () => {
@@ -164,6 +165,7 @@ describe("focused examiners", () => {
       expect(occurrenceCount(prompt.system, TRIGGER_AND_GUARD_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, MIRRORED_VALIDATOR_EVIDENCE_POLICY)).toBe(1);
       expect(occurrenceCount(prompt.system, PARALLEL_MAPPING_EVIDENCE_POLICY)).toBe(1);
+      expect(occurrenceCount(prompt.system, HELPER_CONTROL_FLOW_EVIDENCE_POLICY)).toBe(1);
       expect(prompt.system).not.toContain("## Workflow and pipeline files");
       expect(prompt.system).not.toContain("## Look before you claim");
     }
@@ -201,6 +203,14 @@ describe("focused examiners", () => {
         },
         first: PARALLEL_MAPPING_EVIDENCE_POLICY,
       },
+      {
+        context: {
+          ...ISOLATED_CONTEXT,
+          renderedDiff:
+            '__new hunk__\n8 +throw new Error("unavailable");\n9 +const compiler = windowsToolFromPath(env.PATH, "cl.exe");\n10 +spawn(compiler);',
+        },
+        first: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
+      },
     ];
     for (const sample of contexts) {
       const prompt = buildExaminerPrompt(CORE_ROLE, sample.context, [], { view: "evidence" });
@@ -216,6 +226,7 @@ describe("focused examiners", () => {
         TRIGGER_AND_GUARD_EVIDENCE_POLICY,
         MIRRORED_VALIDATOR_EVIDENCE_POLICY,
         PARALLEL_MAPPING_EVIDENCE_POLICY,
+        HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
       ]) {
         expect(occurrenceCount(prompt.system, policy)).toBe(1);
         expect(firstPolicy).toBeLessThanOrEqual(prompt.system.indexOf(policy));
@@ -555,6 +566,42 @@ describe("shared request ledger", () => {
         )) as typeof fetch,
     );
     expect(result.kind).toBe("invalid_response");
+  });
+
+  it("distinguishes a rejected request from a malformed successful response", async () => {
+    const ledger = createGenerationLedger(100_000);
+    const result = await requestGeneration(
+      {
+        endpoint: "https://model.example/v1",
+        token: "secret",
+        model: "gpt-oss-120b",
+        seed: 42,
+        system: "system",
+        user: "user",
+        timeoutMs: 1_000,
+      },
+      ledger,
+      (() => Promise.resolve(new Response("rejected", { status: 400 }))) as typeof fetch,
+    );
+    expect(result.kind).toBe("request_rejected");
+  });
+
+  it("classifies HTTP 408 as a transient transport failure", async () => {
+    const ledger = createGenerationLedger(100_000);
+    const result = await requestGeneration(
+      {
+        endpoint: "https://model.example/v1",
+        token: "secret",
+        model: "gpt-oss-120b",
+        seed: 42,
+        system: "system",
+        user: "user",
+        timeoutMs: 1_000,
+      },
+      ledger,
+      (() => Promise.resolve(new Response("timeout", { status: 408 }))) as typeof fetch,
+    );
+    expect(result.kind).toBe("transport_failure");
   });
 
   it("applies the caller's real request deadline to the endpoint signal", async () => {

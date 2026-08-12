@@ -3,7 +3,7 @@
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 
-import { parseReleaseDevBinding } from "./release-lib.mjs";
+import { parseReleaseChannelMessage, parseReleaseDevBinding } from "./release-lib.mjs";
 
 const SYSTEM_GIT = "/usr/bin/git";
 
@@ -31,6 +31,10 @@ export function runReleaseMainProvenance({
   if (!parsed.valid || parsed.binding === undefined) {
     throw new Error(`release dev binding is invalid: ${parsed.failures.join(", ")}`);
   }
+  const channel = parseReleaseChannelMessage(message);
+  if (!channel.valid) {
+    throw new Error(`release channel binding is invalid: ${channel.failures.join(", ")}`);
+  }
 
   git(execute, root, ["fetch", "--no-tags", "origin", "refs/heads/dev:refs/remotes/origin/dev"]);
   try {
@@ -51,7 +55,7 @@ export function runReleaseMainProvenance({
     `release-main-provenance: PASS - main tree ${mainTree} matches governed dev ` +
       `${parsed.binding.commit}.`,
   );
-  return parsed.binding;
+  return { ...parsed.binding, channel: channel.channel, recoveryReason: channel.recoveryReason };
 }
 
 export function executeReleaseMainProvenanceCli(input = {}) {

@@ -162,8 +162,8 @@ async function saveCacheStore(
  *
  * A complete settlement always may. An incomplete one may only when its reason leaves the
  * reviewed files' verdicts intact — a budget overrun or a coverage gap, where the engine simply
- * did not reach every file — and never for a rejected schema, a bad terminal state, or an
- * implausible finding count, where the manifest itself is not to be believed. `performReview`
+ * did not reach every file — and never for a rejected schema, a bad terminal state, or an engine
+ * execution failure, where the manifest itself is not to be believed. `performReview`
  * enforces the same rule one layer up by supplying a store only in those cases, and restricts its
  * entries to the paths the engine reports it reached; this check is the independent second one.
  *

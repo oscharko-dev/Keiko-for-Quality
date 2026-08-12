@@ -267,7 +267,9 @@ export function summarizeStageReport(report) {
   const found = recallResults.filter((r) => r.pass === true).length;
   const silent = precisionResults.filter((r) => r.pass === true).length;
   const publishableTotal = results.length;
-  const publishableOk = results.filter((r) => (r.rejected?.length ?? 0) === 0).length;
+  const publishableOk = results.filter(
+    (r) => r.kind !== "error" && (r.rejected?.length ?? 0) === 0,
+  ).length;
   return {
     measured: true,
     seeded: recallResults.length,

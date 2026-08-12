@@ -22,6 +22,7 @@ import { renderCard } from "./card.js";
 import type { CardData, CardTheme } from "./card.js";
 import { collectCardData } from "./collect.js";
 import { installationToken } from "./github-app.js";
+import { loadReleasedQualityEvidence, withQualityEvidence } from "./quality-evidence.js";
 import { createGitHubRequestBudget } from "./request-budget.js";
 import type { GitHubRequestBudget } from "./request-budget.js";
 
@@ -96,6 +97,11 @@ async function renderWidget(env: Env, url: URL, path: WidgetPath): Promise<Respo
   let data: CardData = { owner: path.owner, repo: path.repo };
   if (token !== undefined) {
     data = await collectCardData(path.owner, path.repo, token, requests, nowMs);
+    // Repository truth has priority inside the hard subrequest budget. Released precision is added
+    // only when the remaining budget can fetch all three immutable-release objects; otherwise its
+    // own cell stays an em dash and the already-complete repository metrics remain intact.
+    const evidence = await loadReleasedQualityEvidence(token, requests.fetch);
+    data = withQualityEvidence(data, evidence);
   }
   return svgResponse(renderCard(data, theme));
 }

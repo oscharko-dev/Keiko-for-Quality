@@ -19,10 +19,11 @@ import { FINDING_CATEGORIES, FINDING_SEVERITIES } from "../engine/classify.js";
  * - A per-finding stable identity for cross-run deduplication (issue #97's fuller JSON scope asks
  *   for one; nothing in this module's binding interface provides the content-addressed material —
  *   blob ids and rule digest — needed to compute it honestly).
- * - A dropped/rejected-findings count. Issue #97's acceptance criteria ask for a visible count of
- *   findings the sanitizer rejected; `ReportInput` carries no such counter today, so neither
- *   renderer can surface one. Fabricating a zero would misreport a run where sanitization actually
- *   dropped something, so this is left absent rather than guessed at.
+ * - A dropped/rejected-findings count. `LocalReviewReport.quality.rejectedSanitization` now carries
+ *   the final selected sanitizer loss for production-path corpus grading, but `ReportInput` does not
+ *   yet expose the broader quality block, so neither renderer can surface it. Fabricating a zero
+ *   would misreport a run where sanitization actually dropped something, so this remains absent
+ *   from schema v1 rather than guessed at.
  * - `identity`/`inputs`/`cache` sections from issue #97's full Scope section (engine digest, model
  *   id, protocol, repository path, base/head SHA, profile path, cache hit/miss/append counts).
  *   `ruleDigest` and `engineVersion` below are the only identity fields the binding interface for

@@ -17,12 +17,15 @@ import { composeFindingBody, composeIncompleteNotice } from "./presentation.js";
 import { describePlacement, placementLadder, tallyPlacementAttempts } from "./placement.js";
 import { sanitizeFindingBody } from "./sanitize.js";
 import {
-  areIntraRunDuplicates,
+  arePreparedIntraRunDuplicates,
   findsDispositionedConversation,
   findsOutdatedRecurrence,
   findsSimilarOpenConversation,
+  MIN_INTRA_RUN_SHARED_TOKENS,
+  prepareIntraRunCandidate,
   type CandidateForDedup,
   type ExistingConversation,
+  type PreparedIntraRunCandidate,
 } from "./similarity.js";
 
 export interface PublishContext {
@@ -89,8 +92,9 @@ export interface PublishOutcome {
   /** Verified fresh findings outside the PR-wide publication set. */
   readonly suppressedRanked?: number;
   /**
-   * Fresh candidates withheld because evidence or the independent judge was unavailable. Unlike a
-   * content rejection, any non-zero value degrades settlement so an outage cannot look clean.
+   * Raw model hypotheses withheld because evidence or the independent judge was unavailable.
+   * They never become findings, their paths remain retryable, and the count stays visible even
+   * when complete file coverage lets the review itself settle complete.
    */
   readonly verificationUndecided?: number;
   /**
@@ -483,6 +487,11 @@ export interface PlanCounters {
  *  (so execution can re-check against it), and the tallies for everything that will not publish. */
 export interface PublicationPlan {
   readonly survivors: readonly PlannedFinding[];
+  /** Raw candidates the publication sanitizer refused. They stay internal and are never composed,
+   *  fingerprinted, or posted. `review.ts` carries them only through bounded truth/ranking so a
+   *  malformed low-ranked hypothesis cannot degrade a completed review, while a verified finding
+   *  that still cannot be made publishable remains fail-closed. */
+  readonly rejectedSanitizationCandidates: readonly EngineFinding[];
   readonly prefetch: ExistingConversationsPrefetch;
   readonly counters: PlanCounters;
 }
@@ -583,8 +592,113 @@ function isBetterRepresentative(
 }
 
 interface Cluster {
+  readonly index: number;
   representative: SanitizedCandidate;
-  readonly members: SanitizedCandidate[];
+  readonly members: IndexedSanitizedCandidate[];
+}
+
+interface PreparedSanitizedCandidate {
+  readonly candidate: SanitizedCandidate;
+  readonly similarity: PreparedIntraRunCandidate;
+}
+
+interface IndexedSanitizedCandidate extends PreparedSanitizedCandidate {
+  readonly cluster: Cluster;
+}
+
+interface SimilarityIndex {
+  readonly tokens: Map<string, Map<string, IndexedSanitizedCandidate[]>>;
+  readonly codeBlocks: Map<string, Map<string, IndexedSanitizedCandidate[]>>;
+}
+
+function pathPostings(
+  index: Map<string, Map<string, IndexedSanitizedCandidate[]>>,
+  path: string,
+): Map<string, IndexedSanitizedCandidate[]> {
+  const existing = index.get(path);
+  if (existing !== undefined) return existing;
+  const created = new Map<string, IndexedSanitizedCandidate[]>();
+  index.set(path, created);
+  return created;
+}
+
+function appendPosting(
+  postings: Map<string, IndexedSanitizedCandidate[]>,
+  value: string,
+  candidate: IndexedSanitizedCandidate,
+): void {
+  const existing = postings.get(value);
+  if (existing === undefined) postings.set(value, [candidate]);
+  else existing.push(candidate);
+}
+
+function indexPreparedCandidate(index: SimilarityIndex, member: IndexedSanitizedCandidate): void {
+  const tokenPostings = pathPostings(index.tokens, member.similarity.path);
+  for (const token of member.similarity.contentTokens) appendPosting(tokenPostings, token, member);
+  const blockPostings = pathPostings(index.codeBlocks, member.similarity.path);
+  for (const block of member.similarity.fencedCodeBlocks)
+    appendPosting(blockPostings, block, member);
+}
+
+/** Finds the earliest-created matching cluster without scanning impossible pairs. Any prose match
+ *  needs at least four shared tokens; a fenced-code match needs one identical block. The inverted
+ *  index enumerates only members that can clear either floor, then the prepared matcher applies the
+ *  full coordinate and overlap thresholds. */
+function tokenEligibleCandidates(
+  prepared: PreparedSanitizedCandidate,
+  index: SimilarityIndex,
+): Set<IndexedSanitizedCandidate> {
+  const tokenHits = new Map<IndexedSanitizedCandidate, number>();
+  const tokenPostings = index.tokens.get(prepared.similarity.path);
+  if (tokenPostings !== undefined) {
+    for (const token of prepared.similarity.contentTokens) {
+      for (const prior of tokenPostings.get(token) ?? []) {
+        tokenHits.set(prior, (tokenHits.get(prior) ?? 0) + 1);
+      }
+    }
+  }
+  const eligible = new Set<IndexedSanitizedCandidate>();
+  for (const [prior, shared] of tokenHits) {
+    if (shared >= MIN_INTRA_RUN_SHARED_TOKENS) eligible.add(prior);
+  }
+  return eligible;
+}
+
+function addCodeBlockCandidates(
+  eligible: Set<IndexedSanitizedCandidate>,
+  prepared: PreparedSanitizedCandidate,
+  index: SimilarityIndex,
+): void {
+  const blockPostings = index.codeBlocks.get(prepared.similarity.path);
+  if (blockPostings === undefined) return;
+  for (const block of prepared.similarity.fencedCodeBlocks) {
+    for (const prior of blockPostings.get(block) ?? []) eligible.add(prior);
+  }
+}
+
+function earliestMatchingCluster(
+  eligible: ReadonlySet<IndexedSanitizedCandidate>,
+  prepared: PreparedSanitizedCandidate,
+): Cluster | undefined {
+  let selected: Cluster | undefined;
+  for (const prior of eligible) {
+    if (
+      (selected === undefined || prior.cluster.index < selected.index) &&
+      arePreparedIntraRunDuplicates(prepared.similarity, prior.similarity)
+    ) {
+      selected = prior.cluster;
+    }
+  }
+  return selected;
+}
+
+function indexedMatchingCluster(
+  prepared: PreparedSanitizedCandidate,
+  index: SimilarityIndex,
+): Cluster | undefined {
+  const eligible = tokenEligibleCandidates(prepared, index);
+  addCodeBlockCandidates(eligible, prepared, index);
+  return earliestMatchingCluster(eligible, prepared);
 }
 
 interface IntraRunClusterResult {
@@ -595,6 +709,91 @@ interface IntraRunClusterResult {
   readonly suppressed: readonly SanitizedCandidate[];
 }
 
+/** Hard work bound before the parser's broader 1,000-finding defensive ceiling. The first 256
+ * candidates cover sixteen complete verifier cohorts and every measured production flood (136 at
+ * Keiko#3089); later novel candidates remain singleton clusters and only byte-identical repeats
+ * join an existing cluster through an O(n) exact-key map. They cannot expand pairwise dedupe work
+ * before the verifier/publication caps apply. */
+const MAX_INTRA_RUN_DEDUP_CANDIDATES = 256;
+
+function exactIntraRunKey(candidate: SanitizedCandidate): string {
+  const comparable = toCandidateForDedup(candidate);
+  return JSON.stringify([
+    comparable.path,
+    comparable.startLine,
+    comparable.endLine,
+    comparable.body,
+  ]);
+}
+
+function singletonCluster(candidate: SanitizedCandidate, index: number): Cluster {
+  const cluster: Cluster = { index, representative: candidate, members: [] };
+  cluster.members.push({
+    candidate,
+    // Never indexed or compared. Preserve one carrier shape for the final partition only.
+    similarity: {
+      ...toCandidateForDedup(candidate),
+      contentTokens: new Set(),
+      fencedCodeBlocks: new Set(),
+    },
+    cluster,
+  });
+  return cluster;
+}
+
+function newIndexedCluster(
+  candidate: SanitizedCandidate,
+  prepared: PreparedSanitizedCandidate,
+  index: number,
+  similarityIndex: SimilarityIndex,
+): Cluster {
+  const cluster: Cluster = { index, representative: candidate, members: [] };
+  const member: IndexedSanitizedCandidate = { ...prepared, cluster };
+  cluster.members.push(member);
+  indexPreparedCandidate(similarityIndex, member);
+  return cluster;
+}
+
+function appendIndexedMember(
+  cluster: Cluster,
+  prepared: PreparedSanitizedCandidate,
+  index: SimilarityIndex,
+): void {
+  const member: IndexedSanitizedCandidate = { ...prepared, cluster };
+  cluster.members.push(member);
+  indexPreparedCandidate(index, member);
+  if (isBetterRepresentative(prepared.candidate, cluster.representative)) {
+    cluster.representative = prepared.candidate;
+  }
+}
+
+function appendUnindexedMember(cluster: Cluster, candidate: SanitizedCandidate): void {
+  cluster.members.push({
+    candidate,
+    similarity: {
+      ...toCandidateForDedup(candidate),
+      contentTokens: new Set(),
+      fencedCodeBlocks: new Set(),
+    },
+    cluster,
+  });
+  if (isBetterRepresentative(candidate, cluster.representative)) {
+    cluster.representative = candidate;
+  }
+}
+
+function partitionClusters(clusters: readonly Cluster[]): IntraRunClusterResult {
+  const representatives: SanitizedCandidate[] = [];
+  const suppressed: SanitizedCandidate[] = [];
+  for (const cluster of clusters) {
+    representatives.push(cluster.representative);
+    for (const member of cluster.members) {
+      if (member.candidate !== cluster.representative) suppressed.push(member.candidate);
+    }
+  }
+  return { representatives, suppressed };
+}
+
 /**
  * Greedy, deterministic clustering of this run's own sanitized findings (v0.12.0) — the fix for the
  * gap Arena v0.11.0 measured: 29 duplicate VARIANTS across 95 published findings (31%, versus 0 for
@@ -603,13 +802,11 @@ interface IntraRunClusterResult {
  * conversation, so a model that describes one defect several times in a single pass had nothing here
  * to catch it.
  *
- * `candidates` is walked exactly once, in input order. Each one is compared — via
- * `areIntraRunDuplicates` (`similarity.ts`), on both sides' SANITIZED bodies — against the CURRENT
- * representative of every cluster founded so far, in the order those clusters were founded, and
- * joins the first match (`Array.prototype.find`'s own left-to-right semantics); finding no match, it
- * founds a new cluster of its own. Joining a cluster can change its representative — see
- * `isBetterRepresentative` — so a later candidate compares against whichever member already won that
- * tie-break, not necessarily the cluster's founding member.
+ * `candidates` is walked exactly once, in input order. The index identifies prior MEMBERS capable
+ * of matching on the same path, and the candidate joins the earliest-created cluster containing a
+ * full similarity match; finding none, it founds a cluster. Comparing every eligible member — not
+ * just the representative — preserves transitive variant chains when a later, better-articulated
+ * member has replaced the founder as representative.
  *
  * Determinism follows from three things holding together: candidates are visited in a fixed order
  * (their input order), clusters are compared in a fixed order (their creation order, itself a
@@ -627,58 +824,48 @@ interface IntraRunClusterResult {
  * step — present or future — that only ever sees this stage's own survivors, such as a classification
  * audit running between `planPublication` and `executePublication` (see `PlannedFinding`).
  *
- * O(n^2) in the number of sanitized findings: a candidate is compared against at most one
- * representative per existing cluster. That is bounded in practice by `config.maxFindings` (50 by
- * default, 500 at the outside) — `settle` (`engine/settle.ts`) already discards any engine result
- * over that ceiling as implausible before publication ever runs, so the parser's own 1,000-finding
- * cap (`engine/result.ts`) never reaches this function. Quadratic is fine at that bound, so this
- * stays a plain nested scan rather than earning an index.
+ * Body evidence is computed exactly once per candidate, then an inverted path/token/code-block
+ * index enumerates only prior members capable of clearing the similarity floors. With the engine's
+ * legal 1,000-finding ceiling, that avoids nearly one million repeated scans of bodies up to 20,000
+ * characters — and avoids pairwise checks entirely when two findings share fewer than four content
+ * tokens and no code block. The index admits at most 256 candidates; later novel candidates become
+ * singletons, while an exact-key map still collapses their byte-identical repeats. No finding is
+ * discarded by that bound, and repeated tail output cannot consume the verifier cohort.
  */
 function clusterIntraRunDuplicates(
   candidates: readonly SanitizedCandidate[],
 ): IntraRunClusterResult {
   const clusters: Cluster[] = [];
-  for (const candidate of candidates) {
-    // Every member, not just the current representative: the representative can change as a
-    // cluster grows (`isBetterRepresentative` below), and comparing only against whichever member
-    // happens to hold that role right now lets a real duplicate of an EARLIER, since-demoted
-    // member dodge suppression the moment a later member takes over as representative.
-    // `areIntraRunDuplicates` is symmetric, so this only widens what a cluster can absorb, never
-    // narrows it. Bounded by the same finding-count ceiling `settle.ts` already enforces before
-    // any of this runs, so the worst case (candidates × members-so-far, up from candidates ×
-    // clusters) stays a small constant multiple of it, not an unbounded blowup.
-    // Every member, not just the current representative: the representative can change as a
-    // cluster grows (`isBetterRepresentative` below), and comparing only against whichever member
-    // happens to hold that role right now lets a real duplicate of an EARLIER, since-demoted
-    // member dodge suppression the moment a later member takes over as representative.
-    // `areIntraRunDuplicates` is symmetric, so this only widens what a cluster can absorb, never
-    // narrows it. Bounded by the same finding-count ceiling `settle.ts` already enforces before
-    // any of this runs, so the worst case (candidates × members-so-far, up from candidates ×
-    // clusters) stays a small constant multiple of it, not an unbounded blowup.
-    const cluster = clusters.find((existing) =>
-      existing.members.some((member) =>
-        areIntraRunDuplicates(toCandidateForDedup(candidate), toCandidateForDedup(member)),
-      ),
-    );
-    if (cluster === undefined) {
-      clusters.push({ representative: candidate, members: [candidate] });
+  const index: SimilarityIndex = { tokens: new Map(), codeBlocks: new Map() };
+  const exactClusters = new Map<string, Cluster>();
+  for (const [candidateIndex, candidate] of candidates.entries()) {
+    const exactKey = exactIntraRunKey(candidate);
+    const exactCluster = exactClusters.get(exactKey);
+    if (exactCluster !== undefined) {
+      appendUnindexedMember(exactCluster, candidate);
       continue;
     }
-    cluster.members.push(candidate);
-    if (isBetterRepresentative(candidate, cluster.representative)) {
-      cluster.representative = candidate;
+    if (candidateIndex >= MAX_INTRA_RUN_DEDUP_CANDIDATES) {
+      const cluster = singletonCluster(candidate, clusters.length);
+      clusters.push(cluster);
+      exactClusters.set(exactKey, cluster);
+      continue;
     }
-  }
-
-  const representatives: SanitizedCandidate[] = [];
-  const suppressed: SanitizedCandidate[] = [];
-  for (const cluster of clusters) {
-    representatives.push(cluster.representative);
-    for (const member of cluster.members) {
-      if (member !== cluster.representative) suppressed.push(member);
+    const prepared: PreparedSanitizedCandidate = {
+      candidate,
+      similarity: prepareIntraRunCandidate(toCandidateForDedup(candidate)),
+    };
+    const cluster = indexedMatchingCluster(prepared, index);
+    if (cluster === undefined) {
+      const created = newIndexedCluster(candidate, prepared, clusters.length, index);
+      clusters.push(created);
+      exactClusters.set(exactKey, created);
+      continue;
     }
+    appendIndexedMember(cluster, prepared, index);
+    exactClusters.set(exactKey, cluster);
   }
-  return { representatives, suppressed };
+  return partitionClusters(clusters);
 }
 
 /** Runs the cross-run dedup stages (marker, similarity, dispositioned) for one already-sanitized,
@@ -762,9 +949,11 @@ export async function planPublication(
 
   // Stage 1: sanitize every finding, in input order — independent of every other finding.
   const sanitized: SanitizedCandidate[] = [];
+  const rejectedSanitizationCandidates: EngineFinding[] = [];
   for (const finding of findings) {
     const candidate = sanitizeOne(context, finding, counters, diagnostics);
-    if (candidate !== undefined) sanitized.push(candidate);
+    if (candidate === undefined) rejectedSanitizationCandidates.push(finding);
+    else sanitized.push(candidate);
   }
 
   // Stage 2: intra-run clustering, BETWEEN sanitization and the cross-run checks — see
@@ -788,6 +977,7 @@ export async function planPublication(
 
   return {
     survivors,
+    rejectedSanitizationCandidates,
     prefetch: resolvedPrefetch,
     counters: {
       suppressed: counters.suppressed,

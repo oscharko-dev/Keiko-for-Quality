@@ -2102,6 +2102,99 @@ export function redactModelId(modelId: string): string {
   },
   // ---------------------------------------------------------------------------------------------
   {
+    id: "clean-terminal-helper-before-guarded-spawn",
+    defect: null,
+    // Precision twin earned by the two false findings published on Keiko#3087 with v0.23.0. The
+    // complete file shows both facts the reviewer missed: importing `spawn` is inert, the call is
+    // behind a win32 guard, and the path helper either returns a string or throws before `spawn`
+    // can run. A finding that invents an undefined return or import-time platform execution is a
+    // false positive; silence is the only correct verdict.
+    about: "a guarded Windows spawn whose path helper returns a string or throws terminally",
+    files: [
+      {
+        path: "src/windows-compiler.mjs",
+        base: `import { existsSync } from "node:fs";
+
+export function windowsToolFromPath(pathValue, toolName) {
+  for (const directory of pathValue?.split(";").filter(Boolean) ?? []) {
+    const candidate = \`${"${directory}"}\\\\${"${toolName}"}\`;
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("Windows tool is unavailable");
+}
+`,
+        head: `import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+
+export function windowsToolFromPath(pathValue, toolName) {
+  for (const directory of pathValue?.split(";").filter(Boolean) ?? []) {
+    const candidate = \`${"${directory}"}\\\\${"${toolName}"}\`;
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("Windows tool is unavailable");
+}
+
+export function runWindowsCompiler(pathValue) {
+  if (process.platform !== "win32") return;
+  spawn(windowsToolFromPath(pathValue, "cl.exe"), ["/nologo"], { stdio: "inherit" });
+}
+`,
+      },
+    ],
+  },
+  // ---------------------------------------------------------------------------------------------
+  {
+    id: "helper-fallthrough-reaches-spawn",
+    defect: {
+      file: "src/windows-compiler.mjs",
+      category: "bug",
+      severity: "high",
+    },
+    // Recall twin for the clean case above. This time the helper really can return `undefined` and
+    // the shown win32 call passes that value to `spawn`. The visible control-flow difference — not
+    // the helper's name or an imagined contract — is the defect the reviewer must report.
+    about: "a path helper changed from terminal failure to an invalid value consumed by spawn",
+    anchors: ["return undefined", "undefined", "spawn", "windowsToolFromPath", "fallthrough"],
+    files: [
+      {
+        path: "src/windows-compiler.mjs",
+        base: `import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+
+export function windowsToolFromPath(pathValue, toolName) {
+  for (const directory of pathValue?.split(";").filter(Boolean) ?? []) {
+    const candidate = \`${"${directory}"}\\\\${"${toolName}"}\`;
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error("Windows tool is unavailable");
+}
+
+export function runWindowsCompiler(pathValue) {
+  if (process.platform !== "win32") return;
+  spawn(windowsToolFromPath(pathValue, "cl.exe"), ["/nologo"], { stdio: "inherit" });
+}
+`,
+        head: `import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+
+export function windowsToolFromPath(pathValue, toolName) {
+  for (const directory of pathValue?.split(";").filter(Boolean) ?? []) {
+    const candidate = \`${"${directory}"}\\\\${"${toolName}"}\`;
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+export function runWindowsCompiler(pathValue) {
+  if (process.platform !== "win32") return;
+  spawn(windowsToolFromPath(pathValue, "cl.exe"), ["/nologo"], { stdio: "inherit" });
+}
+`,
+      },
+    ],
+  },
+  // ---------------------------------------------------------------------------------------------
+  {
     id: "clean-version-bump-twin",
     defect: null,
     // The dominant false-positive class of the first live day on the consumer (2026-08-08,

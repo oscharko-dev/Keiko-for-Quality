@@ -405,6 +405,7 @@ describe("closed source proofs", () => {
     expect(evidence).toBeDefined();
     const endpoint = endpointReplying([]);
     const traces: SubstantiationTerminalTrace[] = [];
+    const refutations: string[] = [];
 
     const out = await substantiate(
       [candidate],
@@ -414,6 +415,7 @@ describe("closed source proofs", () => {
       undefined,
       undefined,
       (trace) => traces.push(trace),
+      (ruleId) => refutations.push(ruleId),
     );
 
     expect(out.findings).toEqual([]);
@@ -421,6 +423,7 @@ describe("closed source proofs", () => {
     expect(out.droppedRefuted).toBe(1);
     expect(out.tokens).toBe(0);
     expect(endpoint.prompts()).toEqual([]);
+    expect(refutations).toEqual(["diagnostic_context_noop"]);
     expect(traces).toEqual([
       {
         stage: "truth_initial",
@@ -557,6 +560,10 @@ describe("role prompts", () => {
     expect(truthPrompt).toContain("Impact, severity language");
     expect(terminalTruthPrompt).toContain("Do not require proof of impact");
     expect(truthPrompt).toContain("guard in one caller does not make a missing invariant");
+    expect(truthPrompt).toContain(
+      "baseline fields, or snapshot values do not have to move together",
+    );
+    expect(falsifierPrompt).toContain("shown computation counts the fields independently");
     expect(terminalTruthPrompt).toContain("shown catch-to-sink flow is sufficient");
     expect(terminalTruthPrompt).toContain("request the parser or sink implementation");
     expect(falsifierPrompt).toContain("writes each computed key with Map.set");
@@ -2117,7 +2124,7 @@ describe("hard shared request budget", () => {
     expect(substantiationOnePathTokenUpperBound(candidate, evidence)).toBe(
       MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
     );
-    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(978_283);
+    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(981_375);
   });
 
   it("shares the same hard ceiling across later findings", async () => {

@@ -87,7 +87,8 @@ jobs:
       # The pinned release — see this file's header for why this is not `uses: ./`. Advance it in
       # the same change that tags a release, exactly as the consumer's pin is advanced.
       - name: Review
-        uses: oscharko-dev/Keiko-for-Quality@0c53cb11a924ba62dc2172316dee4ecf4a758360 # v0.21.2
+        id: review
+        uses: oscharko-dev/Keiko-for-Quality@2049125bbe0c516da9357150bac347c316630645 # v0.23.0
         with:
           profile: .github/keiko-for-quality.json
           model_endpoint: ${{ secrets.KFQ_MODEL_ENDPOINT }}
@@ -108,3 +109,18 @@ jobs:
           # gate 100%, seed gate GREEN — corpus/evidence/qualification-2026-08-07-single-shot.md):
           # one model call per file, an arithmetic cost bound, and no tool loop to die mid-file.
           KFQ_SINGLE_SHOT: "1"
+
+      # The action exits non-zero only when its process itself fails. An honest `incomplete`,
+      # `abandoned`, or `skipped` product settlement is still a successfully executed action, so
+      # it must be made load-bearing separately. Read the pinned action's closed-vocabulary output
+      # directly: parsing a PR comment would trust mutable public state and could confuse an older
+      # summary with this exact run. Empty output also fails closed (for example, if output plumbing
+      # failed after the review), and the diagnostic deliberately never echoes the value.
+      - name: Require a complete settlement
+        env:
+          REVIEW_OUTCOME: ${{ steps.review.outputs.outcome }}
+        run: |
+          if [ "$REVIEW_OUTCOME" != "complete" ]; then
+            echo "::error::Keiko for Quality did not settle this self-review as complete."
+            exit 1
+          fi

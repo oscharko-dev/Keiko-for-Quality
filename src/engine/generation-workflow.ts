@@ -22,7 +22,7 @@ import {
 
 export const GENERATION_COMPLETION_LIMIT = 4_096;
 /** Bump whenever a stage prompt, parser, renderer, or routing rule changes review semantics. */
-export const GENERATION_WORKFLOW_IDENTITY = "staged-v13";
+export const GENERATION_WORKFLOW_IDENTITY = "staged-v15";
 const REQUEST_FRAMING_TOKENS = 512;
 const MAX_RISK_HYPOTHESES = 6;
 const MAX_CLAIMS_PER_EXAMINER = 4;
@@ -838,6 +838,7 @@ export type GenerationCallResult =
   | { readonly kind: "success"; readonly content: string }
   | { readonly kind: "budget_blocked" }
   | { readonly kind: "transport_failure" }
+  | { readonly kind: "request_rejected" }
   | { readonly kind: "invalid_response" };
 
 interface EndpointBody {
@@ -968,7 +969,7 @@ function withoutTrailingSlashes(value: string): string {
 }
 
 function transportStatus(status: number): boolean {
-  return status === 429 || status >= 500;
+  return status === 408 || status === 429 || status >= 500;
 }
 
 async function endpointRequest(
@@ -1022,7 +1023,9 @@ async function settleEndpointResponse(
 ): Promise<GenerationCallResult> {
   if (!response.ok) {
     chargeUnreported(ledger, upperBound);
-    return { kind: transportStatus(response.status) ? "transport_failure" : "invalid_response" };
+    return {
+      kind: transportStatus(response.status) ? "transport_failure" : "request_rejected",
+    };
   }
   const body = await parsedBody(response);
   const usage = body === undefined ? undefined : reportedUsage(body, upperBound);

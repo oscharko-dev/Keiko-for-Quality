@@ -90,6 +90,14 @@ export interface CandidateForDedup {
   readonly body: string;
 }
 
+/** Token/code evidence computed once for the intra-run stage. A raw engine result may legally carry
+ *  1,000 findings; recomputing both sets for every candidate pair turns that bounded input into
+ *  nearly one million full body scans before the verifier's sixteen-candidate cap can apply. */
+export interface PreparedIntraRunCandidate extends CandidateForDedup {
+  readonly contentTokens: ReadonlySet<string>;
+  readonly fencedCodeBlocks: ReadonlySet<string>;
+}
+
 /** How far a conversation's anchor may drift from the candidate's and still count as the same spot. */
 const LINE_TOLERANCE = 2;
 
@@ -127,6 +135,24 @@ const SIMILARITY_THRESHOLD = 0.5;
 
 /** Below this many shared content words, a ratio above the threshold is not a meaningful signal. */
 const MIN_SHARED_TOKENS = 4;
+
+/** Cheapest possible prose match. Publisher indexing uses the same floor to avoid inspecting pairs
+ *  that cannot satisfy either the ordinary four-token band or the narrower ten-token exact band. */
+export const MIN_INTRA_RUN_SHARED_TOKENS = MIN_SHARED_TOKENS;
+
+/**
+ * Narrow second band for two candidates from the SAME run at the EXACT same source interval.
+ *
+ * Keiko#3089 produced the same baseline-count claim twice at one line. The retellings shared eleven
+ * concrete tokens (including both field names and both changed numbers) but scored 0.458 because
+ * one version added a long speculative impact tail, just below the ordinary 0.50 band. Coordinate
+ * identity is stronger evidence than the ordinary two-line tolerance, so this band accepts the
+ * measured 0.43+ overlap only with ten shared content tokens. Nearby lines and cross-run matches
+ * retain the stricter existing threshold; a same-line sentence template with only a few shared
+ * words remains publish-biased.
+ */
+const EXACT_INTERVAL_SIMILARITY_THRESHOLD = 0.43;
+const MIN_EXACT_INTERVAL_SHARED_TOKENS = 10;
 
 /**
  * A second, deliberately narrow band for an ANCHORED thread that a contributor already answered
@@ -678,5 +704,33 @@ function recurrenceBodiesMatch(candidateBody: string, existingBody: string): boo
  * suppression is worse than publishing an occasional duplicate.
  */
 export function areIntraRunDuplicates(a: CandidateForDedup, b: CandidateForDedup): boolean {
-  return a.path === b.path && linesOverlap(a, b) && similarByContent(a.body, b.body);
+  return arePreparedIntraRunDuplicates(prepareIntraRunCandidate(a), prepareIntraRunCandidate(b));
+}
+
+/** Linear preprocessing once per candidate; callers comparing one pair can keep using
+ *  `areIntraRunDuplicates`, while the publication clusterer reuses this prepared representation. */
+export function prepareIntraRunCandidate(candidate: CandidateForDedup): PreparedIntraRunCandidate {
+  return {
+    ...candidate,
+    contentTokens: tokenize(candidate.body),
+    fencedCodeBlocks: codeBlocks(candidate.body),
+  };
+}
+
+/** Same judgement as `areIntraRunDuplicates`, without repeated body tokenization. */
+export function arePreparedIntraRunDuplicates(
+  a: PreparedIntraRunCandidate,
+  b: PreparedIntraRunCandidate,
+): boolean {
+  if (a.path !== b.path || !linesOverlap(a, b)) return false;
+  const sharesCode = [...a.fencedCodeBlocks].some((block) => b.fencedCodeBlocks.has(block));
+  if (sharesCode) return true;
+  const ordinary = tokenOverlap(a.contentTokens, b.contentTokens);
+  if (ordinary.shared >= MIN_SHARED_TOKENS && ordinary.score >= SIMILARITY_THRESHOLD) return true;
+  return (
+    a.startLine === b.startLine &&
+    a.endLine === b.endLine &&
+    ordinary.shared >= MIN_EXACT_INTERVAL_SHARED_TOKENS &&
+    ordinary.score >= EXACT_INTERVAL_SIMILARITY_THRESHOLD
+  );
 }

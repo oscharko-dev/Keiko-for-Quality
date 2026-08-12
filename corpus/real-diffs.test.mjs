@@ -202,19 +202,13 @@ test("buildEngineRuntimeConfig rejects a non-https OCR_LLM_URL", () => {
 // countRejectedSanitization — pure.
 // ---------------------------------------------------------------------------------------------
 
-test("countRejectedSanitization counts only publish.finding_rejected_sanitization records", () => {
-  const records = [
-    { code: "publish.finding_rejected_sanitization" },
-    { code: "publish.finding_published" },
-    { code: "publish.finding_rejected_sanitization" },
-    { code: "run.started" },
-  ];
-  assert.equal(countRejectedSanitization(records), 2);
+test("countRejectedSanitization reads only the final local-report count", () => {
+  assert.equal(countRejectedSanitization({ quality: { rejectedSanitization: 1 } }), 1);
 });
 
-test("countRejectedSanitization returns 0 for an empty or unrelated record list", () => {
-  assert.equal(countRejectedSanitization([]), 0);
-  assert.equal(countRejectedSanitization([{ code: "run.started" }]), 0);
+test("countRejectedSanitization returns 0 for a report without the final count", () => {
+  assert.equal(countRejectedSanitization({}), 0);
+  assert.equal(countRejectedSanitization({ quality: {} }), 0);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -406,7 +400,7 @@ test("buildLocalReviewRequest assembles the same field set src/cli.ts's prepareR
 // always a local stub below; it is never the real `performLocalReview`.
 // ---------------------------------------------------------------------------------------------
 
-test("reviewCommit builds a real request, calls the injected runLocalReview exactly once, and counts unpublishable from diagnostics", async () => {
+test("reviewCommit builds a real request, calls the injected runLocalReview exactly once, and counts final unpublishable findings", async () => {
   const dir = buildRepo();
   try {
     const head = headShaOf(dir);
@@ -418,11 +412,17 @@ test("reviewCommit builds a real request, calls the injected runLocalReview exac
     const runLocalReview = async (request, diagnostics) => {
       calls += 1;
       seenRequest = request;
-      // Two rejections and one unrelated record: only the two rejections may be counted.
+      // The provisional rejections are not publication losses. Only the final rollup counts.
       diagnostics.record("publish.finding_rejected_sanitization", {});
       diagnostics.record("publish.finding_published", {});
       diagnostics.record("publish.finding_rejected_sanitization", {});
       return baseReport({
+        quality: {
+          evidenceWithheld: 0,
+          rankedOut: 0,
+          verificationUndecided: 0,
+          rejectedSanitization: 1,
+        },
         findings: [
           {
             path: "src/a.ts",
@@ -448,7 +448,7 @@ test("reviewCommit builds a real request, calls the injected runLocalReview exac
     const { report, unpublishable } = await reviewCommit(deps, head);
 
     assert.equal(calls, 1);
-    assert.equal(unpublishable, 2);
+    assert.equal(unpublishable, 1);
     assert.equal(report.findings.length, 1);
     assert.equal(seenRequest.head, head);
     assert.equal(seenRequest.repositoryPath, dir);

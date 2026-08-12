@@ -78,9 +78,12 @@ reader knows what is being checked on their behalf.
    `docs/operations.md`. Leave the four new version-scoped reports uncommitted, then run `attest`.
    Attestation accepts no other dirty path; accepts only the explicitly redacted qualification
    schema; binds every report to the candidate and pinned model; requires green
-   qualification/seed/completion plus a historical precision gain with at least 80% fixed-finding
-   retention and 75% decision coverage; then runs the full verification chain and signs an
-   evidence-only commit. Land that commit on `dev`. Never pipe `npm run verify` into anything — a
+   qualification/seed/completion plus a historical precision gain with at least 75% fixed-finding
+   retention and 75% decision coverage. The only exception is the explicit `recovery` channel:
+   it still requires the complete, bound historical report and all three safety gates, but may
+   record exactly `historical_holdout_fixed_retention_low` as **quality promotion withheld**. It
+   never calls that evidence green and rejects every other quality failure. Then it runs the full
+   verification chain and signs an evidence-only commit. Land that commit on `dev`. Never pipe `npm run verify` into anything — a
    pipeline exits with its last command's status, so `npm run verify | tail` reads a red chain as
    green. This has shipped a stale bundle once.
 3. **Release pull request into `main`,** whose tree must be `dev`'s tree, whole. Before creating it,

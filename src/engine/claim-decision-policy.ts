@@ -79,6 +79,13 @@ export const PARALLEL_MAPPING_EVIDENCE_POLICY = [
   "SILENT when a shown contract or explicit translation table proves the cross-map intentional.",
 ].join(" ");
 
+export const HELPER_CONTROL_FLOW_EVIDENCE_POLICY = [
+  "Helper/import — SILENT: every helper exit shown returns required call argument or throws before",
+  "the consumer; never invent `undefined` after that throw. Imports do not execute exports; guarded",
+  "platform calls stay silent. REPORT: shown invalid return, fallthrough, or caught failure reaches",
+  "the consumer, or module evaluation runs unavailable platform work before the guard.",
+].join(" ");
+
 interface ClaimDecisionPolicyRow {
   readonly label: string;
   readonly text: string;
@@ -120,6 +127,11 @@ const POLICY_ROWS: readonly ClaimDecisionPolicyRow[] = [
       /(?:\b(?:action|dependency|digest|image|pin)\b|uses:\s|@[0-9a-f]{40}\b)/iu.test(evidence),
   },
   {
+    label: "helper-control-flow",
+    text: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
+    relevant: (evidence) => /\b(?:spawn|fallthrough|platform|win32)\b/iu.test(evidence),
+  },
+  {
     label: "boundary-omission",
     text: BOUNDARY_OMISSION_EVIDENCE_POLICY,
     relevant: (evidence) =>
@@ -143,7 +155,7 @@ const POLICY_ROWS: readonly ClaimDecisionPolicyRow[] = [
     label: "diagnostic-context",
     text: DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
     relevant: (evidence) =>
-      /\b(?:catch|console|diagnostic|error|log(?:ger)?|telemetry|throw)\b/iu.test(evidence),
+      /\b(?:catch|console|diagnostic|log(?:ger)?|telemetry)\b/iu.test(evidence),
   },
   {
     label: "trigger-guard",
@@ -184,4 +196,4 @@ export function renderExaminerClaimDecisionPolicy(visibleEvidence: string): stri
 export const EXAMINER_CLAIM_DECISION_POLICY = renderExaminerClaimDecisionPolicy("");
 
 /** Prevent a focused examiner fix from silently becoming another copy of the complete rule. */
-export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 4_800;
+export const EXAMINER_CLAIM_DECISION_POLICY_MAX_BYTES = 5_100;

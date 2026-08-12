@@ -18,7 +18,6 @@ export const STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS = Object.freeze([
 ]);
 
 const BUDGET_EXCEEDED_REASON = "settlement.incomplete.budget_exceeded";
-const REJECTED_SANITIZATION = "publish.finding_rejected_sanitization";
 const SUPPRESSED_INTRA_RUN = "publish.finding_suppressed_intra_run";
 
 /**
@@ -95,7 +94,10 @@ export function qualificationOutcomeFromLocalReview(report, diagnosticRecords) {
   const plan = {
     survivors: findings.map((finding) => ({ finding, sanitizedBody: finding.content })),
     counters: {
-      rejectedSanitization: occurrenceCount(diagnosticRecords, REJECTED_SANITIZATION),
+      // The report carries FINAL publication loss independently of the run's primary settlement
+      // reason. Provisional sanitizer diagnostics also describe hypotheses later refuted/ranked out
+      // and therefore cannot grade qualification honestly.
+      rejectedSanitization: report.quality?.rejectedSanitization ?? 0,
       suppressedIntraRun: occurrenceCount(diagnosticRecords, SUPPRESSED_INTRA_RUN),
     },
   };
