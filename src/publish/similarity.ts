@@ -129,6 +129,20 @@ const SIMILARITY_THRESHOLD = 0.5;
 const MIN_SHARED_TOKENS = 4;
 
 /**
+ * Narrow second band for two candidates from the SAME run at the EXACT same source interval.
+ *
+ * Keiko#3089 produced the same baseline-count claim twice at one line. The retellings shared eleven
+ * concrete tokens (including both field names and both changed numbers) but scored 0.458 because
+ * one version added a long speculative impact tail, just below the ordinary 0.50 band. Coordinate
+ * identity is stronger evidence than the ordinary two-line tolerance, so this band accepts the
+ * measured 0.43+ overlap only with ten shared content tokens. Nearby lines and cross-run matches
+ * retain the stricter existing threshold; a same-line sentence template with only a few shared
+ * words remains publish-biased.
+ */
+const EXACT_INTERVAL_SIMILARITY_THRESHOLD = 0.43;
+const MIN_EXACT_INTERVAL_SHARED_TOKENS = 10;
+
+/**
  * A second, deliberately narrow band for an ANCHORED thread that a contributor already answered
  * substantively and resolved.
  *
@@ -359,6 +373,12 @@ function similarByContent(a: string, b: string): boolean {
   if (shareCodeBlock(a, b)) return true;
   const { score, shared } = tokenOverlap(tokenize(a), tokenize(b));
   return shared >= MIN_SHARED_TOKENS && score >= SIMILARITY_THRESHOLD;
+}
+
+/** The high-absolute-evidence band reserved for exact intra-run coordinate identity. */
+function similarAtExactInterval(a: string, b: string): boolean {
+  const { score, shared } = tokenOverlap(tokenize(a), tokenize(b));
+  return shared >= MIN_EXACT_INTERVAL_SHARED_TOKENS && score >= EXACT_INTERVAL_SIMILARITY_THRESHOLD;
 }
 
 /**
@@ -678,5 +698,9 @@ function recurrenceBodiesMatch(candidateBody: string, existingBody: string): boo
  * suppression is worse than publishing an occasional duplicate.
  */
 export function areIntraRunDuplicates(a: CandidateForDedup, b: CandidateForDedup): boolean {
-  return a.path === b.path && linesOverlap(a, b) && similarByContent(a.body, b.body);
+  if (a.path !== b.path || !linesOverlap(a, b)) return false;
+  if (similarByContent(a.body, b.body)) return true;
+  return (
+    a.startLine === b.startLine && a.endLine === b.endLine && similarAtExactInterval(a.body, b.body)
+  );
 }

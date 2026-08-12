@@ -18,7 +18,7 @@ export const STAGED_QUALIFICATION_ENGINE_ENTRYPOINTS = Object.freeze([
 ]);
 
 const BUDGET_EXCEEDED_REASON = "settlement.incomplete.budget_exceeded";
-const REJECTED_SANITIZATION = "publish.finding_rejected_sanitization";
+const PUBLICATION_DEGRADED = "settlement.incomplete.publication_degraded";
 const SUPPRESSED_INTRA_RUN = "publish.finding_suppressed_intra_run";
 
 /**
@@ -45,6 +45,16 @@ export function qualificationEngineIdentity({ singleShot, binary, repositoryRoot
 
 function occurrenceCount(records, code) {
   return records.filter((record) => record.code === code).length;
+}
+
+/** Final publication loss only. The provisional planning pass also emits sanitizer diagnostics,
+ *  but Truth/Falsifier and PR-wide ranking may legitimately remove those raw hypotheses before a
+ *  reader was due to receive them. The settlement rollup is the authoritative final boundary. */
+function finalRejectedSanitization(report, records) {
+  if (report.reason !== PUBLICATION_DEGRADED) return 0;
+  const record = records.findLast((candidate) => candidate.code === PUBLICATION_DEGRADED);
+  const count = record?.counts?.rejected_sanitization;
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
 }
 
 function placeholderPaths(count) {
@@ -95,7 +105,7 @@ export function qualificationOutcomeFromLocalReview(report, diagnosticRecords) {
   const plan = {
     survivors: findings.map((finding) => ({ finding, sanitizedBody: finding.content })),
     counters: {
-      rejectedSanitization: occurrenceCount(diagnosticRecords, REJECTED_SANITIZATION),
+      rejectedSanitization: finalRejectedSanitization(report, diagnosticRecords),
       suppressedIntraRun: occurrenceCount(diagnosticRecords, SUPPRESSED_INTRA_RUN),
     },
   };

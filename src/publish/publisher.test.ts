@@ -917,6 +917,27 @@ describe("intra-run deduplication (v0.12.0)", () => {
     expect(api.created).toHaveLength(1);
   });
 
+  it("publishes only one of the two exact-line Keiko#3089 baseline retellings", async () => {
+    const first = variant(
+      "Adjust uncoveredFiles to match new files count. When files reduced from 421 to 415 but " +
+        "uncoveredFiles remains 3, coverage metrics become inconsistent, inflating reported " +
+        "coverage percentage. CI coverage checks may report false positives, hiding uncovered files.",
+      { startLine: 261, endLine: 261, category: "test" },
+    );
+    const second = variant(
+      "Adjust uncoveredFiles after reducing files count. When files changed from 421 to 415 but " +
+        "uncoveredFiles stayed 3, package-coverage-baseline.json now has inconsistent file metrics, " +
+        "potentially referencing non-existent files. CI coverage validation may report inflated " +
+        "coverage or break downstream scripts that assume consistency.",
+      { startLine: 261, endLine: 261, category: "bug" },
+    );
+
+    const outcome = await publishFindings(context, [first, second], diagnostics);
+
+    expect(outcome).toMatchObject({ published: 1, suppressed: 1, suppressedIntraRun: 1 });
+    expect(api.created).toHaveLength(1);
+  });
+
   /**
    * The bug this pins: clustering used to compare a new candidate only against a cluster's CURRENT
    * representative, not every member. Three candidates arriving in a chain — A~B share vocabulary,

@@ -1,6 +1,5 @@
 import { FINDING_SEVERITIES } from "../engine/classify.js";
 import type { EngineFinding } from "../engine/result.js";
-import type { PlannedFinding } from "./publisher.js";
 
 /**
  * Maximum model-authored findings that one pull request may publish in one run.
@@ -16,17 +15,24 @@ export const MAX_FRESH_MODEL_FINDINGS_PER_PR = 8;
 /** Bounded first-stage shortlist for evidence verification, twice the publication ceiling. */
 export const MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR = MAX_FRESH_MODEL_FINDINGS_PER_PR * 2;
 
-export interface PrWideSelection {
+/** The only shape ranking needs. Publication candidates carry a sanitized body as well; a raw
+ *  sanitizer rejection deliberately does not. Keeping selection generic lets the verification
+ *  shortlist judge both without pretending rejected prose is publishable. */
+export interface FindingCandidate {
+  readonly finding: EngineFinding;
+}
+
+export interface PrWideSelection<Candidate extends FindingCandidate> {
   /** Survivors in their original order, with audited/repaired replacements applied. */
-  readonly kept: readonly PlannedFinding[];
+  readonly kept: readonly Candidate[];
   /** Originals removed by either the total or model-authored cap, in input order and identity. */
   readonly rankedOutOriginals: readonly EngineFinding[];
   readonly rankedOutCount: number;
 }
 
-interface SelectionEntry {
+interface SelectionEntry<Candidate extends FindingCandidate> {
   readonly original: EngineFinding;
-  readonly effective: PlannedFinding;
+  readonly effective: Candidate;
   readonly effectiveFinding: EngineFinding;
   readonly index: number;
   readonly modelAuthored: boolean;
@@ -47,12 +53,12 @@ interface SelectionEntry {
  * then follow input order: severity decides membership, never publication order. An equal-severity
  * tie is therefore resolved by the earliest input position and stays deterministic.
  */
-export function selectPrWideFindings(
-  survivors: readonly PlannedFinding[],
+export function selectPrWideFindings<Candidate extends FindingCandidate>(
+  survivors: readonly Candidate[],
   modelOriginals: ReadonlySet<EngineFinding>,
   maxFindings: number,
   replacements: ReadonlyMap<EngineFinding, EngineFinding> = new Map(),
-): PrWideSelection {
+): PrWideSelection<Candidate> {
   return selectWithLimits(
     survivors,
     modelOriginals,
@@ -63,11 +69,11 @@ export function selectPrWideFindings(
 }
 
 /** Shortlists a total-bounded cohort before verification, giving deterministic findings priority. */
-export function selectVerificationCandidates(
-  survivors: readonly PlannedFinding[],
+export function selectVerificationCandidates<Candidate extends FindingCandidate>(
+  survivors: readonly Candidate[],
   modelOriginals: ReadonlySet<EngineFinding>,
   maxFindings: number,
-): PrWideSelection {
+): PrWideSelection<Candidate> {
   return selectWithLimits(
     survivors,
     modelOriginals,
@@ -76,19 +82,20 @@ export function selectVerificationCandidates(
   );
 }
 
-function selectWithLimits(
-  survivors: readonly PlannedFinding[],
+function selectWithLimits<Candidate extends FindingCandidate>(
+  survivors: readonly Candidate[],
   modelOriginals: ReadonlySet<EngineFinding>,
   totalLimit: number,
   modelLimit: number,
   replacements: ReadonlyMap<EngineFinding, EngineFinding> = new Map(),
-): PrWideSelection {
-  const entries: readonly SelectionEntry[] = survivors.map((survivor, index) => {
+): PrWideSelection<Candidate> {
+  const entries: readonly SelectionEntry<Candidate>[] = survivors.map((survivor, index) => {
     const original = survivor.finding;
     const replacement = replacements.get(original);
     return {
       original,
-      effective: replacement === undefined ? survivor : { ...survivor, finding: replacement },
+      effective:
+        replacement === undefined ? survivor : ({ ...survivor, finding: replacement } as Candidate),
       effectiveFinding: replacement ?? original,
       index,
       modelAuthored: modelOriginals.has(original),
@@ -105,7 +112,10 @@ function selectWithLimits(
   return partitionSelection(entries, selectedDeterministicIndexes, selectedModelIndexes);
 }
 
-function selectedModels(entries: readonly SelectionEntry[], limit: number): ReadonlySet<number> {
+function selectedModels<Candidate extends FindingCandidate>(
+  entries: readonly SelectionEntry<Candidate>[],
+  limit: number,
+): ReadonlySet<number> {
   return new Set(
     entries
       .filter((entry) => entry.modelAuthored)
@@ -120,12 +130,12 @@ function selectedModels(entries: readonly SelectionEntry[], limit: number): Read
   );
 }
 
-function partitionSelection(
-  entries: readonly SelectionEntry[],
+function partitionSelection<Candidate extends FindingCandidate>(
+  entries: readonly SelectionEntry<Candidate>[],
   deterministicIndexes: ReadonlySet<number>,
   modelIndexes: ReadonlySet<number>,
-): PrWideSelection {
-  const kept: PlannedFinding[] = [];
+): PrWideSelection<Candidate> {
+  const kept: Candidate[] = [];
   const rankedOutOriginals: EngineFinding[] = [];
   for (const entry of entries) {
     if (

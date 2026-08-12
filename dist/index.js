@@ -3446,6 +3446,10 @@ var CATCH_ALL_RULE = [
   `- **sensitive values reaching output sinks** \u2014 ${SENSITIVE_OUTPUT_EVIDENCE_POLICY}`,
   `- **diagnostic context in error paths** \u2014 ${DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY}`,
   `- **helper exits and module evaluation** \u2014 ${HELPER_CONTROL_FLOW_EVIDENCE_POLICY}`,
+  "- **before claiming two counters, baseline fields, or snapshot values must change together** \u2014",
+  "  trace the schema, producer, or consumer that establishes that dependency. Adjacency, similar",
+  "  names, and a changed total are not an invariant; independently computed counts may correctly",
+  "  stay unchanged when a neighbouring total changes.",
   "- **before stating how an encoding, format, or algorithm behaves** \u2014 verify it against this",
   "  runtime rather than general recollection. A confidently wrong claim about padding, rounding,",
   "  or termination can recommend a fix that weakens correct code instead of improving it.",
@@ -7949,6 +7953,8 @@ var LINE_TOLERANCE = 2;
 var LINE_DRIFT_TOLERANCE = 40;
 var SIMILARITY_THRESHOLD = 0.5;
 var MIN_SHARED_TOKENS = 4;
+var EXACT_INTERVAL_SIMILARITY_THRESHOLD = 0.43;
+var MIN_EXACT_INTERVAL_SHARED_TOKENS = 10;
 var DISPOSITION_SIMILARITY_THRESHOLD = 0.43;
 var MIN_DISPOSITION_SHARED_TOKENS = 14;
 var RECURRENCE_THRESHOLD = 0.7;
@@ -8039,6 +8045,10 @@ function similarByContent(a, b) {
   const { score, shared } = tokenOverlap(tokenize(a), tokenize(b));
   return shared >= MIN_SHARED_TOKENS && score >= SIMILARITY_THRESHOLD;
 }
+function similarAtExactInterval(a, b) {
+  const { score, shared } = tokenOverlap(tokenize(a), tokenize(b));
+  return shared >= MIN_EXACT_INTERVAL_SHARED_TOKENS && score >= EXACT_INTERVAL_SIMILARITY_THRESHOLD;
+}
 function bodiesAreSimilar(candidateBody, existingBody) {
   return similarByContent(candidateBody, stripComposedArtifacts(existingBody));
 }
@@ -8104,7 +8114,9 @@ function recurrenceBodiesMatch(candidateBody, existingBody) {
   return shared >= MIN_RECURRENCE_SHARED_TOKENS && score >= RECURRENCE_THRESHOLD;
 }
 function areIntraRunDuplicates(a, b) {
-  return a.path === b.path && linesOverlap(a, b) && similarByContent(a.body, b.body);
+  if (a.path !== b.path || !linesOverlap(a, b)) return false;
+  if (similarByContent(a.body, b.body)) return true;
+  return a.startLine === b.startLine && a.endLine === b.endLine && similarAtExactInterval(a.body, b.body);
 }
 
 // src/publish/publisher.ts
@@ -8347,9 +8359,11 @@ async function planPublication(context, findings, diagnostics, prefetch) {
   const resolvedPrefetch = prefetch ?? await prefetchExistingConversations(context);
   const counters = emptyCounters();
   const sanitized = [];
+  const rejectedSanitizationCandidates = [];
   for (const finding of findings) {
     const candidate = sanitizeOne(context, finding, counters, diagnostics);
-    if (candidate !== void 0) sanitized.push(candidate);
+    if (candidate === void 0) rejectedSanitizationCandidates.push(finding);
+    else sanitized.push(candidate);
   }
   const { representatives, suppressed: intraRunDuplicates } = clusterIntraRunDuplicates(sanitized);
   counters.suppressed += intraRunDuplicates.length;
@@ -8364,6 +8378,7 @@ async function planPublication(context, findings, diagnostics, prefetch) {
   }
   return {
     survivors,
+    rejectedSanitizationCandidates,
     prefetch: resolvedPrefetch,
     counters: {
       suppressed: counters.suppressed,
@@ -12474,6 +12489,10 @@ var VERIFICATION_CLAIM_DECISION_POLICY = [
   "An existing guard in one caller does not make a missing invariant at an exported or shared",
   "boundary already handled. Use already_handled only when shown evidence proves the guard",
   "dominates every relevant entry to that boundary.",
+  "Two nearby counters, baseline fields, or snapshot values do not have to move together merely",
+  "because one changed. Confirm such a dependency only when cited schema, producer, or consumer",
+  "evidence proves the invariant. Adjacency, similar names, and a changed total are not proof; if",
+  "the shown computation counts the fields independently, the dependency claim is contradicted.",
   "When a user-input parser runs inside a try block and its caught error is passed directly to an",
   "error, diagnostic, logging, or telemetry sink, that shown catch-to-sink flow is sufficient",
   "disclosure evidence. The catch binding used as the sink argument is the claimed flow: do not",
@@ -15630,7 +15649,10 @@ function addPlanCounters(initial, final, evidenceSuppressed, rankedSuppressed, v
     suppressedRanked: rankedSuppressed,
     verificationUndecided,
     suppressedRecurrence: (initial.suppressedRecurrence ?? 0) + (final.suppressedRecurrence ?? 0),
-    rejectedSanitization: initial.rejectedSanitization + final.rejectedSanitization,
+    // The initial pass sees raw hypotheses before truth and PR-wide ranking. A malformed candidate
+    // that those stages refute or rank out was never a publication loss; only the selected final
+    // cohort can degrade completion when it remains unpublishable.
+    rejectedSanitization: final.rejectedSanitization,
     // Only the final cohort reaches a reader. Counting the initial pass too would double-count
     // every unchanged survivor merely because quality replacements require a second full plan.
     neutralized: final.neutralized ?? 0
@@ -15657,10 +15679,10 @@ async function auditSubstantiatedFresh(run2, fresh, substantiated) {
   const survivors = fresh.filter((survivor) => !substantiated.dropped.has(survivor.finding));
   return await auditEffectiveFreshSurvivors(run2, survivors, substantiated.repaired);
 }
-async function runPublicationQualityStages(run2, context, batch, initialPlan) {
+async function runPublicationQualityStages(run2, context, batch, candidates) {
   requireReviewTime(run2.deadline);
   const verification = selectVerificationCandidates(
-    initialPlan.survivors,
+    candidates,
     batch.verify,
     run2.request.config.maxFindings
   );
@@ -15684,6 +15706,7 @@ function finalizeAuditedPlan(inputs) {
   const {
     batch,
     initialPlan,
+    qualityCandidates,
     finalPlan,
     verification,
     selected,
@@ -15694,7 +15717,7 @@ function finalizeAuditedPlan(inputs) {
   const rankedOut = [...verification.rankedOutOriginals, ...selected.rankedOutOriginals];
   const uncacheablePaths = uncacheableModelPaths(
     batch.verify,
-    initialPlan.survivors,
+    qualityCandidates,
     substantiated.dropped,
     rankedOut,
     originalsInPlan(selected.kept, originals),
@@ -15714,15 +15737,25 @@ function finalizeAuditedPlan(inputs) {
     uncacheablePaths
   };
 }
+function candidatesForPublicationQuality(batch, plan) {
+  const survivors = new Map(plan.survivors.map((survivor) => [survivor.finding, survivor]));
+  const rejected = new Set(plan.rejectedSanitizationCandidates);
+  return batch.findings.flatMap((finding) => {
+    const survivor = survivors.get(finding);
+    if (survivor !== void 0) return [survivor];
+    return rejected.has(finding) ? [{ finding }] : [];
+  });
+}
 async function planAndAudit(run2, context, batch, prefetch) {
   requireReviewTime(run2.deadline);
   const initialPlan = await planPublication(context, batch.findings, run2.diagnostics, prefetch);
   recordPlannedCandidates(run2.diagnostics, batch, initialPlan);
+  const qualityCandidates = candidatesForPublicationQuality(batch, initialPlan);
   const { verification, substantiated, auditedByOriginal } = await runPublicationQualityStages(
     run2,
     context,
     batch,
-    initialPlan
+    qualityCandidates
   );
   const combined = qualityReplacements(substantiated, auditedByOriginal);
   const substantiatedSurvivors = verification.kept.filter(
@@ -15746,6 +15779,7 @@ async function planAndAudit(run2, context, batch, prefetch) {
   return finalizeAuditedPlan({
     batch,
     initialPlan,
+    qualityCandidates,
     finalPlan,
     verification,
     selected,

@@ -116,6 +116,8 @@ import {
   MAX_FRESH_VERIFICATION_CANDIDATES_PER_PR,
   selectPrWideFindings,
   selectVerificationCandidates,
+  type FindingCandidate,
+  type PrWideSelection,
 } from "./publish/pr-wide-selection.js";
 import {
   collectInitialRepositoryContext,
@@ -671,9 +673,9 @@ function recordPlannedCandidates(
 
 function recordRankedCandidates(
   diagnostics: Diagnostics,
-  verification: ReturnType<typeof selectVerificationCandidates>,
+  verification: PrWideSelection<FindingCandidate>,
   batch: FindingBatch,
-  selected: ReturnType<typeof selectPrWideFindings>,
+  selected: PrWideSelection<FindingCandidate>,
   plan: PublicationPlan,
 ): void {
   diagnostics.record("publish.candidates.ranked", {
@@ -2843,7 +2845,7 @@ const NO_AUDITED: ReadonlyMap<EngineFinding, EngineFinding> = new Map();
  */
 async function auditFreshSurvivors(
   run: PipelineRun,
-  fresh: readonly PlannedFinding[],
+  fresh: readonly FindingCandidate[],
 ): Promise<ReadonlyMap<EngineFinding, EngineFinding>> {
   if (fresh.length === 0) return NO_AUDITED;
   requireReviewTime(run.deadline);
@@ -2900,7 +2902,7 @@ async function auditFreshSurvivors(
 /** Audits verified prose and maps the classification verdict back to the engine original. */
 async function auditEffectiveFreshSurvivors(
   run: PipelineRun,
-  fresh: readonly PlannedFinding[],
+  fresh: readonly FindingCandidate[],
   repaired: ReadonlyMap<EngineFinding, EngineFinding>,
 ): Promise<ReadonlyMap<EngineFinding, EngineFinding>> {
   const effective = fresh.map((survivor) => {
@@ -3122,7 +3124,7 @@ async function readRenderedRepositorySources(
 async function evidenceForSurvivors(
   run: PipelineRun,
   context: PublishContext,
-  modelFindings: readonly PlannedFinding[],
+  modelFindings: readonly FindingCandidate[],
 ): Promise<ReadonlyMap<EngineFinding, PreparedFindingEvidence>> {
   const cache: BlobTextCache = new Map();
   const ctx = gitContext(run.request);
@@ -3345,7 +3347,7 @@ function recordDeterministicRefutations(diagnostics: Diagnostics, counts: Refuta
 }
 
 function judgeableFindings(
-  modelFindings: readonly PlannedFinding[],
+  modelFindings: readonly FindingCandidate[],
   evidence: ReadonlyMap<EngineFinding, PreparedFindingEvidence>,
 ): readonly JudgeableOriginal[] {
   return modelFindings.map((survivor) => {
@@ -3392,7 +3394,7 @@ function judgeableFindings(
 async function substantiateModelSurvivors(
   run: PipelineRun,
   context: PublishContext,
-  modelFindings: readonly PlannedFinding[],
+  modelFindings: readonly FindingCandidate[],
 ): Promise<SubstantiationResult> {
   if (modelFindings.length === 0) return NO_SUBSTANTIATION;
   requireReviewTime(run.deadline);
@@ -3493,7 +3495,7 @@ interface AuditedPublication {
  */
 function uncacheableModelPaths(
   modelOriginals: ReadonlySet<EngineFinding>,
-  initiallyPlanned: readonly PlannedFinding[],
+  initiallyPlanned: readonly FindingCandidate[],
   dropped: ReadonlySet<EngineFinding>,
   rankedOut: readonly EngineFinding[],
   selectedOriginals: ReadonlySet<EngineFinding>,
@@ -3531,7 +3533,7 @@ function qualityReplacements(
 }
 
 function originalByEffectiveFinding(
-  survivors: readonly PlannedFinding[],
+  survivors: readonly FindingCandidate[],
   replacements: ReadonlyMap<EngineFinding, EngineFinding>,
 ): ReadonlyMap<EngineFinding, EngineFinding> {
   return new Map(
@@ -3543,7 +3545,7 @@ function originalByEffectiveFinding(
 }
 
 function originalsInPlan(
-  survivors: readonly PlannedFinding[],
+  survivors: readonly FindingCandidate[],
   originals: ReadonlyMap<EngineFinding, EngineFinding>,
 ): ReadonlySet<EngineFinding> {
   return new Set(survivors.map((survivor) => originals.get(survivor.finding) ?? survivor.finding));
@@ -3566,7 +3568,10 @@ function addPlanCounters(
     suppressedRanked: rankedSuppressed,
     verificationUndecided,
     suppressedRecurrence: (initial.suppressedRecurrence ?? 0) + (final.suppressedRecurrence ?? 0),
-    rejectedSanitization: initial.rejectedSanitization + final.rejectedSanitization,
+    // The initial pass sees raw hypotheses before truth and PR-wide ranking. A malformed candidate
+    // that those stages refute or rank out was never a publication loss; only the selected final
+    // cohort can degrade completion when it remains unpublishable.
+    rejectedSanitization: final.rejectedSanitization,
     // Only the final cohort reaches a reader. Counting the initial pass too would double-count
     // every unchanged survivor merely because quality replacements require a second full plan.
     neutralized: final.neutralized ?? 0,
@@ -3612,7 +3617,7 @@ function qualityPublicationPlan(
 
 async function auditSubstantiatedFresh(
   run: PipelineRun,
-  fresh: readonly PlannedFinding[],
+  fresh: readonly FindingCandidate[],
   substantiated: SubstantiationResult,
 ): Promise<ReadonlyMap<EngineFinding, EngineFinding>> {
   const survivors = fresh.filter((survivor) => !substantiated.dropped.has(survivor.finding));
@@ -3624,15 +3629,15 @@ async function runPublicationQualityStages(
   run: PipelineRun,
   context: PublishContext,
   batch: FindingBatch,
-  initialPlan: PublicationPlan,
+  candidates: readonly FindingCandidate[],
 ): Promise<{
-  readonly verification: ReturnType<typeof selectVerificationCandidates>;
+  readonly verification: PrWideSelection<FindingCandidate>;
   readonly substantiated: SubstantiationResult;
   readonly auditedByOriginal: ReadonlyMap<EngineFinding, EngineFinding>;
 }> {
   requireReviewTime(run.deadline);
   const verification = selectVerificationCandidates(
-    initialPlan.survivors,
+    candidates,
     batch.verify,
     run.request.config.maxFindings,
   );
@@ -3647,7 +3652,7 @@ async function runPublicationQualityStages(
 
 function replanSelectedFindings(
   context: PublishContext,
-  selected: readonly PlannedFinding[],
+  selected: readonly FindingCandidate[],
   diagnostics: Diagnostics,
   prefetch: ExistingConversationsPrefetch,
 ): Promise<PublicationPlan> {
@@ -3662,9 +3667,10 @@ function replanSelectedFindings(
 interface FinalizeAuditedPlanInputs {
   readonly batch: FindingBatch;
   readonly initialPlan: PublicationPlan;
+  readonly qualityCandidates: readonly FindingCandidate[];
   readonly finalPlan: PublicationPlan;
-  readonly verification: ReturnType<typeof selectVerificationCandidates>;
-  readonly selected: ReturnType<typeof selectPrWideFindings>;
+  readonly verification: PrWideSelection<FindingCandidate>;
+  readonly selected: PrWideSelection<FindingCandidate>;
   readonly substantiated: SubstantiationResult;
   readonly combined: ReadonlyMap<EngineFinding, EngineFinding>;
   readonly originals: ReadonlyMap<EngineFinding, EngineFinding>;
@@ -3674,6 +3680,7 @@ function finalizeAuditedPlan(inputs: FinalizeAuditedPlanInputs): AuditedPlan {
   const {
     batch,
     initialPlan,
+    qualityCandidates,
     finalPlan,
     verification,
     selected,
@@ -3684,7 +3691,7 @@ function finalizeAuditedPlan(inputs: FinalizeAuditedPlanInputs): AuditedPlan {
   const rankedOut = [...verification.rankedOutOriginals, ...selected.rankedOutOriginals];
   const uncacheablePaths = uncacheableModelPaths(
     batch.verify,
-    initialPlan.survivors,
+    qualityCandidates,
     substantiated.dropped,
     rankedOut,
     originalsInPlan(selected.kept, originals),
@@ -3703,6 +3710,23 @@ function finalizeAuditedPlan(inputs: FinalizeAuditedPlanInputs): AuditedPlan {
     droppedOriginals: droppedQualityOriginals(substantiated, rankedOut),
     uncacheablePaths,
   };
+}
+
+/** Restores original engine order across the two initial planning outcomes that remain eligible for
+ *  quality work: publishable dedup survivors and raw sanitizer rejections. Cross-run/intra-run
+ *  duplicates stay suppressed. Rejected prose carries only its finding identity; it cannot reach a
+ *  publication boundary until `replanSelectedFindings` sanitizes the verified final cohort again. */
+function candidatesForPublicationQuality(
+  batch: FindingBatch,
+  plan: PublicationPlan,
+): readonly FindingCandidate[] {
+  const survivors = new Map(plan.survivors.map((survivor) => [survivor.finding, survivor]));
+  const rejected = new Set(plan.rejectedSanitizationCandidates);
+  return batch.findings.flatMap((finding) => {
+    const survivor = survivors.get(finding);
+    if (survivor !== undefined) return [survivor];
+    return rejected.has(finding) ? [{ finding }] : [];
+  });
 }
 
 /**
@@ -3726,13 +3750,14 @@ async function planAndAudit(
   requireReviewTime(run.deadline);
   const initialPlan = await planPublication(context, batch.findings, run.diagnostics, prefetch);
   recordPlannedCandidates(run.diagnostics, batch, initialPlan);
+  const qualityCandidates = candidatesForPublicationQuality(batch, initialPlan);
   // Substantiation runs FIRST and the order is load-bearing: it can drop a survivor, and auditing a
   // finding this stage is about to remove spends 1-3 model calls on an opinion nobody will read.
   const { verification, substantiated, auditedByOriginal } = await runPublicationQualityStages(
     run,
     context,
     batch,
-    initialPlan,
+    qualityCandidates,
   );
   const combined = qualityReplacements(substantiated, auditedByOriginal);
   const substantiatedSurvivors = verification.kept.filter(
@@ -3756,6 +3781,7 @@ async function planAndAudit(
   return finalizeAuditedPlan({
     batch,
     initialPlan,
+    qualityCandidates,
     finalPlan,
     verification,
     selected,
@@ -4610,6 +4636,8 @@ async function localFindings(
   readonly evidenceWithheld: number;
   readonly rankedOut: number;
   readonly verificationUndecided: number;
+  /** Selected findings that remained unsafe at the final publication boundary. */
+  readonly rejectedSanitization: number;
 }> {
   if (batch.findings.length === 0) {
     return {
@@ -4620,6 +4648,7 @@ async function localFindings(
       evidenceWithheld: 0,
       rankedOut: 0,
       verificationUndecided: 0,
+      rejectedSanitization: 0,
     };
   }
   const context = localPublishContext(run.request, inventory);
@@ -4633,6 +4662,7 @@ async function localFindings(
     evidenceWithheld: plan.counters.suppressedEvidence ?? 0,
     rankedOut: plan.counters.suppressedRanked ?? 0,
     verificationUndecided: plan.counters.verificationUndecided ?? 0,
+    rejectedSanitization: plan.counters.rejectedSanitization,
   };
 }
 
@@ -4800,6 +4830,7 @@ function verificationIncompleteLocalReport(
       verification_undecided: reported.verificationUndecided,
       suppressed_evidence: reported.evidenceWithheld,
       suppressed_ranked: reported.rankedOut,
+      rejected_sanitization: reported.rejectedSanitization,
     },
   });
   return {
@@ -4899,7 +4930,7 @@ async function completeLocalReport(
     }
     throw error;
   }
-  if (reported.verificationUndecided > 0) {
+  if (reported.verificationUndecided > 0 || reported.rejectedSanitization > 0) {
     return verificationIncompleteLocalReport(run, inventory, memo, reported);
   }
   // Identical admission call to the action path's: only a complete outcome reaches this function,

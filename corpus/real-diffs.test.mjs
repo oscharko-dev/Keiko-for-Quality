@@ -202,14 +202,18 @@ test("buildEngineRuntimeConfig rejects a non-https OCR_LLM_URL", () => {
 // countRejectedSanitization — pure.
 // ---------------------------------------------------------------------------------------------
 
-test("countRejectedSanitization counts only publish.finding_rejected_sanitization records", () => {
+test("countRejectedSanitization reads only the final settlement rollup", () => {
   const records = [
     { code: "publish.finding_rejected_sanitization" },
     { code: "publish.finding_published" },
     { code: "publish.finding_rejected_sanitization" },
     { code: "run.started" },
+    {
+      code: "settlement.incomplete.publication_degraded",
+      counts: { rejected_sanitization: 1 },
+    },
   ];
-  assert.equal(countRejectedSanitization(records), 2);
+  assert.equal(countRejectedSanitization(records), 1);
 });
 
 test("countRejectedSanitization returns 0 for an empty or unrelated record list", () => {
@@ -406,7 +410,7 @@ test("buildLocalReviewRequest assembles the same field set src/cli.ts's prepareR
 // always a local stub below; it is never the real `performLocalReview`.
 // ---------------------------------------------------------------------------------------------
 
-test("reviewCommit builds a real request, calls the injected runLocalReview exactly once, and counts unpublishable from diagnostics", async () => {
+test("reviewCommit builds a real request, calls the injected runLocalReview exactly once, and counts final unpublishable findings", async () => {
   const dir = buildRepo();
   try {
     const head = headShaOf(dir);
@@ -418,10 +422,13 @@ test("reviewCommit builds a real request, calls the injected runLocalReview exac
     const runLocalReview = async (request, diagnostics) => {
       calls += 1;
       seenRequest = request;
-      // Two rejections and one unrelated record: only the two rejections may be counted.
+      // The provisional rejections are not publication losses. Only the final rollup counts.
       diagnostics.record("publish.finding_rejected_sanitization", {});
       diagnostics.record("publish.finding_published", {});
       diagnostics.record("publish.finding_rejected_sanitization", {});
+      diagnostics.record("settlement.incomplete.publication_degraded", {
+        counts: { rejected_sanitization: 1 },
+      });
       return baseReport({
         findings: [
           {
@@ -448,7 +455,7 @@ test("reviewCommit builds a real request, calls the injected runLocalReview exac
     const { report, unpublishable } = await reviewCommit(deps, head);
 
     assert.equal(calls, 1);
-    assert.equal(unpublishable, 2);
+    assert.equal(unpublishable, 1);
     assert.equal(report.findings.length, 1);
     assert.equal(seenRequest.head, head);
     assert.equal(seenRequest.repositoryPath, dir);

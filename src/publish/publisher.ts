@@ -483,6 +483,11 @@ export interface PlanCounters {
  *  (so execution can re-check against it), and the tallies for everything that will not publish. */
 export interface PublicationPlan {
   readonly survivors: readonly PlannedFinding[];
+  /** Raw candidates the publication sanitizer refused. They stay internal and are never composed,
+   *  fingerprinted, or posted. `review.ts` carries them only through bounded truth/ranking so a
+   *  malformed low-ranked hypothesis cannot degrade a completed review, while a verified finding
+   *  that still cannot be made publishable remains fail-closed. */
+  readonly rejectedSanitizationCandidates: readonly EngineFinding[];
   readonly prefetch: ExistingConversationsPrefetch;
   readonly counters: PlanCounters;
 }
@@ -758,9 +763,11 @@ export async function planPublication(
 
   // Stage 1: sanitize every finding, in input order — independent of every other finding.
   const sanitized: SanitizedCandidate[] = [];
+  const rejectedSanitizationCandidates: EngineFinding[] = [];
   for (const finding of findings) {
     const candidate = sanitizeOne(context, finding, counters, diagnostics);
-    if (candidate !== undefined) sanitized.push(candidate);
+    if (candidate === undefined) rejectedSanitizationCandidates.push(finding);
+    else sanitized.push(candidate);
   }
 
   // Stage 2: intra-run clustering, BETWEEN sanitization and the cross-run checks — see
@@ -784,6 +791,7 @@ export async function planPublication(
 
   return {
     survivors,
+    rejectedSanitizationCandidates,
     prefetch: resolvedPrefetch,
     counters: {
       suppressed: counters.suppressed,

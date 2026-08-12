@@ -71,8 +71,11 @@ reviewed repository can never shrink the review.
 
 **Published content is validated, not repaired.** Bodies carrying control characters, bidirectional
 overrides, zero-width characters, HTML, images, links, mentions, suggestion blocks, or
-credential-shaped strings are rejected. A rejected finding makes the run incomplete — visible and
-blocking — rather than being silently rewritten into something no one authored.
+credential-shaped strings can never reach publication. Raw hypotheses that fail this boundary still
+enter the same bounded Truth/Falsifier and pull-request-wide ranking stages as safe hypotheses; a
+refuted or ranked-out hypothesis is not a lost review result. If a selected, independently verified
+finding remains unsafe at the final publication boundary, the run is incomplete — visible and
+blocking — rather than silently rewriting or discarding something a reader should have received.
 
 **Suggestion blocks are prohibited.** Model output produced while reading attacker-influenced input
 must never become one-click-applicable code.

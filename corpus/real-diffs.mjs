@@ -67,8 +67,8 @@ const { parseGuidelinePaths } = await import("../src/config/guidelines.ts");
  * content — which is how this script found the Windows-null-device finding this header comment used
  * to cite as its own headline discovery. `planPublication` (like production) never surfaces a
  * rejected finding's body or reason outside the sanitizer itself; only a COUNT is observable, via
- * the same `publish.finding_rejected_sanitization` diagnostic the shared publisher emits for every
- * rejection (see `PUBLISH_FINDING_REJECTED_SANITIZATION` below). `corpus/run.mjs`'s own
+ * the final degraded-publication settlement's count after Truth/Falsifier and PR-wide ranking
+ * (see `PUBLICATION_DEGRADED` below). `corpus/run.mjs`'s own
  * `rejectedSanitization` counter has carried this exact limitation for as long as it has existed
  * ("there is nothing honest to put in each element beyond a placeholder") — this script now matches
  * that, rather than being the one place in this repository that could still see through the
@@ -264,15 +264,15 @@ export async function buildLocalReviewRequest({ ctx, repo, commit, profile, conf
 // own `MainDeps.runLocalReview` injection.
 // -------------------------------------------------------------------------------------------------
 
-/** The diagnostic `planPublication` (`src/publish/publisher.ts`) records once per finding a
- *  sanitizer rejects — the only signal left, once `performLocalReview` is the caller, for "the
- *  reviewer said something the publisher would have thrown away": the shared pipeline, like
- *  production, never surfaces the rejected finding's own body or reason past the sanitizer itself.
- *  See this file's header comment for what that replaces. */
-const PUBLISH_FINDING_REJECTED_SANITIZATION = "publish.finding_rejected_sanitization";
+/** The final degraded-publication settlement carries the selected sanitizer losses after
+ *  Truth/Falsifier and PR-wide ranking. Earlier sanitizer diagnostics describe raw hypotheses and
+ *  must not be promoted into publication failures when quality work legitimately removes them. */
+const PUBLICATION_DEGRADED = "settlement.incomplete.publication_degraded";
 
 export function countRejectedSanitization(records) {
-  return records.filter((record) => record.code === PUBLISH_FINDING_REJECTED_SANITIZATION).length;
+  const record = records.findLast((candidate) => candidate.code === PUBLICATION_DEGRADED);
+  const count = record?.counts?.rejected_sanitization;
+  return Number.isSafeInteger(count) && count >= 0 ? count : 0;
 }
 
 /**

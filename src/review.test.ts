@@ -3368,6 +3368,108 @@ describe("performReview: review-cache memoization end to end", () => {
       return { impl, callCount: () => calls };
     }
 
+    it("does not let two low-ranked HTML hypotheses destroy a 136-candidate completed review", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const safe = Array.from({ length: 134 }, (_, index) => ({
+        path: "src/a.ts",
+        content: withChallengeProbe(
+          `When alpha${String(index)} occurs, beta${String(index)} corrupts gamma${String(index)}, ` +
+            `delta${String(index)}, epsilon${String(index)}, zeta${String(index)}, eta${String(index)}, ` +
+            `theta${String(index)}, iota${String(index)}, kappa${String(index)}, lambda${String(index)}, ` +
+            `mu${String(index)}, nu${String(index)}, xi${String(index)}, omicron${String(index)}, ` +
+            `pi${String(index)}, rho${String(index)}, and sigma${String(index)}.`,
+        ),
+        category: "bug",
+        severity: "high",
+      }));
+      const rejected = [
+        {
+          path: "src/a.ts",
+          content: "When markup is copied, <script>one</script> remains in this candidate body.",
+          category: "bug",
+          severity: "low",
+        },
+        {
+          path: "src/a.ts",
+          content: "When markup is copied, <widget>two</widget> remains in this candidate body.",
+          category: "bug",
+          severity: "low",
+        },
+      ];
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout([...safe, ...rejected], 2),
+        ruleDigest: engineDigest,
+      });
+      const { impl } = classifyFetchMock({ auditPair: { category: "bug", severity: "high" } });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(auditRequest(client), diagnostics);
+      const records = diagnostics.drain();
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({
+        published: 8,
+        rejectedSanitization: 0,
+        suppressedRanked: 128,
+      });
+      expect(created).toHaveLength(8);
+      expect(created.some((comment) => comment.body.includes("<script>"))).toBe(false);
+      expect(
+        records.find((record) => record.code === "publish.candidates.planned")?.counts,
+      ).toStrictEqual({ generated: 136, sanitized: 134, deduplicated: 134 });
+    });
+
+    it("still fails closed when a selected and verified finding remains unsafe to publish", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const body = withChallengeProbe(
+        "When markup is copied, <script>alert(1)</script> remains in this selected candidate body.",
+      );
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: body, category: "bug", severity: "high" }],
+          2,
+        ),
+        ruleDigest: engineDigest,
+      });
+      const { impl } = classifyFetchMock({ auditPair: { category: "bug", severity: "high" } });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+
+      const report = await performReview(auditRequest(client), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("incomplete");
+      expect(report.reason).toBe("settlement.incomplete.publication_degraded");
+      expect(report.publish).toMatchObject({ published: 0, rejectedSanitization: 1 });
+      expect(created.some((comment) => comment.body.includes("<script>"))).toBe(false);
+    });
+
+    it("lets Truth refute a selected unsafe hypothesis without degrading publication", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const body =
+        "When markup is copied, <script>alert(1)</script> allegedly changes runtime behavior here.";
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(
+          [{ path: "src/a.ts", content: body, category: "bug", severity: "high" }],
+          2,
+        ),
+        ruleDigest: engineDigest,
+      });
+      const { impl } = classifyFetchMock({ judgeVerdict: "unsupported" });
+      globalThis.fetch = impl;
+      const { client, created } = successfulClient([]);
+
+      const report = await performReview(auditRequest(client), createSilentDiagnostics());
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({ published: 0, rejectedSanitization: 0 });
+      expect(created).toHaveLength(0);
+    });
+
     it("binds a closed runtime fact to the exact reviewed commit and requires its T ref", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });

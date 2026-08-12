@@ -181,11 +181,13 @@ describe("buildRuleFile", () => {
       "Restore each capability's matching predicate.\n\nOn every config where flags differ, the `figma` member calls the Jira predicate while `jira` calls the Figma predicate, so each capability reports the other connector's authorization.",
       "Restore the helper's terminal failure before spawning.\n\nWhen the changed helper returns `undefined` instead of throwing, this call passes the invalid value to `spawn`.",
       "Move platform work behind the guard.\n\nWhen this module loads on Linux, its top-level compiler probe runs before the shown `win32` guard and aborts startup.",
+      "Keep independently computed baseline counts separate.\n\nWhen the total file count changes, `uncoveredFiles` may correctly stay unchanged because its producer counts only files with zero covered lines.",
     ];
     for (const example of examples) {
       expect(sanitizeFindingBody(example).ok).toBe(true);
     }
     expect(rule).toContain("Do not emit HTML, images, links or URLs");
+    expect(rule).toContain("baseline fields, or snapshot values must change together");
   });
 
   /**
