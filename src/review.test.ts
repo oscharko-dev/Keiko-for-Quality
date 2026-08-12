@@ -3759,6 +3759,48 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(spend?.counts).toStrictEqual({ engine: 100, classify: 0, total: 100 });
     });
 
+    it("never caches an unclassified suppressed path when a raw flood skips early repair", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      const BODY = withChallengeProbe(
+        "This handler swallows the write error and reports success to the caller regardless.",
+      );
+      const rawFlood = Array.from({ length: AUDIT_CONFIG.maxFindings + 1 }, () => ({
+        path: "src/a.ts",
+        content: BODY,
+      }));
+      runEngineMock.mockResolvedValue({
+        stdout: findingsStdout(rawFlood, 2, 100),
+        ruleDigest: engineDigest,
+      });
+
+      const { impl, callCount } = classifyFetchMock({
+        auditPair: { category: "bug", severity: "medium" },
+      });
+      globalThis.fetch = impl;
+      const client = successfulClient([seededMarker("general", BODY)]);
+      const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
+
+      const report = await performReview(
+        auditRequest(client.client, empty),
+        createSilentDiagnostics(),
+      );
+
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({
+        published: 0,
+        suppressed: AUDIT_CONFIG.maxFindings + 1,
+        suppressedIntraRun: AUDIT_CONFIG.maxFindings,
+        suppressedExactDuplicate: 1,
+      });
+      expect(callCount()).toBe(0);
+      expect(client.created).toHaveLength(0);
+      const entries = report.updatedCacheStore?.entries ?? [];
+      expect(entries.some((entry) => String(entry.headBlob) === headBlobA)).toBe(false);
+      expect(report.cacheAppended).toBe(1);
+      expect(entries).toHaveLength(1);
+    });
+
     it("audits a surviving fresh finding once via the fast path and publishes it with the audited classification", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });

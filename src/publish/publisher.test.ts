@@ -1187,6 +1187,28 @@ describe("intra-run deduplication (v0.12.0)", () => {
  * rather than only through `publishFindings`, which the suite above already covers end to end.
  */
 describe("planPublication and executePublication", () => {
+  it("collapses exact repeats beyond the bounded similarity index", async () => {
+    const unique = Array.from({ length: 256 }, (_, index) =>
+      finding({
+        startLine: 12,
+        endLine: 12,
+        content: `alpha beta gamma ${`${String(index)}x`.repeat(20)}`,
+      }),
+    );
+    const repeatedTail = finding({
+      startLine: 44,
+      endLine: 44,
+      content: "This exact late finding repeats enough times to consume a verifier cohort.",
+      severity: "critical",
+    });
+    const findings = [...unique, ...Array.from({ length: 16 }, () => ({ ...repeatedTail }))];
+
+    const plan = await planPublication(context, findings, createSilentDiagnostics());
+
+    expect(plan.survivors).toHaveLength(257);
+    expect(plan.counters.suppressedIntraRun).toBe(15);
+  });
+
   it("plans the parser ceiling without pairwise body tokenization", async () => {
     const findings = Array.from({ length: 1_000 }, (_, index) =>
       finding({
@@ -1194,8 +1216,8 @@ describe("planPublication and executePublication", () => {
         endLine: 12,
         // Three shared tokens stay below the similarity floor. The long unique fourth token
         // forces the old pairwise implementation to rescan hundreds of MB across 499,500 pairs;
-        // the bounded index prepares only the first 256 candidates and carries the rest as
-        // singleton clusters; every finding still reaches later ranking.
+        // the bounded index prepares only the first 256 candidates and carries later novel bodies
+        // as singleton clusters; every finding still reaches later ranking.
         content: `alpha beta gamma ${`${String(index)}x`.repeat(250)}`,
       }),
     );

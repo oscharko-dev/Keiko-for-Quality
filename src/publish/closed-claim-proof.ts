@@ -1087,21 +1087,49 @@ function provenStringBinding(text: string): string | undefined {
   return isIdentifier(binding) && isStringLiteralExpression(value) ? binding : undefined;
 }
 
-function provenStringBindings(lines: readonly SourceLine[]): ReadonlySet<string> {
-  const bindings = new Set<string>();
+function declaredSimpleBinding(text: string): string | undefined {
+  return /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b/u.exec(text)?.[1];
+}
+
+/** Literal bindings a return may safely use: declared once and returned at the same brace depth. */
+function provenStringBindings(
+  lines: readonly SourceLine[],
+): ReadonlyMap<string, { readonly index: number; readonly depth: number }> {
+  const declarationCounts = new Map<string, number>();
   for (const line of lines) {
+    const binding = declaredSimpleBinding(line.code);
+    if (binding !== undefined) {
+      declarationCounts.set(binding, (declarationCounts.get(binding) ?? 0) + 1);
+    }
+  }
+
+  const bindings = new Map<string, { readonly index: number; readonly depth: number }>();
+  for (const [index, line] of lines.entries()) {
     const binding = provenStringBinding(line.text);
-    if (binding !== undefined) bindings.add(binding);
+    if (binding !== undefined && declarationCounts.get(binding) === 1) {
+      bindings.set(binding, { index, depth: line.depth });
+    }
   }
   return bindings;
 }
 
-function validStringReturn(line: SourceLine, bindings: ReadonlySet<string>): boolean {
+function validStringReturn(
+  line: SourceLine,
+  lineIndex: number,
+  bindings: ReadonlyMap<string, { readonly index: number; readonly depth: number }>,
+): boolean {
   const returnAt = line.code.search(/\breturn\b/u);
   if (returnAt < 0) return true;
   const value = withoutOptionalSemicolon(line.text.slice(returnAt + "return".length)).trim();
   if (value === "") return false;
-  if (bindings.has(value)) return true;
+  const declaration = bindings.get(value);
+  if (
+    declaration !== undefined &&
+    declaration.index < lineIndex &&
+    declaration.depth === line.depth
+  ) {
+    return true;
+  }
   return isStringLiteralExpression(value);
 }
 
@@ -1117,7 +1145,7 @@ function helperReturnsOrThrows(
     body.some((line) =>
       /\b(?:async\s+function|catch|finally|function|yield)\b|=>/u.test(line.code),
     ) ||
-    body.some((line) => !validStringReturn(line, stringBindings))
+    body.some((line, index) => !validStringReturn(line, index, stringBindings))
   ) {
     return false;
   }
@@ -1212,6 +1240,37 @@ function dynamicImportPairs(
   return imports === 0 ? undefined : pairs;
 }
 
+function enclosingTestScope(lines: readonly SourceLine[], lineIndex: number): number | undefined {
+  for (let opening = lineIndex - 1; opening >= 0; opening -= 1) {
+    const code = lines[opening]?.code ?? "";
+    if (!/(?:^|[^\w$.])(?:it|test)(?:\.(?:concurrent|only|skip|todo))?\s*\(/u.test(code)) {
+      continue;
+    }
+    const closing = matchingBrace(lines, opening);
+    if (closing !== undefined && closing >= lineIndex) return opening;
+  }
+  return undefined;
+}
+
+function pairsOccupyDistinctTests(
+  lines: readonly SourceLine[],
+  pairs: readonly DynamicImportPair[],
+): boolean {
+  const scopes = new Set<number>();
+  for (const pair of pairs) {
+    const importedIndex = lines.indexOf(pair.imported);
+    const resetIndex = lines.indexOf(pair.reset);
+    if (importedIndex < 0 || resetIndex < 0) return false;
+    const importedScope = enclosingTestScope(lines, importedIndex);
+    const resetScope = enclosingTestScope(lines, resetIndex);
+    if (importedScope === undefined || importedScope !== resetScope || scopes.has(importedScope)) {
+      return false;
+    }
+    scopes.add(importedScope);
+  }
+  return scopes.size === pairs.length;
+}
+
 function staticallyImportsTarget(
   lines: readonly SourceLine[],
   targets: ReadonlySet<string>,
@@ -1266,6 +1325,7 @@ function resetIsolationRefutation(
   if (
     pairs.length < 2 ||
     targets.size !== 1 ||
+    !pairsOccupyDistinctTests(lines, pairs) ||
     staticallyImportsTarget(lines, targets) ||
     !importsVitestViDirectly(lines) ||
     lines.some(
@@ -1555,7 +1615,17 @@ function redactionAssertionRefutation(
   lines: readonly SourceLine[],
   evidence: TrustedHunkEvidence,
 ): ClosedClaimRefutation | undefined {
-  if (!redactionClaim(finding.content) || !/(?:^|\.)test\.[cm]?[jt]sx?$/u.test(finding.path)) {
+  const claim = finding.content.slice(0, MAX_CLAIM_CHARS);
+  const allegesLostCoverage =
+    /\b(?:test|assertion|coverage|regression|case)\b/iu.test(claim) &&
+    /\b(?:drop|dropped|lose|lost|missing|omit|omitted|remove|removed|weaken|weakened)\b/iu.test(
+      claim,
+    );
+  if (
+    !redactionClaim(finding.content) ||
+    allegesLostCoverage ||
+    !/(?:^|\.)test\.[cm]?[jt]sx?$/u.test(finding.path)
+  ) {
     return undefined;
   }
   const assertion = changedExactAssertion(finding, lines);
