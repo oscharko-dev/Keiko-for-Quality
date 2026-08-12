@@ -79,10 +79,7 @@ describe("paid release-gate workflow contract", () => {
 
   it("keeps the four version-scoped release evidence artifacts", () => {
     assert.match(workflow, /qualification-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.json/u);
-    assert.match(
-      workflow,
-      /historical-replay-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.json/u,
-    );
+    assert.match(workflow, /historical-replay-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.json/u);
     assert.match(workflow, /seed-gate-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.md/u);
     assert.match(workflow, /completion-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.md/u);
     assert.equal([...workflow.matchAll(/if-no-files-found: error/gu)].length, 4);
