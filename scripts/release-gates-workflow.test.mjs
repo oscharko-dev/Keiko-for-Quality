@@ -41,6 +41,17 @@ function runBlocks(source) {
   return blocks;
 }
 
+/** Rejects an input-context reference anywhere inside a GitHub expression in shell code. */
+function assertNoDispatchInputsInShell(source, filename) {
+  for (const block of runBlocks(source)) {
+    assert.doesNotMatch(
+      block,
+      /\$\{\{(?:(?!\}\})[\s\S])*(?:github\.event\.)?inputs(?:\.|\[)(?:(?!\}\})[\s\S])*\}\}/u,
+      `${filename} must move workflow_dispatch inputs into env: before a run: block`,
+    );
+  }
+}
+
 function jobSection(jobName) {
   const lines = workflow.split("\n");
   const start = lines.indexOf(`  ${jobName}:`);
@@ -89,13 +100,21 @@ describe("paid release-gate workflow contract", () => {
     for (const filename of readdirSync(workflowsDirectory)) {
       if (!/\.ya?ml$/u.test(filename)) continue;
       const source = readFileSync(resolve(workflowsDirectory, filename), "utf8");
-      for (const block of runBlocks(source)) {
-        assert.doesNotMatch(
-          block,
-          /\$\{\{\s*(?:github\.event\.)?inputs(?:\.[A-Za-z_][A-Za-z0-9_]*|\[['"][^'"]+['"]\])\s*\}\}/u,
-          `${filename} must move workflow_dispatch inputs into env: before a run: block`,
-        );
-      }
+      assertNoDispatchInputsInShell(source, filename);
+    }
+  });
+
+  it("rejects dispatch inputs hidden inside compound shell expressions", () => {
+    for (const expression of [
+      "${{ inputs.version || '0.0.0' }}",
+      "${{ format('{0}', inputs.version) }}",
+      "${{ github.event.inputs['version'] || '0.0.0' }}",
+    ]) {
+      assert.throws(
+        () =>
+          assertNoDispatchInputsInShell(`steps:\n  - run: echo \"${expression}\"`, "fixture.yml"),
+        /must move workflow_dispatch inputs into env/u,
+      );
     }
   });
 
