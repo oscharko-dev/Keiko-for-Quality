@@ -216,10 +216,14 @@ for that would be claiming to have verified something it only waited for.
   than the outcome of a hand-resolved merge. The release pull request validates that immutable
   binding before merge; main repeats the proof afterwards. Neither compares against the then-current
   dev tip.
-- Both branches carry identical protection: signed commits, linear history, no force pushes,
-  conversation resolution, and the required checks `verify`, `engine pin`, and
-  `SonarCloud Code Analysis` (verified against the live branch protection). `action smoke` runs on
-  every pull request but is _not_ required.
+- Both branches require signed commits, linear history, no force pushes, conversation resolution,
+  and the checks `verify`, `engine pin`, and `SonarCloud Code Analysis`. Administrator enforcement
+  is enabled, so those requirements cannot be bypassed by an admin merge. `dev` additionally
+  requires `self review`: integration must wait for the released reviewer to finish and for every
+  conversation it opens to be resolved. `main` cannot require that context because `self-review.yml`
+  deliberately runs only on pull requests targeting `dev`. `action smoke` runs on every pull
+  request but is _not_ required. These statements are verified against live branch protection, not
+  inferred from the workflow files.
 - The scheduled re-qualification (`qualify.yml`) measures `main` explicitly — consumers run
   releases, and drift on `dev` is caught by the corpus run the release rule demands instead.
 - Branch names follow `type/slug` (`feat/…`, `fix/…`, `ci/…`, `docs/…`, `release/…`).
