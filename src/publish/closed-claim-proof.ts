@@ -1015,11 +1015,16 @@ function enclosingRethrowingCatch(
 
 function terminalHelperClaim(content: string): boolean {
   const claim = content.slice(0, MAX_CLAIM_CHARS);
+  const describesInvalidResult = [
+    /\bundefined\b/iu,
+    /\bnull\b/iu,
+    /fall(?:s|ing)?\s*through/iu,
+    /without\s+return/iu,
+    /invalid\s+(?:argument|command|path)/iu,
+    /fails?\s+to\s+return/iu,
+  ].some((pattern) => pattern.test(claim));
   return (
-    /\b(?:spawn|command|executable|tool|helper|path)\b/iu.test(claim) &&
-    /(?:\bundefined\b|\bnull\b|fall(?:s|ing)?\s*through|without\s+return|invalid\s+(?:argument|command|path)|fails?\s+to\s+return)/iu.test(
-      claim,
-    )
+    /\b(?:spawn|command|executable|tool|helper|path)\b/iu.test(claim) && describesInvalidResult
   );
 }
 
@@ -1051,25 +1056,53 @@ function namedFunctionRange(
   return opening === undefined || closing === undefined ? undefined : { opening, closing };
 }
 
+function withoutOptionalSemicolon(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.endsWith(";") ? trimmed.slice(0, -1).trimEnd() : trimmed;
+}
+
+function isIdentifier(value: string): boolean {
+  return /^[A-Za-z_$][\w$]*$/u.test(value);
+}
+
+function isStringLiteralExpression(value: string): boolean {
+  const quote = value[0];
+  if (value.length < 2 || quote === undefined || value.at(-1) !== quote) return false;
+  if (quote === '"' || quote === "'") return quotedLiteral(value) !== undefined;
+  if (quote !== "`") return false;
+  for (let index = 1; index < value.length - 1; index += 1) {
+    if (value[index] === "`") return false;
+    if (value[index] === "\\") index += 1;
+  }
+  return true;
+}
+
+function provenStringBinding(text: string): string | undefined {
+  const statement = withoutOptionalSemicolon(text);
+  if (!statement.startsWith("const ")) return undefined;
+  const assignment = statement.indexOf("=", 6);
+  if (assignment < 0) return undefined;
+  const binding = statement.slice(6, assignment).trim();
+  const value = statement.slice(assignment + 1).trim();
+  return isIdentifier(binding) && isStringLiteralExpression(value) ? binding : undefined;
+}
+
 function provenStringBindings(lines: readonly SourceLine[]): ReadonlySet<string> {
   const bindings = new Set<string>();
   for (const line of lines) {
-    const match =
-      /^\s*const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:`(?:[^`\\]|\\.)*`|"(?:[^"\\]|\\.)*"|'[^'\\]*')\s*;?\s*$/u.exec(
-        line.text,
-      );
-    if (match?.[1] !== undefined) bindings.add(match[1]);
+    const binding = provenStringBinding(line.text);
+    if (binding !== undefined) bindings.add(binding);
   }
   return bindings;
 }
 
 function validStringReturn(line: SourceLine, bindings: ReadonlySet<string>): boolean {
-  if (!/\breturn\b/u.test(line.code)) return true;
-  const match = /\breturn\s+(.+?)\s*;?\s*$/u.exec(line.text);
-  const value = match?.[1]?.replace(/;\s*$/u, "").trim();
-  if (value === undefined || value === "") return false;
+  const returnAt = line.code.search(/\breturn\b/u);
+  if (returnAt < 0) return true;
+  const value = withoutOptionalSemicolon(line.text.slice(returnAt + "return".length)).trim();
+  if (value === "") return false;
   if (bindings.has(value)) return true;
-  return /^(?:`(?:[^`\\]|\\.)*`|"(?:[^"\\]|\\.)*"|'[^'\\]*')$/u.test(value);
+  return isStringLiteralExpression(value);
 }
 
 function helperReturnsOrThrows(
@@ -1092,7 +1125,8 @@ function helperReturnsOrThrows(
   if (returns.length === 0) return false;
   const terminal = body.findLast((line) => line.code.trim() !== "");
   if (terminal?.depth !== opening.depth + 1) return false;
-  return /^\s*(?:throw\b.+|return\s+(?!undefined\b|null\b|void\b).+)\s*;?\s*$/u.test(terminal.code);
+  const terminalStatement = withoutOptionalSemicolon(terminal.code);
+  return terminalStatement.startsWith("throw ") || terminalStatement.startsWith("return ");
 }
 
 function terminalHelperRefutation(
@@ -1168,9 +1202,8 @@ function dynamicImportPairs(
     imports += 1;
     const reset = previousCodeLine(lines, index);
     if (
-      reset === undefined ||
-      reset.depth !== line.depth ||
-      !/^\s*vi\.resetModules\(\)\s*;?\s*$/u.test(reset.code)
+      reset?.depth !== line.depth ||
+      withoutOptionalSemicolon(reset.code) !== "vi.resetModules()"
     ) {
       return undefined;
     }
@@ -1184,15 +1217,41 @@ function staticallyImportsTarget(
   targets: ReadonlySet<string>,
 ): boolean {
   return lines.some((line) => {
-    const target = /^\s*import(?:\s+type)?\b.*\sfrom\s+["']([^"']+)["']\s*;?/u.exec(line.text)?.[1];
+    const statement = withoutOptionalSemicolon(line.text);
+    if (!statement.startsWith("import ")) return false;
+    const fromAt = statement.lastIndexOf(" from ");
+    const target = fromAt < 0 ? undefined : quotedLiteral(statement.slice(fromAt + 6).trim());
     return target !== undefined && targets.has(target);
   });
 }
 
+interface NamedImport {
+  readonly names: readonly string[];
+  readonly source: string;
+}
+
+function namedImport(text: string): NamedImport | undefined {
+  const statement = withoutOptionalSemicolon(text);
+  if (!statement.startsWith("import")) return undefined;
+  const specifiers = statement.slice("import".length).trimStart();
+  if (!specifiers.startsWith("{")) return undefined;
+  const closing = specifiers.indexOf("}");
+  if (closing < 0) return undefined;
+  const remainder = specifiers.slice(closing + 1).trim();
+  if (!remainder.startsWith("from ")) return undefined;
+  const source = quotedLiteral(remainder.slice("from ".length).trim());
+  if (source === undefined) return undefined;
+  const names = specifiers
+    .slice(1, closing)
+    .split(",")
+    .map((specifier) => specifier.trim());
+  return { names, source };
+}
+
 function importsVitestViDirectly(lines: readonly SourceLine[]): boolean {
   return lines.some((line) => {
-    const named = /^\s*import\s*\{([^}]*)\}\s*from\s*["']vitest["']\s*;?\s*$/u.exec(line.text)?.[1];
-    return named?.split(",").some((specifier) => specifier.trim() === "vi") ?? false;
+    const imported = namedImport(line.text);
+    return imported?.source === "vitest" && imported.names.some((name) => name === "vi");
   });
 }
 
@@ -1214,7 +1273,7 @@ function resetIsolationRefutation(
         /\b(?:const|let|var|function|class)\s+vi\b/u.test(line.code) ||
         /\bcatch\s*\(\s*vi\b/u.test(line.code) ||
         /\bfunction\s+[A-Za-z_$][\w$]*\s*\([^)]*\bvi\b/u.test(line.code) ||
-        /(?:\(|,)\s*vi\s*(?:[,)=:])/u.test(line.code) ||
+        /[(,]\s*vi\s*[,)=:]/u.test(line.code) ||
         /\bvi\s+as\s+[A-Za-z_$]/u.test(line.code),
     )
   ) {
@@ -1262,15 +1321,75 @@ interface ExactAssertion {
   readonly line: SourceLine;
 }
 
-function assertionFromMatch(
-  match: RegExpExecArray | null,
+function afterWhitespace(text: string, offset: number): number {
+  let cursor = offset;
+  while (/\s/u.test(text[cursor] ?? "")) cursor += 1;
+  return cursor;
+}
+
+function afterToken(text: string, offset: number, token: string): number | undefined {
+  const cursor = afterWhitespace(text, offset);
+  return text.startsWith(token, cursor) ? cursor + token.length : undefined;
+}
+
+interface ParsedToken {
+  readonly value: string;
+  readonly after: number;
+}
+
+function identifierToken(text: string, offset: number): ParsedToken | undefined {
+  const start = afterWhitespace(text, offset);
+  let after = start;
+  while (identifierCharacter(text[after])) after += 1;
+  const value = text.slice(start, after);
+  return isIdentifier(value) ? { value, after } : undefined;
+}
+
+function quotedToken(text: string, offset: number): ParsedToken | undefined {
+  const start = afterWhitespace(text, offset);
+  const quote = text[start];
+  if (quote !== '"' && quote !== "'") return undefined;
+  for (let cursor = start + 1; cursor < text.length; cursor += 1) {
+    if (text[cursor] === "\\") {
+      cursor += 1;
+    } else if (text[cursor] === quote) {
+      return { value: text.slice(start, cursor + 1), after: cursor + 1 };
+    }
+  }
+  return undefined;
+}
+
+function completedExactAssertion(
+  text: string,
+  functionName: ParsedToken,
+  input: ParsedToken,
+  expected: ParsedToken,
   line: SourceLine,
 ): ExactAssertion | undefined {
-  const functionName = match?.[1];
-  const input = match?.[2] === undefined ? undefined : quotedLiteral(match[2]);
-  const expected = match?.[3] === undefined ? undefined : quotedLiteral(match[3]);
-  if (functionName === undefined || input === undefined || expected === undefined) return undefined;
-  return { functionName, input, expected, line };
+  const closing = afterToken(text, expected.after, ")");
+  if (closing === undefined || withoutOptionalSemicolon(text.slice(closing)) !== "") {
+    return undefined;
+  }
+  const inputValue = quotedLiteral(input.value);
+  const expectedValue = quotedLiteral(expected.value);
+  if (inputValue === undefined || expectedValue === undefined) return undefined;
+  return { functionName: functionName.value, input: inputValue, expected: expectedValue, line };
+}
+
+function parsedExactAssertion(text: string, line: SourceLine): ExactAssertion | undefined {
+  const functionAt = afterToken(text, 0, "expect(");
+  if (functionAt === undefined) return undefined;
+  const functionName = identifierToken(text, functionAt);
+  if (functionName === undefined) return undefined;
+  const inputAt = afterToken(text, functionName.after, "(");
+  if (inputAt === undefined) return undefined;
+  const input = quotedToken(text, inputAt);
+  if (input === undefined) return undefined;
+  const expectedAt = afterToken(text, input.after, ")).toBe(");
+  if (expectedAt === undefined) return undefined;
+  const expected = quotedToken(text, expectedAt);
+  if (expected === undefined) return undefined;
+  return completedExactAssertion(text, functionName, input, expected, line);
 }
 
 function exactAssertionAtLine(
@@ -1278,11 +1397,7 @@ function exactAssertionAtLine(
   finding: JudgeableFinding,
 ): ExactAssertion | undefined {
   if (!line.changed || !insideFinding(line.line, finding)) return undefined;
-  const match =
-    /^\s*expect\(\s*([A-Za-z_$][\w$]*)\(\s*((?:"(?:[^"\\]|\\.)*")|(?:'[^'\\]*'))\s*\)\s*\)\.toBe\(\s*((?:"(?:[^"\\]|\\.)*")|(?:'[^'\\]*'))\s*\)\s*;?\s*$/u.exec(
-      line.text,
-    );
-  return assertionFromMatch(match, line);
+  return parsedExactAssertion(line.text, line);
 }
 
 function changedExactAssertion(
@@ -1319,22 +1434,23 @@ function importedSource(
   functionName: string,
 ): string | undefined {
   const imports = testLines.flatMap((line) => {
-    const match = /^\s*import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']\s*;?\s*$/u.exec(line.text);
-    const specifiers = match?.[1]?.split(",").map((specifier) => specifier.trim()) ?? [];
-    return match?.[2] !== undefined &&
-      specifiers.filter((name) => name === functionName).length === 1
-      ? [match[2]]
+    const imported = namedImport(line.text);
+    return imported?.names.filter((name) => name === functionName).length === 1
+      ? [imported.source]
       : [];
   });
   if (imports.length !== 1) return undefined;
   const path = normalizedRelativePath(finding.path, imports[0] ?? "");
   if (path === undefined) return undefined;
-  const candidates = [
-    path,
-    ...(/\.(?:c|m)?js$/u.test(path)
-      ? [path.replace(/\.(?:c|m)?js$/u, ".ts"), path.replace(/\.(?:c|m)?js$/u, ".tsx")]
-      : []),
-  ];
+  const javascriptExtension = [".js", ".cjs", ".mjs"].find((extension) => path.endsWith(extension));
+  const candidates =
+    javascriptExtension === undefined
+      ? [path]
+      : [
+          path,
+          `${path.slice(0, -javascriptExtension.length)}.ts`,
+          `${path.slice(0, -javascriptExtension.length)}.tsx`,
+        ];
   const matches = candidates.flatMap((candidate) => {
     const source = evidence.headRepositorySources.get(candidate);
     return source === undefined ? [] : [source];

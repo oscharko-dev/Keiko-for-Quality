@@ -139,8 +139,11 @@ import {
   type SubstantiationTraceReasonCode,
   type SubstantiationTraceStage,
 } from "./publish/substantiate.js";
-import { bindTrustedHunkEvidence, type TrustedHunkEvidence } from "./publish/closed-claim-proof.js";
-import type { ClosedRefutationRuleId } from "./publish/closed-claim-proof.js";
+import {
+  bindTrustedHunkEvidence,
+  type ClosedRefutationRuleId,
+  type TrustedHunkEvidence,
+} from "./publish/closed-claim-proof.js";
 
 export interface ReviewRequest {
   readonly client: GitHubClient;

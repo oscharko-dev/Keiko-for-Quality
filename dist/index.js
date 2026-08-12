@@ -11991,9 +11991,15 @@ function enclosingRethrowingCatch(lines, addition) {
 }
 function terminalHelperClaim(content) {
   const claim = content.slice(0, MAX_CLAIM_CHARS);
-  return /\b(?:spawn|command|executable|tool|helper|path)\b/iu.test(claim) && /(?:\bundefined\b|\bnull\b|fall(?:s|ing)?\s*through|without\s+return|invalid\s+(?:argument|command|path)|fails?\s+to\s+return)/iu.test(
-    claim
-  );
+  const describesInvalidResult = [
+    /\bundefined\b/iu,
+    /\bnull\b/iu,
+    /fall(?:s|ing)?\s*through/iu,
+    /without\s+return/iu,
+    /invalid\s+(?:argument|command|path)/iu,
+    /fails?\s+to\s+return/iu
+  ].some((pattern) => pattern.test(claim));
+  return /\b(?:spawn|command|executable|tool|helper|path)\b/iu.test(claim) && describesInvalidResult;
 }
 function changedSpawnHelper(finding, lines) {
   const matches = lines.flatMap((line) => {
@@ -12015,23 +12021,48 @@ function namedFunctionRange(lines, name) {
   const closing = opening === void 0 ? void 0 : matchingBrace2(lines, opening);
   return opening === void 0 || closing === void 0 ? void 0 : { opening, closing };
 }
+function withoutOptionalSemicolon(value) {
+  const trimmed = value.trim();
+  return trimmed.endsWith(";") ? trimmed.slice(0, -1).trimEnd() : trimmed;
+}
+function isIdentifier(value) {
+  return /^[A-Za-z_$][\w$]*$/u.test(value);
+}
+function isStringLiteralExpression(value) {
+  const quote = value[0];
+  if (value.length < 2 || quote === void 0 || value.at(-1) !== quote) return false;
+  if (quote === '"' || quote === "'") return quotedLiteral(value) !== void 0;
+  if (quote !== "`") return false;
+  for (let index = 1; index < value.length - 1; index += 1) {
+    if (value[index] === "`") return false;
+    if (value[index] === "\\") index += 1;
+  }
+  return true;
+}
+function provenStringBinding(text3) {
+  const statement = withoutOptionalSemicolon(text3);
+  if (!statement.startsWith("const ")) return void 0;
+  const assignment = statement.indexOf("=", 6);
+  if (assignment < 0) return void 0;
+  const binding = statement.slice(6, assignment).trim();
+  const value = statement.slice(assignment + 1).trim();
+  return isIdentifier(binding) && isStringLiteralExpression(value) ? binding : void 0;
+}
 function provenStringBindings(lines) {
   const bindings = /* @__PURE__ */ new Set();
   for (const line of lines) {
-    const match = /^\s*const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:`(?:[^`\\]|\\.)*`|"(?:[^"\\]|\\.)*"|'[^'\\]*')\s*;?\s*$/u.exec(
-      line.text
-    );
-    if (match?.[1] !== void 0) bindings.add(match[1]);
+    const binding = provenStringBinding(line.text);
+    if (binding !== void 0) bindings.add(binding);
   }
   return bindings;
 }
 function validStringReturn(line, bindings) {
-  if (!/\breturn\b/u.test(line.code)) return true;
-  const match = /\breturn\s+(.+?)\s*;?\s*$/u.exec(line.text);
-  const value = match?.[1]?.replace(/;\s*$/u, "").trim();
-  if (value === void 0 || value === "") return false;
+  const returnAt = line.code.search(/\breturn\b/u);
+  if (returnAt < 0) return true;
+  const value = withoutOptionalSemicolon(line.text.slice(returnAt + "return".length)).trim();
+  if (value === "") return false;
   if (bindings.has(value)) return true;
-  return /^(?:`(?:[^`\\]|\\.)*`|"(?:[^"\\]|\\.)*"|'[^'\\]*')$/u.test(value);
+  return isStringLiteralExpression(value);
 }
 function helperReturnsOrThrows(lines, range) {
   const opening = lines[range.opening];
@@ -12047,7 +12078,8 @@ function helperReturnsOrThrows(lines, range) {
   if (returns.length === 0) return false;
   const terminal = body.findLast((line) => line.code.trim() !== "");
   if (terminal?.depth !== opening.depth + 1) return false;
-  return /^\s*(?:throw\b.+|return\s+(?!undefined\b|null\b|void\b).+)\s*;?\s*$/u.test(terminal.code);
+  const terminalStatement = withoutOptionalSemicolon(terminal.code);
+  return terminalStatement.startsWith("throw ") || terminalStatement.startsWith("return ");
 }
 function terminalHelperRefutation(finding, lines) {
   if (!terminalHelperClaim(finding.content)) return void 0;
@@ -12098,7 +12130,7 @@ function dynamicImportPairs(lines) {
     if (target === void 0) return void 0;
     imports += 1;
     const reset = previousCodeLine(lines, index);
-    if (reset === void 0 || reset.depth !== line.depth || !/^\s*vi\.resetModules\(\)\s*;?\s*$/u.test(reset.code)) {
+    if (reset?.depth !== line.depth || withoutOptionalSemicolon(reset.code) !== "vi.resetModules()") {
       return void 0;
     }
     pairs.push({ target, reset, imported: line });
@@ -12107,14 +12139,31 @@ function dynamicImportPairs(lines) {
 }
 function staticallyImportsTarget(lines, targets) {
   return lines.some((line) => {
-    const target = /^\s*import(?:\s+type)?\b.*\sfrom\s+["']([^"']+)["']\s*;?/u.exec(line.text)?.[1];
+    const statement = withoutOptionalSemicolon(line.text);
+    if (!statement.startsWith("import ")) return false;
+    const fromAt = statement.lastIndexOf(" from ");
+    const target = fromAt < 0 ? void 0 : quotedLiteral(statement.slice(fromAt + 6).trim());
     return target !== void 0 && targets.has(target);
   });
 }
+function namedImport(text3) {
+  const statement = withoutOptionalSemicolon(text3);
+  if (!statement.startsWith("import")) return void 0;
+  const specifiers = statement.slice("import".length).trimStart();
+  if (!specifiers.startsWith("{")) return void 0;
+  const closing = specifiers.indexOf("}");
+  if (closing < 0) return void 0;
+  const remainder = specifiers.slice(closing + 1).trim();
+  if (!remainder.startsWith("from ")) return void 0;
+  const source = quotedLiteral(remainder.slice("from ".length).trim());
+  if (source === void 0) return void 0;
+  const names = specifiers.slice(1, closing).split(",").map((specifier) => specifier.trim());
+  return { names, source };
+}
 function importsVitestViDirectly(lines) {
   return lines.some((line) => {
-    const named = /^\s*import\s*\{([^}]*)\}\s*from\s*["']vitest["']\s*;?\s*$/u.exec(line.text)?.[1];
-    return named?.split(",").some((specifier) => specifier.trim() === "vi") ?? false;
+    const imported = namedImport(line.text);
+    return imported?.source === "vitest" && imported.names.some((name) => name === "vi");
   });
 }
 function resetIsolationRefutation(finding, lines) {
@@ -12123,7 +12172,7 @@ function resetIsolationRefutation(finding, lines) {
   if (pairs === void 0) return void 0;
   const targets = new Set(pairs.map((pair) => pair.target));
   if (pairs.length < 2 || targets.size !== 1 || staticallyImportsTarget(lines, targets) || !importsVitestViDirectly(lines) || lines.some(
-    (line) => /\b(?:const|let|var|function|class)\s+vi\b/u.test(line.code) || /\bcatch\s*\(\s*vi\b/u.test(line.code) || /\bfunction\s+[A-Za-z_$][\w$]*\s*\([^)]*\bvi\b/u.test(line.code) || /(?:\(|,)\s*vi\s*(?:[,)=:])/u.test(line.code) || /\bvi\s+as\s+[A-Za-z_$]/u.test(line.code)
+    (line) => /\b(?:const|let|var|function|class)\s+vi\b/u.test(line.code) || /\bcatch\s*\(\s*vi\b/u.test(line.code) || /\bfunction\s+[A-Za-z_$][\w$]*\s*\([^)]*\bvi\b/u.test(line.code) || /[(,]\s*vi\s*[,)=:]/u.test(line.code) || /\bvi\s+as\s+[A-Za-z_$]/u.test(line.code)
   )) {
     return void 0;
   }
@@ -12154,19 +12203,63 @@ function quotedLiteral(value) {
   }
   return value.slice(1, -1);
 }
-function assertionFromMatch(match, line) {
-  const functionName = match?.[1];
-  const input = match?.[2] === void 0 ? void 0 : quotedLiteral(match[2]);
-  const expected = match?.[3] === void 0 ? void 0 : quotedLiteral(match[3]);
-  if (functionName === void 0 || input === void 0 || expected === void 0) return void 0;
-  return { functionName, input, expected, line };
+function afterWhitespace(text3, offset) {
+  let cursor = offset;
+  while (/\s/u.test(text3[cursor] ?? "")) cursor += 1;
+  return cursor;
+}
+function afterToken(text3, offset, token) {
+  const cursor = afterWhitespace(text3, offset);
+  return text3.startsWith(token, cursor) ? cursor + token.length : void 0;
+}
+function identifierToken(text3, offset) {
+  const start = afterWhitespace(text3, offset);
+  let after = start;
+  while (identifierCharacter(text3[after])) after += 1;
+  const value = text3.slice(start, after);
+  return isIdentifier(value) ? { value, after } : void 0;
+}
+function quotedToken(text3, offset) {
+  const start = afterWhitespace(text3, offset);
+  const quote = text3[start];
+  if (quote !== '"' && quote !== "'") return void 0;
+  for (let cursor = start + 1; cursor < text3.length; cursor += 1) {
+    if (text3[cursor] === "\\") {
+      cursor += 1;
+    } else if (text3[cursor] === quote) {
+      return { value: text3.slice(start, cursor + 1), after: cursor + 1 };
+    }
+  }
+  return void 0;
+}
+function completedExactAssertion(text3, functionName, input, expected, line) {
+  const closing = afterToken(text3, expected.after, ")");
+  if (closing === void 0 || withoutOptionalSemicolon(text3.slice(closing)) !== "") {
+    return void 0;
+  }
+  const inputValue = quotedLiteral(input.value);
+  const expectedValue = quotedLiteral(expected.value);
+  if (inputValue === void 0 || expectedValue === void 0) return void 0;
+  return { functionName: functionName.value, input: inputValue, expected: expectedValue, line };
+}
+function parsedExactAssertion(text3, line) {
+  const functionAt = afterToken(text3, 0, "expect(");
+  if (functionAt === void 0) return void 0;
+  const functionName = identifierToken(text3, functionAt);
+  if (functionName === void 0) return void 0;
+  const inputAt = afterToken(text3, functionName.after, "(");
+  if (inputAt === void 0) return void 0;
+  const input = quotedToken(text3, inputAt);
+  if (input === void 0) return void 0;
+  const expectedAt = afterToken(text3, input.after, ")).toBe(");
+  if (expectedAt === void 0) return void 0;
+  const expected = quotedToken(text3, expectedAt);
+  if (expected === void 0) return void 0;
+  return completedExactAssertion(text3, functionName, input, expected, line);
 }
 function exactAssertionAtLine(line, finding) {
   if (!line.changed || !insideFinding(line.line, finding)) return void 0;
-  const match = /^\s*expect\(\s*([A-Za-z_$][\w$]*)\(\s*((?:"(?:[^"\\]|\\.)*")|(?:'[^'\\]*'))\s*\)\s*\)\.toBe\(\s*((?:"(?:[^"\\]|\\.)*")|(?:'[^'\\]*'))\s*\)\s*;?\s*$/u.exec(
-    line.text
-  );
-  return assertionFromMatch(match, line);
+  return parsedExactAssertion(line.text, line);
 }
 function changedExactAssertion(finding, lines) {
   const matches = lines.flatMap((line) => {
@@ -12192,16 +12285,17 @@ function normalizedRelativePath(from, target) {
 }
 function importedSource(evidence, finding, testLines, functionName) {
   const imports = testLines.flatMap((line) => {
-    const match = /^\s*import\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']\s*;?\s*$/u.exec(line.text);
-    const specifiers = match?.[1]?.split(",").map((specifier) => specifier.trim()) ?? [];
-    return match?.[2] !== void 0 && specifiers.filter((name) => name === functionName).length === 1 ? [match[2]] : [];
+    const imported = namedImport(line.text);
+    return imported?.names.filter((name) => name === functionName).length === 1 ? [imported.source] : [];
   });
   if (imports.length !== 1) return void 0;
   const path = normalizedRelativePath(finding.path, imports[0] ?? "");
   if (path === void 0) return void 0;
-  const candidates = [
+  const javascriptExtension = [".js", ".cjs", ".mjs"].find((extension) => path.endsWith(extension));
+  const candidates = javascriptExtension === void 0 ? [path] : [
     path,
-    .../\.(?:c|m)?js$/u.test(path) ? [path.replace(/\.(?:c|m)?js$/u, ".ts"), path.replace(/\.(?:c|m)?js$/u, ".tsx")] : []
+    `${path.slice(0, -javascriptExtension.length)}.ts`,
+    `${path.slice(0, -javascriptExtension.length)}.tsx`
   ];
   const matches = candidates.flatMap((candidate) => {
     const source = evidence.headRepositorySources.get(candidate);
@@ -13824,7 +13918,8 @@ function tallyJudgement(counts, judged) {
   if (judged.disposition === "undecided") counts.undecided += 1;
   if (judged.budgetBlocked) counts.budgetBlocked += 1;
 }
-async function substantiate(findings, readHunk, deps, strictness = resolveSubstantiationStrictness(), maxTokens, retrieveEvidence, historicalTraceSink, closedRefutationSink) {
+async function substantiate(findings, readHunk, deps, strictness = resolveSubstantiationStrictness(), maxTokens, retrieveEvidence, ...sinks) {
+  const [historicalTraceSink, closedRefutationSink] = sinks;
   const kept = [];
   const counts = emptyCounts();
   const budget = { maximum: hardMaximum2(maxTokens), spent: 0, calls: 0 };

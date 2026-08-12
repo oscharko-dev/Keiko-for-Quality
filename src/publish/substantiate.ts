@@ -2669,9 +2669,12 @@ export async function substantiate<T extends JudgeableFinding>(
   strictness: SubstantiationStrictness = resolveSubstantiationStrictness(),
   maxTokens?: number,
   retrieveEvidence?: EvidenceRetriever<T>,
-  historicalTraceSink?: SubstantiationTraceSink,
-  closedRefutationSink?: (ruleId: ClosedRefutationRuleId) => void,
+  ...sinks: readonly [
+    historicalTraceSink?: SubstantiationTraceSink,
+    closedRefutationSink?: (ruleId: ClosedRefutationRuleId) => void,
+  ]
 ): Promise<SubstantiationOutcome<T>> {
+  const [historicalTraceSink, closedRefutationSink] = sinks;
   const kept: T[] = [];
   const counts = emptyCounts();
   const budget: CallBudget = { maximum: hardMaximum(maxTokens), spent: 0, calls: 0 };
