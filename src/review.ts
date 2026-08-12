@@ -2285,6 +2285,11 @@ interface ResumeOutcome {
   readonly alreadyReviewedPaths: readonly string[];
 }
 
+interface ResumeAttemptPolicy {
+  readonly samplingSeed: number;
+  readonly preserveReviewedPathsOnFailure: boolean;
+}
+
 /** One diagnostic code per engine status — diagnostics carry no strings, so the code IS the value. */
 const ENGINE_STATUS_DIAGNOSTIC: Readonly<Record<RunStatus, ReasonCode>> = {
   success: "engine.status.success",
@@ -2602,8 +2607,7 @@ async function settleFinishedRun(
       standing,
       covered,
       ledger,
-      targetedResumeSeed(round),
-      true,
+      { samplingSeed: targetedResumeSeed(round), preserveReviewedPathsOnFailure: true },
     );
     outcome = attempt;
     spent = attempt.engineTokens;
@@ -2642,8 +2646,7 @@ async function attemptResume(
   firstResult: EngineResult | undefined,
   alreadyReviewedPaths: readonly string[],
   ledger: SpendLedger,
-  samplingSeed: number,
-  preserveReviewedPathsOnFailure: boolean,
+  policy: ResumeAttemptPolicy,
 ): Promise<ResumeOutcome> {
   try {
     // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
@@ -2655,7 +2658,7 @@ async function attemptResume(
     const second = await invokeEngine(
       {
         ...options,
-        samplingSeed,
+        samplingSeed: policy.samplingSeed,
         allottedBudget: remaining,
         expectedReviewablePaths: options.expectedReviewablePaths.filter(
           (path) => !alreadyReviewedPaths.includes(path),
@@ -2705,7 +2708,7 @@ async function attemptResume(
     return {
       result: firstResult,
       engineTokens: firstAttemptTokens,
-      alreadyReviewedPaths: preserveReviewedPathsOnFailure ? alreadyReviewedPaths : [],
+      alreadyReviewedPaths: policy.preserveReviewedPathsOnFailure ? alreadyReviewedPaths : [],
     };
   }
 }
@@ -2779,8 +2782,7 @@ async function runEngineWithOneResume(
     firstResult,
     alreadyReviewedPaths,
     ledger,
-    RESUME_SEED,
-    false,
+    { samplingSeed: RESUME_SEED, preserveReviewedPathsOnFailure: false },
   );
 }
 

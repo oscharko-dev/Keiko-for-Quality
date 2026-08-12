@@ -15331,8 +15331,7 @@ async function settleFinishedRun(parsed, context) {
       standing,
       covered,
       ledger,
-      targetedResumeSeed(round),
-      true
+      { samplingSeed: targetedResumeSeed(round), preserveReviewedPathsOnFailure: true }
     );
     outcome = attempt;
     spent = attempt.engineTokens;
@@ -15349,12 +15348,12 @@ function finishedRunOutcome(diagnostics, parsed, options2) {
   });
   return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
 }
-async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger, samplingSeed, preserveReviewedPathsOnFailure) {
+async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger, policy) {
   try {
     const second = await invokeEngine(
       {
         ...options2,
-        samplingSeed,
+        samplingSeed: policy.samplingSeed,
         allottedBudget: remaining,
         expectedReviewablePaths: options2.expectedReviewablePaths.filter(
           (path) => !alreadyReviewedPaths.includes(path)
@@ -15381,7 +15380,7 @@ async function attemptResume(options2, diagnostics, remaining, firstAttemptToken
     return {
       result: firstResult,
       engineTokens: firstAttemptTokens,
-      alreadyReviewedPaths: preserveReviewedPathsOnFailure ? alreadyReviewedPaths : []
+      alreadyReviewedPaths: policy.preserveReviewedPathsOnFailure ? alreadyReviewedPaths : []
     };
   }
 }
@@ -15423,8 +15422,7 @@ async function runEngineWithOneResume(options2, diagnostics, ledger, reviewableP
     firstResult,
     alreadyReviewedPaths,
     ledger,
-    RESUME_SEED,
-    false
+    { samplingSeed: RESUME_SEED, preserveReviewedPathsOnFailure: false }
   );
 }
 function mergeResumedResult(first, second, excludedPaths) {
