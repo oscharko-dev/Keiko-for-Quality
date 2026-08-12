@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, it } from "node:test";
 
 const workflow = readFileSync(
@@ -61,6 +63,18 @@ function jobSection(jobName) {
   return lines.slice(start, end).join("\n");
 }
 
+function evidenceCardinalityGuard() {
+  const lines = jobSection("promotion").split("\n");
+  const start = lines.findIndex((line) => line.trim() === "require_single_evidence() {");
+  assert(start >= 0, "promotion must define the evidence cardinality guard");
+  const endOffset = lines.slice(start + 1).findIndex((line) => line === "          }");
+  assert(endOffset >= 0, "evidence cardinality guard must close at the run-block indentation");
+  return lines
+    .slice(start, start + endOffset + 2)
+    .map((line) => line.slice(10))
+    .join("\n");
+}
+
 describe("paid release-gate workflow contract", () => {
   it("is manual-only and refuses anything except the exact dispatched dev candidate", () => {
     assert.match(workflow, /^on:\n {2}workflow_dispatch:/mu);
@@ -94,6 +108,89 @@ describe("paid release-gate workflow contract", () => {
     assert.match(workflow, /seed-gate-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.md/u);
     assert.match(workflow, /completion-\$\(date -u \+%F\)-v\$\{EXPECTED_VERSION\}\.md/u);
     assert.equal([...workflow.matchAll(/if-no-files-found: error/gu)].length, 4);
+  });
+
+  it("promotes only the complete evidence set for the exact candidate", () => {
+    const promotion = jobSection("promotion");
+    for (const dependency of ["preflight", "qualification", "historical", "seed", "completion"]) {
+      assert.match(promotion, new RegExp(`^ {6}- ${dependency}$`, "mu"));
+    }
+    assert.match(promotion, /ref: \$\{\{ inputs\.expected_reviewer_sha \}\}/u);
+    assert.match(promotion, /persist-credentials: false/u);
+
+    for (const artifact of ["qualification", "historical", "seed", "completion"]) {
+      assert.match(
+        promotion,
+        new RegExp(`name: ${artifact}-v\\$\\{\\{ inputs\\.version \\}\\}`),
+        `${artifact} evidence is downloaded by its version-scoped artifact name`,
+      );
+      assert.match(
+        promotion,
+        new RegExp(`path: \\$\\{\\{ runner\\.temp \\}\\}/release-evidence/${artifact}`),
+        `${artifact} evidence has an isolated download directory`,
+      );
+    }
+
+    assert.match(promotion, /shopt -s nullglob/u);
+    assert.match(promotion, /if \(\( \$# != 1 \)\); then/u);
+    assert.match(promotion, /Expected exactly one \$\{label\} evidence file; found \$#/u);
+    for (const artifact of ["qualification", "historical", "seed", "completion"]) {
+      assert.match(
+        promotion,
+        new RegExp(`require_single_evidence ${artifact} "\\$\\{${artifact}\\[@\\]\\}"`),
+        `${artifact} evidence uses the cardinality guard`,
+      );
+    }
+    assert.match(promotion, /git rev-parse HEAD\^\{tree\}/u);
+    assert.match(promotion, /node scripts\/check-release-evidence\.mjs/u);
+    for (const flag of [
+      "version",
+      "head",
+      "tree",
+      "qualification",
+      "historical",
+      "seed",
+      "completion",
+    ]) {
+      assert.match(promotion, new RegExp(`--${flag} `), `promotion passes --${flag}`);
+    }
+  });
+
+  it("names zero, duplicate, and non-file evidence before failing closed", () => {
+    const directory = mkdtempSync(join(tmpdir(), "kfq-evidence-cardinality-"));
+    try {
+      const evidence = join(directory, "historical.json");
+      writeFileSync(evidence, "{}");
+      const runGuard = (...paths) =>
+        spawnSync(
+          "bash",
+          [
+            "-c",
+            `${evidenceCardinalityGuard()}\nrequire_single_evidence historical "$@"`,
+            "evidence-guard",
+            ...paths,
+          ],
+          { encoding: "utf8" },
+        );
+
+      assert.equal(runGuard(evidence).status, 0);
+      for (const [paths, count] of [
+        [[], 0],
+        [[evidence, evidence], 2],
+      ]) {
+        const result = runGuard(...paths);
+        assert.equal(result.status, 1);
+        assert.match(
+          result.stdout,
+          new RegExp(`::error::Expected exactly one historical evidence file; found ${count}\\.`),
+        );
+      }
+      const missing = runGuard(join(directory, "missing.json"));
+      assert.equal(missing.status, 1);
+      assert.match(missing.stdout, /selected historical evidence path is not a file/u);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("never passes workflow_dispatch inputs directly to a shell", () => {
