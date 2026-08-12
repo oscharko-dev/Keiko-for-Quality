@@ -112,7 +112,10 @@ describe("paid release-gate workflow contract", () => {
     ]) {
       assert.throws(
         () =>
-          assertNoDispatchInputsInShell(`steps:\n  - run: echo \"${expression}\"`, "fixture.yml"),
+          assertNoDispatchInputsInShell(
+            `steps:\n  run: |\n    echo \"${expression}\"`,
+            "fixture.yml",
+          ),
         /must move workflow_dispatch inputs into env/u,
       );
     }
