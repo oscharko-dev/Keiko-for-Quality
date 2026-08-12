@@ -85,7 +85,8 @@ test("a configured PAT drives collection through the real pipeline", async () =>
   assert.equal(response.status, 200);
   assert.ok(calls.length >= 2);
   const svg = await response.text();
-  assert.ok((svg.match(/>—</g) ?? []).length === 6);
+  assert.ok((svg.match(/>—</g) ?? []).length === 5);
+  assert.match(svg, />DATA AS OF · /);
 });
 
 test("App credentials that cannot sign degrade to the em-dash card, not a 500", async () => {

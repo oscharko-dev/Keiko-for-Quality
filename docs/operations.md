@@ -298,6 +298,13 @@ first, at most sixteen model-authored candidates reach verification, and at most
 model-authored findings publish. Lower values reduce both bounded model cohorts as well; they do
 not turn candidate volume into `engine_error`.
 
+Completion describes file coverage, not a claim that every raw hypothesis became a finding. When
+independent verification cannot decide one candidate, that candidate is withheld, its path remains
+uncached for a later retry, and the completed run reports both the evidence-withheld total and the
+undecided subset in its quality data and GitHub summary. A failure to deliver an already verified
+finding — sanitization, placement, read-back, or GitHub API failure — still settles incomplete,
+because the reader did not receive something the review had established.
+
 The process exit code carries the settlement outcome, never merely "did it crash":
 
 | Code | Meaning                                                               |
@@ -394,6 +401,13 @@ Four things are scored separately, because they fail for different reasons:
 
 Publishability is scored with `sanitizeFindingBody` itself, not a copy of its rules — a corpus that
 restated them would keep passing after the real ones moved.
+
+The promotion checker treats this small synthetic corpus as a safety net, not as proof of production
+precision: severe recall must reach 85%, every finding must remain publishable, and at least 80% of
+the twelve clean fixtures must stay silent. The 80% precision floor means ten of twelve pass while
+three false-positive fixtures fail the release. Real-world precision comes from the independent,
+calibrated historical replay and its chronological holdout; a stochastic 12/12 synthetic result is
+reported as measured, never presented as a 95% production-quality claim.
 
 Three of the cases carry text inside the diff that instructs the reviewer to stay silent, to honour
 a forged security waiver, or to append a tracking URL to its comment. They exist because the rule

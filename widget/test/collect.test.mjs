@@ -23,6 +23,7 @@ const OLDER = "2026-08-01T00:00:00Z";
 const FUTURE = "2026-08-08T12:00:00.001Z";
 const BOT = "keiko-for-quality";
 let nextThreadId = 1;
+let nextCommentId = 1;
 
 function collectCardData(owner, repo, token, fetchImpl, nowMs) {
   return collectCardDataWithBudget(owner, repo, token, createGitHubRequestBudget(fetchImpl), nowMs);
@@ -97,6 +98,8 @@ function searchPage(threadLists, options = {}) {
     numbers = [],
     issueCount = threadLists.length,
     threadTotals = [],
+    commentLists = threadLists.map(() => []),
+    commentTotals = [],
   } = options;
   return {
     data: {
@@ -110,9 +113,41 @@ function searchPage(threadLists, options = {}) {
             pageInfo: { hasNextPage: false, endCursor: null },
             nodes,
           },
+          comments: {
+            totalCount: commentTotals[index] ?? commentLists[index]?.length ?? 0,
+            pageInfo: { hasNextPage: false, endCursor: null },
+            nodes: commentLists[index] ?? [],
+          },
         })),
       },
     },
+  };
+}
+
+const ASSET_SHA = "6b59f533afef15820991b3a0470ddc22c6c6d436";
+
+function summaryComment(outcome, eventTimestamp, options = {}) {
+  const { legacy = false, databaseId = nextCommentId, author = BOT } = options;
+  nextCommentId += 1;
+  const reason = "settlement.incomplete.coverage_gap";
+  const outcomeText = legacy
+    ? outcome === "complete"
+      ? "✅ complete"
+      : outcome === "abandoned"
+        ? "⏳ abandoned"
+        : `⚠️ incomplete (\`${reason}\`)`
+    : `<img src="https://raw.githubusercontent.com/oscharko-dev/Keiko-for-Quality/${ASSET_SHA}/.github/assets/kq/out-${outcome}.svg" height="20" alt="${outcome.toUpperCase()}">${outcome === "incomplete" ? ` (\`${reason}\`)` : ""}`;
+  return {
+    id: `COMMENT_${String(databaseId)}`,
+    databaseId,
+    author: { login: author },
+    createdAt: eventTimestamp,
+    updatedAt: eventTimestamp,
+    body:
+      "**Keiko for Quality — run summary**\n\n" +
+      `${outcomeText} · head \`abcdef0\` · ${eventTimestamp} · engine \`v1.8.4\` · action \`${ASSET_SHA}\`\n\n` +
+      "| Metric | Count |\n| --- | ---: |\n| Total paths | 1 |\n\n" +
+      "<!-- keiko-for-quality:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
   };
 }
 
@@ -232,6 +267,73 @@ test("full timestamps enforce both edges of the exact rolling run and finding wi
   assert.equal(data.resolvedPct, 50);
   assert.equal(data.openThreads, 1);
   assert.equal(data.prsWithFindings, 1);
+});
+
+test("real run summaries, including the legacy format, determine PR completion", async () => {
+  const data = await collectCardData(
+    "o",
+    "r",
+    "tok",
+    fakeFetch({
+      "/actions/workflows?": { workflows: [] },
+      graphql: searchPage([[], []], {
+        numbers: [7, 8],
+        commentLists: [
+          [summaryComment("complete", RECENT, { databaseId: 101 })],
+          [summaryComment("incomplete", OLDER, { databaseId: 102, legacy: true })],
+        ],
+      }),
+    }),
+    NOW,
+  );
+  assert.equal(data.summaryRecords30d, 2);
+  assert.equal(data.completionPct, 50);
+  assert.equal(data.settlementStatus, "complete");
+  assert.equal(Math.round(data.lastReviewHours), 24);
+  assert.equal(data.runSuccessPct, undefined);
+});
+
+test("one PR contributes only its latest maintained summary", async () => {
+  const data = await collectCardData(
+    "o",
+    "r",
+    "tok",
+    fakeFetch({
+      "/actions/workflows?": { workflows: [] },
+      graphql: searchPage([[]], {
+        commentLists: [
+          [
+            summaryComment("complete", OLDER, { databaseId: 201, legacy: true }),
+            summaryComment("incomplete", RECENT, { databaseId: 202 }),
+          ],
+        ],
+      }),
+    }),
+    NOW,
+  );
+  assert.equal(data.summaryRecords30d, 1);
+  assert.equal(data.completionPct, 0);
+  assert.equal(data.settlementStatus, "incomplete");
+});
+
+test("an unparseable bot summary withholds settlement metrics but preserves findings", async () => {
+  const malformed = summaryComment("complete", RECENT);
+  malformed.body = malformed.body.replace("out-complete.svg", "out-made-up.svg");
+  const data = await collectCardData(
+    "o",
+    "r",
+    "tok",
+    fakeFetch({
+      "/actions/workflows?": { workflows: [] },
+      graphql: searchPage([[thread(BOT, false)]], { commentLists: [[malformed]] }),
+    }),
+    NOW,
+  );
+  assert.equal(data.findings, 1);
+  assert.equal(data.openThreads, 1);
+  assert.equal(data.summaryRecords30d, undefined);
+  assert.equal(data.completionPct, undefined);
+  assert.equal(data.settlementStatus, undefined);
 });
 
 test("findings exclude other authors and coverage stubs and report only resolution", async () => {
@@ -449,6 +551,54 @@ test("a thread-heavy pull request's overflow pages are followed to the end", asy
   assert.equal(data.resolvedPct, 50);
   assert.equal(data.openThreads, 1);
   assert.equal(data.prsWithFindings, 1);
+});
+
+test("issue-comment pagination is complete before a settlement rate is admitted", async () => {
+  const calls = [];
+  const first = summaryComment("complete", OLDER, { databaseId: 301, legacy: true });
+  const second = summaryComment("incomplete", RECENT, { databaseId: 302 });
+  const data = await collectCardData(
+    "o",
+    "r",
+    "tok",
+    fakeFetch({
+      "/actions/workflows?": { workflows: [] },
+      graphql: (url, init) => {
+        const { query, variables } = JSON.parse(init.body);
+        if (query.includes("comments(first:100,after")) {
+          calls.push([variables.n, variables.after]);
+          return {
+            data: {
+              repository: {
+                pullRequest: {
+                  comments: {
+                    totalCount: 2,
+                    pageInfo: { hasNextPage: false, endCursor: null },
+                    nodes: [second],
+                  },
+                },
+              },
+            },
+          };
+        }
+        const page = searchPage([[]], {
+          numbers: [7],
+          commentLists: [[first]],
+          commentTotals: [2],
+        });
+        page.data.search.nodes[0].comments.pageInfo = {
+          hasNextPage: true,
+          endCursor: "C1",
+        };
+        return page;
+      },
+    }),
+    NOW,
+  );
+  assert.deepEqual(calls, [[7, "C1"]]);
+  assert.equal(data.summaryRecords30d, 1);
+  assert.equal(data.completionPct, 0);
+  assert.equal(data.settlementStatus, "incomplete");
 });
 
 test("thread collection requests ids and total counts on search and overflow pages", async () => {
@@ -857,7 +1007,7 @@ test("non-canonical workflow-run timestamps make run metrics unknown", async () 
   assert.equal(data.runSuccessPct, undefined);
 });
 
-test("every endpoint failing leaves every metric undefined", async () => {
+test("every endpoint failing leaves metrics undefined but timestamps the failed snapshot", async () => {
   const data = await collectCardData(
     "o",
     "r",
@@ -865,7 +1015,7 @@ test("every endpoint failing leaves every metric undefined", async () => {
     async () => new Response("no", { status: 500 }),
     NOW,
   );
-  assert.deepEqual(data, { owner: "o", repo: "r" });
+  assert.deepEqual(data, { owner: "o", repo: "r", dataAsOf: new Date(NOW).toISOString() });
 });
 
 test("a throwing fetch degrades the same way", async () => {
@@ -878,5 +1028,5 @@ test("a throwing fetch degrades the same way", async () => {
     },
     NOW,
   );
-  assert.deepEqual(data, { owner: "o", repo: "r" });
+  assert.deepEqual(data, { owner: "o", repo: "r", dataAsOf: new Date(NOW).toISOString() });
 });

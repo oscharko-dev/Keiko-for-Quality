@@ -22,18 +22,27 @@ if (!owner || !repo || !outDir || !token) {
 
 const { formatPercentage, renderCard } = await import("../src/card.ts");
 const { collectCardData } = await import("../src/collect.ts");
+const { loadReleasedQualityEvidence, withQualityEvidence } = await import(
+  "../src/quality-evidence.ts"
+);
 const { createGitHubRequestBudget } = await import("../src/request-budget.ts");
 
 const requests = createGitHubRequestBudget(fetch);
-const data = await collectCardData(owner, repo, token, requests, Date.now());
+const nowMs = Date.now();
+const [repositoryData, qualityEvidence] = await Promise.all([
+  collectCardData(owner, repo, token, requests, nowMs),
+  loadReleasedQualityEvidence(token),
+]);
+const data = withQualityEvidence(repositoryData, qualityEvidence);
 await mkdir(join(outDir, owner), { recursive: true });
 await writeFile(join(outDir, owner, `${repo}.svg`), renderCard(data, "dark"));
 await writeFile(join(outDir, owner, `${repo}-light.svg`), renderCard(data, "light"));
 
 const shown = (v) => (v === undefined ? "—" : String(v));
 console.log(
-  `${owner}/${repo}: runs30d=${shown(data.runs30d)} findings=${shown(data.findings)} ` +
-    `resolved=${formatPercentage(data.resolvedPct)} openThreads=${shown(data.openThreads)} ` +
-    `prsWithFindings=${shown(data.prsWithFindings)} runsOk=${formatPercentage(data.runSuccessPct)} ` +
-    `runStatus=${shown(data.runStatus)}`,
+  `${owner}/${repo}: summaryRecords30d=${shown(data.summaryRecords30d)} ` +
+    `completion=${formatPercentage(data.completionPct)} findings=${shown(data.findings)} ` +
+    `openThreads=${shown(data.openThreads)} latestSettlement=${shown(data.settlementStatus)} ` +
+    `holdoutPrecision=${formatPercentage(data.historicalHoldoutPrecisionPct)} ` +
+    `evidence=${shown(data.qualityVersion)} dataAsOf=${shown(data.dataAsOf)}`,
 );

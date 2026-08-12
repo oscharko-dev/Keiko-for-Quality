@@ -6,10 +6,13 @@
  *   contains `keiko-for-quality` or ends in `self-review.yml`) created in the exact trailing
  *   thirty days. Skipped and cancelled runs are not reviews — superseded pushes cancel their runs
  *   under the consumer's concurrency group — and do not count.
- * - `runStatus`/`lastRunHours`: from the newest counted run. This is explicitly the GitHub
- *   workflow conclusion (`RUN OK`/`RUN NOT OK`), never the review settlement; only the run summary
- *   on the pull request can prove `complete` or `incomplete`.
+ * - `runStatus`/`lastRunHours`: retained as low-level workflow telemetry only. Neither value is
+ *   rendered as review quality.
  * - `runSuccessPct`: the share of counted runs whose GitHub conclusion is `success`.
+ * - `summaryRecords30d`/`completionPct`/`settlementStatus`: from the reviewer's maintained,
+ *   marker-bound run-summary issue comment. One current record per pull request is counted when
+ *   that summary's own event timestamp is in the window. `complete` is the actual product
+ *   settlement, not a green workflow conclusion.
  * - `findings`: reviewer-bot review threads whose first comment was created inside that same exact
  *   window, fixed-template incomplete-review notices excluded. The coarse
  *   pull-request search window is only candidate discovery; every thread is filtered by its full
@@ -473,13 +476,21 @@ const SEARCH_QUERY =
   `query($q:String!,$after:String){search(query:$q,type:ISSUE,first:${String(SEARCH_PAGE_SIZE)},after:$after){` +
   "issueCount pageInfo{hasNextPage endCursor}nodes{... on PullRequest{number " +
   "reviewThreads(first:100){totalCount pageInfo{hasNextPage endCursor}" +
-  "nodes{id isResolved comments(first:1){nodes{author{login} body createdAt}}}}}}}}";
+  "nodes{id isResolved comments(first:1){nodes{author{login} body createdAt}}}}" +
+  "comments(first:100){totalCount pageInfo{hasNextPage endCursor}" +
+  "nodes{id databaseId author{login} body createdAt updatedAt}}}}}}";
 
 /** Follow-up pages of one pull request's threads, for the overflow case above. */
 const THREADS_QUERY =
   "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){" +
   "pullRequest(number:$n){reviewThreads(first:100,after:$after){totalCount pageInfo{hasNextPage endCursor}" +
   "nodes{id isResolved comments(first:1){nodes{author{login} body createdAt}}}}}}}";
+
+/** Follow-up pages of one pull request's issue comments, used only when it has over 100. */
+const COMMENTS_QUERY =
+  "query($o:String!,$r:String!,$n:Int!,$after:String){repository(owner:$o,name:$r){" +
+  "pullRequest(number:$n){comments(first:100,after:$after){totalCount " +
+  "pageInfo{hasNextPage endCursor}nodes{id databaseId author{login} body createdAt updatedAt}}}}}";
 
 /** Thread pages per pull request past the first — 10 covers a 1,100-thread pull request. */
 const MAX_THREAD_PAGES = 10;
@@ -514,6 +525,27 @@ interface ThreadConnection {
   readonly nodes?: readonly unknown[];
 }
 
+interface IssueCommentNode {
+  readonly id?: string;
+  readonly databaseId?: number;
+  readonly author?: { readonly login?: string } | null;
+  readonly body?: string;
+  readonly createdAt?: string;
+  readonly updatedAt?: string;
+}
+
+interface IssueCommentConnection {
+  readonly totalCount?: number;
+  readonly pageInfo?: PageInfo;
+  readonly nodes?: readonly unknown[];
+}
+
+interface CompleteIssueCommentConnection extends IssueCommentConnection {
+  readonly totalCount: number;
+  readonly pageInfo: CompletePageInfo;
+  readonly nodes: readonly unknown[];
+}
+
 interface CompleteThreadConnection extends ThreadConnection {
   readonly totalCount: number;
   readonly pageInfo: CompletePageInfo;
@@ -523,6 +555,7 @@ interface CompleteThreadConnection extends ThreadConnection {
 interface SearchPullRequest {
   readonly number?: number;
   readonly reviewThreads?: ThreadConnection;
+  readonly comments?: IssueCommentConnection;
 }
 
 interface BoundSearchPullRequest extends SearchPullRequest {
@@ -676,6 +709,18 @@ interface FindingStats {
   readonly prsWithFindings?: number;
 }
 
+interface SettlementStats {
+  readonly summaryRecords30d?: number;
+  readonly completionPct?: number;
+  readonly settlementStatus?: CardData["settlementStatus"];
+  readonly lastReviewHours?: number;
+}
+
+interface ReviewStats {
+  readonly findings: FindingStats;
+  readonly settlements: SettlementStats;
+}
+
 function finishedStats(tally: ThreadTally, prsWithFindings: ReadonlySet<number>): FindingStats {
   const { findings, resolved } = tally;
   return {
@@ -781,6 +826,275 @@ interface FindingCollectionContext {
   readonly nowMs: number;
 }
 
+interface CommentsPage {
+  readonly data?: {
+    readonly repository?: {
+      readonly pullRequest?: { readonly comments?: IssueCommentConnection };
+    };
+  };
+  readonly errors?: readonly unknown[];
+}
+
+type SettlementOutcome = Exclude<CardData["settlementStatus"], undefined>;
+
+interface SettlementRecord {
+  readonly databaseId: number;
+  readonly eventMs: number;
+  readonly outcome: SettlementOutcome;
+}
+
+interface CommentPopulationState {
+  readonly seenIds: Set<string>;
+  readonly summaries: SettlementRecord[];
+  expectedTotal?: number;
+}
+
+interface SettlementTally {
+  records: number;
+  complete: number;
+  latest?: SettlementRecord;
+}
+
+const SUMMARY_TITLE = "**Keiko for Quality — run summary**";
+const SUMMARY_MARKER = /<!-- keiko-for-quality:v1:[0-9a-f]{32} -->/u;
+const SUMMARY_HEADLINE =
+  /^<img src="https:\/\/raw\.githubusercontent\.com\/oscharko-dev\/Keiko-for-Quality\/[0-9a-f]{40}\/\.github\/assets\/kq\/out-(complete|incomplete|abandoned)\.svg" height="20" alt="(COMPLETE|INCOMPLETE|ABANDONED)">( \(`([a-z0-9._]+)`\))? · head `([0-9a-f]{7})` · (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z) · engine `v[0-9]+\.[0-9]+\.[0-9]+`(?: · action `[^`]+`)?$/u;
+/** v0.6.0-v0.22.x summaries used text glyphs before the pinned design-system chips. They remain
+ *  valid historical product records; refusing them would silently select only newer reviews and
+ *  inflate the apparent completion rate. */
+const LEGACY_SUMMARY_HEADLINE =
+  /^(✅ complete|⏳ abandoned|⚠️ incomplete(?: \(`([a-z0-9._]+)`\))) · head `([0-9a-f]{7})` · (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z) · engine `v[0-9]+\.[0-9]+\.[0-9]+`(?: · action `[^`]+`)?$/u;
+
+function validIssueCommentConnection(
+  connection: IssueCommentConnection | undefined,
+): connection is CompleteIssueCommentConnection {
+  return (
+    Array.isArray(connection?.nodes) &&
+    Number.isSafeInteger(connection.totalCount) &&
+    (connection.totalCount ?? -1) >= 0 &&
+    validPageInfo(connection.pageInfo)
+  );
+}
+
+type SummaryClassification =
+  | { readonly kind: "summary"; readonly record: SettlementRecord }
+  | { readonly kind: "other" }
+  | { readonly kind: "invalid" };
+
+interface ParsedSummaryHeadline {
+  readonly outcome: SettlementOutcome;
+  readonly eventMs: number;
+}
+
+function parsedCurrentHeadline(headline: string): ParsedSummaryHeadline | undefined {
+  const match = SUMMARY_HEADLINE.exec(headline);
+  if (match === null) return undefined;
+  const outcome = match[1] as SettlementOutcome;
+  const alt = match[2]?.toLowerCase();
+  const reason = match[4];
+  const eventMs = parsedTimestamp(match[6]);
+  if (
+    alt !== outcome ||
+    (outcome === "incomplete") !== (reason !== undefined) ||
+    eventMs === undefined
+  ) {
+    return undefined;
+  }
+  return { outcome, eventMs };
+}
+
+function parsedLegacyHeadline(headline: string): ParsedSummaryHeadline | undefined {
+  const match = LEGACY_SUMMARY_HEADLINE.exec(headline);
+  if (match === null) return undefined;
+  const label = match[1];
+  const outcome: SettlementOutcome = label?.startsWith("✅")
+    ? "complete"
+    : label?.startsWith("⏳")
+      ? "abandoned"
+      : "incomplete";
+  const reason = match[2];
+  const eventMs = parsedTimestamp(match[4]);
+  if ((outcome === "incomplete") !== (reason !== undefined) || eventMs === undefined) {
+    return undefined;
+  }
+  return { outcome, eventMs };
+}
+
+function isBotSummary(comment: IssueCommentNode): SummaryClassification | undefined {
+  if (comment.author?.login === BOT_LOGIN_GRAPHQL) return undefined;
+  return comment.author?.login === undefined ? { kind: "invalid" } : { kind: "other" };
+}
+
+function summaryMetadata(comment: IssueCommentNode, body: string): number | undefined {
+  const { databaseId, createdAt, updatedAt } = comment;
+  if (
+    typeof databaseId !== "number" ||
+    !Number.isSafeInteger(databaseId) ||
+    databaseId <= 0 ||
+    typeof createdAt !== "string" ||
+    parsedTimestamp(createdAt) === undefined ||
+    typeof updatedAt !== "string" ||
+    parsedTimestamp(updatedAt) === undefined ||
+    !SUMMARY_MARKER.test(body)
+  ) {
+    return undefined;
+  }
+  return databaseId;
+}
+
+function summaryHeadline(body: string): string | undefined {
+  return body.split("\n")[2];
+}
+
+export function parseSummaryRecord(comment: IssueCommentNode): SummaryClassification {
+  const body = comment.body;
+  if (typeof body !== "string" || !body.startsWith(`${SUMMARY_TITLE}\n\n`))
+    return { kind: "other" };
+  const identity = isBotSummary(comment);
+  if (identity !== undefined) return identity;
+  const databaseId = summaryMetadata(comment, body);
+  const headline = summaryHeadline(body);
+  if (databaseId === undefined || headline === undefined) return { kind: "invalid" };
+  const parsed = parsedCurrentHeadline(headline) ?? parsedLegacyHeadline(headline);
+  if (parsed === undefined) return { kind: "invalid" };
+  return {
+    kind: "summary",
+    record: {
+      databaseId,
+      eventMs: parsed.eventMs,
+      outcome: parsed.outcome,
+    },
+  };
+}
+
+function acceptCommentNode(value: unknown, state: CommentPopulationState): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  const comment = value as IssueCommentNode;
+  if (typeof comment.id !== "string" || comment.id.length === 0 || state.seenIds.has(comment.id)) {
+    return false;
+  }
+  state.seenIds.add(comment.id);
+  const classification = parseSummaryRecord(comment);
+  if (classification.kind === "invalid") return false;
+  if (classification.kind === "summary") state.summaries.push(classification.record);
+  return true;
+}
+
+function acceptCommentPage(
+  connection: IssueCommentConnection | undefined,
+  state: CommentPopulationState,
+): PageDecision {
+  if (!validIssueCommentConnection(connection)) return "invalid";
+  state.expectedTotal ??= connection.totalCount;
+  if (connection.totalCount !== state.expectedTotal) return "invalid";
+  for (const node of connection.nodes) {
+    if (!acceptCommentNode(node, state)) return "invalid";
+  }
+  if (state.seenIds.size > state.expectedTotal) return "invalid";
+  if (!connection.pageInfo.hasNextPage) {
+    return state.seenIds.size === state.expectedTotal ? "complete" : "invalid";
+  }
+  return state.seenIds.size < state.expectedTotal ? "continue" : "invalid";
+}
+
+async function fetchCommentPage(
+  context: FindingCollectionContext,
+  prNumber: number,
+  after: string | null,
+): Promise<IssueCommentConnection | undefined> {
+  const reply = await json<CommentsPage>(
+    context.fetchImpl,
+    "https://api.github.com/graphql",
+    context.token,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        query: COMMENTS_QUERY,
+        variables: { o: context.owner, r: context.repo, n: prNumber, after },
+      }),
+    },
+  );
+  if (reply?.errors !== undefined) return undefined;
+  return reply?.data?.repository?.pullRequest?.comments;
+}
+
+function newestSettlement(records: readonly SettlementRecord[]): SettlementRecord | undefined {
+  return records.reduce<SettlementRecord | undefined>(
+    (latest, record) =>
+      latest === undefined || record.databaseId > latest.databaseId ? record : latest,
+    undefined,
+  );
+}
+
+async function pullRequestSettlement(
+  pr: BoundSearchPullRequest,
+  context: FindingCollectionContext,
+): Promise<SettlementRecord | undefined | false> {
+  const state: CommentPopulationState = { seenIds: new Set(), summaries: [] };
+  if (!(await collectSettlementPages(pr, context, state))) return false;
+  const latest = newestSettlement(state.summaries);
+  if (latest !== undefined && latest.eventMs > context.nowMs) return false;
+  if (latest === undefined || latest.eventMs < context.since) return undefined;
+  return latest;
+}
+
+async function collectSettlementPages(
+  pr: BoundSearchPullRequest,
+  context: FindingCollectionContext,
+  state: CommentPopulationState,
+): Promise<boolean> {
+  let connection = pr.comments;
+  let decision = acceptCommentPage(connection, state);
+  for (let page = 1; decision === "continue" && page <= MAX_THREAD_PAGES; page += 1) {
+    connection = await fetchCommentPage(
+      context,
+      pr.number,
+      connection?.pageInfo?.endCursor ?? null,
+    );
+    decision = acceptCommentPage(connection, state);
+  }
+  return decision === "complete";
+}
+
+function newerSettlement(
+  current: SettlementRecord | undefined,
+  candidate: SettlementRecord,
+): SettlementRecord {
+  if (current === undefined || candidate.eventMs > current.eventMs) return candidate;
+  if (candidate.eventMs === current.eventMs && candidate.databaseId > current.databaseId) {
+    return candidate;
+  }
+  return current;
+}
+
+async function tallySearchSettlements(
+  pullRequests: readonly BoundSearchPullRequest[],
+  context: FindingCollectionContext,
+  tally: SettlementTally,
+): Promise<boolean> {
+  for (const pr of pullRequests) {
+    const record = await pullRequestSettlement(pr, context);
+    if (record === false) return false;
+    if (record === undefined) continue;
+    tally.records += 1;
+    if (record.outcome === "complete") tally.complete += 1;
+    tally.latest = newerSettlement(tally.latest, record);
+  }
+  return true;
+}
+
+function finishedSettlementStats(tally: SettlementTally, nowMs: number): SettlementStats {
+  if (tally.records === 0) return { summaryRecords30d: 0 };
+  const latest = tally.latest;
+  if (latest === undefined) return {};
+  return {
+    summaryRecords30d: tally.records,
+    completionPct: (tally.complete / tally.records) * 100,
+    settlementStatus: latest.outcome,
+    lastReviewHours: (nowMs - latest.eventMs) / HOUR_MS,
+  };
+}
+
 interface OverflowThreadsRequest extends FindingCollectionContext {
   readonly prNumber: number;
   readonly cursor: string | null;
@@ -858,37 +1172,49 @@ async function fetchSearchPage(
   return reply?.data?.search;
 }
 
-async function collectFindingStats(
+async function collectReviewStats(
   owner: string,
   repo: string,
   token: string,
   fetchImpl: typeof fetch,
   since: number,
   nowMs: number,
-): Promise<FindingStats> {
+): Promise<ReviewStats> {
   const context: FindingCollectionContext = { owner, repo, token, fetchImpl, since, nowMs };
   const day = new Date(since).toISOString().slice(0, 10);
   // The inclusive coarse boundary prevents a thread created exactly at 00:00Z from disappearing;
   // classifyThread still applies the exact millisecond window locally.
   const q = `repo:${owner}/${repo} is:pr updated:>=${day}`;
   const tally: ThreadTally = { findings: 0, resolved: 0 };
+  const settlementTally: SettlementTally = { records: 0, complete: 0 };
   const prsWithFindings = new Set<number>();
   const population: SearchPopulationState = { seenPullRequests: new Set() };
+  let findingsKnown = true;
+  let settlementsKnown = true;
   let after: string | null = null;
   for (let page = 1; page <= MAX_SEARCH_PAGES; page += 1) {
     const search = await fetchSearchPage(q, after, token, fetchImpl);
-    if (!validSearchResults(search)) return {};
+    if (!validSearchResults(search)) return { findings: {}, settlements: {} };
     const pullRequests = acceptSearchPopulation(search, population);
-    if (pullRequests === undefined) return {};
-    const complete = await tallySearchPullRequests(pullRequests, context, tally, prsWithFindings);
-    if (!complete) return {};
+    if (pullRequests === undefined) return { findings: {}, settlements: {} };
+    if (findingsKnown) {
+      findingsKnown = await tallySearchPullRequests(pullRequests, context, tally, prsWithFindings);
+    }
+    if (settlementsKnown) {
+      settlementsKnown = await tallySearchSettlements(pullRequests, context, settlementTally);
+    }
     const continuation = searchContinuation(search, population);
-    if (continuation.kind === "complete") return finishedStats(tally, prsWithFindings);
-    if (continuation.kind === "invalid") return {};
+    if (continuation.kind === "complete") {
+      return {
+        findings: findingsKnown ? finishedStats(tally, prsWithFindings) : {},
+        settlements: settlementsKnown ? finishedSettlementStats(settlementTally, nowMs) : {},
+      };
+    }
+    if (continuation.kind === "invalid") return { findings: {}, settlements: {} };
     after = continuation.cursor;
   }
   // The window outran the safety ceiling: absent beats publishing a floor as the truth.
-  return {};
+  return { findings: {}, settlements: {} };
 }
 
 export async function collectCardData(
@@ -900,34 +1226,46 @@ export async function collectCardData(
 ): Promise<CardData> {
   const since = nowMs - 30 * DAY_MS;
   const base = `https://api.github.com/repos/${owner}/${repo}`;
-  const [runs, findingStats] = await Promise.all([
+  const [runs, reviewStats] = await Promise.all([
     collectRunStats(base, token, requests.fetch, nowMs, since),
-    collectFindingStats(owner, repo, token, requests.fetch, since, nowMs),
+    collectReviewStats(owner, repo, token, requests.fetch, since, nowMs),
   ]);
   if (requests.exhausted) return { owner, repo };
-  // Field-by-field under exactOptionalPropertyTypes: a metric is either present or absent —
-  // an explicit `undefined` never enters CardData, matching the card's em-dash contract.
-  const data: {
-    owner: string;
-    repo: string;
-    runs30d?: number;
-    runSuccessPct?: number;
-    findings?: number;
-    resolvedPct?: number;
-    openThreads?: number;
-    prsWithFindings?: number;
-    runStatus?: Exclude<CardData["runStatus"], undefined>;
-    lastRunHours?: number;
-  } = { owner, repo };
-  if (runs.runs30d !== undefined) data.runs30d = runs.runs30d;
-  if (runs.runSuccessPct !== undefined) data.runSuccessPct = runs.runSuccessPct;
-  if (runs.runStatus !== undefined) data.runStatus = runs.runStatus;
-  if (runs.lastRunHours !== undefined) data.lastRunHours = runs.lastRunHours;
-  if (findingStats.findings !== undefined) data.findings = findingStats.findings;
-  if (findingStats.resolvedPct !== undefined) data.resolvedPct = findingStats.resolvedPct;
-  if (findingStats.openThreads !== undefined) data.openThreads = findingStats.openThreads;
-  if (findingStats.prsWithFindings !== undefined) {
-    data.prsWithFindings = findingStats.prsWithFindings;
-  }
-  return data;
+  return cardData(owner, repo, nowMs, runs, reviewStats);
+}
+
+type CardMetrics = Omit<CardData, "owner" | "repo">;
+
+function presentMetric<Key extends keyof CardMetrics>(
+  key: Key,
+  value: CardMetrics[Key],
+): Pick<CardMetrics, Key> | Record<never, never> {
+  return value === undefined ? {} : ({ [key]: value } as Pick<CardMetrics, Key>);
+}
+
+function cardData(
+  owner: string,
+  repo: string,
+  nowMs: number,
+  runs: RunStats,
+  reviewStats: ReviewStats,
+): CardData {
+  const { findings, settlements } = reviewStats;
+  return {
+    owner,
+    repo,
+    dataAsOf: new Date(nowMs).toISOString(),
+    ...presentMetric("runs30d", runs.runs30d),
+    ...presentMetric("runSuccessPct", runs.runSuccessPct),
+    ...presentMetric("runStatus", runs.runStatus),
+    ...presentMetric("lastRunHours", runs.lastRunHours),
+    ...presentMetric("findings", findings.findings),
+    ...presentMetric("resolvedPct", findings.resolvedPct),
+    ...presentMetric("openThreads", findings.openThreads),
+    ...presentMetric("prsWithFindings", findings.prsWithFindings),
+    ...presentMetric("summaryRecords30d", settlements.summaryRecords30d),
+    ...presentMetric("completionPct", settlements.completionPct),
+    ...presentMetric("settlementStatus", settlements.settlementStatus),
+    ...presentMetric("lastReviewHours", settlements.lastReviewHours),
+  };
 }

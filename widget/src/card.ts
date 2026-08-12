@@ -3,7 +3,7 @@
  * self-contained SVG — the production evolution of the card widget foundation in section 07 of
  * `design-system/index.html`. Its dimensions, colour system, typography, dot grid, orca tile and
  * footer stay on that visual contract: 340px card, #171B18 on a 24px dot grid, a 42px tile with
- * its green glow, mono 21px metrics with 10px labels, an explicit workflow-status chip, a quiet
+ * its green glow, mono 21px metrics with 10px labels, an explicit latest-settlement line, a quiet
  * second row of operational signals, and the EX EXPERIENTIA DISCO / quality.keiko.dev footer.
  * This module is the normative production contract; the design page's section 07 is a historical
  * layout specimen, not a live source for metric meaning or future card evolution.
@@ -39,6 +39,20 @@ export interface CardData {
   readonly runStatus?: "ok" | "not_ok";
   /** Hours since the most recent run, for the "last run" line. */
   readonly lastRunHours?: number;
+  /** Pull requests whose latest maintained run summary belongs to the trailing thirty days. */
+  readonly summaryRecords30d?: number;
+  /** Share of those latest per-PR summaries whose real settlement is `complete`, 0–100. */
+  readonly completionPct?: number;
+  /** Latest real settlement among the counted summaries. */
+  readonly settlementStatus?: "complete" | "incomplete" | "abandoned";
+  /** Hours since the event timestamp in the latest counted run summary. */
+  readonly lastReviewHours?: number;
+  /** Precision on the released chronological historical holdout, never synthetic clean silence. */
+  readonly historicalHoldoutPrecisionPct?: number;
+  /** Released version whose historical evidence supplied the precision value. */
+  readonly qualityVersion?: string;
+  /** Exact ISO timestamp at which the GitHub snapshot was collected. */
+  readonly dataAsOf?: string;
 }
 
 export type CardTheme = "dark" | "light";
@@ -51,12 +65,7 @@ interface Palette {
   readonly fg: string;
   readonly muted: string;
   readonly accent: string;
-  readonly chipOk: string;
-  readonly chipOkBg: string;
-  readonly chipOkLine: string;
   readonly chipWarn: string;
-  readonly chipWarnBg: string;
-  readonly chipWarnLine: string;
   readonly statsBg: string;
   readonly tile: string;
   readonly tileGlow: string;
@@ -73,12 +82,7 @@ const PALETTES: Record<CardTheme, Palette> = {
     fg: "#F2F5F3",
     muted: "#98A29C",
     accent: "#4EBA87",
-    chipOk: "#5FB585",
-    chipOkBg: "rgba(78,186,135,0.14)",
-    chipOkLine: "rgba(78,186,135,0.4)",
     chipWarn: "#D9A24F",
-    chipWarnBg: "rgba(217,162,79,0.14)",
-    chipWarnLine: "rgba(217,162,79,0.4)",
     statsBg: "rgba(255,255,255,0.025)",
     tile: "#4EBA87",
     tileGlow: "rgba(78,186,135,0.45)",
@@ -92,12 +96,7 @@ const PALETTES: Record<CardTheme, Palette> = {
     fg: "#1B211E",
     muted: "#6A746E",
     accent: "#2E8F63",
-    chipOk: "#2E8F63",
-    chipOkBg: "rgba(46,143,99,0.10)",
-    chipOkLine: "rgba(46,143,99,0.35)",
     chipWarn: "#8A6410",
-    chipWarnBg: "rgba(138,100,16,0.10)",
-    chipWarnLine: "rgba(138,100,16,0.35)",
     statsBg: "rgba(27,33,30,0.025)",
     tile: "#4EBA87",
     tileGlow: "rgba(78,186,135,0.35)",
@@ -135,11 +134,16 @@ export function formatPercentage(value: number | undefined): string {
   return `${String(rounded)}%`;
 }
 
-function lastRunLabel(hours: number | undefined): string {
-  if (hours === undefined) return "";
-  if (hours < 1) return "last run <1 h ago";
-  if (hours < 48) return `last run ${String(Math.round(hours))} h ago`;
-  return `last run ${String(Math.round(hours / 24))} d ago`;
+function lastReviewLabel(hours: number | undefined, status: CardData["settlementStatus"]): string {
+  let time = "";
+  if (hours !== undefined && hours < 1) time = "last review <1 h ago";
+  else if (hours !== undefined && hours < 48) {
+    time = `last review ${String(Math.round(hours))} h ago`;
+  } else if (hours !== undefined) {
+    time = `last review ${String(Math.round(hours / 24))} d ago`;
+  }
+  if (status === undefined) return time;
+  return time === "" ? `latest ${status}` : `${time} · ${status}`;
 }
 
 /** The 42px brand tile with its glow, and the orca ink mark inset by the design's 4px. */
@@ -175,27 +179,6 @@ function metricsBlock(columns: readonly MetricColumn[], p: Palette): string {
   return parts.join("\n  ");
 }
 
-function chipBlock(runStatus: CardData["runStatus"], p: Palette): string {
-  if (runStatus === undefined) return "";
-  const ok = runStatus === "ok";
-  const color = ok ? p.chipOk : p.chipWarn;
-  const bg = ok ? p.chipOkBg : p.chipWarnBg;
-  const line = ok ? p.chipOkLine : p.chipWarnLine;
-  const label = ok ? "RUN OK" : "RUN NOT OK";
-  const textW = label.length * 6.4;
-  const w = 9 + 11 + 5 + textW + 9;
-  const x = WIDTH - PAD_X - w;
-  const cy = 88;
-  const icon = ok
-    ? `<path d="M${String(x + 11)} ${String(cy)} l2.8 2.8 l5.4 -5.6" fill="none" stroke="${color}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>`
-    : `<circle cx="${String(x + 14.5)}" cy="${String(cy)}" r="4.4" fill="none" stroke="${color}" stroke-width="1.6"/>`;
-  return (
-    `<rect x="${String(x)}" y="${String(cy - 10.5)}" width="${String(w)}" height="21" rx="10.5" fill="${bg}" stroke="${line}"/>` +
-    icon +
-    `<text x="${String(x + 25)}" y="${String(cy + 3.5)}" font-family="${MONO}" font-size="9.5" letter-spacing="0.7" fill="${color}">${label}</text>`
-  );
-}
-
 interface HealthMetric {
   readonly value: string;
   readonly label: string;
@@ -229,22 +212,44 @@ function footerBlock(p: Palette): string {
   );
 }
 
+interface AsOfLabel {
+  readonly value: string;
+  readonly label: string;
+}
+
+function asOfLabel(value: string | undefined): AsOfLabel {
+  if (value === undefined) return { value: "—", label: "DATA AS OF" };
+  const milliseconds = Date.parse(value);
+  if (!Number.isFinite(milliseconds)) return { value: "—", label: "DATA AS OF" };
+  const iso = new Date(milliseconds).toISOString();
+  return { value: iso.slice(0, 10), label: `DATA AS OF · ${iso.slice(11, 16)}Z` };
+}
+
 export function renderCard(data: CardData, theme: CardTheme = "dark"): string {
   const p = PALETTES[theme];
   const title = "Reviewed by Keiko for Quality";
-  const last = esc(lastRunLabel(data.lastRunHours));
+  const last = esc(lastReviewLabel(data.lastReviewHours, data.settlementStatus));
+  const lastColor =
+    data.settlementStatus === "incomplete" || data.settlementStatus === "abandoned"
+      ? p.chipWarn
+      : p.muted;
   const slug = esc(`${data.owner}/${data.repo}`);
-  const resolved = formatPercentage(data.resolvedPct);
-  const runSuccess = formatPercentage(data.runSuccessPct);
+  const completion = formatPercentage(data.completionPct);
+  const precision = formatPercentage(data.historicalHoldoutPrecisionPct);
+  const evidenceLabel =
+    data.qualityVersion === undefined
+      ? "HOLDOUT PRECISION"
+      : `HOLDOUT PREC · ${data.qualityVersion.toUpperCase()}`;
+  const asOf = asOfLabel(data.dataAsOf);
   const columns: readonly MetricColumn[] = [
-    { value: metric(data.runs30d), label: "runs · 30 d", accent: false },
-    { value: metric(data.findings), label: "findings", accent: false },
-    { value: resolved, label: "resolved", accent: true },
+    { value: metric(data.summaryRecords30d), label: "PR records · 30 d", accent: false },
+    { value: metric(data.findings), label: "findings · 30 d", accent: false },
+    { value: completion, label: "PRs complete", accent: true },
   ];
   const health: readonly HealthMetric[] = [
-    { value: runSuccess, label: "RUN SUCCESS" },
+    { value: precision, label: evidenceLabel },
     { value: metric(data.openThreads), label: "OPEN THREADS" },
-    { value: metric(data.prsWithFindings), label: "PRS W/ FINDINGS" },
+    asOf,
   ];
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${String(WIDTH)}" height="${String(HEIGHT)}" viewBox="0 0 ${String(WIDTH)} ${String(HEIGHT)}" role="img" aria-label="${esc(title)} — ${slug}">
   <defs>
@@ -262,9 +267,8 @@ export function renderCard(data: CardData, theme: CardTheme = "dark"): string {
   ${tileBlock(p)}
   <text x="75" y="32" font-family="${SANS}" font-size="13.5" font-weight="650" letter-spacing="-0.14" fill="${p.fg}">${esc(title)}</text>
   <text x="75" y="45" font-family="${MONO}" font-size="10" fill="${p.muted}">${slug}</text>
-  ${last === "" ? "" : `<text x="75" y="57" font-family="${MONO}" font-size="8.5" fill="${p.muted}">${last}</text>`}
+  ${last === "" ? "" : `<text x="75" y="57" font-family="${MONO}" font-size="8.5" fill="${lastColor}">${last}</text>`}
   ${metricsBlock(columns, p)}
-  ${chipBlock(data.runStatus, p)}
   ${healthBlock(health, p)}
   ${footerBlock(p)}
   </g>

@@ -15078,7 +15078,7 @@ async function localSettleOrReport(run2, inventory, memo) {
     );
   }
 }
-function verificationIncompleteLocalReport(run2, inventory, memo, reported) {
+function sanitizationIncompleteLocalReport(run2, inventory, memo, reported) {
   const reason = "settlement.incomplete.publication_degraded";
   run2.diagnostics.record(reason, {
     headSha: run2.request.head,
@@ -15164,8 +15164,8 @@ async function completeLocalReport(run2, inventory, settlement, memo) {
     }
     throw error;
   }
-  if (reported.verificationUndecided > 0 || reported.rejectedSanitization > 0) {
-    return verificationIncompleteLocalReport(run2, inventory, memo, reported);
+  if (reported.rejectedSanitization > 0) {
+    return sanitizationIncompleteLocalReport(run2, inventory, memo, reported);
   }
   return verifiedCompleteLocalReport(run2, inventory, settlement, memo, reported);
 }

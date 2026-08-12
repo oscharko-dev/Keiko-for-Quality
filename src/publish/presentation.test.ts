@@ -307,6 +307,8 @@ describe("composeSummaryBody", () => {
     suppressedSimilar: 2,
     suppressedDispositioned: 0,
     suppressedRecurrence: 6,
+    suppressedEvidence: 11,
+    verificationUndecided: 2,
     rejectedSanitization: 7,
     rejectedPlacement: 8,
     readbackFailures: 9,
@@ -414,6 +416,7 @@ describe("composeSummaryBody", () => {
       expect(body).toContain("| Suppressed (similar) | 2 |");
       expect(body).toContain("| Suppressed (dispositioned) | 0 |");
       expect(body).toContain("| Suppressed (outdated recurrence) | 6 |");
+      expect(body).toContain("| Withheld by evidence (undecided) | 11 (2) |");
       // The four counters `publicationDegraded` (review.ts) actually decides complete-vs-incomplete
       // on — previously computed but never surfaced on this comment.
       expect(body).toContain("| Rejected (sanitization) | 7 |");

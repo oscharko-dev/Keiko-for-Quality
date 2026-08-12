@@ -1796,6 +1796,10 @@ function countRows(counts) {
     ["Suppressed (similar)", counts.suppressedSimilar],
     ["Suppressed (dispositioned)", counts.suppressedDispositioned],
     ["Suppressed (outdated recurrence)", counts.suppressedRecurrence],
+    [
+      "Withheld by evidence (undecided)",
+      `${String(counts.suppressedEvidence)} (${String(counts.verificationUndecided)})`
+    ],
     ["Rejected (sanitization)", counts.rejectedSanitization],
     ["Rejected (placement)", counts.rejectedPlacement],
     ["Read-back failures", counts.readbackFailures],
@@ -1895,6 +1899,8 @@ function buildSummaryReport(input, diagnostics) {
     suppressedDispositioned: publish.suppressedDispositioned,
     // Same optional-field fallback as `suppressedIntraRun` above, for the same reason.
     suppressedRecurrence: publish.suppressedRecurrence ?? 0,
+    suppressedEvidence: publish.suppressedEvidence ?? 0,
+    verificationUndecided: publish.verificationUndecided ?? 0,
     // The four counters `publicationDegraded` (review.ts) actually decides on — see
     // `SummaryCounts`'s own doc comment. `apiFailures` alone needs the same optional-field
     // fallback as `suppressedIntraRun`/`suppressedRecurrence` above; the other three have always
@@ -15404,9 +15410,7 @@ function publicationDegraded(outcome) {
   return outcome.rejectedSanitization > 0 || outcome.rejectedPlacement > 0 || outcome.readbackFailures > 0 || // A finding whose publish call itself failed was contained per finding rather than allowed to
   // abort the loop (publisher.ts), but containment does not make it published: the consumer
   // never saw it, so the run cannot read as fully reviewed.
-  (outcome.apiFailures ?? 0) > 0 || // A verifier outage withheld fresh claims instead of publishing them. The withholding is the
-  // safe publication decision; this flag is what stops that outage from masquerading as clean.
-  (outcome.verificationUndecided ?? 0) > 0;
+  (outcome.apiFailures ?? 0) > 0;
 }
 function nonzeroPublicationCount(key, value) {
   if (value === void 0 || value === 0) return {};
@@ -16067,7 +16071,7 @@ async function reportDegradedPublication(inputs) {
     },
     memo
   );
-  const finalized = (publish.verificationUndecided ?? 0) > 0 ? void 0 : finalizeCacheStore(
+  const finalized = finalizeCacheStore(
     run2.request,
     inventory,
     memo,

@@ -4228,7 +4228,7 @@ describe("performReview: review-cache memoization end to end", () => {
       ).toBe(false);
     });
 
-    it("fails closed when the remaining budget cannot finish verification and never audits or caches the finding", async () => {
+    it("withholds an unverified finding without making a fully covered review incomplete or caching its path", async () => {
       const engineDigest = currentPlatformDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       const BODY =
@@ -4260,20 +4260,31 @@ describe("performReview: review-cache memoization end to end", () => {
       const diagnostics = createSilentDiagnostics();
       const report = await performReview(request, diagnostics);
 
-      expect(report.outcome).toBe("incomplete");
-      expect(report.reason).toBe("settlement.incomplete.publication_degraded");
+      expect(report.outcome).toBe("complete");
       expect(report.publish).toMatchObject({
         published: 0,
         suppressedEvidence: 1,
         verificationUndecided: 1,
       });
-      // The path-anchored incomplete notice may be present, but the unverified finding may not.
+      // The undecided hypothesis never reaches a reader and does not produce a false incomplete
+      // notice for a review that covered both files.
       expect(created.some((comment) => comment.body.includes(BODY))).toBe(false);
-      expect(report.cacheAppended).toBe(0);
-      expect(report.updatedCacheStore).toBeUndefined();
+      // src/a.ts remains retryable because its sole model verdict was undecided. The independently
+      // reviewed clean path is still admitted, so the next run does not repay the entire review.
+      expect(report.cacheAppended).toBe(1);
+      const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+      const cachedBlobs = (report.updatedCacheStore?.entries ?? []).map((entry) =>
+        String(entry.headBlob),
+      );
+      expect(cachedBlobs).not.toContain(headBlobA);
+      expect(cachedBlobs).toContain(headBlobB);
       expect(callCount()).toBe(0);
 
       const records = diagnostics.drain();
+      expect(records.some((record) => record.code === "settlement.complete")).toBe(true);
+      expect(
+        records.some((record) => record.code === "settlement.incomplete.publication_degraded"),
+      ).toBe(false);
       expect(records.find((r) => r.code === "classify.audited")).toBeUndefined();
       const substantiated = records.find((r) => r.code === "publish.substantiated");
       expect(substantiated?.counts).toMatchObject({
@@ -4287,7 +4298,7 @@ describe("performReview: review-cache memoization end to end", () => {
       });
     });
 
-    it("records a closed verifier stage and reason when publication becomes undecidable", async () => {
+    it("records a closed verifier stage and reason while the covered review stays complete", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       const BODY = withChallengeProbe(
@@ -4308,8 +4319,12 @@ describe("performReview: review-cache memoization end to end", () => {
 
       const report = await performReview(auditRequest(client), diagnostics);
 
-      expect(report.outcome).toBe("incomplete");
-      expect(report.reason).toBe("settlement.incomplete.publication_degraded");
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({
+        published: 0,
+        suppressedEvidence: 1,
+        verificationUndecided: 1,
+      });
       expect(created.some((comment) => comment.body.includes(BODY))).toBe(false);
       expect(callCount()).toBe(3);
       const substantiated = diagnostics
@@ -4386,8 +4401,9 @@ describe("performReview: review-cache memoization end to end", () => {
       });
       globalThis.fetch = impl;
       const { client, created } = successfulClient([]);
+      const empty: CacheStore = { schemaVersion: SUPPORTED_STORE_SCHEMA, entries: [] };
       const request = {
-        ...auditRequest(client),
+        ...auditRequest(client, empty),
         config: { ...AUDIT_CONFIG, tokenBudget: 8_000 },
       };
       const diagnostics = createSilentDiagnostics();
@@ -4395,10 +4411,22 @@ describe("performReview: review-cache memoization end to end", () => {
       const report = await performReview(request, diagnostics);
 
       // Neither classification repair nor the larger evidence request fits. The pipeline invents
-      // no classification, publishes no unverified claim, and reports incomplete instead of clean.
-      expect(report.outcome).toBe("incomplete");
+      // no classification and publishes no unverified claim, while the fully covered review stays
+      // complete and reports the withheld candidate in its quality telemetry.
+      expect(report.outcome).toBe("complete");
+      expect(report.publish).toMatchObject({
+        published: 0,
+        suppressedEvidence: 1,
+        verificationUndecided: 1,
+      });
       expect(created.some((comment) => comment.body.includes(BODY))).toBe(false);
-      expect(report.cacheAppended).toBe(0);
+      expect(report.cacheAppended).toBe(1);
+      const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+      const cachedBlobs = (report.updatedCacheStore?.entries ?? []).map((entry) =>
+        String(entry.headBlob),
+      );
+      expect(cachedBlobs).not.toContain(headBlobA);
+      expect(cachedBlobs).toContain(headBlobB);
       expect(callCount()).toBe(0);
 
       const records = diagnostics.drain();
@@ -4669,7 +4697,7 @@ describe("performReview: review-cache memoization end to end", () => {
       );
     });
 
-    it("fails closed without a cache write when evidence is invented or the verifier transport fails", async () => {
+    it("withholds invented or transport-undecidable evidence and retries only the affected path", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
       const BODY =
@@ -4702,21 +4730,26 @@ describe("performReview: review-cache memoization end to end", () => {
           diagnostics,
         );
 
-        expect(report.outcome, failure).toBe("incomplete");
-        expect(report.reason, failure).toBe("settlement.incomplete.publication_degraded");
+        expect(report.outcome, failure).toBe("complete");
         expect(report.publish, failure).toMatchObject({
           published: 0,
           suppressed: 1,
           suppressedEvidence: 1,
           verificationUndecided: 1,
         });
-        // `created` may contain the honest incomplete notice, but never the unverified finding.
+        // The verifier never admitted the hypothesis, so neither a finding nor an incomplete
+        // notice is published for the otherwise fully covered review.
         expect(
           created.some((comment) => comment.body.includes(BODY)),
           failure,
         ).toBe(false);
-        expect(report.cacheAppended, failure).toBe(0);
-        expect(report.updatedCacheStore, failure).toBeUndefined();
+        expect(report.cacheAppended, failure).toBe(1);
+        const headBlobB = git(["rev-parse", `${headSha}:src/b.ts`]).trim();
+        const cachedBlobs = (report.updatedCacheStore?.entries ?? []).map((entry) =>
+          String(entry.headBlob),
+        );
+        expect(cachedBlobs, failure).not.toContain(headBlobA);
+        expect(cachedBlobs, failure).toContain(headBlobB);
         const substantiated = diagnostics
           .drain()
           .find((record) => record.code === "publish.substantiated");
