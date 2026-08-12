@@ -2117,7 +2117,7 @@ describe("hard shared request budget", () => {
     expect(substantiationOnePathTokenUpperBound(candidate, evidence)).toBe(
       MAX_SUBSTANTIATION_TOKENS_PER_FINDING,
     );
-    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(979_875);
+    expect(MAX_SUBSTANTIATION_TOKENS_PER_FINDING).toBe(979_879);
   });
 
   it("shares the same hard ceiling across later findings", async () => {

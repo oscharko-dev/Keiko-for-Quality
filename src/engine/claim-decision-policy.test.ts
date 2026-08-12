@@ -22,6 +22,7 @@ describe("shared claim-decision policy", () => {
       [
         `- test-isolation: ${TEST_ISOLATION_EVIDENCE_POLICY}`,
         `- reference-transition: ${REFERENCE_TRANSITION_EVIDENCE_POLICY}`,
+        `- helper-control-flow: ${HELPER_CONTROL_FLOW_EVIDENCE_POLICY}`,
         `- boundary-omission: ${BOUNDARY_OMISSION_EVIDENCE_POLICY}`,
         `- workflow-trust: ${WORKFLOW_TRUST_EVIDENCE_POLICY}`,
         `- sensitive-output: ${SENSITIVE_OUTPUT_EVIDENCE_POLICY}`,
@@ -29,7 +30,6 @@ describe("shared claim-decision policy", () => {
         `- trigger-guard: ${TRIGGER_AND_GUARD_EVIDENCE_POLICY}`,
         `- mirrored-validator: ${MIRRORED_VALIDATOR_EVIDENCE_POLICY}`,
         `- parallel-mapping: ${PARALLEL_MAPPING_EVIDENCE_POLICY}`,
-        `- helper-control-flow: ${HELPER_CONTROL_FLOW_EVIDENCE_POLICY}`,
       ].join("\n"),
     );
     expect(new TextEncoder().encode(EXAMINER_CLAIM_DECISION_POLICY).byteLength).toBeLessThanOrEqual(
@@ -62,6 +62,15 @@ describe("shared claim-decision policy", () => {
       },
       {
         evidence: 'const compiler = windowsToolFromPath(env.PATH, "cl.exe"); spawn(compiler);',
+        first: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
+      },
+      {
+        evidence: [
+          'import { spawn } from "node:child_process";',
+          'throw new Error("Windows tool is unavailable");',
+          'if (process.platform !== "win32") return;',
+          'spawn(windowsToolFromPath(pathValue, "cl.exe"));',
+        ].join("\n"),
         first: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
       },
     ];
@@ -178,15 +187,17 @@ describe("shared claim-decision policy", () => {
 
   it("distinguishes fail-closed helper exits and inert imports from real execution paths", () => {
     expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain(
-      "A terminal throw for the state prevents the call",
+      "SILENT: every helper exit shown returns required call argument or throws before the consumer",
     );
     expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain(
-      "invalid return, fallthrough, or catch-and-continue path",
+      "never invent `undefined` after that throw",
     );
-    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain("import does not execute exports");
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain("Imports do not execute exports");
     expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain(
-      "module evaluation runs unavailable platform code",
+      "REPORT: shown invalid return, fallthrough, or caught failure reaches the consumer",
     );
-    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain("guarded calls remain silent");
+    expect(HELPER_CONTROL_FLOW_EVIDENCE_POLICY).toContain(
+      "module evaluation runs unavailable platform work before the guard",
+    );
   });
 });

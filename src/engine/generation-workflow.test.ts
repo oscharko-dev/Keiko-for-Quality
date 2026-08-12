@@ -63,7 +63,7 @@ function occurrenceCount(value: string, needle: string): number {
 
 describe("risk planner", () => {
   it("pins the manually bumped cache identity", () => {
-    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v14");
+    expect(GENERATION_WORKFLOW_IDENTITY).toBe("staged-v15");
   });
 
   it("sees the complete qualified rule but never receives the whole file", () => {
@@ -207,7 +207,7 @@ describe("focused examiners", () => {
         context: {
           ...ISOLATED_CONTEXT,
           renderedDiff:
-            '__new hunk__\n8 +const compiler = windowsToolFromPath(env.PATH, "cl.exe");\n9 +spawn(compiler);',
+            '__new hunk__\n8 +throw new Error("unavailable");\n9 +const compiler = windowsToolFromPath(env.PATH, "cl.exe");\n10 +spawn(compiler);',
         },
         first: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
       },

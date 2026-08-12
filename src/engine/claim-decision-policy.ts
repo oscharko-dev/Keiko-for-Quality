@@ -80,11 +80,10 @@ export const PARALLEL_MAPPING_EVIDENCE_POLICY = [
 ].join(" ");
 
 export const HELPER_CONTROL_FLOW_EVIDENCE_POLICY = [
-  "Helper/import decision — RETURN: trace exits before claiming invalid output reaches a call. A",
-  "terminal throw for the state prevents the call; report an invalid return, fallthrough, or",
-  "catch-and-continue path. IMPORT: import does not execute exports. Report load failure",
-  "only when module evaluation runs unavailable",
-  "platform code or dependency; guarded calls remain silent.",
+  "Helper/import — SILENT: every helper exit shown returns required call argument or throws before",
+  "the consumer; never invent `undefined` after that throw. Imports do not execute exports; guarded",
+  "platform calls stay silent. REPORT: shown invalid return, fallthrough, or caught failure reaches",
+  "the consumer, or module evaluation runs unavailable platform work before the guard.",
 ].join(" ");
 
 interface ClaimDecisionPolicyRow {
@@ -128,6 +127,11 @@ const POLICY_ROWS: readonly ClaimDecisionPolicyRow[] = [
       /(?:\b(?:action|dependency|digest|image|pin)\b|uses:\s|@[0-9a-f]{40}\b)/iu.test(evidence),
   },
   {
+    label: "helper-control-flow",
+    text: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
+    relevant: (evidence) => /\b(?:spawn|fallthrough|platform|win32)\b/iu.test(evidence),
+  },
+  {
     label: "boundary-omission",
     text: BOUNDARY_OMISSION_EVIDENCE_POLICY,
     relevant: (evidence) =>
@@ -151,7 +155,7 @@ const POLICY_ROWS: readonly ClaimDecisionPolicyRow[] = [
     label: "diagnostic-context",
     text: DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
     relevant: (evidence) =>
-      /\b(?:catch|console|diagnostic|error|log(?:ger)?|telemetry|throw)\b/iu.test(evidence),
+      /\b(?:catch|console|diagnostic|log(?:ger)?|telemetry)\b/iu.test(evidence),
   },
   {
     label: "trigger-guard",
@@ -170,12 +174,6 @@ const POLICY_ROWS: readonly ClaimDecisionPolicyRow[] = [
     text: PARALLEL_MAPPING_EVIDENCE_POLICY,
     relevant: (evidence) =>
       /\b(?:capabilit|mapping|mapper)\b/iu.test(evidence) || mappingEntryVisible(evidence),
-  },
-  {
-    label: "helper-control-flow",
-    text: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
-    relevant: (evidence) =>
-      /\b(?:import|spawn|throw|returns?|fallthrough|platform|win32)\b/iu.test(evidence),
   },
 ];
 

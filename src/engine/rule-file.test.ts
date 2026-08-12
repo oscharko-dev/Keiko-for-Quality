@@ -179,7 +179,7 @@ describe("buildRuleFile", () => {
       "Restore the positive batch-size guard.\n\nWhen the shown digest caller supplies its zero fallback, the loop increment stays zero and never terminates.",
       "Keep the audit validator aligned with production.\n\nWhen metadata lacks `schemaVersion` or `provider`, the loosened audit accepts an object the shown production validator rejects.",
       "Restore each capability's matching predicate.\n\nOn every config where flags differ, the `figma` member calls the Jira predicate while `jira` calls the Figma predicate, so each capability reports the other connector's authorization.",
-      "Return a compiler path or stop before spawning.\n\nWhen the shown helper falls through with no compiler, this changed call passes `undefined` to `spawn` instead of failing closed.",
+      "Restore the helper's terminal failure before spawning.\n\nWhen the changed helper returns `undefined` instead of throwing, this call passes the invalid value to `spawn`.",
       "Move platform work behind the guard.\n\nWhen this module loads on Linux, its top-level compiler probe runs before the shown `win32` guard and aborts startup.",
     ];
     for (const example of examples) {

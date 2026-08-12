@@ -3264,11 +3264,10 @@ var PARALLEL_MAPPING_EVIDENCE_POLICY = [
   "SILENT when a shown contract or explicit translation table proves the cross-map intentional."
 ].join(" ");
 var HELPER_CONTROL_FLOW_EVIDENCE_POLICY = [
-  "Helper/import decision \u2014 RETURN: trace exits before claiming invalid output reaches a call. A",
-  "terminal throw for the state prevents the call; report an invalid return, fallthrough, or",
-  "catch-and-continue path. IMPORT: import does not execute exports. Report load failure",
-  "only when module evaluation runs unavailable",
-  "platform code or dependency; guarded calls remain silent."
+  "Helper/import \u2014 SILENT: every helper exit shown returns required call argument or throws before",
+  "the consumer; never invent `undefined` after that throw. Imports do not execute exports; guarded",
+  "platform calls stay silent. REPORT: shown invalid return, fallthrough, or caught failure reaches",
+  "the consumer, or module evaluation runs unavailable platform work before the guard."
 ].join(" ");
 var OUTPUT_SINK_SIGNAL = /\b(?:console|diagnostic|error|log(?:ger)?|telemetry)\b/iu;
 var SENSITIVE_VALUE_SIGNAL = /\b(?:authorization|credential|password|secret|session(?:id|identifier)?|token)\b/iu;
@@ -3296,6 +3295,11 @@ var POLICY_ROWS = [
     relevant: (evidence) => /(?:\b(?:action|dependency|digest|image|pin)\b|uses:\s|@[0-9a-f]{40}\b)/iu.test(evidence)
   },
   {
+    label: "helper-control-flow",
+    text: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
+    relevant: (evidence) => /\b(?:spawn|fallthrough|platform|win32)\b/iu.test(evidence)
+  },
+  {
     label: "boundary-omission",
     text: BOUNDARY_OMISSION_EVIDENCE_POLICY,
     relevant: (evidence) => /(?:\b(?:boundary|clear(?:ed|ing|s)?|empty|index|offset|optional)\b|\?\?|\.slice\s*\()/iu.test(
@@ -3315,7 +3319,7 @@ var POLICY_ROWS = [
   {
     label: "diagnostic-context",
     text: DIAGNOSTIC_CONTEXT_EVIDENCE_POLICY,
-    relevant: (evidence) => /\b(?:catch|console|diagnostic|error|log(?:ger)?|telemetry|throw)\b/iu.test(evidence)
+    relevant: (evidence) => /\b(?:catch|console|diagnostic|log(?:ger)?|telemetry)\b/iu.test(evidence)
   },
   {
     label: "trigger-guard",
@@ -3331,11 +3335,6 @@ var POLICY_ROWS = [
     label: "parallel-mapping",
     text: PARALLEL_MAPPING_EVIDENCE_POLICY,
     relevant: (evidence) => /\b(?:capabilit|mapping|mapper)\b/iu.test(evidence) || mappingEntryVisible(evidence)
-  },
-  {
-    label: "helper-control-flow",
-    text: HELPER_CONTROL_FLOW_EVIDENCE_POLICY,
-    relevant: (evidence) => /\b(?:import|spawn|throw|returns?|fallthrough|platform|win32)\b/iu.test(evidence)
   }
 ];
 function renderPolicyRows(rows) {
@@ -3981,7 +3980,7 @@ function startModelProxy(options2) {
 
 // src/engine/generation-workflow.ts
 var GENERATION_COMPLETION_LIMIT = 4096;
-var GENERATION_WORKFLOW_IDENTITY = "staged-v14";
+var GENERATION_WORKFLOW_IDENTITY = "staged-v15";
 var REQUEST_FRAMING_TOKENS = 512;
 var MAX_RISK_HYPOTHESES = 6;
 var MAX_CLAIMS_PER_EXAMINER = 4;
