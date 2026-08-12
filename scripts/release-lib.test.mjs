@@ -5,6 +5,7 @@ import { CASES } from "../corpus/cases.mjs";
 import { productionHistoricalReplayEvidenceFixture } from "../corpus/historical-replay-evidence.test-fixture.mjs";
 import { redactQualificationReport } from "./qualification-evidence-lib.mjs";
 import {
+  RECOVERY_QUALITY_REASONS,
   bumpConsumerPin,
   bumpQuickstartPin,
   findGateEvidence,
@@ -172,6 +173,16 @@ test("recovery channel is opt-in, closed, and recorded in the signed release com
     failures: ["release_channel_binding_mismatch", "recovery_quality_reason_binding_mismatch"],
   });
   assert.equal(parseReleaseChannelMessage(`${message}\n${message}`).valid, false);
+});
+
+test("exported recovery reasons cannot widen the closed release contract", () => {
+  assert.equal(Object.isFrozen(RECOVERY_QUALITY_REASONS), true);
+  assert.deepEqual(RECOVERY_QUALITY_REASONS, ["historical_holdout_fixed_retention_low"]);
+  assert.throws(() => RECOVERY_QUALITY_REASONS.push("anything"), TypeError);
+  assert.equal(
+    validateReleaseChannel({ channel: "recovery", recoveryReason: "anything" }).valid,
+    false,
+  );
 });
 
 test("rewrites the README quickstart pin comment and reports how many it touched", () => {

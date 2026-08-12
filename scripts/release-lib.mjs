@@ -29,7 +29,7 @@ const RECOVERY_QUALITY_REASON_TRAILER = "Keiko-Recovery-Quality-Reason";
  * quality floor remains red.  Adding a new exception is a product decision, not an operator flag:
  * unknown reasons therefore fail closed here.
  */
-export const RECOVERY_QUALITY_REASONS = ["historical_holdout_fixed_retention_low"];
+export const RECOVERY_QUALITY_REASONS = Object.freeze(["historical_holdout_fixed_retention_low"]);
 
 export function validateReleaseChannel({ channel, recoveryReason }) {
   const failures = [];
