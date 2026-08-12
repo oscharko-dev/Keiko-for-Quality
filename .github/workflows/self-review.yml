@@ -88,7 +88,7 @@ jobs:
       # the same change that tags a release, exactly as the consumer's pin is advanced.
       - name: Review
         id: review
-        uses: oscharko-dev/Keiko-for-Quality@2049125bbe0c516da9357150bac347c316630645 # v0.23.0
+        uses: oscharko-dev/Keiko-for-Quality@f6aa08d66c13de0a49a91ea8810600100ca8770d # v0.24.0
         with:
           profile: .github/keiko-for-quality.json
           model_endpoint: ${{ secrets.KFQ_MODEL_ENDPOINT }}
