@@ -1599,6 +1599,111 @@ describe("performReview: review-cache memoization end to end", () => {
       expect(report.reason).toBe("settlement.incomplete.coverage_gap");
     });
 
+    it("never rebuys a staged file whose request was permanently rejected", async () => {
+      const engineDigest = requireEngineDigest();
+      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+      runEngineMock.mockResolvedValue({
+        stdout: JSON.stringify({
+          status: "completed_with_errors",
+          summary: { files_reviewed: 2, total_tokens: 60_000, budget_exceeded: false },
+          comments: [],
+          warnings: [
+            {
+              type: "subtask_error",
+              file: "src/b.ts",
+              message: "single_shot core examiner request rejected",
+            },
+          ],
+        }),
+        ruleDigest: engineDigest,
+      });
+      const diagnostics = createSilentDiagnostics();
+
+      const report = await performReview(
+        {
+          ...baseRequest(undefined),
+          config: { ...CONFIG, protocol: "openai" },
+        },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("incomplete");
+      expect(runEngineMock).toHaveBeenCalledTimes(1);
+      expect(diagnostics.drain().map((record) => record.code)).not.toContain(
+        "engine.resumed_gap_targeted",
+      );
+    });
+
+    it("does not retry transient peers by falsely crediting a permanently rejected path", async () => {
+      const mixedRepo = await mkdtemp(join(tmpdir(), "kfq-mixed-retry-causes-"));
+      try {
+        git(["init", "-q", "-b", "main"], mixedRepo);
+        await mkdir(join(mixedRepo, "src"), { recursive: true });
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 1;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "base", "--no-gpg-sign"], mixedRepo);
+        const mixedBase = git(["rev-parse", "HEAD"], mixedRepo).trim();
+        for (const name of ["a", "b", "c", "d"]) {
+          await writeFile(join(mixedRepo, `src/${name}.ts`), `export const ${name} = 2;\n`);
+        }
+        git(["add", "-A"], mixedRepo);
+        git(["commit", "-q", "-m", "head", "--no-gpg-sign"], mixedRepo);
+        const mixedHead = git(["rev-parse", "HEAD"], mixedRepo).trim();
+
+        const engineDigest = requireEngineDigest();
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        runEngineMock.mockResolvedValue({
+          stdout: JSON.stringify({
+            status: "completed_with_errors",
+            summary: { files_reviewed: 4, total_tokens: 60_000, budget_exceeded: false },
+            comments: [],
+            warnings: [
+              {
+                type: "subtask_error",
+                file: "src/b.ts",
+                message: "single_shot core examiner request rejected",
+              },
+              {
+                type: "subtask_error",
+                file: "src/c.ts",
+                message: "single_shot core examiner failed",
+              },
+            ],
+          }),
+          ruleDigest: engineDigest,
+        });
+        const request = baseRequest(undefined);
+        vi.spyOn(request.client, "getPullRequest").mockResolvedValue({
+          headSha: commitSha(mixedHead),
+          draft: false,
+          baseRef: "dev",
+          headRepoFullName: undefined,
+        });
+        const diagnostics = createSilentDiagnostics();
+
+        const report = await performReview(
+          {
+            ...request,
+            base: commitSha(mixedBase),
+            head: commitSha(mixedHead),
+            repositoryPath: mixedRepo,
+            config: { ...CONFIG, protocol: "openai" },
+          },
+          diagnostics,
+        );
+
+        expect(report.outcome).toBe("incomplete");
+        expect(runEngineMock).toHaveBeenCalledTimes(1);
+        expect(diagnostics.drain().map((record) => record.code)).not.toContain(
+          "engine.resumed_gap_targeted",
+        );
+      } finally {
+        await rm(mixedRepo, { recursive: true, force: true });
+      }
+    });
+
     it("settles complete when the targeted retry closes the gap", async () => {
       const engineDigest = requireEngineDigest();
       acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });

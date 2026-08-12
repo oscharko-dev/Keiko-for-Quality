@@ -131,6 +131,11 @@ interface EngineWarningShape {
   readonly message: string;
 }
 
+type ExaminerOutcome =
+  | { readonly kind: "accepted"; readonly comments: readonly EngineComment[] }
+  | { readonly kind: "retryable_failure" }
+  | { readonly kind: "request_rejected" };
+
 /**
  * One parsed unified-diff hunk, rendered PR-Agent style: `__new hunk__` carries every kept line
  * prefixed with its ABSOLUTE line number in the new file (additions marked `+`), `__old hunk__`
@@ -614,11 +619,13 @@ async function callStage(
   return result;
 }
 
-function warnExaminer(state: RunState, path: string, role: string): void {
+function warnExaminer(state: RunState, path: string, role: string, requestRejected: boolean): void {
   state.warnings.push({
     type: "subtask_error",
     file: path,
-    message: `single_shot ${role} examiner failed`,
+    message: requestRejected
+      ? `single_shot ${role} examiner request rejected`
+      : `single_shot ${role} examiner failed`,
   });
 }
 
@@ -642,7 +649,7 @@ async function examine(
   risks: readonly RiskHypothesis[],
   role: typeof CORE_ROLE | typeof INTEGRATION_ROLE,
   seedOffset: number,
-): Promise<readonly EngineComment[] | undefined> {
+): Promise<ExaminerOutcome> {
   const prompt = buildExaminerPrompt(role, context, risks, { view: evidenceView(dispatch) });
   const allowedAnchors = new Set(dispatch.allowedAnchors);
   for (let attempt = 0; attempt <= EXAMINER_SHAPE_RETRIES; attempt += 1) {
@@ -653,13 +660,17 @@ async function examine(
     );
     if (result.kind === "budget_blocked") state.mandatoryBudgetBlocked = true;
     if (result.kind === "invalid_response") continue;
-    if (result.kind !== "success") return undefined;
+    if (result.kind === "request_rejected") return { kind: "request_rejected" };
+    if (result.kind !== "success") return { kind: "retryable_failure" };
     const claims = parseStructuredClaims(result.content, allowedAnchors);
     if (claims !== undefined) {
-      return claims.map((claim) => renderStructuredClaim(dispatch.path, claim));
+      return {
+        kind: "accepted",
+        comments: claims.map((claim) => renderStructuredClaim(dispatch.path, claim)),
+      };
     }
   }
-  return undefined;
+  return { kind: "retryable_failure" };
 }
 
 /**
@@ -671,13 +682,13 @@ async function reviewOneFile(state: RunState, dispatch: FileDispatch): Promise<v
   const context = generationContext(state, dispatch);
   const risks = await planRisks(state, context);
   const core = await examine(state, dispatch, context, risks, CORE_ROLE, CORE_EXAMINER_SEED_OFFSET);
-  if (core === undefined) {
-    warnExaminer(state, dispatch.path, CORE_ROLE);
+  if (core.kind !== "accepted") {
+    warnExaminer(state, dispatch.path, CORE_ROLE, core.kind === "request_rejected");
     return;
   }
   state.coreExaminations += 1;
 
-  let combined = core;
+  let combined = core.comments;
   if (shouldRunIntegrationExaminer(context)) {
     const integration = await examine(
       state,
@@ -687,11 +698,11 @@ async function reviewOneFile(state: RunState, dispatch: FileDispatch): Promise<v
       INTEGRATION_ROLE,
       INTEGRATION_EXAMINER_SEED_OFFSET,
     );
-    if (integration === undefined) {
-      warnExaminer(state, dispatch.path, INTEGRATION_ROLE);
+    if (integration.kind !== "accepted") {
+      warnExaminer(state, dispatch.path, INTEGRATION_ROLE, integration.kind === "request_rejected");
     } else {
       state.integrationExaminations += 1;
-      combined = unionComments(core, integration);
+      combined = unionComments(core.comments, integration.comments);
     }
   }
   state.comments.push(...combined);

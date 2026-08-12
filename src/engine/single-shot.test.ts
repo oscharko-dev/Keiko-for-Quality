@@ -704,7 +704,9 @@ describe("runSingleShotEngine staged generation", () => {
       fetchImpl,
     );
 
-    expect(parseEngineResult(output.stdout).status).toBe("completed_with_errors");
+    const parsed = parseEngineResult(output.stdout);
+    expect(parsed.status).toBe("completed_with_errors");
+    expect(parsed.warnings[0]?.cause).toBe("non_retryable");
     expect(seen.map((body) => body.seed)).toEqual([42, 1042]);
   });
 
@@ -982,6 +984,35 @@ describe("runSingleShotEngine staged generation", () => {
     expect(parsed.status).toBe("success");
     expect(parsed.findings).toHaveLength(1);
     expect(seen.map((body) => body.seed)).toEqual([42, 1042, 2042, 12042]);
+  });
+
+  it("keeps the core finding but closes retries after an integration request rejection", async () => {
+    const bigBody = Array.from(
+      { length: 160 },
+      (_, index) => `const line${String(index)} = ${String(index)};`,
+    ).join("\n");
+    const { repo, pair } = await makeRepo("kfq-integration-request-rejected-", {
+      "src/a.ts": `${bigBody}\n`,
+    });
+    const seen: CapturedBody[] = [];
+    const fetchImpl = fetchStub((system) => {
+      const kind = stage(system);
+      if (kind === "planner") return { status: 200, reply: "[]" };
+      if (kind === "core") return { status: 200, reply: claim({ start: 3, end: 3 }) };
+      return { status: 400 };
+    }, seen);
+
+    const output = await runSingleShotEngine(
+      options(pair, { repositoryPath: repo }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+    const parsed = parseEngineResult(output.stdout);
+
+    expect(parsed.status).toBe("completed_with_errors");
+    expect(parsed.findings).toHaveLength(1);
+    expect(parsed.warnings[0]?.cause).toBe("non_retryable");
+    expect(seen.map((body) => body.seed)).toEqual([42, 1042, 2042]);
   });
 
   it("never rewrites a sanitizer-rejected deterministic body with a fourth model role", async () => {

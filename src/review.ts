@@ -2290,6 +2290,14 @@ interface ResumeAttemptPolicy {
   readonly preserveReviewedPathsOnFailure: boolean;
 }
 
+interface ResumeAttemptContext {
+  readonly firstAttemptTokens: number;
+  readonly firstResult: EngineResult | undefined;
+  readonly alreadyReviewedPaths: readonly string[];
+  readonly ledger: SpendLedger;
+  readonly policy: ResumeAttemptPolicy;
+}
+
 /** One diagnostic code per engine status — diagnostics carry no strings, so the code IS the value. */
 const ENGINE_STATUS_DIAGNOSTIC: Readonly<Record<RunStatus, ReasonCode>> = {
   success: "engine.status.success",
@@ -2407,10 +2415,12 @@ const TARGETED_GAP_MAX_ROUNDS = 3;
  * The paths a targeted gap resume should re-dispatch, or `undefined` when this run is not a
  * candidate for one.
  *
- * Three conditions, each a refusal for its own reason: the engine must have NAMED its casualties
+ * Four conditions, each a refusal for its own reason: the engine must have NAMED its casualties
  * (an unnamed gap has nothing to aim at), at least one path must have survived (nothing to credit
  * otherwise, and a total failure is the broad case `TARGETED_GAP_MAX_FRACTION` defers to), and the
- * casualties must be a minority of the reviewable set.
+ * casualties must be a minority of the reviewable set. A closed non-retryable cause refuses the
+ * whole round too: re-dispatching a permanent provider rejection cannot repair any of its peers
+ * without falsely crediting the rejected path as covered.
  */
 function targetedGapPaths(
   result: EngineResult,
@@ -2423,6 +2433,11 @@ function targetedGapPaths(
     // reviewable set cannot be closed by re-dispatching it, and crediting the rest against a
     // phantom would misstate what the first attempt covered.
     if (reviewablePaths.has(path)) failed.add(path);
+  }
+  if (
+    result.warnings.some((warning) => failed.has(warning.file) && warning.cause === "non_retryable")
+  ) {
+    return undefined;
   }
   if (failed.size === 0 || failed.size >= reviewablePaths.size) return undefined;
   if (failed.size > reviewablePaths.size * TARGETED_GAP_MAX_FRACTION) return undefined;
@@ -2599,16 +2614,13 @@ async function settleFinishedRun(
     diagnostics.record("engine.resumed_gap_targeted", {
       counts: { round, targeted: targeted.size, covered: covered.length, remaining },
     });
-    const attempt = await attemptResume(
-      options,
-      diagnostics,
-      remaining,
-      spent,
-      standing,
-      covered,
+    const attempt = await attemptResume(options, diagnostics, remaining, {
+      firstAttemptTokens: spent,
+      firstResult: standing,
+      alreadyReviewedPaths: covered,
       ledger,
-      { samplingSeed: targetedResumeSeed(round), preserveReviewedPathsOnFailure: true },
-    );
+      policy: { samplingSeed: targetedResumeSeed(round), preserveReviewedPathsOnFailure: true },
+    });
     outcome = attempt;
     spent = attempt.engineTokens;
     standing = attempt.result;
@@ -2642,12 +2654,9 @@ async function attemptResume(
   options: EngineRunOptions,
   diagnostics: Diagnostics,
   remaining: number,
-  firstAttemptTokens: number,
-  firstResult: EngineResult | undefined,
-  alreadyReviewedPaths: readonly string[],
-  ledger: SpendLedger,
-  policy: ResumeAttemptPolicy,
+  context: ResumeAttemptContext,
 ): Promise<ResumeOutcome> {
+  const { firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger, policy } = context;
   try {
     // A different seed, deliberately: sampling is pinned for reproducibility, so a failing path
     // would replay itself byte-for-byte — measured, not hypothesized (the seeded verification
@@ -2774,16 +2783,13 @@ async function runEngineWithOneResume(
     ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   }
-  return attemptResume(
-    options,
-    diagnostics,
-    remaining,
+  return attemptResume(options, diagnostics, remaining, {
     firstAttemptTokens,
     firstResult,
     alreadyReviewedPaths,
     ledger,
-    { samplingSeed: RESUME_SEED, preserveReviewedPathsOnFailure: false },
-  );
+    policy: { samplingSeed: RESUME_SEED, preserveReviewedPathsOnFailure: false },
+  });
 }
 
 /**

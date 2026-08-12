@@ -831,9 +831,11 @@ function unwrapEnvelopeContent(content, field) {
   };
 }
 var TOOL_BUDGET_MESSAGE = /main_task did not complete/i;
+var NON_RETRYABLE_SINGLE_SHOT_MESSAGE = /^single_shot (?:core|integration) examiner request rejected$/u;
 function classifyWarning(type, message) {
   if (type !== "subtask_error" && type !== "scan_subtask_error") return void 0;
   if (typeof message !== "string") return "other";
+  if (NON_RETRYABLE_SINGLE_SHOT_MESSAGE.test(message)) return "non_retryable";
   return TOOL_BUDGET_MESSAGE.test(message) ? "tool_budget" : "other";
 }
 function parseWarnings(value, field) {
@@ -5321,11 +5323,11 @@ async function callStage(state, prompt, seed) {
   }
   return result;
 }
-function warnExaminer(state, path, role) {
+function warnExaminer(state, path, role, requestRejected) {
   state.warnings.push({
     type: "subtask_error",
     file: path,
-    message: `single_shot ${role} examiner failed`
+    message: requestRejected ? `single_shot ${role} examiner request rejected` : `single_shot ${role} examiner failed`
   });
 }
 async function planRisks(state, context) {
@@ -5348,24 +5350,28 @@ async function examine(state, dispatch, context, risks, role, seedOffset) {
     );
     if (result.kind === "budget_blocked") state.mandatoryBudgetBlocked = true;
     if (result.kind === "invalid_response") continue;
-    if (result.kind !== "success") return void 0;
+    if (result.kind === "request_rejected") return { kind: "request_rejected" };
+    if (result.kind !== "success") return { kind: "retryable_failure" };
     const claims = parseStructuredClaims(result.content, allowedAnchors);
     if (claims !== void 0) {
-      return claims.map((claim) => renderStructuredClaim(dispatch.path, claim));
+      return {
+        kind: "accepted",
+        comments: claims.map((claim) => renderStructuredClaim(dispatch.path, claim))
+      };
     }
   }
-  return void 0;
+  return { kind: "retryable_failure" };
 }
 async function reviewOneFile(state, dispatch) {
   const context = generationContext(state, dispatch);
   const risks = await planRisks(state, context);
   const core = await examine(state, dispatch, context, risks, CORE_ROLE, CORE_EXAMINER_SEED_OFFSET);
-  if (core === void 0) {
-    warnExaminer(state, dispatch.path, CORE_ROLE);
+  if (core.kind !== "accepted") {
+    warnExaminer(state, dispatch.path, CORE_ROLE, core.kind === "request_rejected");
     return;
   }
   state.coreExaminations += 1;
-  let combined = core;
+  let combined = core.comments;
   if (shouldRunIntegrationExaminer(context)) {
     const integration = await examine(
       state,
@@ -5375,11 +5381,11 @@ async function reviewOneFile(state, dispatch) {
       INTEGRATION_ROLE,
       INTEGRATION_EXAMINER_SEED_OFFSET
     );
-    if (integration === void 0) {
-      warnExaminer(state, dispatch.path, INTEGRATION_ROLE);
+    if (integration.kind !== "accepted") {
+      warnExaminer(state, dispatch.path, INTEGRATION_ROLE, integration.kind === "request_rejected");
     } else {
       state.integrationExaminations += 1;
-      combined = unionComments(core, integration);
+      combined = unionComments(core.comments, integration.comments);
     }
   }
   state.comments.push(...combined);
@@ -14131,6 +14137,9 @@ function targetedGapPaths(result, reviewablePaths) {
   for (const path of engineFailurePaths(result)) {
     if (reviewablePaths.has(path)) failed.add(path);
   }
+  if (result.warnings.some((warning) => failed.has(warning.file) && warning.cause === "non_retryable")) {
+    return void 0;
+  }
   if (failed.size === 0 || failed.size >= reviewablePaths.size) return void 0;
   if (failed.size > reviewablePaths.size * TARGETED_GAP_MAX_FRACTION) return void 0;
   return failed;
@@ -14193,16 +14202,13 @@ async function settleFinishedRun(parsed, context) {
     diagnostics.record("engine.resumed_gap_targeted", {
       counts: { round, targeted: targeted.size, covered: covered.length, remaining }
     });
-    const attempt = await attemptResume(
-      options2,
-      diagnostics,
-      remaining,
-      spent,
-      standing,
-      covered,
+    const attempt = await attemptResume(options2, diagnostics, remaining, {
+      firstAttemptTokens: spent,
+      firstResult: standing,
+      alreadyReviewedPaths: covered,
       ledger,
-      { samplingSeed: targetedResumeSeed(round), preserveReviewedPathsOnFailure: true }
-    );
+      policy: { samplingSeed: targetedResumeSeed(round), preserveReviewedPathsOnFailure: true }
+    });
     outcome = attempt;
     spent = attempt.engineTokens;
     standing = attempt.result;
@@ -14218,7 +14224,8 @@ function finishedRunOutcome(diagnostics, parsed, options2) {
   });
   return { result: parsed, engineTokens: parsed.totalTokens, alreadyReviewedPaths: [] };
 }
-async function attemptResume(options2, diagnostics, remaining, firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger, policy) {
+async function attemptResume(options2, diagnostics, remaining, context) {
+  const { firstAttemptTokens, firstResult, alreadyReviewedPaths, ledger, policy } = context;
   try {
     const second = await invokeEngine(
       {
@@ -14284,16 +14291,13 @@ async function runEngineWithOneResume(options2, diagnostics, ledger, reviewableP
     ledger.engine += error.wireTokens ?? 0;
     diagnostics.record("engine.resumed_once", { counts: { remaining } });
   }
-  return attemptResume(
-    options2,
-    diagnostics,
-    remaining,
+  return attemptResume(options2, diagnostics, remaining, {
     firstAttemptTokens,
     firstResult,
     alreadyReviewedPaths,
     ledger,
-    { samplingSeed: RESUME_SEED, preserveReviewedPathsOnFailure: false }
-  );
+    policy: { samplingSeed: RESUME_SEED, preserveReviewedPathsOnFailure: false }
+  });
 }
 function mergeResumedResult(first, second, excludedPaths) {
   if (excludedPaths.length === 0) return second;
