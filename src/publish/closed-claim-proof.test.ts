@@ -572,6 +572,32 @@ describe("trusted closed claim proof", () => {
     ).toBeUndefined();
   });
 
+  it("does not let a nested literal declaration prove a return from another scope", () => {
+    const head = [
+      'import { spawn } from "node:child_process";',
+      "",
+      "export function windowsToolFromPath(preferBundled) {",
+      "  let command;",
+      "  if (preferBundled) {",
+      '    const command = "cl.exe";',
+      "    void command;",
+      "  }",
+      "  return command;",
+      "}",
+      "",
+      "export function runWindowsCompiler(preferBundled) {",
+      "  spawn(windowsToolFromPath(preferBundled), []);",
+      "}",
+    ];
+
+    expect(
+      closedClaimRefutation(
+        finding("The helper can return undefined and pass an invalid command to spawn.", 13),
+        evidence(head, [13], head),
+      ),
+    ).toBeUndefined();
+  });
+
   it("refutes a reset-removal claim when each test resets immediately before dynamic import", () => {
     const base = [
       'import { describe, expect, it, vi } from "vitest";',
@@ -630,6 +656,27 @@ describe("trusted closed claim proof", () => {
       closedClaimRefutation(
         finding("Remove the redundant vi.resetModules() because the module cache is shared.", 9),
         evidence(head, [9], head),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("falls back when both reset/import pairs are inside the same test", () => {
+    const head = [
+      'import { expect, it, vi } from "vitest";',
+      'it("uses two module instances in one case", async () => {',
+      "  vi.resetModules();",
+      '  const first = await import("./cache.js");',
+      '  first.lookup("a");',
+      "  vi.resetModules();",
+      '  const second = await import("./cache.js");',
+      "  expect(second.entryCount()).toBe(0);",
+      "});",
+    ];
+
+    expect(
+      closedClaimRefutation(
+        finding("Remove resetModules because the module cache is still shared across tests.", 6),
+        evidence(head, [6, 7], head),
       ),
     ).toBeUndefined();
   });
@@ -743,6 +790,39 @@ describe("trusted closed claim proof", () => {
       ruleId: "redaction_assertion_proves_contract",
       evidenceRefs: ["D:H:6", "H:6"],
     });
+  });
+
+  it("does not refute a finding about removed redaction regression coverage", () => {
+    const base = [
+      'import { redactModelId } from "./redact.js";',
+      'it("redacts", () => {',
+      '  expect(redactModelId("family#secret")).toBe("family");',
+      "});",
+    ];
+    const head = [
+      'import { redactModelId } from "./redact.js";',
+      'it("redacts", () => {',
+      '  expect(redactModelId("family")).toBe("family");',
+      "});",
+    ];
+    const implementation = [
+      "export function redactModelId(modelId: string): string {",
+      '  const separator = modelId.indexOf("#");',
+      "  return separator === -1 ? modelId : modelId.slice(0, separator);",
+      "}",
+    ].join("\n");
+
+    expect(
+      closedClaimRefutation(
+        finding(
+          "The changed test removed regression coverage for redacting a secret suffix.",
+          3,
+          3,
+          "src/redact.test.ts",
+        ),
+        evidence(head, [3], base, new Map([["src/redact.ts", implementation]])),
+      ),
+    ).toBeUndefined();
   });
 
   it.each([

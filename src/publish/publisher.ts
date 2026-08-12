@@ -710,9 +710,20 @@ interface IntraRunClusterResult {
 
 /** Hard work bound before the parser's broader 1,000-finding defensive ceiling. The first 256
  * candidates cover sixteen complete verifier cohorts and every measured production flood (136 at
- * Keiko#3089); later candidates remain eligible as singleton clusters but cannot expand pairwise
- * dedupe work before the verifier/publication caps apply. */
+ * Keiko#3089); later novel candidates remain singleton clusters and only byte-identical repeats
+ * join an existing cluster through an O(n) exact-key map. They cannot expand pairwise dedupe work
+ * before the verifier/publication caps apply. */
 const MAX_INTRA_RUN_DEDUP_CANDIDATES = 256;
+
+function exactIntraRunKey(candidate: SanitizedCandidate): string {
+  const comparable = toCandidateForDedup(candidate);
+  return JSON.stringify([
+    comparable.path,
+    comparable.startLine,
+    comparable.endLine,
+    comparable.body,
+  ]);
+}
 
 function singletonCluster(candidate: SanitizedCandidate, index: number): Cluster {
   const cluster: Cluster = { index, representative: candidate, members: [] };
@@ -752,6 +763,21 @@ function appendIndexedMember(
   indexPreparedCandidate(index, member);
   if (isBetterRepresentative(prepared.candidate, cluster.representative)) {
     cluster.representative = prepared.candidate;
+  }
+}
+
+function appendUnindexedMember(cluster: Cluster, candidate: SanitizedCandidate): void {
+  cluster.members.push({
+    candidate,
+    similarity: {
+      ...toCandidateForDedup(candidate),
+      contentTokens: new Set(),
+      fencedCodeBlocks: new Set(),
+    },
+    cluster,
+  });
+  if (isBetterRepresentative(candidate, cluster.representative)) {
+    cluster.representative = candidate;
   }
 }
 
@@ -801,17 +827,27 @@ function partitionClusters(clusters: readonly Cluster[]): IntraRunClusterResult 
  * index enumerates only prior members capable of clearing the similarity floors. With the engine's
  * legal 1,000-finding ceiling, that avoids nearly one million repeated scans of bodies up to 20,000
  * characters — and avoids pairwise checks entirely when two findings share fewer than four content
- * tokens and no code block. The index admits at most 256 candidates; every later candidate becomes
- * a singleton rather than extending this pre-verifier work. No finding is discarded by that bound.
+ * tokens and no code block. The index admits at most 256 candidates; later novel candidates become
+ * singletons, while an exact-key map still collapses their byte-identical repeats. No finding is
+ * discarded by that bound, and repeated tail output cannot consume the verifier cohort.
  */
 function clusterIntraRunDuplicates(
   candidates: readonly SanitizedCandidate[],
 ): IntraRunClusterResult {
   const clusters: Cluster[] = [];
   const index: SimilarityIndex = { tokens: new Map(), codeBlocks: new Map() };
+  const exactClusters = new Map<string, Cluster>();
   for (const [candidateIndex, candidate] of candidates.entries()) {
+    const exactKey = exactIntraRunKey(candidate);
+    const exactCluster = exactClusters.get(exactKey);
+    if (exactCluster !== undefined) {
+      appendUnindexedMember(exactCluster, candidate);
+      continue;
+    }
     if (candidateIndex >= MAX_INTRA_RUN_DEDUP_CANDIDATES) {
-      clusters.push(singletonCluster(candidate, clusters.length));
+      const cluster = singletonCluster(candidate, clusters.length);
+      clusters.push(cluster);
+      exactClusters.set(exactKey, cluster);
       continue;
     }
     const prepared: PreparedSanitizedCandidate = {
@@ -820,10 +856,13 @@ function clusterIntraRunDuplicates(
     };
     const cluster = indexedMatchingCluster(prepared, index);
     if (cluster === undefined) {
-      clusters.push(newIndexedCluster(candidate, prepared, clusters.length, index));
+      const created = newIndexedCluster(candidate, prepared, clusters.length, index);
+      clusters.push(created);
+      exactClusters.set(exactKey, created);
       continue;
     }
     appendIndexedMember(cluster, prepared, index);
+    exactClusters.set(exactKey, cluster);
   }
   return partitionClusters(clusters);
 }

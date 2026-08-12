@@ -7447,6 +7447,15 @@ function indexedMatchingCluster(prepared, index) {
   return earliestMatchingCluster(eligible, prepared);
 }
 var MAX_INTRA_RUN_DEDUP_CANDIDATES = 256;
+function exactIntraRunKey(candidate) {
+  const comparable = toCandidateForDedup(candidate);
+  return JSON.stringify([
+    comparable.path,
+    comparable.startLine,
+    comparable.endLine,
+    comparable.body
+  ]);
+}
 function singletonCluster(candidate, index) {
   const cluster = { index, representative: candidate, members: [] };
   cluster.members.push({
@@ -7476,6 +7485,20 @@ function appendIndexedMember(cluster, prepared, index) {
     cluster.representative = prepared.candidate;
   }
 }
+function appendUnindexedMember(cluster, candidate) {
+  cluster.members.push({
+    candidate,
+    similarity: {
+      ...toCandidateForDedup(candidate),
+      contentTokens: /* @__PURE__ */ new Set(),
+      fencedCodeBlocks: /* @__PURE__ */ new Set()
+    },
+    cluster
+  });
+  if (isBetterRepresentative(candidate, cluster.representative)) {
+    cluster.representative = candidate;
+  }
+}
 function partitionClusters(clusters) {
   const representatives = [];
   const suppressed = [];
@@ -7490,9 +7513,18 @@ function partitionClusters(clusters) {
 function clusterIntraRunDuplicates(candidates) {
   const clusters = [];
   const index = { tokens: /* @__PURE__ */ new Map(), codeBlocks: /* @__PURE__ */ new Map() };
+  const exactClusters = /* @__PURE__ */ new Map();
   for (const [candidateIndex, candidate] of candidates.entries()) {
+    const exactKey = exactIntraRunKey(candidate);
+    const exactCluster = exactClusters.get(exactKey);
+    if (exactCluster !== void 0) {
+      appendUnindexedMember(exactCluster, candidate);
+      continue;
+    }
     if (candidateIndex >= MAX_INTRA_RUN_DEDUP_CANDIDATES) {
-      clusters.push(singletonCluster(candidate, clusters.length));
+      const cluster2 = singletonCluster(candidate, clusters.length);
+      clusters.push(cluster2);
+      exactClusters.set(exactKey, cluster2);
       continue;
     }
     const prepared = {
@@ -7501,10 +7533,13 @@ function clusterIntraRunDuplicates(candidates) {
     };
     const cluster = indexedMatchingCluster(prepared, index);
     if (cluster === void 0) {
-      clusters.push(newIndexedCluster(candidate, prepared, clusters.length, index));
+      const created = newIndexedCluster(candidate, prepared, clusters.length, index);
+      clusters.push(created);
+      exactClusters.set(exactKey, created);
       continue;
     }
     appendIndexedMember(cluster, prepared, index);
+    exactClusters.set(exactKey, cluster);
   }
   return partitionClusters(clusters);
 }
@@ -11180,20 +11215,35 @@ function provenStringBinding(text) {
   const value = statement.slice(assignment + 1).trim();
   return isIdentifier(binding) && isStringLiteralExpression(value) ? binding : void 0;
 }
+function declaredSimpleBinding(text) {
+  return /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b/u.exec(text)?.[1];
+}
 function provenStringBindings(lines) {
-  const bindings = /* @__PURE__ */ new Set();
+  const declarationCounts = /* @__PURE__ */ new Map();
   for (const line of lines) {
+    const binding = declaredSimpleBinding(line.code);
+    if (binding !== void 0) {
+      declarationCounts.set(binding, (declarationCounts.get(binding) ?? 0) + 1);
+    }
+  }
+  const bindings = /* @__PURE__ */ new Map();
+  for (const [index, line] of lines.entries()) {
     const binding = provenStringBinding(line.text);
-    if (binding !== void 0) bindings.add(binding);
+    if (binding !== void 0 && declarationCounts.get(binding) === 1) {
+      bindings.set(binding, { index, depth: line.depth });
+    }
   }
   return bindings;
 }
-function validStringReturn(line, bindings) {
+function validStringReturn(line, lineIndex, bindings) {
   const returnAt = line.code.search(/\breturn\b/u);
   if (returnAt < 0) return true;
   const value = withoutOptionalSemicolon(line.text.slice(returnAt + "return".length)).trim();
   if (value === "") return false;
-  if (bindings.has(value)) return true;
+  const declaration = bindings.get(value);
+  if (declaration !== void 0 && declaration.index < lineIndex && declaration.depth === line.depth) {
+    return true;
+  }
   return isStringLiteralExpression(value);
 }
 function helperReturnsOrThrows(lines, range) {
@@ -11203,7 +11253,7 @@ function helperReturnsOrThrows(lines, range) {
   const stringBindings = provenStringBindings(body);
   if (body.some(
     (line) => /\b(?:async\s+function|catch|finally|function|yield)\b|=>/u.test(line.code)
-  ) || body.some((line) => !validStringReturn(line, stringBindings))) {
+  ) || body.some((line, index) => !validStringReturn(line, index, stringBindings))) {
     return false;
   }
   const returns = body.filter((line) => /\breturn\b/u.test(line.code));
@@ -11273,6 +11323,32 @@ function dynamicImportPairs(lines) {
   }
   return imports === 0 ? void 0 : pairs;
 }
+function enclosingTestScope(lines, lineIndex) {
+  for (let opening = lineIndex - 1; opening >= 0; opening -= 1) {
+    const code = lines[opening]?.code ?? "";
+    if (!/(?:^|[^\w$.])(?:it|test)(?:\.(?:concurrent|only|skip|todo))?\s*\(/u.test(code)) {
+      continue;
+    }
+    const closing = matchingBrace2(lines, opening);
+    if (closing !== void 0 && closing >= lineIndex) return opening;
+  }
+  return void 0;
+}
+function pairsOccupyDistinctTests(lines, pairs) {
+  const scopes = /* @__PURE__ */ new Set();
+  for (const pair of pairs) {
+    const importedIndex = lines.indexOf(pair.imported);
+    const resetIndex = lines.indexOf(pair.reset);
+    if (importedIndex < 0 || resetIndex < 0) return false;
+    const importedScope = enclosingTestScope(lines, importedIndex);
+    const resetScope = enclosingTestScope(lines, resetIndex);
+    if (importedScope === void 0 || importedScope !== resetScope || scopes.has(importedScope)) {
+      return false;
+    }
+    scopes.add(importedScope);
+  }
+  return scopes.size === pairs.length;
+}
 function staticallyImportsTarget(lines, targets) {
   return lines.some((line) => {
     const statement = withoutOptionalSemicolon(line.text);
@@ -11307,7 +11383,7 @@ function resetIsolationRefutation(finding, lines) {
   const pairs = dynamicImportPairs(lines);
   if (pairs === void 0) return void 0;
   const targets = new Set(pairs.map((pair) => pair.target));
-  if (pairs.length < 2 || targets.size !== 1 || staticallyImportsTarget(lines, targets) || !importsVitestViDirectly(lines) || lines.some(
+  if (pairs.length < 2 || targets.size !== 1 || !pairsOccupyDistinctTests(lines, pairs) || staticallyImportsTarget(lines, targets) || !importsVitestViDirectly(lines) || lines.some(
     (line) => /\b(?:const|let|var|function|class)\s+vi\b/u.test(line.code) || /\bcatch\s*\(\s*vi\b/u.test(line.code) || /\bfunction\s+[A-Za-z_$][\w$]*\s*\([^)]*\bvi\b/u.test(line.code) || /[(,]\s*vi\s*[,)=:]/u.test(line.code) || /\bvi\s+as\s+[A-Za-z_$]/u.test(line.code)
   )) {
     return void 0;
@@ -11496,7 +11572,11 @@ function implementationProvesFirstSeparatorRedaction(source, assertion) {
   return assertionMatchesSeparator(assertion, declaration.separator);
 }
 function redactionAssertionRefutation(finding, lines, evidence) {
-  if (!redactionClaim(finding.content) || !/(?:^|\.)test\.[cm]?[jt]sx?$/u.test(finding.path)) {
+  const claim = finding.content.slice(0, MAX_CLAIM_CHARS);
+  const allegesLostCoverage = /\b(?:test|assertion|coverage|regression|case)\b/iu.test(claim) && /\b(?:drop|dropped|lose|lost|missing|omit|omitted|remove|removed|weaken|weakened)\b/iu.test(
+    claim
+  );
+  if (!redactionClaim(finding.content) || allegesLostCoverage || !/(?:^|\.)test\.[cm]?[jt]sx?$/u.test(finding.path)) {
     return void 0;
   }
   const assertion = changedExactAssertion(finding, lines);
