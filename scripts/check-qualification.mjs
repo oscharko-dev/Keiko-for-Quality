@@ -80,7 +80,13 @@ function rejectionCount(result) {
   return Array.isArray(result?.rejected) ? result.rejected.length : 1;
 }
 
-const publishedCleanly = (c) => rejectionCount(byId.get(c.id)) === 0;
+// A case that threw never reached a publishable verdict. Counting its empty rejection list as
+// clean made a scoring-stage harness error satisfy the 100% publication floor in the v0.24.0 R3
+// wave. The closed `kind` and rejection count must both prove that the case completed.
+const publishedCleanly = (c) => {
+  const result = byId.get(c.id);
+  return result?.kind !== "error" && rejectionCount(result) === 0;
+};
 
 const measured = {
   severeRecall: score(isSevere),

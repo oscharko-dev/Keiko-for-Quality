@@ -915,7 +915,9 @@ const found = recall.filter((r) => r.pass);
 const classified = found.filter((r) => r.classified);
 const adjacent = found.filter((r) => r.severityAdjacent);
 const silent = precision.filter((r) => r.pass);
-const unpublishable = results.filter((r) => r.rejected.length > 0);
+// An errored case produced no publication verdict at all. Treat it as unpublishable rather than
+// letting its necessarily-empty rejection list flatter the 100% publication scoreboard.
+const unpublishable = results.filter((r) => r.kind === "error" || r.rejected.length > 0);
 // Over every result that carries a count, not only the passing ones. Summing over `found` made the
 // number fall as the reviewer got worse: a case that misses its defect and reports three unrelated
 // things is the noisiest outcome there is, and it was contributing zero.
@@ -994,8 +996,8 @@ const { measured, reason, errored } = classifyMeasurement(results, tokens);
 if (errored > 0 && measured) {
   console.log("");
   console.log(
-    `WARNING        ${String(errored)} case(s) threw before reaching the model — harness or` +
-      " connection failures, not review misses; the scores below cover the rest",
+    `WARNING        ${String(errored)} case(s) threw in the harness — instrument failures, not` +
+      " review misses; the scores below cover the remaining cases",
   );
 }
 

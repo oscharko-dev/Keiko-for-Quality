@@ -9,7 +9,7 @@ import { CASES } from "../corpus/cases.mjs";
  * `OCR_REPORT` a release-gate failure rather than a documentation mistake.
  */
 export const QUALIFICATION_EVIDENCE_ARTIFACT = "keiko-for-quality/qualification-evidence";
-export const QUALIFICATION_EVIDENCE_SCHEMA_VERSION = 3;
+export const QUALIFICATION_EVIDENCE_SCHEMA_VERSION = 4;
 
 const VERSION = /^\d+\.\d+\.\d+$/u;
 const COMMIT = /^[0-9a-f]{40}$/u;
@@ -24,7 +24,7 @@ const ERROR_STAGES = new Set([
   "publication",
   "scoring",
 ]);
-const REASONS = new Set(["measured", "no_cases", "model_unreached"]);
+const REASONS = new Set(["measured", "no_cases", "model_unreached", "harness_failed"]);
 const PROTOCOLS = new Set(["openai", "anthropic"]);
 const STRICTNESS_LEVELS = new Set(["lenient", "default", "strict", "paranoid"]);
 const CASE_BY_ID = new Map(CASES.map((testCase) => [testCase.id, testCase]));

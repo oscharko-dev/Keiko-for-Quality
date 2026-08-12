@@ -421,6 +421,13 @@ test("qualification corpus keeps the 44-case seeded/clean population contract", 
   assert.equal(changedFiles.length, 52);
 });
 
+test("every seeded defect exposes its scorer anchors at the case boundary", () => {
+  for (const entry of CASES.filter((testCase) => testCase.defect !== null)) {
+    assert.ok(Array.isArray(entry.anchors) && entry.anchors.length > 0, entry.id);
+    assert.equal(Object.hasOwn(entry.defect, "anchors"), false, entry.id);
+  }
+});
+
 test("Windows helper twins distinguish terminal failure from an invalid spawn value", () => {
   const clean = caseById("clean-terminal-helper-before-guarded-spawn");
   const seeded = caseById("helper-fallthrough-reaches-spawn");
@@ -434,8 +441,14 @@ test("Windows helper twins distinguish terminal failure from an invalid spawn va
     file: "src/windows-compiler.mjs",
     category: "bug",
     severity: "high",
-    anchors: ["return undefined", "undefined", "spawn", "windowsToolFromPath", "fallthrough"],
   });
+  assert.deepEqual(seeded.anchors, [
+    "return undefined",
+    "undefined",
+    "spawn",
+    "windowsToolFromPath",
+    "fallthrough",
+  ]);
 
   for (const source of [cleanFile.head, seededFile.base, seededFile.head]) {
     assert.match(source, /^import \{ spawn \} from "node:child_process";/mu);

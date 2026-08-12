@@ -65,7 +65,7 @@ test("redacts raw qualification reports to fixed identifiers, booleans, counts a
   const serialized = JSON.stringify(evidence);
 
   assert.equal(evidence.artifact, QUALIFICATION_EVIDENCE_ARTIFACT);
-  assert.equal(evidence.schemaVersion, 3);
+  assert.equal(evidence.schemaVersion, 4);
   assert.equal(evidence.redacted, true);
   assert.equal(evidence.reason, "measured");
   assert.equal(evidence.results.length, CASES.length);
@@ -274,8 +274,9 @@ test("the promotion checker names a closed error stage without private text", ()
       cwd: new URL("..", import.meta.url),
       encoding: "utf8",
     });
-    assert.equal(checked.status, 0);
+    assert.equal(checked.status, 1);
     assert.match(checked.stdout, /kind=error, stage=deterministic_gate, findings=0/u);
+    assert.match(checked.stderr, /FAIL publishable/u);
     assert.ok(!checked.stdout.includes(SECRET));
     assert.ok(!checked.stderr.includes(SECRET));
   } finally {

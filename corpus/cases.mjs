@@ -2149,12 +2149,12 @@ export function runWindowsCompiler(pathValue) {
       file: "src/windows-compiler.mjs",
       category: "bug",
       severity: "high",
-      anchors: ["return undefined", "undefined", "spawn", "windowsToolFromPath", "fallthrough"],
     },
     // Recall twin for the clean case above. This time the helper really can return `undefined` and
     // the shown win32 call passes that value to `spawn`. The visible control-flow difference — not
     // the helper's name or an imagined contract — is the defect the reviewer must report.
     about: "a path helper changed from terminal failure to an invalid value consumed by spawn",
+    anchors: ["return undefined", "undefined", "spawn", "windowsToolFromPath", "fallthrough"],
     files: [
       {
         path: "src/windows-compiler.mjs",

@@ -187,8 +187,9 @@ function measuredReport(overrides = {}) {
       { id: "case-b", kind: "recall", pass: false, tokens: 800, rejected: [] },
       { id: "case-c", kind: "precision", pass: true, tokens: 500, rejected: [] },
       { id: "case-d", kind: "precision", pass: true, tokens: 400, rejected: [{}] },
+      { id: "case-e", kind: "error", pass: false, tokens: 300, rejected: [] },
     ],
-    tokens: 2700,
+    tokens: 3000,
     ...overrides,
   };
 }
@@ -202,10 +203,10 @@ test("summarizeStageReport computes recall/precision/publishable from results[],
   assert.equal(summary.clean, 2);
   assert.equal(summary.silent, 2);
   assert.equal(summary.precision, 1);
-  assert.equal(summary.publishableTotal, 4);
-  // case-d carries one rejected-sanitization entry, so only 3 of the 4 cases are publishable.
+  assert.equal(summary.publishableTotal, 5);
+  // case-d carries a rejected finding and case-e never reached a publication verdict.
   assert.equal(summary.publishableOk, 3);
-  assert.equal(summary.tokens, 2700);
+  assert.equal(summary.tokens, 3000);
 });
 
 test("summarizeStageReport reports recall/precision as null, never NaN, when a corpus has none of that kind", () => {
