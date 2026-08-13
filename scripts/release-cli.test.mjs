@@ -7,6 +7,7 @@ import {
   formatPostPrepInstruction,
   formatReleaseCommand,
   parseReleaseCli,
+  releaseAutoMergeAction,
   releasePullRequestPlan,
 } from "./release.mjs";
 
@@ -216,7 +217,49 @@ test("release pull requests pin the exact GitHub squash headline and body", () =
       }),
     /invalid release pull-request number/u,
   );
-  assert.match(releaseSource, /"--auto",\n {4}"--squash",\n {4}"--match-head-commit",/u);
-  assert.match(releaseSource, /"--subject",\n {4}pullRequestPlan\.mergeHeadline,/u);
-  assert.match(releaseSource, /"--body",\n {4}pullRequestPlan\.body,/u);
+  assert.throws(
+    () =>
+      releasePullRequestPlan({
+        version: "0.25.0",
+        number: 268,
+        commit: "not-a-commit",
+        tree,
+        releaseChannel: { channel: "standard", recoveryReason: undefined },
+      }),
+    /full lowercase Git ids/u,
+  );
+  assert.match(releaseSource, /"--auto",\s+"--squash",\s+"--match-head-commit",/u);
+  assert.match(releaseSource, /"--subject",\s+plan\.mergeHeadline,/u);
+  assert.match(releaseSource, /"--body",\s+plan\.body,/u);
+});
+
+test("release auto-merge resumes or replaces only the exact stored message", () => {
+  const plan = { mergeHeadline: "release: v0.25.0 (#268)", body: "bound body" };
+  assert.equal(releaseAutoMergeAction({ autoMergeRequest: null }, plan), "enable");
+  assert.equal(
+    releaseAutoMergeAction(
+      {
+        autoMergeRequest: {
+          mergeMethod: "SQUASH",
+          commitHeadline: plan.mergeHeadline,
+          commitBody: plan.body,
+        },
+      },
+      plan,
+    ),
+    "ready",
+  );
+  assert.equal(
+    releaseAutoMergeAction(
+      {
+        autoMergeRequest: {
+          mergeMethod: "SQUASH",
+          commitHeadline: plan.mergeHeadline,
+          commitBody: "stale body",
+        },
+      },
+      plan,
+    ),
+    "replace",
+  );
 });
