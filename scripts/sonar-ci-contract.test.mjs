@@ -104,13 +104,14 @@ describe("required Sonar CI contract", () => {
     const prefix =
       `release: v0.25.0 (#268)\n\nKeiko-Release-Dev-Commit: ${commit}\n` +
       `Keiko-Release-Dev-Tree: ${tree}\n\n`;
-    const standard = `${prefix}Keiko-Release-Channel: standard\n`;
+    const standard = `${prefix}Quality promotion: green\n\nKeiko-Release-Channel: standard\n`;
     const recovery =
       `${prefix}Quality promotion withheld: historical_holdout_fixed_retention_low\n\n` +
       "Keiko-Release-Channel: recovery\n" +
       "Keiko-Recovery-Quality-Reason: historical_holdout_fixed_retention_low\n";
     assert.match(standard, releasePattern);
     assert.match(recovery, releasePattern);
+    assert.doesNotMatch(`${prefix}Keiko-Release-Channel: standard\n`, releasePattern);
     assert.doesNotMatch(standard.replace(commit, "a".repeat(39)), releasePattern);
     assert.doesNotMatch(`${recovery}\n${recovery}`, releasePattern);
     assert.doesNotMatch(`${recovery}Keiko-Release-Channel: recovery\n`, releasePattern);
