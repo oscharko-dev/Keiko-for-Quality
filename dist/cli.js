@@ -2047,69 +2047,82 @@ function contextMatches(entry, path, pathSetDigest, contextDigests) {
   const expected = cacheContextDigest(pathSetDigest, contextDigests?.get(path), entry.findings);
   return entry.prPathSetDigest === expected;
 }
-function lookupMemoized(store, inventory, ruleDigest, engineDigest, config, pathSetDigest, contextDigests) {
-  if (store === void 0 || engineDigest === void 0) return EMPTY_LOOKUP;
-  let model;
+function configuredCacheModel(config) {
   try {
-    model = modelId(config.model);
+    return modelId(config.model);
   } catch {
-    return EMPTY_LOOKUP;
+    return void 0;
   }
+}
+function lookupInventoryItem(item, store, ruleDigest, engineDigest, config, model, pathSetDigest, contextDigests, semantics) {
+  if (!isCacheEligible(item) || item.baseBlob === void 0 || item.headBlob === void 0) {
+    return { contextInvalidated: false };
+  }
+  const path = item.path;
+  const key = computeKey(
+    item.baseBlob,
+    item.headBlob,
+    ruleDigest,
+    engineDigest,
+    model,
+    config.protocol
+  );
+  const entry = lookupUnderSemantics(store, key, semantics);
+  if (entry === void 0) return { path, contextInvalidated: false };
+  if (contextMatches(entry, path, pathSetDigest, contextDigests)) {
+    return { path, entry, contextInvalidated: false };
+  }
+  return { path, contextInvalidated: true };
+}
+function lookupBySemantics(store, inventory, ruleDigest, engineDigest, config, pathSetDigest, contextDigests, semantics = PUBLICATION_SEMANTICS) {
+  if (store === void 0 || engineDigest === void 0) return EMPTY_LOOKUP;
+  const model = configuredCacheModel(config);
+  if (model === void 0) return EMPTY_LOOKUP;
   const hits = /* @__PURE__ */ new Map();
   const eligiblePaths = /* @__PURE__ */ new Set();
   let contextInvalidated = 0;
   for (const item of inventory.items) {
-    if (!isCacheEligible(item) || item.baseBlob === void 0 || item.headBlob === void 0) {
-      continue;
-    }
-    const path = item.path;
-    eligiblePaths.add(path);
-    const key = computeKey(
-      item.baseBlob,
-      item.headBlob,
+    const result = lookupInventoryItem(
+      item,
+      store,
       ruleDigest,
       engineDigest,
+      config,
       model,
-      config.protocol
+      pathSetDigest,
+      contextDigests,
+      semantics
     );
-    const entry = lookupUnderSemantics(store, key, PUBLICATION_SEMANTICS);
-    if (entry === void 0) continue;
-    if (contextMatches(entry, path, pathSetDigest, contextDigests)) hits.set(path, entry);
-    else contextInvalidated += 1;
+    if (result.path === void 0) continue;
+    eligiblePaths.add(result.path);
+    if (result.entry !== void 0) hits.set(result.path, result.entry);
+    else if (result.contextInvalidated) contextInvalidated += 1;
   }
   return { hits, eligiblePaths, contextInvalidated };
 }
+function lookupMemoized(store, inventory, ruleDigest, engineDigest, config, pathSetDigest, contextDigests) {
+  return lookupBySemantics(
+    store,
+    inventory,
+    ruleDigest,
+    engineDigest,
+    config,
+    pathSetDigest,
+    contextDigests,
+    PUBLICATION_SEMANTICS
+  );
+}
 function lookupGenerationCheckpoints(store, inventory, ruleDigest, engineDigest, config, pathSetDigest, contextDigests) {
-  if (store === void 0 || engineDigest === void 0) return EMPTY_LOOKUP;
-  let model;
-  try {
-    model = modelId(config.model);
-  } catch {
-    return EMPTY_LOOKUP;
-  }
-  const hits = /* @__PURE__ */ new Map();
-  const eligiblePaths = /* @__PURE__ */ new Set();
-  let contextInvalidated = 0;
-  for (const item of inventory.items) {
-    if (!isCacheEligible(item) || item.baseBlob === void 0 || item.headBlob === void 0) {
-      continue;
-    }
-    const path = item.path;
-    eligiblePaths.add(path);
-    const key = computeKey(
-      item.baseBlob,
-      item.headBlob,
-      ruleDigest,
-      engineDigest,
-      model,
-      config.protocol
-    );
-    const entry = lookupUnderSemantics(store, key, GENERATION_CHECKPOINT_SEMANTICS);
-    if (entry === void 0) continue;
-    if (contextMatches(entry, path, pathSetDigest, contextDigests)) hits.set(path, entry);
-    else contextInvalidated += 1;
-  }
-  return { hits, eligiblePaths, contextInvalidated };
+  return lookupBySemantics(
+    store,
+    inventory,
+    ruleDigest,
+    engineDigest,
+    config,
+    pathSetDigest,
+    contextDigests,
+    GENERATION_CHECKPOINT_SEMANTICS
+  );
 }
 function combinedExcludes(mechanicallyClean, hitPaths) {
   return [.../* @__PURE__ */ new Set([...mechanicallyClean, ...hitPaths])];

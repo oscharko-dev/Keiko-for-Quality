@@ -201,7 +201,52 @@ function contextMatches(
   return entry.prPathSetDigest === expected;
 }
 
-export function lookupMemoized(
+function configuredCacheModel(config: RuntimeConfig): ReturnType<typeof modelId> | undefined {
+  try {
+    return modelId(config.model);
+  } catch {
+    return undefined;
+  }
+}
+
+interface ItemLookup {
+  readonly path?: string;
+  readonly entry?: CacheEntry;
+  readonly contextInvalidated: boolean;
+}
+
+function lookupInventoryItem(
+  item: Inventory["items"][number],
+  store: CacheStore,
+  ruleDigest: Sha256,
+  engineDigest: Sha256,
+  config: RuntimeConfig,
+  model: ReturnType<typeof modelId>,
+  pathSetDigest: Sha256,
+  contextDigests: ReadonlyMap<string, Sha256> | undefined,
+  semantics: CacheEntry["semantics"],
+): ItemLookup {
+  if (!isCacheEligible(item) || item.baseBlob === undefined || item.headBlob === undefined) {
+    return { contextInvalidated: false };
+  }
+  const path = item.path as string;
+  const key = computeKey(
+    item.baseBlob,
+    item.headBlob,
+    ruleDigest,
+    engineDigest,
+    model,
+    config.protocol,
+  );
+  const entry = lookupUnderSemantics(store, key, semantics);
+  if (entry === undefined) return { path, contextInvalidated: false };
+  if (contextMatches(entry, path, pathSetDigest, contextDigests)) {
+    return { path, entry, contextInvalidated: false };
+  }
+  return { path, contextInvalidated: true };
+}
+
+function lookupBySemantics(
   store: CacheStore | undefined,
   inventory: Inventory,
   ruleDigest: Sha256,
@@ -215,39 +260,54 @@ export function lookupMemoized(
   // verdict composes the per-path value with `pathSetDigest`; an absent map or path keeps the
   // scalar, so the agentic path is byte-identical to before.
   contextDigests?: ReadonlyMap<string, Sha256>,
+  semantics: CacheEntry["semantics"] = PUBLICATION_SEMANTICS,
 ): MemoLookupResult {
   if (store === undefined || engineDigest === undefined) return EMPTY_LOOKUP;
-
-  let model;
-  try {
-    model = modelId(config.model);
-  } catch {
-    return EMPTY_LOOKUP;
-  }
+  const model = configuredCacheModel(config);
+  if (model === undefined) return EMPTY_LOOKUP;
 
   const hits = new Map<string, CacheEntry>();
   const eligiblePaths = new Set<string>();
   let contextInvalidated = 0;
   for (const item of inventory.items) {
-    if (!isCacheEligible(item) || item.baseBlob === undefined || item.headBlob === undefined) {
-      continue;
-    }
-    const path = item.path as string;
-    eligiblePaths.add(path);
-    const key = computeKey(
-      item.baseBlob,
-      item.headBlob,
+    const result = lookupInventoryItem(
+      item,
+      store,
       ruleDigest,
       engineDigest,
+      config,
       model,
-      config.protocol,
+      pathSetDigest,
+      contextDigests,
+      semantics,
     );
-    const entry = lookupUnderSemantics(store, key, PUBLICATION_SEMANTICS);
-    if (entry === undefined) continue;
-    if (contextMatches(entry, path, pathSetDigest, contextDigests)) hits.set(path, entry);
-    else contextInvalidated += 1;
+    if (result.path === undefined) continue;
+    eligiblePaths.add(result.path);
+    if (result.entry !== undefined) hits.set(result.path, result.entry);
+    else if (result.contextInvalidated) contextInvalidated += 1;
   }
   return { hits, eligiblePaths, contextInvalidated };
+}
+
+export function lookupMemoized(
+  store: CacheStore | undefined,
+  inventory: Inventory,
+  ruleDigest: Sha256,
+  engineDigest: Sha256 | undefined,
+  config: RuntimeConfig,
+  pathSetDigest: Sha256,
+  contextDigests?: ReadonlyMap<string, Sha256>,
+): MemoLookupResult {
+  return lookupBySemantics(
+    store,
+    inventory,
+    ruleDigest,
+    engineDigest,
+    config,
+    pathSetDigest,
+    contextDigests,
+    PUBLICATION_SEMANTICS,
+  );
 }
 
 /**
@@ -265,38 +325,16 @@ export function lookupGenerationCheckpoints(
   pathSetDigest: Sha256,
   contextDigests?: ReadonlyMap<string, Sha256>,
 ): MemoLookupResult {
-  if (store === undefined || engineDigest === undefined) return EMPTY_LOOKUP;
-
-  let model;
-  try {
-    model = modelId(config.model);
-  } catch {
-    return EMPTY_LOOKUP;
-  }
-
-  const hits = new Map<string, CacheEntry>();
-  const eligiblePaths = new Set<string>();
-  let contextInvalidated = 0;
-  for (const item of inventory.items) {
-    if (!isCacheEligible(item) || item.baseBlob === undefined || item.headBlob === undefined) {
-      continue;
-    }
-    const path = item.path as string;
-    eligiblePaths.add(path);
-    const key = computeKey(
-      item.baseBlob,
-      item.headBlob,
-      ruleDigest,
-      engineDigest,
-      model,
-      config.protocol,
-    );
-    const entry = lookupUnderSemantics(store, key, GENERATION_CHECKPOINT_SEMANTICS);
-    if (entry === undefined) continue;
-    if (contextMatches(entry, path, pathSetDigest, contextDigests)) hits.set(path, entry);
-    else contextInvalidated += 1;
-  }
-  return { hits, eligiblePaths, contextInvalidated };
+  return lookupBySemantics(
+    store,
+    inventory,
+    ruleDigest,
+    engineDigest,
+    config,
+    pathSetDigest,
+    contextDigests,
+    GENERATION_CHECKPOINT_SEMANTICS,
+  );
 }
 
 /**
