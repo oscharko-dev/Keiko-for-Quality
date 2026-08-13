@@ -92,10 +92,28 @@ describe("required Sonar CI contract", () => {
     assert.match(workflow, /main release provenance trailers/u);
     assert.match(workflow, /repos\/\$\{GITHUB_REPOSITORY\}\/rulesets/u);
     assert.doesNotMatch(workflow, /name: Require the platform release-trailer rule\n {8}if:/u);
-    assert.match(
-      workflow,
-      /Keiko-Release-Dev-Commit: \[0-9a-f\]\{40\}.*Keiko-Release-Dev-Tree:.*Keiko-Release-Channel:/u,
+    const patternLiteral = /\.rules\[0\]\.parameters\.pattern ==\n +(".*")\n/u.exec(workflow)?.[1];
+    assert.notEqual(patternLiteral, undefined);
+    const re2Pattern = JSON.parse(patternLiteral);
+    const releasePattern = new RegExp(
+      re2Pattern.replace(String.raw`\A`, "^").replace(String.raw`\z`, "$"),
+      "u",
     );
+    const commit = "a".repeat(40);
+    const tree = "b".repeat(40);
+    const prefix =
+      `release: v0.25.0 (#268)\n\nKeiko-Release-Dev-Commit: ${commit}\n` +
+      `Keiko-Release-Dev-Tree: ${tree}\n\n`;
+    const standard = `${prefix}Keiko-Release-Channel: standard\n`;
+    const recovery =
+      `${prefix}Quality promotion withheld: historical_holdout_fixed_retention_low\n\n` +
+      "Keiko-Release-Channel: recovery\n" +
+      "Keiko-Recovery-Quality-Reason: historical_holdout_fixed_retention_low\n";
+    assert.match(standard, releasePattern);
+    assert.match(recovery, releasePattern);
+    assert.doesNotMatch(standard.replace(commit, "a".repeat(39)), releasePattern);
+    assert.doesNotMatch(`${recovery}\n${recovery}`, releasePattern);
+    assert.doesNotMatch(`${recovery}Keiko-Release-Channel: recovery\n`, releasePattern);
     assert.match(workflow, /node scripts\/release-main-provenance\.mjs/u);
     assert.doesNotMatch(workflow, /git rev-parse 'origin\/dev\^\{tree\}'/u);
   });

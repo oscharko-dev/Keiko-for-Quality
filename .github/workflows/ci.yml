@@ -380,7 +380,7 @@ jobs:
               .rules[0].parameters.operator == "regex" and
               .rules[0].parameters.negate == false and
               .rules[0].parameters.pattern ==
-                "Keiko-Release-Dev-Commit: [0-9a-f]{40}[\\s\\S]*Keiko-Release-Dev-Tree: [0-9a-f]{40}[\\s\\S]*Keiko-Release-Channel: (standard|recovery)"
+                "\\Arelease: v[0-9]+\\.[0-9]+\\.[0-9]+ \\(#[0-9]+\\)\\n\\nKeiko-Release-Dev-Commit: [0-9a-f]{40}\\nKeiko-Release-Dev-Tree: [0-9a-f]{40}\\n\\n(Keiko-Release-Channel: standard|Quality promotion withheld: historical_holdout_fixed_retention_low\\n\\nKeiko-Release-Channel: recovery\\nKeiko-Recovery-Quality-Reason: historical_holdout_fixed_retention_low)\\n?\\z"
             '
           )
           if [ "$valid" != "true" ]; then
