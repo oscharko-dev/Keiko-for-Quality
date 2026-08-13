@@ -24,9 +24,10 @@ import {
 } from "./claim-decision-policy.js";
 import { GENERATION_COMPLETION_LIMIT, generationRequestUpperBound } from "./generation-workflow.js";
 import { parseEngineResult } from "./result.js";
-import type { EngineRunOptions } from "./run.js";
+import type { EngineRunOptions, EngineRunOutput } from "./run.js";
 import { sanitizeFindingBody } from "../publish/sanitize.js";
 import {
+  GENERATION_CHECKPOINT_CHUNK_FILES,
   parseFindingsReply,
   renderNumberedHunks,
   runSingleShotEngine,
@@ -246,6 +247,45 @@ describe("runSingleShotEngine staged generation", () => {
     };
   }
 
+  async function makeManyFileRepo(
+    count: number,
+  ): Promise<{ repo: string; pair: ReviewPair; paths: string[] }> {
+    const repo = await mkdtemp(join(tmpdir(), "kfq-staged-chunks-"));
+    const git = (args: readonly string[]): string =>
+      execFileSync("git", [...args], {
+        cwd: repo,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "t",
+          GIT_AUTHOR_EMAIL: "t@example.test",
+          GIT_COMMITTER_NAME: "t",
+          GIT_COMMITTER_EMAIL: "t@example.test",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+        },
+      });
+    git(["init", "-q", "-b", "main"]);
+    await mkdir(join(repo, "src"), { recursive: true });
+    const paths = Array.from(
+      { length: count },
+      (_value, index) => `src/file-${String(index).padStart(2, "0")}.ts`,
+    );
+    for (const path of paths) await writeFile(join(repo, path), "export const value = 1;\n");
+    git(["add", "."]);
+    git(["commit", "-q", "-m", "base", "--no-gpg-sign"]);
+    const base = git(["rev-parse", "HEAD"]).trim();
+    for (const path of paths) await writeFile(join(repo, path), "export const value = 2;\n");
+    git(["add", "."]);
+    git(["commit", "-q", "-m", "head", "--no-gpg-sign"]);
+    const head = git(["rev-parse", "HEAD"]).trim();
+    return {
+      repo,
+      paths,
+      pair: { base: commitSha(base), head: commitSha(head), mergeBase: commitSha(base) },
+    };
+  }
+
   /**
    * One real Git diff carrying all three classification boundaries the staged dispatcher used to
    * get wrong when it repeated the profile's globs: a deletion-critical path outside
@@ -351,6 +391,35 @@ describe("runSingleShotEngine staged generation", () => {
     if (system.includes("focused integration examiner")) return "integration";
     throw new TypeError("unexpected generation role");
   }
+
+  it("checkpoints a large review after each deterministic file chunk", async () => {
+    const count = GENERATION_CHECKPOINT_CHUNK_FILES + 1;
+    const { repo, pair, paths } = await makeManyFileRepo(count);
+    const snapshots: EngineRunOutput[] = [];
+    const fetchImpl = fetchStub(() => ({ status: 200, reply: "[]" }), []);
+
+    const output = await runSingleShotEngine(
+      options(pair, {
+        repositoryPath: repo,
+        expectedReviewablePaths: paths,
+        onGenerationCheckpoint: (snapshot): Promise<void> => {
+          snapshots.push(snapshot);
+          return Promise.resolve();
+        },
+      }),
+      createSilentDiagnostics(),
+      fetchImpl,
+    );
+
+    expect(snapshots).toHaveLength(2);
+    const first = parseEngineResult(snapshots[0]?.stdout ?? "");
+    const second = parseEngineResult(snapshots[1]?.stdout ?? "");
+    expect(first.coverage.completed).toHaveLength(GENERATION_CHECKPOINT_CHUNK_FILES);
+    expect(first.terminalState).toBe("partial");
+    expect(second.coverage.completed).toHaveLength(count);
+    expect(second.terminalState).toBe("complete");
+    expect(parseEngineResult(output.stdout).coverage.completed).toEqual(second.coverage.completed);
+  });
 
   it("runs planner, core and deterministic integration roles while excluding generated files", async () => {
     const { repo, pair } = await makeRepo("kfq-staged-", {

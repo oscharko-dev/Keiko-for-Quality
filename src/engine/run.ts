@@ -103,6 +103,12 @@ export interface EngineRunOptions {
    * that cannot produce a different path is not a second opinion.
    */
   readonly samplingSeed?: number;
+  /**
+   * Receives bounded, engine-shaped snapshots after staged file chunks. The caller may persist
+   * completed per-file generation work; failures in that optimization must not alter settlement.
+   * The agentic runner ignores it because it cannot expose trustworthy per-file boundaries.
+   */
+  readonly onGenerationCheckpoint?: (output: EngineRunOutput) => Promise<void>;
 }
 
 export interface EngineRunOutput {

@@ -299,6 +299,7 @@ describe("composeSummaryBody", () => {
     mechanicallyClean: 4,
     criticalPointers: 1,
     cacheHits: 5,
+    checkpointHits: 0,
     contextInvalidated: 2,
     freshlyReviewed: 25,
     findingsPublished: 3,
@@ -408,6 +409,7 @@ describe("composeSummaryBody", () => {
       expect(body).toContain("| Mechanically clean | 4 |");
       expect(body).toContain("| Critical pointer changes (content not reviewable) | 1 |");
       expect(body).toContain("| Replayed from cache | 5 |");
+      expect(body).not.toContain("Resumed from generation checkpoint");
       expect(body).toContain("| Cache miss (path-set shape changed) | 2 |");
       expect(body).toContain("| Freshly reviewed | 25 |");
       expect(body).toContain("| Findings published | 3 |");
@@ -423,6 +425,15 @@ describe("composeSummaryBody", () => {
       expect(body).toContain("| Rejected (placement) | 8 |");
       expect(body).toContain("| Read-back failures | 9 |");
       expect(body).toContain("| API failures | 10 |");
+    });
+
+    it("shows resumed generation only when a checkpoint actually saved model work", () => {
+      const body = composeSummaryBody(
+        summaryReport({ counts: { ...COUNTS, checkpointHits: 4, freshlyReviewed: 21 } }),
+        MARKER,
+      );
+      expect(body).toContain("| Resumed from generation checkpoint | 4 |");
+      expect(body).toContain("| Freshly reviewed | 21 |");
     });
 
     // Keiko-for-Quality#50's visibility requirement: replay staleness and dedup behaviour must stay

@@ -64,6 +64,8 @@ export interface SummarySourceReport {
   readonly criticalPointers: number;
   /** Cache-eligible paths a stored entry answered instead of the engine. Always 0 when inert. */
   readonly cacheHits: number;
+  /** Raw generation checkpoints reused and reverified this run. */
+  readonly checkpointHits: number;
   /** Of the cache misses, how many were specifically a content match the changed-path-set shape
    *  invalidated — see `ReviewReport.contextInvalidated` (review.ts) for the full rationale.
    *  Always 0 when inert. */
@@ -160,7 +162,7 @@ const EMPTY_PUBLISH_OUTCOME: PublishOutcome = {
  * accounting `performReview` already computes — or off `report.publish`, never recomputed from a
  * second, independent pass over the inventory or the GitHub API. `freshlyReviewed` is the one
  * arithmetic step, and it is a trivial partition of two fields the report already carries:
- * `reviewablePaths - cacheHits`.
+ * `reviewablePaths - cacheHits - checkpointHits`.
  */
 export function buildSummaryReport(
   input: SummaryRunInput,
@@ -175,8 +177,9 @@ export function buildSummaryReport(
     mechanicallyClean: report.mechanicallyClean,
     criticalPointers: report.criticalPointers,
     cacheHits: report.cacheHits,
+    checkpointHits: report.checkpointHits,
     contextInvalidated: report.contextInvalidated,
-    freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits),
+    freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits - report.checkpointHits),
     findingsPublished: publish.published,
     // Unlike the four counts below, this one stays optional on `PublishOutcome` even once `publish`
     // is known to exist — see its own doc comment in `publisher.ts` — so `EMPTY_PUBLISH_OUTCOME`'s
@@ -237,7 +240,8 @@ function historyRow(input: SummaryRunInput): string {
   const reason = r.reason === undefined ? "" : ` (\`${r.reason}\`)`;
   return (
     `- \`${(input.headSha as string).slice(0, 7)}\` · ${r.outcome}${reason} · ` +
-    `fresh ${String(r.reviewablePaths - r.cacheHits)} · replayed ${String(r.cacheHits)} · ` +
+    `fresh ${String(r.reviewablePaths - r.cacheHits - r.checkpointHits)} · ` +
+    `replayed ${String(r.cacheHits)} · resumed ${String(r.checkpointHits)} · ` +
     `${String(Math.round(input.durationMs / 1000))}s`
   );
 }

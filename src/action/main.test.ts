@@ -1,10 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { blobId, sha256 } from "../core/brands.js";
 import {
+  GENERATION_CHECKPOINT_SEMANTICS,
   PUBLICATION_SEMANTICS,
   SUPPORTED_STORE_SCHEMA,
   computeKey,
@@ -78,6 +79,7 @@ function report(overrides: Partial<ReviewReport> = {}): ReviewReport {
     mechanicallyClean: 0,
     criticalPointers: 0,
     cacheHits: 0,
+    checkpointHits: 0,
     cacheMisses: 0,
     contextInvalidated: 0,
     cacheAppended: 0,
@@ -304,6 +306,45 @@ describe("runAction: loading the store", () => {
 });
 
 describe("runAction: writing the store back", () => {
+  it("persists a completed generation chunk before a later review failure and reloads it", async () => {
+    const checkpointEntry = {
+      ...entry("src/a.ts"),
+      semantics: GENERATION_CHECKPOINT_SEMANTICS,
+    };
+    const checkpointStore: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [checkpointEntry],
+    };
+    performReviewMock.mockImplementation(async (request: unknown): Promise<ReviewReport> => {
+      const typed = request as {
+        persistGenerationCheckpoint?: (store: CacheStore, appended: number) => Promise<void>;
+      };
+      await typed.persistGenerationCheckpoint?.(checkpointStore, 1);
+      throw new Error("later chunk failed");
+    });
+    const storePath = join(dir, "store.json");
+    const firstEnv = await baseEnv({ reviewStorePath: storePath });
+    const diagnostics = createDiagnostics(() => undefined);
+
+    await expect(runAction(firstEnv, diagnostics)).rejects.toThrow("later chunk failed");
+    expect(await readFile(storePath, "utf8")).toBe(serializeStore(checkpointStore));
+    expect((await readdir(dir)).filter((name) => name.includes(".tmp-"))).toEqual([]);
+    expect((await readOutputs(firstEnv)).store_written).toBe("true");
+    expect(diagnostics.drain().map((record) => record.code)).toContain("cache.checkpoint_saved");
+
+    performReviewMock.mockResolvedValue(report());
+    const secondEnv = await baseEnv({ reviewStorePath: storePath });
+    await runAction(
+      secondEnv,
+      createDiagnostics(() => undefined),
+    );
+    const [restartedRequest] = performReviewMock.mock.calls.at(-1) as [
+      { cacheStore?: CacheStore },
+      unknown,
+    ];
+    expect(restartedRequest.cacheStore?.entries).toEqual([checkpointEntry]);
+  });
+
   it("writes the updated store and records cache.appended only on a complete outcome", async () => {
     const updated: CacheStore = {
       schemaVersion: SUPPORTED_STORE_SCHEMA,

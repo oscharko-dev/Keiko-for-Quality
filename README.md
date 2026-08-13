@@ -143,7 +143,7 @@ specific review.
                GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth" \
                git fetch --no-tags --no-recurse-submodules origin "pull/${PR}/head"
 
-         - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.24.0
+         - uses: oscharko-dev/Keiko-for-Quality@<sha> # v0.25.0
            env:
              KFQ_MODEL_TOKEN: ${{ secrets.KFQ_MODEL_TOKEN }}
            with:
