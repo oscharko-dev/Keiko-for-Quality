@@ -306,6 +306,8 @@ export interface SummaryCounts {
   readonly criticalPointers: number;
   /** Reviewable paths a review-cache hit answered instead of the engine (v0.9.0). Always 0 when inert. */
   readonly cacheHits: number;
+  /** Raw generation checkpoints resumed without another generator call. */
+  readonly checkpointHits: number;
   /** Of the cache misses, how many were a content match the changed-path-set shape invalidated —
    *  see `ReviewReport.contextInvalidated` (review.ts). Always 0 when inert. */
   readonly contextInvalidated: number;
@@ -437,6 +439,9 @@ function countRows(counts: SummaryCounts): readonly string[] {
     ["Mechanically clean", counts.mechanicallyClean],
     ["Critical pointer changes (content not reviewable)", counts.criticalPointers],
     ["Replayed from cache", counts.cacheHits],
+    ...(counts.checkpointHits === 0
+      ? []
+      : ([["Resumed from generation checkpoint", counts.checkpointHits]] as const)),
     ["Cache miss (path-set shape changed)", counts.contextInvalidated],
     ["Freshly reviewed", counts.freshlyReviewed],
     ["Findings published", counts.findingsPublished],

@@ -8,7 +8,8 @@ import type { Inventory } from "../inventory/inventory.js";
 import {
   computeKey,
   computePathSetDigest,
-  lookup,
+  GENERATION_CHECKPOINT_SEMANTICS,
+  lookupUnderSemantics,
   modelId,
   PUBLICATION_SEMANTICS,
   type CacheEntry,
@@ -200,6 +201,93 @@ function contextMatches(
   return entry.prPathSetDigest === expected;
 }
 
+function configuredCacheModel(config: RuntimeConfig): ReturnType<typeof modelId> | undefined {
+  try {
+    return modelId(config.model);
+  } catch {
+    return undefined;
+  }
+}
+
+interface ItemLookup {
+  readonly path?: string;
+  readonly entry?: CacheEntry;
+  readonly contextInvalidated: boolean;
+}
+
+interface LookupIdentity {
+  readonly store: CacheStore;
+  readonly ruleDigest: Sha256;
+  readonly engineDigest: Sha256;
+  readonly config: RuntimeConfig;
+  readonly model: ReturnType<typeof modelId>;
+  readonly pathSetDigest: Sha256;
+  readonly contextDigests: ReadonlyMap<string, Sha256> | undefined;
+  readonly semantics: CacheEntry["semantics"];
+}
+
+function lookupInventoryItem(
+  item: Inventory["items"][number],
+  identity: LookupIdentity,
+): ItemLookup {
+  if (!isCacheEligible(item) || item.baseBlob === undefined || item.headBlob === undefined) {
+    return { contextInvalidated: false };
+  }
+  const path = item.path as string;
+  const key = computeKey(
+    item.baseBlob,
+    item.headBlob,
+    identity.ruleDigest,
+    identity.engineDigest,
+    identity.model,
+    identity.config.protocol,
+  );
+  const entry = lookupUnderSemantics(identity.store, key, identity.semantics);
+  if (entry === undefined) return { path, contextInvalidated: false };
+  if (contextMatches(entry, path, identity.pathSetDigest, identity.contextDigests)) {
+    return { path, entry, contextInvalidated: false };
+  }
+  return { path, contextInvalidated: true };
+}
+
+interface LookupRequest {
+  readonly store: CacheStore | undefined;
+  readonly inventory: Inventory;
+  readonly ruleDigest: Sha256;
+  readonly engineDigest: Sha256 | undefined;
+  readonly config: RuntimeConfig;
+  readonly pathSetDigest: Sha256;
+  readonly contextDigests: ReadonlyMap<string, Sha256> | undefined;
+  readonly semantics: CacheEntry["semantics"];
+}
+
+function lookupBySemantics(request: LookupRequest): MemoLookupResult {
+  // Per-path context expectation (v0.20.1): in single-shot mode a file's verdict depends on its
+  // companion group's diff identity, not on the whole pull request's path-set shape — see
+  // `companions.ts` for the measurement (89% of a live window's spend went into whole-set
+  // invalidations) and for why the agentic path keeps the conservative scalar. A staged empty
+  // verdict composes the per-path value with `pathSetDigest`; an absent map or path keeps the
+  // scalar, so the agentic path is byte-identical to before.
+  const { store, inventory, engineDigest, config } = request;
+  if (store === undefined || engineDigest === undefined) return EMPTY_LOOKUP;
+  const model = configuredCacheModel(config);
+  if (model === undefined) return EMPTY_LOOKUP;
+
+  const identity: LookupIdentity = { ...request, store, engineDigest, model };
+
+  const hits = new Map<string, CacheEntry>();
+  const eligiblePaths = new Set<string>();
+  let contextInvalidated = 0;
+  for (const item of inventory.items) {
+    const result = lookupInventoryItem(item, identity);
+    if (result.path === undefined) continue;
+    eligiblePaths.add(result.path);
+    if (result.entry !== undefined) hits.set(result.path, result.entry);
+    else if (result.contextInvalidated) contextInvalidated += 1;
+  }
+  return { hits, eligiblePaths, contextInvalidated };
+}
+
 export function lookupMemoized(
   store: CacheStore | undefined,
   inventory: Inventory,
@@ -207,46 +295,45 @@ export function lookupMemoized(
   engineDigest: Sha256 | undefined,
   config: RuntimeConfig,
   pathSetDigest: Sha256,
-  // Per-path context expectation (v0.20.1): in single-shot mode a file's verdict depends on its
-  // companion group's diff identity, not on the whole pull request's path-set shape — see
-  // `companions.ts` for the measurement (89% of a live window's spend went into whole-set
-  // invalidations) and for why the agentic path keeps the conservative scalar. A staged empty
-  // verdict composes the per-path value with `pathSetDigest`; an absent map or path keeps the
-  // scalar, so the agentic path is byte-identical to before.
   contextDigests?: ReadonlyMap<string, Sha256>,
 ): MemoLookupResult {
-  if (store === undefined || engineDigest === undefined) return EMPTY_LOOKUP;
+  return lookupBySemantics({
+    store,
+    inventory,
+    ruleDigest,
+    engineDigest,
+    config,
+    pathSetDigest,
+    contextDigests,
+    semantics: PUBLICATION_SEMANTICS,
+  });
+}
 
-  let model;
-  try {
-    model = modelId(config.model);
-  } catch {
-    return EMPTY_LOOKUP;
-  }
-
-  const hits = new Map<string, CacheEntry>();
-  const eligiblePaths = new Set<string>();
-  let contextInvalidated = 0;
-  for (const item of inventory.items) {
-    if (!isCacheEligible(item) || item.baseBlob === undefined || item.headBlob === undefined) {
-      continue;
-    }
-    const path = item.path as string;
-    eligiblePaths.add(path);
-    const key = computeKey(
-      item.baseBlob,
-      item.headBlob,
-      ruleDigest,
-      engineDigest,
-      model,
-      config.protocol,
-    );
-    const entry = lookup(store, key);
-    if (entry === undefined) continue;
-    if (contextMatches(entry, path, pathSetDigest, contextDigests)) hits.set(path, entry);
-    else contextInvalidated += 1;
-  }
-  return { hits, eligiblePaths, contextInvalidated };
+/**
+ * Raw generation checkpoints use the identical content/context identity as publication entries,
+ * but are returned separately so callers must treat their findings as fresh, unaudited model
+ * output. This is the trust boundary that makes resumability a generation optimization rather than
+ * a publication bypass.
+ */
+export function lookupGenerationCheckpoints(
+  store: CacheStore | undefined,
+  inventory: Inventory,
+  ruleDigest: Sha256,
+  engineDigest: Sha256 | undefined,
+  config: RuntimeConfig,
+  pathSetDigest: Sha256,
+  contextDigests?: ReadonlyMap<string, Sha256>,
+): MemoLookupResult {
+  return lookupBySemantics({
+    store,
+    inventory,
+    ruleDigest,
+    engineDigest,
+    config,
+    pathSetDigest,
+    contextDigests,
+    semantics: GENERATION_CHECKPOINT_SEMANTICS,
+  });
 }
 
 /**
@@ -333,7 +420,7 @@ function findingsByPath(findings: readonly EngineFinding[]): ReadonlyMap<string,
  * caller-enforced condition for cache admission, matching the module's own "why an incomplete run
  * must never write an entry" reasoning in `review-cache.ts`.
  */
-export function buildNewEntries(inputs: NewEntryInputs): CacheEntry[] {
+function buildEntries(inputs: NewEntryInputs, semantics: CacheEntry["semantics"]): CacheEntry[] {
   let model;
   try {
     model = modelId(inputs.config.model);
@@ -374,11 +461,20 @@ export function buildNewEntries(inputs: NewEntryInputs): CacheEntry[] {
       // Stamped from the constant rather than passed in: only this build knows which publication
       // contract produced these findings, and an entry that lied about it would be replayed by a
       // build whose sanitizer disagrees with the body it stored.
-      semantics: PUBLICATION_SEMANTICS,
+      semantics,
       modelId: model,
       protocol: proto,
       findings: pathFindings,
     });
   }
   return entries;
+}
+
+export function buildNewEntries(inputs: NewEntryInputs): CacheEntry[] {
+  return buildEntries(inputs, PUBLICATION_SEMANTICS);
+}
+
+/** Builds raw-generation entries that must be reverified before any later publication. */
+export function buildGenerationCheckpointEntries(inputs: NewEntryInputs): CacheEntry[] {
+  return buildEntries(inputs, GENERATION_CHECKPOINT_SEMANTICS);
 }

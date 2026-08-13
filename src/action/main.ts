@@ -1,8 +1,10 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 
 import {
   SUPPORTED_STORE_SCHEMA,
-  entriesUnderCurrentSemantics,
+  GENERATION_CHECKPOINT_SEMANTICS,
+  entriesUnderSupportedSemantics,
   readStore,
   serializeStore,
   type CacheStore,
@@ -59,6 +61,7 @@ function reportOutputs(
     findings_published: String(report.publish?.published ?? 0),
     findings_suppressed: String(report.publish?.suppressed ?? 0),
     cache_hits: String(report.cacheHits),
+    checkpoint_hits: String(report.checkpointHits),
     cache_misses: String(report.cacheMisses),
     // Isolates the one cache miss reason that costs nothing to fix from the ordinary kind: a file
     // whose own bytes never changed, denied replay only because the pull request's reviewable-path
@@ -120,29 +123,37 @@ async function loadCacheStore(path: string, diagnostics: Diagnostics): Promise<C
   // reported as one. Both counts are recorded: `entries` is what this build may replay, `retired` is
   // what a release cost, which is the number that tells an operator whether a version bump — rather
   // than the pull request's own churn — explains a cold run.
-  const usable = entriesUnderCurrentSemantics(result.store);
+  const usable = entriesUnderSupportedSemantics(result.store);
   const retired = result.store.entries.length - usable.entries.length;
+  const checkpoints = usable.entries.filter(
+    (entry) => entry.semantics === GENERATION_CHECKPOINT_SEMANTICS,
+  ).length;
   diagnostics.record("cache.store_loaded", {
-    counts: { entries: usable.entries.length, retired },
+    counts: { entries: usable.entries.length, checkpoints, retired },
   });
   return usable;
 }
 
 /**
- * Writes the review-cache store back out, reached only after `runAction` has already confirmed the
- * settlement was `complete` — see the call site. A write failure is fail-open in the same direction
- * as a read failure: it costs the *next* run's re-review budget, never this run's own completeness,
- * which already settled before this function was ever called.
+ * Writes a complete store to a sibling file and atomically replaces the visible path. Checkpoints
+ * happen while model work is still running, so an OS-level cancellation must leave either the old
+ * valid store or the new valid store — never half JSON. A write failure is fail-open in the same
+ * direction as a read failure: it costs re-review budget, never changes settlement semantics.
  */
 async function saveCacheStore(
   path: string,
   store: CacheStore,
   appended: number,
   diagnostics: Diagnostics,
+  checkpoint = false,
 ): Promise<boolean> {
+  const temporary = `${path}.tmp-${String(process.pid)}-${randomUUID()}`;
   try {
-    await writeFile(path, serializeStore(store), "utf8");
-    diagnostics.record("cache.appended", { counts: { entries: appended } });
+    await writeFile(temporary, serializeStore(store), "utf8");
+    await rename(temporary, path);
+    diagnostics.record(checkpoint ? "cache.checkpoint_saved" : "cache.appended", {
+      counts: { entries: appended },
+    });
     return true;
   } catch {
     // Swallowing the error is right — a store this run cannot write is a lost optimization, not a
@@ -151,6 +162,8 @@ async function saveCacheStore(
     // is not there.
     diagnostics.record("cache.store_write_failed");
     return false;
+  } finally {
+    await rm(temporary, { force: true }).catch(() => undefined);
   }
 }
 
@@ -250,15 +263,28 @@ async function maybeMaintainSummary(
  * function carrying both that assembly and the orchestration around it — the object itself is
  * unchanged by the split.
  */
-function buildReviewRequest(
-  event: EventContext,
-  identity: ResolvedIdentity,
-  config: RuntimeConfig,
-  profile: CompiledProfile,
-  guidelines: GuidelineIndex,
-  env: NodeJS.ProcessEnv,
-  cacheStore: CacheStore | undefined,
-): ReviewRequest {
+interface ReviewRequestInput {
+  readonly event: EventContext;
+  readonly identity: ResolvedIdentity;
+  readonly config: RuntimeConfig;
+  readonly profile: CompiledProfile;
+  readonly guidelines: GuidelineIndex;
+  readonly env: NodeJS.ProcessEnv;
+  readonly cacheStore: CacheStore | undefined;
+  readonly persistGenerationCheckpoint?: (store: CacheStore, appended: number) => Promise<void>;
+}
+
+function buildReviewRequest(input: ReviewRequestInput): ReviewRequest {
+  const {
+    event,
+    identity,
+    config,
+    profile,
+    guidelines,
+    env,
+    cacheStore,
+    persistGenerationCheckpoint,
+  } = input;
   return {
     client: identity.client,
     ref: { owner: event.owner, repo: event.repo },
@@ -278,6 +304,7 @@ function buildReviewRequest(
     // model request byte-identical to what the previous release sent.
     ...(event.changeIntent === "" ? {} : { changeIntent: event.changeIntent }),
     ...(cacheStore === undefined ? {} : { cacheStore }),
+    ...(persistGenerationCheckpoint === undefined ? {} : { persistGenerationCheckpoint }),
   };
 }
 
@@ -345,6 +372,36 @@ interface LoadedConfiguration {
   readonly guidelines: GuidelineIndex;
 }
 
+interface CheckpointPersistence {
+  readonly persist?: (store: CacheStore, appended: number) => Promise<void>;
+  readonly wasWritten: () => boolean;
+}
+
+function checkpointPersistence(
+  storePath: string,
+  diagnostics: Diagnostics,
+  env: NodeJS.ProcessEnv,
+): CheckpointPersistence {
+  let written = false;
+  if (storePath === "") return { wasWritten: () => false };
+  return {
+    persist: async (store, appended): Promise<void> => {
+      const saved = await saveCacheStore(storePath, store, appended, diagnostics, true);
+      if (!saved) throw new Error("checkpoint write failed");
+      written = true;
+      // Publish the hand-off signal immediately. If a later chunk throws, `runAction` never reaches
+      // its final output block, but the consumer still needs to upload the already-paid checkpoint.
+      // GitHub output files accept repeated keys; the final report writes the same true value again.
+      try {
+        writeOutputs(env, { store_written: "true" });
+      } catch {
+        diagnostics.record("outputs.write_failed");
+      }
+    },
+    wasWritten: () => written,
+  };
+}
+
 /**
  * Loads runtime inputs, the review profile, and the guidelines list, recording a distinguishing
  * diagnostic on failure — mirrors `resolveIdentityOrThrow` above for the same reason.
@@ -394,16 +451,29 @@ export async function runAction(
   // default fallback to a non-empty value, matching `guidelines`' existing empty-disables contract.
   const storePath = readInput(env, "review_store_path");
   const cacheStore = storePath === "" ? undefined : await loadCacheStore(storePath, diagnostics);
+  const checkpoint = checkpointPersistence(storePath, diagnostics, env);
 
   // Measured around the call itself, not the whole action: identity resolution, config/profile
   // loading, and the cache read above are this action's own overhead, not the review's cost.
   // Issue #59 is visibility only — nothing here reads the number back to gate or speed up anything.
-  const request = buildReviewRequest(event, identity, config, profile, guidelines, env, cacheStore);
+  const request = buildReviewRequest({
+    event,
+    identity,
+    config,
+    profile,
+    guidelines,
+    env,
+    cacheStore,
+    ...(checkpoint.persist === undefined
+      ? {}
+      : { persistGenerationCheckpoint: checkpoint.persist }),
+  });
   const reviewStartedAt = Date.now();
   const report = await performReview(request, diagnostics);
   const durationMs = Date.now() - reviewStartedAt;
 
-  const storeWritten = await maybeSaveCacheStore(storePath, report, diagnostics);
+  const storeWritten =
+    (await maybeSaveCacheStore(storePath, report, diagnostics)) || checkpoint.wasWritten();
   const summaryCommentUrl = await maybeMaintainSummary(
     env,
     event,
