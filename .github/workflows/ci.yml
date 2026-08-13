@@ -5,6 +5,7 @@ on:
     branches: [main, dev]
   pull_request:
     branches: [main, dev]
+    types: [opened, synchronize, reopened, auto_merge_enabled, auto_merge_disabled]
 
 # The reviewer runs inside other people's CI with a model credential and comment-write access.
 # Every job below therefore declares only its own minimum authority; no workflow-wide grant can
@@ -336,6 +337,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
+      pull-requests: read
     steps:
       - name: Check out the immutable release revision
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -351,18 +353,29 @@ jobs:
         with:
           node-version: 24
 
-      # The exact release HEAD proof below is primary. This secondary repository-policy check
-      # catches a squash-message configuration drift while the PR is still reversible; the main
-      # push repeats the binding proof and remains the final fail-closed guard.
-      - name: Require squash commits to preserve the release binding
+      # Commit-metadata rules do not govern squash commits GitHub creates. The release program
+      # therefore arms auto-merge with an explicit, immutable headline/body. This job reads the
+      # pending merge request itself and proves those exact bytes before branch protection admits
+      # it. Enabling or disabling auto-merge is an explicit workflow trigger above, so a later
+      # change cannot retain the earlier green check.
+      - name: Require the exact release squash message
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          setting=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.squash_merge_commit_message')
-          if [ "$setting" != "COMMIT_MESSAGES" ]; then
-            echo "squash commit messages would not preserve the release binding: $setting"
+          expected_headline="$(git log -1 --format=%s) (#${PR_NUMBER})"
+          expected_body="$(git log -1 --format=%b)"
+          request="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json autoMergeRequest)"
+          if ! jq -e \
+            --arg headline "$expected_headline" \
+            --arg body "$expected_body" \
+            '.autoMergeRequest.mergeMethod == "SQUASH" and
+             .autoMergeRequest.commitHeadline == $headline and
+             .autoMergeRequest.commitBody == $body' \
+            <<<"$request" >/dev/null; then
+            echo "release auto-merge is not armed with the exact signed release message"
             exit 1
           fi
 

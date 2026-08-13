@@ -88,8 +88,21 @@ describe("required Sonar CI contract", () => {
     assert.match(workflow, /github\.event_name == 'pull_request' && github\.base_ref == 'main'/u);
     assert.match(workflow, /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
     assert.match(workflow, /github\.event\.pull_request\.head\.sha \|\| github\.sha/u);
-    assert.match(workflow, /squash_merge_commit_message/u);
-    assert.match(workflow, /"\$setting" != "COMMIT_MESSAGES"/u);
+    assert.doesNotMatch(workflow, /squash_merge_commit_message|\/rulesets/u);
+    assert.match(
+      workflow,
+      /types: \[opened, synchronize, reopened, auto_merge_enabled, auto_merge_disabled\]/u,
+    );
+    assert.match(
+      workflow,
+      /name: Require the exact release squash message\n {8}if: github\.event_name == 'pull_request'/u,
+    );
+    assert.match(workflow, /pull-requests: read/u);
+    assert.match(workflow, /\.autoMergeRequest\.mergeMethod == "SQUASH"/u);
+    assert.match(workflow, /\.autoMergeRequest\.commitHeadline == \$headline/u);
+    assert.match(workflow, /\.autoMergeRequest\.commitBody == \$body/u);
+    assert.match(workflow, /git log -1 --format=%s/u);
+    assert.match(workflow, /git log -1 --format=%b/u);
     assert.match(workflow, /node scripts\/release-main-provenance\.mjs/u);
     assert.doesNotMatch(workflow, /git rev-parse 'origin\/dev\^\{tree\}'/u);
   });

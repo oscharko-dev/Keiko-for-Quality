@@ -196,6 +196,24 @@ export function formatPendingPublishInstruction({ version, releaseChannel }) {
   );
 }
 
+/** Exact bytes GitHub must use for the governed squash commit. */
+export function releasePullRequestPlan({ version, number, commit, tree, releaseChannel }) {
+  if (parseVersion(version) === undefined)
+    throw new Error("cannot plan an invalid release version");
+  if (!Number.isSafeInteger(number) || number < 1) {
+    throw new TypeError("cannot plan an invalid release pull-request number");
+  }
+  const validation = validateReleaseChannel(releaseChannel);
+  if (!validation.valid) throw new Error("cannot plan an invalid release channel");
+  const title = `release: v${version}`;
+  const body = [
+    releaseDevBindingMessage({ commit, tree }),
+    releaseChannelDispositionMessage(releaseChannel),
+    releaseChannelMessage(releaseChannel),
+  ].join("\n\n");
+  return { title, body, mergeHeadline: `${title} (#${String(number)})` };
+}
+
 function requireCleanWorktree() {
   if (run("git", ["status", "--porcelain"]).trim() !== "") {
     fail("the worktree has uncommitted changes — commit or stash them first");
@@ -445,6 +463,152 @@ function requireCommittedGateEvidence(
   }
 }
 
+function releaseMessages({ devCommit, devTree, releaseChannel }) {
+  return [
+    releaseDevBindingMessage({ commit: devCommit, tree: devTree }),
+    releaseChannelDispositionMessage(releaseChannel),
+    releaseChannelMessage(releaseChannel),
+  ];
+}
+
+function prepareReleaseBranch({ version, branch, devCommit, devTree, releaseChannel }) {
+  const existing = tryRun("git", ["rev-parse", "--verify", `refs/heads/${branch}^{commit}`]);
+  const messages = releaseMessages({ devCommit, devTree, releaseChannel });
+  if (existing === undefined) {
+    run("git", ["checkout", "-b", branch, "origin/main"]);
+    run("git", ["rm", "-rq", "."]);
+    run("git", ["checkout", "origin/dev", "--", "."]);
+    run("git", ["add", "-A"]);
+    run("git", [
+      "commit",
+      "-S",
+      "-m",
+      `release: v${version}`,
+      "-m",
+      messages[0],
+      "-m",
+      messages[1],
+      "-m",
+      messages[2],
+    ]);
+  } else {
+    run("git", ["checkout", branch]);
+  }
+  const expectedMessage = `release: v${version}\n\n${messages.join("\n\n")}`;
+  const actualMessage = run("git", ["log", "-1", "--format=%B"]).trimEnd();
+  const parent = run("git", ["rev-parse", "HEAD^1"]).trim();
+  const main = run("git", ["rev-parse", "origin/main^{commit}"]).trim();
+  if (actualMessage !== expectedMessage || parent !== main) {
+    fail("existing release branch does not exactly match this release plan");
+  }
+  if (tryRun("git", ["verify-commit", "HEAD"]) === undefined) {
+    fail("release commit is not signed and verifiable");
+  }
+  const tree = run("git", ["rev-parse", "HEAD^{tree}"]).trim();
+  if (tree !== devTree) fail(`release tree ${tree} does not match dev's ${devTree}`);
+  return { messages, releaseCommit: run("git", ["rev-parse", "HEAD^{commit}"]).trim() };
+}
+
+function readReleasePullRequest(branch) {
+  const output = tryRun("gh", [
+    "pr",
+    "view",
+    branch,
+    "--repo",
+    REPO,
+    "--json",
+    "number,url,state,baseRefName,headRefName,headRefOid,title,autoMergeRequest",
+  ]);
+  if (output === undefined) return undefined;
+  try {
+    return JSON.parse(output);
+  } catch {
+    fail("GitHub returned an invalid release pull-request record");
+  }
+}
+
+function requireReleasePullRequest(record, { version, branch, releaseCommit }) {
+  if (
+    record === undefined ||
+    record.state !== "OPEN" ||
+    record.baseRefName !== "main" ||
+    record.headRefName !== branch ||
+    record.headRefOid !== releaseCommit ||
+    record.title !== `release: v${version}` ||
+    !Number.isSafeInteger(record.number) ||
+    typeof record.url !== "string"
+  ) {
+    fail("existing release pull request does not exactly match this release plan");
+  }
+  return record;
+}
+
+function ensureReleasePullRequest({ version, branch, messages, releaseCommit }) {
+  let record = readReleasePullRequest(branch);
+  if (record === undefined) {
+    run("gh", [
+      "pr",
+      "create",
+      "--repo",
+      REPO,
+      "--base",
+      "main",
+      "--head",
+      branch,
+      "--title",
+      `release: v${version}`,
+      "--body",
+      messages.join("\n\n"),
+    ]);
+    record = readReleasePullRequest(branch);
+  }
+  return requireReleasePullRequest(record, { version, branch, releaseCommit });
+}
+
+function autoMergeMatches(record, plan) {
+  return (
+    record.autoMergeRequest?.mergeMethod === "SQUASH" &&
+    record.autoMergeRequest.commitHeadline === plan.mergeHeadline &&
+    record.autoMergeRequest.commitBody === plan.body
+  );
+}
+
+export function releaseAutoMergeAction(record, plan) {
+  if (autoMergeMatches(record, plan)) return "ready";
+  return record.autoMergeRequest == null ? "enable" : "replace";
+}
+
+function armExactReleaseAutoMerge({ record, plan, releaseCommit, branch, version }) {
+  const action = releaseAutoMergeAction(record, plan);
+  if (action === "replace") {
+    run("gh", ["pr", "merge", record.url, "--repo", REPO, "--disable-auto"]);
+  }
+  if (action !== "ready") {
+    run("gh", [
+      "pr",
+      "merge",
+      record.url,
+      "--repo",
+      REPO,
+      "--auto",
+      "--squash",
+      "--match-head-commit",
+      releaseCommit,
+      "--subject",
+      plan.mergeHeadline,
+      "--body",
+      plan.body,
+    ]);
+  }
+  const armed = requireReleasePullRequest(readReleasePullRequest(branch), {
+    version,
+    branch,
+    releaseCommit,
+  });
+  if (!autoMergeMatches(armed, plan)) fail("release auto-merge did not retain the exact message");
+  return armed.url;
+}
+
 function phaseRelease() {
   const version = requireVersion();
   const releaseChannel = requireReleaseChannel();
@@ -455,33 +619,33 @@ function phaseRelease() {
   const devTree = run("git", ["rev-parse", "origin/dev^{tree}"]).trim();
   if (localTree !== devTree) fail("run release from the exact current origin/dev tree");
   requireCommittedGateEvidence(version, "origin/dev", releaseChannel);
-  run("git", ["checkout", "-b", `release/v${version}`, "origin/main"]);
-  run("git", ["rm", "-rq", "."]);
-  run("git", ["checkout", "origin/dev", "--", "."]);
-  run("git", ["add", "-A"]);
-  run("git", [
-    "commit",
-    "-S",
-    "-m",
-    `release: v${version}`,
-    "-m",
-    releaseDevBindingMessage({ commit: devCommit, tree: devTree }),
-    "-m",
-    releaseChannelDispositionMessage(releaseChannel),
-    "-m",
-    releaseChannelMessage(releaseChannel),
-  ]);
-
-  // dev's tree, whole — asserted, never assumed. A release that is not byte-identical to what the
-  // gates ran against is a release with no evidence.
-  const mine = run("git", ["rev-parse", "HEAD^{tree}"]).trim();
-  const theirs = run("git", ["rev-parse", "origin/dev^{tree}"]).trim();
-  if (mine !== theirs) fail(`release tree ${mine} does not match dev's ${theirs}`);
-
-  run("git", ["push", "-u", "origin", `release/v${version}`]);
+  const branch = `release/v${version}`;
+  const { messages, releaseCommit } = prepareReleaseBranch({
+    version,
+    branch,
+    devCommit,
+    devTree,
+    releaseChannel,
+  });
+  run("git", ["push", "-u", "origin", branch]);
+  const pullRequest = ensureReleasePullRequest({ version, branch, messages, releaseCommit });
+  const pullRequestPlan = releasePullRequestPlan({
+    version,
+    number: pullRequest.number,
+    commit: devCommit,
+    tree: devTree,
+    releaseChannel,
+  });
+  const pullRequestUrl = armExactReleaseAutoMerge({
+    record: pullRequest,
+    plan: pullRequestPlan,
+    releaseCommit,
+    branch,
+    version,
+  });
   const nextInstruction = formatPendingPublishInstruction({ version, releaseChannel });
   console.log(
-    `release/v${version} pushed, tree identical to dev. Open the PR into main. ${nextInstruction}`,
+    `${pullRequestUrl} opened with exact squash auto-merge, tree identical to dev. ${nextInstruction}`,
   );
 }
 
