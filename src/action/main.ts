@@ -263,16 +263,28 @@ async function maybeMaintainSummary(
  * function carrying both that assembly and the orchestration around it — the object itself is
  * unchanged by the split.
  */
-function buildReviewRequest(
-  event: EventContext,
-  identity: ResolvedIdentity,
-  config: RuntimeConfig,
-  profile: CompiledProfile,
-  guidelines: GuidelineIndex,
-  env: NodeJS.ProcessEnv,
-  cacheStore: CacheStore | undefined,
-  persistGenerationCheckpoint?: (store: CacheStore, appended: number) => Promise<void>,
-): ReviewRequest {
+interface ReviewRequestInput {
+  readonly event: EventContext;
+  readonly identity: ResolvedIdentity;
+  readonly config: RuntimeConfig;
+  readonly profile: CompiledProfile;
+  readonly guidelines: GuidelineIndex;
+  readonly env: NodeJS.ProcessEnv;
+  readonly cacheStore: CacheStore | undefined;
+  readonly persistGenerationCheckpoint?: (store: CacheStore, appended: number) => Promise<void>;
+}
+
+function buildReviewRequest(input: ReviewRequestInput): ReviewRequest {
+  const {
+    event,
+    identity,
+    config,
+    profile,
+    guidelines,
+    env,
+    cacheStore,
+    persistGenerationCheckpoint,
+  } = input;
   return {
     client: identity.client,
     ref: { owner: event.owner, repo: event.repo },
@@ -444,7 +456,7 @@ export async function runAction(
   // Measured around the call itself, not the whole action: identity resolution, config/profile
   // loading, and the cache read above are this action's own overhead, not the review's cost.
   // Issue #59 is visibility only — nothing here reads the number back to gate or speed up anything.
-  const request = buildReviewRequest(
+  const request = buildReviewRequest({
     event,
     identity,
     config,
@@ -452,8 +464,10 @@ export async function runAction(
     guidelines,
     env,
     cacheStore,
-    checkpoint.persist,
-  );
+    ...(checkpoint.persist === undefined
+      ? {}
+      : { persistGenerationCheckpoint: checkpoint.persist }),
+  });
   const reviewStartedAt = Date.now();
   const report = await performReview(request, diagnostics);
   const durationMs = Date.now() - reviewStartedAt;

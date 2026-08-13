@@ -215,16 +215,20 @@ interface ItemLookup {
   readonly contextInvalidated: boolean;
 }
 
+interface LookupIdentity {
+  readonly store: CacheStore;
+  readonly ruleDigest: Sha256;
+  readonly engineDigest: Sha256;
+  readonly config: RuntimeConfig;
+  readonly model: ReturnType<typeof modelId>;
+  readonly pathSetDigest: Sha256;
+  readonly contextDigests: ReadonlyMap<string, Sha256> | undefined;
+  readonly semantics: CacheEntry["semantics"];
+}
+
 function lookupInventoryItem(
   item: Inventory["items"][number],
-  store: CacheStore,
-  ruleDigest: Sha256,
-  engineDigest: Sha256,
-  config: RuntimeConfig,
-  model: ReturnType<typeof modelId>,
-  pathSetDigest: Sha256,
-  contextDigests: ReadonlyMap<string, Sha256> | undefined,
-  semantics: CacheEntry["semantics"],
+  identity: LookupIdentity,
 ): ItemLookup {
   if (!isCacheEligible(item) || item.baseBlob === undefined || item.headBlob === undefined) {
     return { contextInvalidated: false };
@@ -233,54 +237,49 @@ function lookupInventoryItem(
   const key = computeKey(
     item.baseBlob,
     item.headBlob,
-    ruleDigest,
-    engineDigest,
-    model,
-    config.protocol,
+    identity.ruleDigest,
+    identity.engineDigest,
+    identity.model,
+    identity.config.protocol,
   );
-  const entry = lookupUnderSemantics(store, key, semantics);
+  const entry = lookupUnderSemantics(identity.store, key, identity.semantics);
   if (entry === undefined) return { path, contextInvalidated: false };
-  if (contextMatches(entry, path, pathSetDigest, contextDigests)) {
+  if (contextMatches(entry, path, identity.pathSetDigest, identity.contextDigests)) {
     return { path, entry, contextInvalidated: false };
   }
   return { path, contextInvalidated: true };
 }
 
-function lookupBySemantics(
-  store: CacheStore | undefined,
-  inventory: Inventory,
-  ruleDigest: Sha256,
-  engineDigest: Sha256 | undefined,
-  config: RuntimeConfig,
-  pathSetDigest: Sha256,
+interface LookupRequest {
+  readonly store: CacheStore | undefined;
+  readonly inventory: Inventory;
+  readonly ruleDigest: Sha256;
+  readonly engineDigest: Sha256 | undefined;
+  readonly config: RuntimeConfig;
+  readonly pathSetDigest: Sha256;
+  readonly contextDigests: ReadonlyMap<string, Sha256> | undefined;
+  readonly semantics: CacheEntry["semantics"];
+}
+
+function lookupBySemantics(request: LookupRequest): MemoLookupResult {
   // Per-path context expectation (v0.20.1): in single-shot mode a file's verdict depends on its
   // companion group's diff identity, not on the whole pull request's path-set shape — see
   // `companions.ts` for the measurement (89% of a live window's spend went into whole-set
   // invalidations) and for why the agentic path keeps the conservative scalar. A staged empty
   // verdict composes the per-path value with `pathSetDigest`; an absent map or path keeps the
   // scalar, so the agentic path is byte-identical to before.
-  contextDigests?: ReadonlyMap<string, Sha256>,
-  semantics: CacheEntry["semantics"] = PUBLICATION_SEMANTICS,
-): MemoLookupResult {
+  const { store, inventory, engineDigest, config } = request;
   if (store === undefined || engineDigest === undefined) return EMPTY_LOOKUP;
   const model = configuredCacheModel(config);
   if (model === undefined) return EMPTY_LOOKUP;
+
+  const identity: LookupIdentity = { ...request, store, engineDigest, model };
 
   const hits = new Map<string, CacheEntry>();
   const eligiblePaths = new Set<string>();
   let contextInvalidated = 0;
   for (const item of inventory.items) {
-    const result = lookupInventoryItem(
-      item,
-      store,
-      ruleDigest,
-      engineDigest,
-      config,
-      model,
-      pathSetDigest,
-      contextDigests,
-      semantics,
-    );
+    const result = lookupInventoryItem(item, identity);
     if (result.path === undefined) continue;
     eligiblePaths.add(result.path);
     if (result.entry !== undefined) hits.set(result.path, result.entry);
@@ -298,7 +297,7 @@ export function lookupMemoized(
   pathSetDigest: Sha256,
   contextDigests?: ReadonlyMap<string, Sha256>,
 ): MemoLookupResult {
-  return lookupBySemantics(
+  return lookupBySemantics({
     store,
     inventory,
     ruleDigest,
@@ -306,8 +305,8 @@ export function lookupMemoized(
     config,
     pathSetDigest,
     contextDigests,
-    PUBLICATION_SEMANTICS,
-  );
+    semantics: PUBLICATION_SEMANTICS,
+  });
 }
 
 /**
@@ -325,7 +324,7 @@ export function lookupGenerationCheckpoints(
   pathSetDigest: Sha256,
   contextDigests?: ReadonlyMap<string, Sha256>,
 ): MemoLookupResult {
-  return lookupBySemantics(
+  return lookupBySemantics({
     store,
     inventory,
     ruleDigest,
@@ -333,8 +332,8 @@ export function lookupGenerationCheckpoints(
     config,
     pathSetDigest,
     contextDigests,
-    GENERATION_CHECKPOINT_SEMANTICS,
-  );
+    semantics: GENERATION_CHECKPOINT_SEMANTICS,
+  });
 }
 
 /**

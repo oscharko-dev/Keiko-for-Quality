@@ -1622,11 +1622,18 @@ async function executeEngine(
     );
     ledger.engine += engineTokens;
     requireReviewTime(deadline);
+    // Raw generation checkpoints are not trusted publication hits. They rejoin the current
+    // generation cohort before classification repair and every later quality gate, so resuming a
+    // paid chunk cannot bypass a repair the same fresh engine output would receive.
+    const generated = {
+      ...parsed,
+      findings: mergeHitFindings(parsed.findings, memo.checkpoints),
+    };
     // Keep rejected hypotheses observable without discarding the valid remainder.
-    recordRejectedEngineFindings(parsed, diagnostics, inventory.pair.head);
-    recordEngineCandidateCount(parsed, diagnostics, inventory.pair.head);
+    recordRejectedEngineFindings(generated, diagnostics, inventory.pair.head);
+    recordEngineCandidateCount(generated, diagnostics, inventory.pair.head);
     const { result: repaired, classifyTokens } = await repairEngineFindings(
-      parsed,
+      generated,
       request,
       deadline,
       diagnostics,
@@ -1634,13 +1641,9 @@ async function executeEngine(
     );
     ledger.classify += classifyTokens;
     requireReviewTime(deadline);
-    const classified = {
-      ...repaired,
-      findings: mergeHitFindings(repaired.findings, memo.checkpoints),
-    };
     // Targeted resume credits are coverage earned by the earlier attempt, not cache hits.
     for (const path of alreadyReviewedPaths) credited.add(path);
-    return settleExecutedEngine(inventory, classified, request, memo, alreadyReviewedPaths);
+    return settleExecutedEngine(inventory, repaired, request, memo, alreadyReviewedPaths);
   } catch (error) {
     bookPropagatedEngineFailure(error, ledger);
     throw error;
@@ -2280,13 +2283,13 @@ async function collectChangePassFindings(
  * ceiling, the anthropic protocol, no findings to classify, no token to call with, or nothing that
  * actually needs it — because none of them ever placed a call.
  */
-async function repairEngineFindings(
-  parsed: EngineResult,
+async function repairFindingList(
+  findings: readonly EngineFinding[],
   request: PipelineRequest,
   deadline: ReviewDeadline,
   diagnostics: Diagnostics,
   maxTokens: number,
-): Promise<{ result: EngineResult; classifyTokens: number }> {
+): Promise<{ findings: readonly EngineFinding[]; classifyTokens: number }> {
   // `maxFindings` limits the FINAL publication set; it must never invalidate a complete engine
   // result merely because generation produced more hypotheses. It is still the right free guard for
   // this early, per-finding repair pass. The publication plan keeps at most the configured total and
@@ -2301,16 +2304,16 @@ async function repairEngineFindings(
   // `settle.ts`), so their classification quality matters exactly as much as an ordinary run's.
   // A budget-truncated cohort within the publication ceiling therefore still receives the ordinary
   // repair. The count guard is solely an early cost bound, never a trust or settlement verdict.
-  if (parsed.findings.length > request.config.maxFindings) {
-    return { result: parsed, classifyTokens: 0 };
+  if (findings.length > request.config.maxFindings) {
+    return { findings, classifyTokens: 0 };
   }
-  if (parsed.findings.length === 0) return { result: parsed, classifyTokens: 0 };
+  if (findings.length === 0) return { findings, classifyTokens: 0 };
   requireReviewTime(deadline);
   const deps = classifyDeps(request, deadline);
-  if (deps === undefined) return { result: parsed, classifyTokens: 0 };
-  if (!parsed.findings.some(needsClassification)) return { result: parsed, classifyTokens: 0 };
+  if (deps === undefined) return { findings, classifyTokens: 0 };
+  if (!findings.some(needsClassification)) return { findings, classifyTokens: 0 };
 
-  const outcome = await repairClassification(parsed.findings, deps, maxTokens);
+  const outcome = await repairClassification(findings, deps, maxTokens);
   diagnostics.record("classify.repaired", {
     counts: {
       repaired: outcome.repaired,
@@ -2319,7 +2322,27 @@ async function repairEngineFindings(
       tokens: outcome.tokens,
     },
   });
-  return { result: { ...parsed, findings: outcome.findings }, classifyTokens: outcome.tokens };
+  return { findings: outcome.findings, classifyTokens: outcome.tokens };
+}
+
+async function repairEngineFindings(
+  parsed: EngineResult,
+  request: PipelineRequest,
+  deadline: ReviewDeadline,
+  diagnostics: Diagnostics,
+  maxTokens: number,
+): Promise<{ result: EngineResult; classifyTokens: number }> {
+  const repaired = await repairFindingList(
+    parsed.findings,
+    request,
+    deadline,
+    diagnostics,
+    maxTokens,
+  );
+  return {
+    result: { ...parsed, findings: repaired.findings },
+    classifyTokens: repaired.classifyTokens,
+  };
 }
 
 /** The resume's seed — any value other than the primary pin does the job. */
@@ -4031,6 +4054,8 @@ function evictUncacheableHits(
   for (const path of uncacheablePaths) {
     const hit = memo.hits.get(path);
     if (hit !== undefined) keys.add(hit.key);
+    const checkpoint = memo.checkpoints.get(path);
+    if (checkpoint !== undefined) keys.add(checkpoint.key);
   }
   return removeEntriesByKey(store, keys);
 }
@@ -4468,8 +4493,9 @@ async function abandonIfStale(
 /**
  * A generation-free settlement when exact cache entries answer every reviewable path.
  *
- * The empty finding list is deliberate: cached findings are merged later from `memo.hits`, where
- * they enter `FindingBatch.verify` and therefore still pay current Truth/Falsifier. This shortcut
+ * Publication-semantic findings are merged later from `memo.hits`, where they enter
+ * `FindingBatch.verify` and therefore still pay current Truth/Falsifier. Raw checkpoint findings
+ * are returned here so `repairedMemoizedSettlement` can classify-repair them first. This shortcut
  * skips only engine acquisition/generation; it does not skip any publication-quality stage.
  */
 function fullyMemoizedSettlement(
@@ -4491,6 +4517,25 @@ function fullyMemoizedSettlement(
   };
 }
 
+/** A checkpoint-only run still performs the same classification repair as a fresh engine run. */
+async function repairedMemoizedSettlement(
+  run: PipelineRun,
+  inventory: Inventory,
+  memo: MemoContext,
+): Promise<Extract<Settlement, { status: "complete" }> | undefined> {
+  const settlement = fullyMemoizedSettlement(inventory, memo);
+  if (settlement === undefined || settlement.findings.length === 0) return settlement;
+  const repaired = await repairFindingList(
+    settlement.findings,
+    run.request,
+    run.deadline,
+    run.diagnostics,
+    remainingWholeReviewBudget(run.request, run.ledger),
+  );
+  run.ledger.classify += repaired.classifyTokens;
+  return { ...settlement, findings: repaired.findings };
+}
+
 /**
  * Runs the engine and records the settlement mode, or reports the failure.
  *
@@ -4503,7 +4548,7 @@ async function settleOrReport(
   inventory: Inventory,
   memo: MemoContext,
 ): Promise<Settlement | ReviewReport> {
-  const memoized = fullyMemoizedSettlement(inventory, memo);
+  const memoized = await repairedMemoizedSettlement(run, inventory, memo);
   if (memoized !== undefined) {
     run.diagnostics.record("settlement.mode.memoized", { headSha: run.request.head });
     return memoized;
@@ -4958,7 +5003,7 @@ async function localSettleOrReport(
   inventory: Inventory,
   memo: MemoContext,
 ): Promise<Settlement | LocalReviewReport> {
-  const memoized = fullyMemoizedSettlement(inventory, memo);
+  const memoized = await repairedMemoizedSettlement(run, inventory, memo);
   if (memoized !== undefined) {
     run.diagnostics.record("settlement.mode.memoized", { headSha: run.request.head });
     return memoized;

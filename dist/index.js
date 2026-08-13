@@ -2068,7 +2068,7 @@ function configuredCacheModel(config) {
     return void 0;
   }
 }
-function lookupInventoryItem(item, store, ruleDigest, engineDigest, config, model, pathSetDigest, contextDigests, semantics) {
+function lookupInventoryItem(item, identity) {
   if (!isCacheEligible(item) || item.baseBlob === void 0 || item.headBlob === void 0) {
     return { contextInvalidated: false };
   }
@@ -2076,37 +2076,29 @@ function lookupInventoryItem(item, store, ruleDigest, engineDigest, config, mode
   const key = computeKey(
     item.baseBlob,
     item.headBlob,
-    ruleDigest,
-    engineDigest,
-    model,
-    config.protocol
+    identity.ruleDigest,
+    identity.engineDigest,
+    identity.model,
+    identity.config.protocol
   );
-  const entry = lookupUnderSemantics(store, key, semantics);
+  const entry = lookupUnderSemantics(identity.store, key, identity.semantics);
   if (entry === void 0) return { path, contextInvalidated: false };
-  if (contextMatches(entry, path, pathSetDigest, contextDigests)) {
+  if (contextMatches(entry, path, identity.pathSetDigest, identity.contextDigests)) {
     return { path, entry, contextInvalidated: false };
   }
   return { path, contextInvalidated: true };
 }
-function lookupBySemantics(store, inventory, ruleDigest, engineDigest, config, pathSetDigest, contextDigests, semantics = PUBLICATION_SEMANTICS) {
+function lookupBySemantics(request) {
+  const { store, inventory, engineDigest, config } = request;
   if (store === void 0 || engineDigest === void 0) return EMPTY_LOOKUP;
   const model = configuredCacheModel(config);
   if (model === void 0) return EMPTY_LOOKUP;
+  const identity = { ...request, store, engineDigest, model };
   const hits = /* @__PURE__ */ new Map();
   const eligiblePaths = /* @__PURE__ */ new Set();
   let contextInvalidated = 0;
   for (const item of inventory.items) {
-    const result = lookupInventoryItem(
-      item,
-      store,
-      ruleDigest,
-      engineDigest,
-      config,
-      model,
-      pathSetDigest,
-      contextDigests,
-      semantics
-    );
+    const result = lookupInventoryItem(item, identity);
     if (result.path === void 0) continue;
     eligiblePaths.add(result.path);
     if (result.entry !== void 0) hits.set(result.path, result.entry);
@@ -2115,7 +2107,7 @@ function lookupBySemantics(store, inventory, ruleDigest, engineDigest, config, p
   return { hits, eligiblePaths, contextInvalidated };
 }
 function lookupMemoized(store, inventory, ruleDigest, engineDigest, config, pathSetDigest, contextDigests) {
-  return lookupBySemantics(
+  return lookupBySemantics({
     store,
     inventory,
     ruleDigest,
@@ -2123,11 +2115,11 @@ function lookupMemoized(store, inventory, ruleDigest, engineDigest, config, path
     config,
     pathSetDigest,
     contextDigests,
-    PUBLICATION_SEMANTICS
-  );
+    semantics: PUBLICATION_SEMANTICS
+  });
 }
 function lookupGenerationCheckpoints(store, inventory, ruleDigest, engineDigest, config, pathSetDigest, contextDigests) {
-  return lookupBySemantics(
+  return lookupBySemantics({
     store,
     inventory,
     ruleDigest,
@@ -2135,8 +2127,8 @@ function lookupGenerationCheckpoints(store, inventory, ruleDigest, engineDigest,
     config,
     pathSetDigest,
     contextDigests,
-    GENERATION_CHECKPOINT_SEMANTICS
-  );
+    semantics: GENERATION_CHECKPOINT_SEMANTICS
+  });
 }
 function combinedExcludes(mechanicallyClean, hitPaths) {
   return [.../* @__PURE__ */ new Set([...mechanicallyClean, ...hitPaths])];
@@ -5960,7 +5952,7 @@ function dispatchChunks(dispatches) {
   }
   return chunks;
 }
-async function reviewAndCheckpoint(state, dispatches, diagnostics, started) {
+async function reviewAndCheckpoint(state, dispatches, diagnostics, started, ruleDigest) {
   const processed = [];
   const chunks = dispatchChunks(dispatches);
   for (const [index, chunk] of chunks.entries()) {
@@ -5986,7 +5978,7 @@ async function reviewAndCheckpoint(state, dispatches, diagnostics, started) {
     try {
       await state.options.onGenerationCheckpoint({
         stdout,
-        ruleDigest: sha256(createHash9("sha256").update(state.rule).digest("hex")),
+        ruleDigest,
         wireTokens: state.ledger.spent
       });
     } catch {
@@ -6010,7 +6002,7 @@ async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
   const dispatches = prepared.dispatches;
   const state = initialRunState(options2, ruleDocument, fetchImpl, token);
   warnMissingDispatches(state, prepared.missingPaths);
-  await reviewAndCheckpoint(state, dispatches, diagnostics, started);
+  await reviewAndCheckpoint(state, dispatches, diagnostics, started, ruleDigest);
   requireCompletedBeforeDeadline(options2, state, diagnostics, started);
   const stdout = assembleStdout(state, dispatches, started, true);
   diagnostics.record("engine.run.completed", {
@@ -15052,10 +15044,14 @@ async function executeEngine(request, deadline, inventory, memo, ledger, diagnos
     );
     ledger.engine += engineTokens;
     requireReviewTime(deadline);
-    recordRejectedEngineFindings(parsed, diagnostics, inventory.pair.head);
-    recordEngineCandidateCount(parsed, diagnostics, inventory.pair.head);
+    const generated = {
+      ...parsed,
+      findings: mergeHitFindings(parsed.findings, memo.checkpoints)
+    };
+    recordRejectedEngineFindings(generated, diagnostics, inventory.pair.head);
+    recordEngineCandidateCount(generated, diagnostics, inventory.pair.head);
     const { result: repaired, classifyTokens } = await repairEngineFindings(
-      parsed,
+      generated,
       request,
       deadline,
       diagnostics,
@@ -15063,12 +15059,8 @@ async function executeEngine(request, deadline, inventory, memo, ledger, diagnos
     );
     ledger.classify += classifyTokens;
     requireReviewTime(deadline);
-    const classified = {
-      ...repaired,
-      findings: mergeHitFindings(repaired.findings, memo.checkpoints)
-    };
     for (const path of alreadyReviewedPaths) credited.add(path);
-    return settleExecutedEngine(inventory, classified, request, memo, alreadyReviewedPaths);
+    return settleExecutedEngine(inventory, repaired, request, memo, alreadyReviewedPaths);
   } catch (error) {
     bookPropagatedEngineFailure(error, ledger);
     throw error;
@@ -15379,16 +15371,16 @@ async function collectChangePassFindings(request, deadline, inventory, ledger, d
   });
   return anchorable;
 }
-async function repairEngineFindings(parsed, request, deadline, diagnostics, maxTokens) {
-  if (parsed.findings.length > request.config.maxFindings) {
-    return { result: parsed, classifyTokens: 0 };
+async function repairFindingList(findings, request, deadline, diagnostics, maxTokens) {
+  if (findings.length > request.config.maxFindings) {
+    return { findings, classifyTokens: 0 };
   }
-  if (parsed.findings.length === 0) return { result: parsed, classifyTokens: 0 };
+  if (findings.length === 0) return { findings, classifyTokens: 0 };
   requireReviewTime(deadline);
   const deps = classifyDeps(request, deadline);
-  if (deps === void 0) return { result: parsed, classifyTokens: 0 };
-  if (!parsed.findings.some(needsClassification)) return { result: parsed, classifyTokens: 0 };
-  const outcome = await repairClassification(parsed.findings, deps, maxTokens);
+  if (deps === void 0) return { findings, classifyTokens: 0 };
+  if (!findings.some(needsClassification)) return { findings, classifyTokens: 0 };
+  const outcome = await repairClassification(findings, deps, maxTokens);
   diagnostics.record("classify.repaired", {
     counts: {
       repaired: outcome.repaired,
@@ -15397,7 +15389,20 @@ async function repairEngineFindings(parsed, request, deadline, diagnostics, maxT
       tokens: outcome.tokens
     }
   });
-  return { result: { ...parsed, findings: outcome.findings }, classifyTokens: outcome.tokens };
+  return { findings: outcome.findings, classifyTokens: outcome.tokens };
+}
+async function repairEngineFindings(parsed, request, deadline, diagnostics, maxTokens) {
+  const repaired = await repairFindingList(
+    parsed.findings,
+    request,
+    deadline,
+    diagnostics,
+    maxTokens
+  );
+  return {
+    result: { ...parsed, findings: repaired.findings },
+    classifyTokens: repaired.classifyTokens
+  };
 }
 var RESUME_SEED = 43;
 function targetedResumeSeed(round) {
@@ -16235,6 +16240,8 @@ function evictUncacheableHits(store, memo, uncacheablePaths) {
   for (const path of uncacheablePaths) {
     const hit = memo.hits.get(path);
     if (hit !== void 0) keys.add(hit.key);
+    const checkpoint = memo.checkpoints.get(path);
+    if (checkpoint !== void 0) keys.add(checkpoint.key);
   }
   return removeEntriesByKey(store, keys);
 }
@@ -16457,8 +16464,21 @@ function fullyMemoizedSettlement(inventory, memo) {
     findings: mergeHitFindings([], memo.checkpoints)
   };
 }
+async function repairedMemoizedSettlement(run2, inventory, memo) {
+  const settlement = fullyMemoizedSettlement(inventory, memo);
+  if (settlement === void 0 || settlement.findings.length === 0) return settlement;
+  const repaired = await repairFindingList(
+    settlement.findings,
+    run2.request,
+    run2.deadline,
+    run2.diagnostics,
+    remainingWholeReviewBudget(run2.request, run2.ledger)
+  );
+  run2.ledger.classify += repaired.classifyTokens;
+  return { ...settlement, findings: repaired.findings };
+}
 async function settleOrReport(run2, inventory, memo) {
-  const memoized = fullyMemoizedSettlement(inventory, memo);
+  const memoized = await repairedMemoizedSettlement(run2, inventory, memo);
   if (memoized !== void 0) {
     run2.diagnostics.record("settlement.mode.memoized", { headSha: run2.request.head });
     return memoized;
@@ -16919,7 +16939,17 @@ async function maybeMaintainSummary(env, event, identity, report, durationMs, di
     diagnostics
   );
 }
-function buildReviewRequest(event, identity, config, profile, guidelines, env, cacheStore, persistGenerationCheckpoint) {
+function buildReviewRequest(input) {
+  const {
+    event,
+    identity,
+    config,
+    profile,
+    guidelines,
+    env,
+    cacheStore,
+    persistGenerationCheckpoint
+  } = input;
   return {
     client: identity.client,
     ref: { owner: event.owner, repo: event.repo },
@@ -17020,7 +17050,7 @@ async function runAction(env, diagnostics) {
   const storePath = readInput(env, "review_store_path");
   const cacheStore = storePath === "" ? void 0 : await loadCacheStore(storePath, diagnostics);
   const checkpoint = checkpointPersistence(storePath, diagnostics, env);
-  const request = buildReviewRequest(
+  const request = buildReviewRequest({
     event,
     identity,
     config,
@@ -17028,8 +17058,8 @@ async function runAction(env, diagnostics) {
     guidelines,
     env,
     cacheStore,
-    checkpoint.persist
-  );
+    ...checkpoint.persist === void 0 ? {} : { persistGenerationCheckpoint: checkpoint.persist }
+  });
   const reviewStartedAt = Date.now();
   const report = await performReview(request, diagnostics);
   const durationMs = Date.now() - reviewStartedAt;

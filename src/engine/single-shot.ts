@@ -33,7 +33,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 
-import { sha256 } from "../core/brands.js";
+import { sha256, type Sha256 } from "../core/brands.js";
 import type { Diagnostics } from "../diagnostics/sink.js";
 import { gitEnvironment, run } from "../git/exec.js";
 import { readTextAtCommit } from "../git/plumbing.js";
@@ -886,6 +886,7 @@ async function reviewAndCheckpoint(
   dispatches: readonly FileDispatch[],
   diagnostics: Diagnostics,
   started: number,
+  ruleDigest: Sha256,
 ): Promise<void> {
   const processed: FileDispatch[] = [];
   const chunks = dispatchChunks(dispatches);
@@ -912,7 +913,7 @@ async function reviewAndCheckpoint(
     try {
       await state.options.onGenerationCheckpoint({
         stdout,
-        ruleDigest: sha256(createHash("sha256").update(state.rule).digest("hex")),
+        ruleDigest,
         wireTokens: state.ledger.spent,
       });
     } catch {
@@ -951,7 +952,7 @@ export async function runSingleShotEngine(
   const dispatches = prepared.dispatches;
   const state = initialRunState(options, ruleDocument, fetchImpl, token);
   warnMissingDispatches(state, prepared.missingPaths);
-  await reviewAndCheckpoint(state, dispatches, diagnostics, started);
+  await reviewAndCheckpoint(state, dispatches, diagnostics, started, ruleDigest);
 
   requireCompletedBeforeDeadline(options, state, diagnostics, started);
 
