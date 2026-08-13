@@ -215,8 +215,9 @@ export function releasePullRequestPlan({ version, number, commit, tree, releaseC
 }
 
 function pullRequestNumberFromUrl(url) {
-  const match =
-    /^https:\/\/github\.com\/oscharko-dev\/Keiko-for-Quality\/pull\/([1-9][0-9]*)$/u.exec(url);
+  const match = /^https:\/\/github\.com\/oscharko-dev\/Keiko-for-Quality\/pull\/([1-9]\d*)$/u.exec(
+    url,
+  );
   const number = match === null ? Number.NaN : Number(match[1]);
   if (!Number.isSafeInteger(number)) fail("GitHub did not return the created release pull request");
   return number;
