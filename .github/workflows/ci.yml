@@ -353,9 +353,9 @@ jobs:
 
       # GitHub's job token cannot read the repository-admin squash-message setting. The platform
       # rule is stronger: GitHub rejects the main update itself unless the generated commit keeps
-      # all three provenance trailers. This public read proves that rule is active before merge.
+      # all three provenance trailers. This public read proves that rule before merge and again on
+      # the resulting main revision.
       - name: Require the platform release-trailer rule
-        if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

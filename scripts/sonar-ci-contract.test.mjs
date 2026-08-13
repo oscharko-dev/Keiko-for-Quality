@@ -91,6 +91,7 @@ describe("required Sonar CI contract", () => {
     assert.doesNotMatch(workflow, /squash_merge_commit_message/u);
     assert.match(workflow, /main release provenance trailers/u);
     assert.match(workflow, /repos\/\$\{GITHUB_REPOSITORY\}\/rulesets/u);
+    assert.doesNotMatch(workflow, /name: Require the platform release-trailer rule\n {8}if:/u);
     assert.match(
       workflow,
       /Keiko-Release-Dev-Commit: \[0-9a-f\]\{40\}.*Keiko-Release-Dev-Tree:.*Keiko-Release-Channel:/u,
