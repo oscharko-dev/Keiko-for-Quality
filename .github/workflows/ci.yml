@@ -351,6 +351,43 @@ jobs:
         with:
           node-version: 24
 
+      # GitHub's job token cannot read the repository-admin squash-message setting. The platform
+      # rule is stronger: GitHub rejects the main update itself unless the generated commit keeps
+      # all three provenance trailers. This public read proves that rule is active before merge.
+      - name: Require the platform release-trailer rule
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t ids < <(
+            gh api "repos/${GITHUB_REPOSITORY}/rulesets" --paginate \
+              --jq '.[] | select(.name == "main release provenance trailers") | .id'
+          )
+          if [ "${#ids[@]}" -ne 1 ]; then
+            echo "expected exactly one main release provenance trailer ruleset"
+            exit 1
+          fi
+          valid=$(
+            gh api "repos/${GITHUB_REPOSITORY}/rulesets/${ids[0]}" --jq '
+              .target == "branch" and
+              .enforcement == "active" and
+              (.bypass_actors | length) == 0 and
+              .conditions.ref_name.include == ["refs/heads/main"] and
+              .conditions.ref_name.exclude == [] and
+              (.rules | length) == 1 and
+              .rules[0].type == "commit_message_pattern" and
+              .rules[0].parameters.operator == "regex" and
+              .rules[0].parameters.negate == false and
+              .rules[0].parameters.pattern ==
+                "Keiko-Release-Dev-Commit: [0-9a-f]{40}[\\s\\S]*Keiko-Release-Dev-Tree: [0-9a-f]{40}[\\s\\S]*Keiko-Release-Channel: (standard|recovery)"
+            '
+          )
+          if [ "$valid" != "true" ]; then
+            echo "main release provenance trailer ruleset is missing or weakened"
+            exit 1
+          fi
+
       # main is a release ledger, not a second integration line. The pre-merge run makes the
       # binding load-bearing while the PR is still reversible; the push run proves the squash
       # preserved it before reusing dev's Sonar evidence. The release commit binds the exact dev

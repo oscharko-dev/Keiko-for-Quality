@@ -89,7 +89,12 @@ describe("required Sonar CI contract", () => {
     assert.match(workflow, /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
     assert.match(workflow, /github\.event\.pull_request\.head\.sha \|\| github\.sha/u);
     assert.doesNotMatch(workflow, /squash_merge_commit_message/u);
-    assert.doesNotMatch(workflow, /gh api "repos\/\$\{GITHUB_REPOSITORY\}"/u);
+    assert.match(workflow, /main release provenance trailers/u);
+    assert.match(workflow, /repos\/\$\{GITHUB_REPOSITORY\}\/rulesets/u);
+    assert.match(
+      workflow,
+      /Keiko-Release-Dev-Commit: \[0-9a-f\]\{40\}.*Keiko-Release-Dev-Tree:.*Keiko-Release-Channel:/u,
+    );
     assert.match(workflow, /node scripts\/release-main-provenance\.mjs/u);
     assert.doesNotMatch(workflow, /git rev-parse 'origin\/dev\^\{tree\}'/u);
   });

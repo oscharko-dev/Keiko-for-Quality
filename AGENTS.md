@@ -69,10 +69,11 @@ because a fork receives no secrets, and the aggregate deliberately treats that s
 the change on a trusted same-repository branch before merging it. A push to `main` is the one
 non-Sonar path: the signed release commit binds the exact dev commit and tree it copied, and a
 separate provenance job resolves that immutable commit from dev history and recomputes both trees.
-The job is load-bearing on the release pull request by checking the signed release HEAD, and it
-repeats on the resulting main push to prove that the squash actually preserved the binding. It does
-not compare against the moving dev tip, so a later dev push cannot invalidate a correct release; a
-missing, malformed, non-dev, or tree-mismatched binding stays red. The release ledger therefore
+The job is load-bearing on the release pull request by checking the signed release HEAD and the
+active server-side main-trailer rule, and it repeats on the resulting main push to prove that the
+squash actually preserved the binding. It does not compare against the moving dev tip, so a later
+dev push cannot invalidate a correct release; a missing, malformed, non-dev, or tree-mismatched
+binding stays red. The release ledger therefore
 reuses already-governed dev evidence only for byte-identical source. Read the `verify` context named
 in the `dist/index.js` section below the same way: that is the CI aggregate, not the script.
 
