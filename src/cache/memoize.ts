@@ -8,7 +8,8 @@ import type { Inventory } from "../inventory/inventory.js";
 import {
   computeKey,
   computePathSetDigest,
-  lookup,
+  GENERATION_CHECKPOINT_SEMANTICS,
+  lookupUnderSemantics,
   modelId,
   PUBLICATION_SEMANTICS,
   type CacheEntry,
@@ -241,7 +242,56 @@ export function lookupMemoized(
       model,
       config.protocol,
     );
-    const entry = lookup(store, key);
+    const entry = lookupUnderSemantics(store, key, PUBLICATION_SEMANTICS);
+    if (entry === undefined) continue;
+    if (contextMatches(entry, path, pathSetDigest, contextDigests)) hits.set(path, entry);
+    else contextInvalidated += 1;
+  }
+  return { hits, eligiblePaths, contextInvalidated };
+}
+
+/**
+ * Raw generation checkpoints use the identical content/context identity as publication entries,
+ * but are returned separately so callers must treat their findings as fresh, unaudited model
+ * output. This is the trust boundary that makes resumability a generation optimization rather than
+ * a publication bypass.
+ */
+export function lookupGenerationCheckpoints(
+  store: CacheStore | undefined,
+  inventory: Inventory,
+  ruleDigest: Sha256,
+  engineDigest: Sha256 | undefined,
+  config: RuntimeConfig,
+  pathSetDigest: Sha256,
+  contextDigests?: ReadonlyMap<string, Sha256>,
+): MemoLookupResult {
+  if (store === undefined || engineDigest === undefined) return EMPTY_LOOKUP;
+
+  let model;
+  try {
+    model = modelId(config.model);
+  } catch {
+    return EMPTY_LOOKUP;
+  }
+
+  const hits = new Map<string, CacheEntry>();
+  const eligiblePaths = new Set<string>();
+  let contextInvalidated = 0;
+  for (const item of inventory.items) {
+    if (!isCacheEligible(item) || item.baseBlob === undefined || item.headBlob === undefined) {
+      continue;
+    }
+    const path = item.path as string;
+    eligiblePaths.add(path);
+    const key = computeKey(
+      item.baseBlob,
+      item.headBlob,
+      ruleDigest,
+      engineDigest,
+      model,
+      config.protocol,
+    );
+    const entry = lookupUnderSemantics(store, key, GENERATION_CHECKPOINT_SEMANTICS);
     if (entry === undefined) continue;
     if (contextMatches(entry, path, pathSetDigest, contextDigests)) hits.set(path, entry);
     else contextInvalidated += 1;
@@ -333,7 +383,7 @@ function findingsByPath(findings: readonly EngineFinding[]): ReadonlyMap<string,
  * caller-enforced condition for cache admission, matching the module's own "why an incomplete run
  * must never write an entry" reasoning in `review-cache.ts`.
  */
-export function buildNewEntries(inputs: NewEntryInputs): CacheEntry[] {
+function buildEntries(inputs: NewEntryInputs, semantics: CacheEntry["semantics"]): CacheEntry[] {
   let model;
   try {
     model = modelId(inputs.config.model);
@@ -374,11 +424,20 @@ export function buildNewEntries(inputs: NewEntryInputs): CacheEntry[] {
       // Stamped from the constant rather than passed in: only this build knows which publication
       // contract produced these findings, and an entry that lied about it would be replayed by a
       // build whose sanitizer disagrees with the body it stored.
-      semantics: PUBLICATION_SEMANTICS,
+      semantics,
       modelId: model,
       protocol: proto,
       findings: pathFindings,
     });
   }
   return entries;
+}
+
+export function buildNewEntries(inputs: NewEntryInputs): CacheEntry[] {
+  return buildEntries(inputs, PUBLICATION_SEMANTICS);
+}
+
+/** Builds raw-generation entries that must be reverified before any later publication. */
+export function buildGenerationCheckpointEntries(inputs: NewEntryInputs): CacheEntry[] {
+  return buildEntries(inputs, GENERATION_CHECKPOINT_SEMANTICS);
 }

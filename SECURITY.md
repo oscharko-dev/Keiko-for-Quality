@@ -179,6 +179,12 @@ store from CI would let whoever controls the local run manufacture a clean resul
 one-directional by design and permanent: CI→local sharing may be considered separately; local→CI is
 rejected outright (Keiko-for-Quality#94).
 
+**A generation checkpoint is not a verdict.** The Action may persist raw per-file hypotheses after
+each completed 25-file chunk so cancellation or a later chunk failure does not repurchase them. On
+resume they are treated as fresh model output and must pass the current evidence, falsification,
+sanitization, deduplication, ranking, and publication pipeline. A checkpoint can save model work;
+it cannot mark a file clean or publish a finding by itself.
+
 ## Supported versions
 
 Only the newest release line receives fixes; there are no maintenance branches for older lines.

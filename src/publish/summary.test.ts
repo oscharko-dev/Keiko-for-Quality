@@ -70,6 +70,7 @@ function report(overrides: Partial<ReviewReport> = {}): ReviewReport {
     mechanicallyClean: 1,
     criticalPointers: 0,
     cacheHits: 2,
+    checkpointHits: 0,
     cacheMisses: 4,
     contextInvalidated: 0,
     cacheAppended: 0,

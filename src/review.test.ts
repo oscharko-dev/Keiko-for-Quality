@@ -11,6 +11,7 @@ import {
   protocol,
   SUPPORTED_STORE_SCHEMA,
   type CacheStore,
+  GENERATION_CHECKPOINT_SEMANTICS,
   PUBLICATION_SEMANTICS,
 } from "./cache/review-cache.js";
 import { compileProfile, type ReviewProfile } from "./config/profile.js";
@@ -401,6 +402,51 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(
       secondDiagnostics.drain().some((record) => record.code === "settlement.mode.memoized"),
     ).toBe(true);
+  });
+
+  it("resumes a generation checkpoint without repeating model work and promotes it only after quality gates", async () => {
+    const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+    const engineDigest = requireEngineDigest();
+    const model = modelId(CONFIG.model);
+    const proto = protocol(CONFIG.protocol);
+    const base = blobId(baseBlobA);
+    const head = blobId(headBlobA);
+    const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+    const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+    const store: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [
+        {
+          key,
+          baseBlob: base,
+          headBlob: head,
+          ruleDigest,
+          engineDigest,
+          prPathSetDigest: currentPathSet,
+          semantics: GENERATION_CHECKPOINT_SEMANTICS,
+          modelId: model,
+          protocol: proto,
+          findings: [],
+        },
+      ],
+    };
+
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+    runEngineMock.mockResolvedValue({ stdout: engineStdout(1), ruleDigest: engineDigest });
+
+    const report = await performReview(baseRequest(store), createSilentDiagnostics());
+
+    const [calledOptions] = runEngineMock.mock.calls[0] as [
+      { mechanicallyCleanPaths: string[]; expectedReviewablePaths: string[] },
+    ];
+    expect(calledOptions.mechanicallyCleanPaths).toContain("src/a.ts");
+    expect(calledOptions.expectedReviewablePaths).toEqual(["src/b.ts"]);
+    expect(report.outcome).toBe("complete");
+    expect(report.cacheHits).toBe(0);
+    expect(report.checkpointHits).toBe(1);
+    expect(report.cacheMisses).toBe(1);
+    const promoted = report.updatedCacheStore?.entries.find((entry) => entry.key === key);
+    expect(promoted?.semantics).toBe(PUBLICATION_SEMANTICS);
   });
 
   it("treats a hit rejected by the path-set digest as an ordinary miss: the file is reviewed and never memoized (v0.10.0, issue #50)", async () => {

@@ -12,8 +12,10 @@ import {
 } from "./core/review-deadline.js";
 import {
   buildNewEntries,
+  buildGenerationCheckpointEntries,
   combinedExcludes,
   computePrPathSetDigest,
+  lookupGenerationCheckpoints,
   lookupMemoized,
   mergeHitFindings,
 } from "./cache/memoize.js";
@@ -184,6 +186,8 @@ export interface ReviewRequest {
    * this being present, so an absent store costs this run nothing beyond the check itself.
    */
   readonly cacheStore?: CacheStore;
+  /** Persists raw generation progress after each bounded staged chunk. */
+  readonly persistGenerationCheckpoint?: (store: CacheStore, appended: number) => Promise<void>;
 }
 
 /**
@@ -230,6 +234,8 @@ interface PipelineRequest {
    * being present, so an absent store costs this run nothing beyond the check itself.
    */
   readonly cacheStore?: CacheStore;
+  /** Present only for the hosted action; local reviews never persist CI checkpoints. */
+  readonly persistGenerationCheckpoint?: (store: CacheStore, appended: number) => Promise<void>;
 }
 
 /**
@@ -271,6 +277,8 @@ export interface ReviewReport {
   readonly publish?: PublishOutcome;
   /** Cache-eligible paths a stored entry answered instead of the engine. Always 0 when inert. */
   readonly cacheHits: number;
+  /** Raw generation checkpoints reused without repeating model generation. */
+  readonly checkpointHits: number;
   /** Cache-eligible paths that were sent to the engine anyway. Always 0 when inert. */
   readonly cacheMisses: number;
   /**
@@ -759,6 +767,9 @@ function publishContextFor(request: ReviewRequest, inventory: Inventory): Publis
 interface MemoContext {
   readonly hits: ReadonlyMap<string, CacheEntry>;
   readonly hitPaths: ReadonlySet<string>;
+  /** Raw generation snapshots. Their findings re-enter every current quality gate as fresh. */
+  readonly checkpoints: ReadonlyMap<string, CacheEntry>;
+  readonly checkpointPaths: ReadonlySet<string>;
   readonly eligiblePaths: ReadonlySet<string>;
   /** Set together with `engineDigest` and `pathSetDigest`; all three `undefined` when inert this run. */
   readonly ruleDigest: Sha256 | undefined;
@@ -779,6 +790,8 @@ interface MemoContext {
 const INERT_MEMO: MemoContext = {
   hits: new Map(),
   hitPaths: new Set(),
+  checkpoints: new Map(),
+  checkpointPaths: new Set(),
   eligiblePaths: new Set(),
   ruleDigest: undefined,
   engineDigest: undefined,
@@ -829,12 +842,14 @@ interface IncompleteCause {
 
 function cacheCounts(memo: MemoContext): {
   cacheHits: number;
+  checkpointHits: number;
   cacheMisses: number;
   contextInvalidated: number;
 } {
   return {
     cacheHits: memo.hits.size,
-    cacheMisses: memo.eligiblePaths.size - memo.hits.size,
+    checkpointHits: memo.checkpoints.size,
+    cacheMisses: memo.eligiblePaths.size - memo.hits.size - memo.checkpoints.size,
     contextInvalidated: memo.contextInvalidated,
   };
 }
@@ -952,6 +967,59 @@ function recordCacheLookupDiagnostics(
   });
 }
 
+interface MemoLookupIdentity {
+  readonly request: PipelineRequest;
+  readonly inventory: Inventory;
+  readonly ruleDigest: Sha256;
+  readonly engineDigest: Sha256 | undefined;
+  readonly pathSetDigest: Sha256;
+  readonly contextDigests: ReadonlyMap<string, Sha256> | undefined;
+}
+
+function lookupMemoEntries(identity: MemoLookupIdentity): {
+  readonly primary: ReturnType<typeof lookupMemoized>;
+  readonly checkpoints: ReadonlyMap<string, CacheEntry>;
+  readonly contextInvalidated: number;
+} {
+  const { request, inventory, ruleDigest, engineDigest, pathSetDigest, contextDigests } = identity;
+  const args = [
+    request.cacheStore,
+    inventory,
+    ruleDigest,
+    engineDigest,
+    request.config,
+    pathSetDigest,
+    contextDigests,
+  ] as const;
+  const primary = lookupMemoized(...args);
+  const raw = lookupGenerationCheckpoints(...args);
+  return {
+    primary,
+    checkpoints: new Map([...raw.hits].filter(([path]) => !primary.hits.has(path))),
+    contextInvalidated: primary.contextInvalidated + raw.contextInvalidated,
+  };
+}
+
+function recordMemoLookup(
+  request: PipelineRequest,
+  diagnostics: Diagnostics,
+  primary: ReturnType<typeof lookupMemoized>,
+  checkpoints: ReadonlyMap<string, CacheEntry>,
+  contextInvalidated: number,
+): void {
+  recordCacheLookupDiagnostics(
+    request,
+    diagnostics,
+    primary.hits.size,
+    primary.eligiblePaths.size - primary.hits.size - checkpoints.size,
+    contextInvalidated,
+  );
+  diagnostics.record("cache.checkpoint_hits", {
+    headSha: request.head,
+    counts: { hits: checkpoints.size },
+  });
+}
+
 function memoWithLookup(
   request: PipelineRequest,
   inventory: Inventory,
@@ -972,19 +1040,20 @@ function memoWithLookup(
     contextPacks,
     guidelineContext,
   );
-  const { hits, eligiblePaths, contextInvalidated } = lookupMemoized(
-    request.cacheStore,
+  const { primary, checkpoints, contextInvalidated } = lookupMemoEntries({
+    request,
     inventory,
     ruleDigest,
     engineDigest,
-    request.config,
     pathSetDigest,
     contextDigests,
-  );
+  });
   const memo: MemoContext = {
-    hits,
-    hitPaths: new Set(hits.keys()),
-    eligiblePaths,
+    hits: primary.hits,
+    hitPaths: new Set(primary.hits.keys()),
+    checkpoints,
+    checkpointPaths: new Set(checkpoints.keys()),
+    eligiblePaths: primary.eligiblePaths,
     ruleDigest,
     engineDigest,
     pathSetDigest,
@@ -993,14 +1062,59 @@ function memoWithLookup(
     ...(guidelineContext === undefined ? {} : { guidelineContext }),
     contextInvalidated,
   };
-  recordCacheLookupDiagnostics(
-    request,
-    diagnostics,
-    hits.size,
-    eligiblePaths.size - hits.size,
-    contextInvalidated,
-  );
+  recordMemoLookup(request, diagnostics, primary, checkpoints, contextInvalidated);
   return memo;
+}
+
+interface GenerationCheckpointInvocation {
+  readonly request: PipelineRequest;
+  readonly inventory: Inventory;
+  readonly memo: MemoContext;
+  readonly options: EngineRunOptions;
+}
+
+function withGenerationCheckpoint(input: GenerationCheckpointInvocation): EngineRunOptions {
+  const { request, inventory, memo, options } = input;
+  if (
+    request.persistGenerationCheckpoint === undefined ||
+    request.cacheStore === undefined ||
+    memo.ruleDigest === undefined ||
+    memo.engineDigest === undefined ||
+    memo.pathSetDigest === undefined
+  ) {
+    return options;
+  }
+  const identity = {
+    ruleDigest: memo.ruleDigest,
+    engineDigest: memo.engineDigest,
+    pathSetDigest: memo.pathSetDigest,
+  };
+  let checkpointStore = request.cacheStore;
+  const alreadyAnswered = new Set([...memo.hitPaths, ...memo.checkpointPaths]);
+  return {
+    ...options,
+    onGenerationCheckpoint: async (output): Promise<void> => {
+      const parsed = parseEngineResult(output.stdout);
+      const completed = new Set(parsed.coverage.completed.map((entry) => entry.path));
+      const eligiblePaths = new Set(
+        [...memo.eligiblePaths].filter((path) => completed.has(path) && !alreadyAnswered.has(path)),
+      );
+      if (eligiblePaths.size === 0) return;
+      const entries = buildGenerationCheckpointEntries({
+        inventory,
+        eligiblePaths,
+        hitPaths: alreadyAnswered,
+        findings: parsed.findings,
+        ...identity,
+        ...(memo.contextDigests === undefined ? {} : { contextDigests: memo.contextDigests }),
+        config: request.config,
+      });
+      if (entries.length === 0) return;
+      checkpointStore = appendEntries(checkpointStore, entries, RETENTION);
+      for (const path of eligiblePaths) alreadyAnswered.add(path);
+      await request.persistGenerationCheckpoint?.(checkpointStore, entries.length);
+    },
+  };
 }
 
 /**
@@ -1265,7 +1379,8 @@ function computeEngineBudget(
   inventory: Inventory,
   memo: MemoContext,
 ): EngineBudget {
-  const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
+  const answeredPaths = new Set([...memo.hitPaths, ...memo.checkpointPaths]);
+  const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), answeredPaths);
   const excludedSet = new Set(excluded);
   const engineCeiling = Math.max(
     1,
@@ -1413,13 +1528,14 @@ function preparedInvocation(
 ): EngineRunOptions {
   const { excluded, allottedBudget } = computeEngineBudget(request, inventory, memo);
   ledger.allotted = allottedBudget;
-  return engineInvocationOptions(request, deadline, inventory, {
+  const options = engineInvocationOptions(request, deadline, inventory, {
     binaryPath,
     allottedBudget,
     excluded,
     preparedContextPacks: memo.contextPacks,
     guidelineContext: memo.guidelineContext,
   });
+  return withGenerationCheckpoint({ request, inventory, memo, options });
 }
 
 function recordRejectedEngineFindings(
@@ -1454,6 +1570,29 @@ async function reviewEngineBinaryPath(
   return (await acquireEngine(workspace, diagnostics)).binaryPath;
 }
 
+function settlementAnsweredPaths(
+  memo: MemoContext,
+  alreadyReviewedPaths: readonly string[],
+): ReadonlySet<string> {
+  return new Set([...memo.hitPaths, ...memo.checkpointPaths, ...alreadyReviewedPaths]);
+}
+
+function settleExecutedEngine(
+  inventory: Inventory,
+  result: EngineResult,
+  request: PipelineRequest,
+  memo: MemoContext,
+  alreadyReviewedPaths: readonly string[],
+): Settlement {
+  return settle(
+    inventory,
+    result,
+    request.profile,
+    request.config,
+    settlementAnsweredPaths(memo, alreadyReviewedPaths),
+  );
+}
+
 async function executeEngine(
   request: PipelineRequest,
   deadline: ReviewDeadline,
@@ -1483,12 +1622,10 @@ async function executeEngine(
     );
     ledger.engine += engineTokens;
     requireReviewTime(deadline);
-    // Findings this adapter refused while keeping the run (see `EngineResult.rejectedFindings`).
-    // Recorded only when non-zero: a zero here is the ordinary case, and a line for it would
-    // bury the one occurrence that matters under nineteen that do not.
+    // Keep rejected hypotheses observable without discarding the valid remainder.
     recordRejectedEngineFindings(parsed, diagnostics, inventory.pair.head);
     recordEngineCandidateCount(parsed, diagnostics, inventory.pair.head);
-    const { result: classified, classifyTokens } = await repairEngineFindings(
+    const { result: repaired, classifyTokens } = await repairEngineFindings(
       parsed,
       request,
       deadline,
@@ -1497,18 +1634,13 @@ async function executeEngine(
     );
     ledger.classify += classifyTokens;
     requireReviewTime(deadline);
-    // Widened, never replaced: `alreadyReviewedPaths` (empty except after a resume that narrowed
-    // its own dispatch — see `ResumeOutcome`'s doc comment) tells `settle()` those paths are
-    // covered by the FIRST attempt, not by the returned result's own coverage, exactly the same
-    // "covered by other means" contract `memo.hitPaths` already establishes for a cache hit.
-    // Recorded for the report as well as handed to `settle()`: these paths are covered, and a
-    // report that omitted them would understate its own coverage (see `CreditedPaths`).
+    const classified = {
+      ...repaired,
+      findings: mergeHitFindings(repaired.findings, memo.checkpoints),
+    };
+    // Targeted resume credits are coverage earned by the earlier attempt, not cache hits.
     for (const path of alreadyReviewedPaths) credited.add(path);
-    const memoizedForSettlement =
-      alreadyReviewedPaths.length === 0
-        ? memo.hitPaths
-        : new Set([...memo.hitPaths, ...alreadyReviewedPaths]);
-    return settle(inventory, classified, request.profile, request.config, memoizedForSettlement);
+    return settleExecutedEngine(inventory, classified, request, memo, alreadyReviewedPaths);
   } catch (error) {
     bookPropagatedEngineFailure(error, ledger);
     throw error;
@@ -4294,6 +4426,7 @@ function emptyReviewReport(inventory: Inventory): ReviewReport {
     outcome: "complete",
     ...inventoryCounts(inventory),
     cacheHits: 0,
+    checkpointHits: 0,
     cacheMisses: 0,
     contextInvalidated: 0,
     cacheAppended: 0,
@@ -4345,11 +4478,17 @@ function fullyMemoizedSettlement(
 ): Extract<Settlement, { status: "complete" }> | undefined {
   if (
     inventory.reviewablePaths.size === 0 ||
-    [...inventory.reviewablePaths].some((path) => !memo.hitPaths.has(path))
+    [...inventory.reviewablePaths].some(
+      (path) => !memo.hitPaths.has(path) && !memo.checkpointPaths.has(path),
+    )
   ) {
     return undefined;
   }
-  return { status: "complete", mode: "memoized", findings: [] };
+  return {
+    status: "complete",
+    mode: "memoized",
+    findings: mergeHitFindings([], memo.checkpoints),
+  };
 }
 
 /**

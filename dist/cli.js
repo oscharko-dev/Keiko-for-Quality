@@ -112,6 +112,7 @@ var CLOSED_RUNTIME_FACT_IDS = Object.freeze(
 // src/cache/review-cache.ts
 var SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
 var PUBLICATION_SEMANTICS = `v0.23.0-finding-badges-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}`;
+var GENERATION_CHECKPOINT_SEMANTICS = "keiko-for-quality.generation-checkpoint/v1";
 var CACHE_KEY_PATTERN = /^[0-9a-f]{64}$/;
 var PROTOCOLS = /* @__PURE__ */ new Set(["openai", "anthropic"]);
 var FIELD_SEPARATOR = "\0";
@@ -280,8 +281,8 @@ function entriesUnderCurrentSemantics(store) {
   const kept = store.entries.filter((entry) => entry.semantics === PUBLICATION_SEMANTICS);
   return kept.length === store.entries.length ? store : { ...store, entries: kept };
 }
-function lookup(store, key) {
-  return store.entries.find((entry) => entry.key === key);
+function lookupUnderSemantics(store, key, semantics) {
+  return store.entries.find((entry) => entry.key === key && entry.semantics === semantics);
 }
 function removeEntriesByKey(store, keys) {
   if (keys.size === 0) return store;
@@ -1467,6 +1468,7 @@ var REASON_CODES = [
   "engine.run.timeout",
   "engine.run.spawn_failed",
   "engine.run.nonzero_exit",
+  "engine.chunk.completed",
   // The engine's own verdict about its run, recorded once per engine execution (2026-08-06). One
   // code per status value rather than a free-form field, because diagnostics carry no strings —
   // and because "which status did the engine actually report" is precisely the question the
@@ -1579,6 +1581,9 @@ var REASON_CODES = [
   "cache.store.entry_overflow",
   "cache.store.entry_invalid",
   "cache.store_write_failed",
+  "cache.checkpoint_saved",
+  "cache.checkpoint_write_failed",
+  "cache.checkpoint_hits",
   // The action's own final output write failed (v0.13.0) — `$GITHUB_OUTPUT` unwritable, a full
   // disk. Mirrors `cache.store_write_failed`'s own posture: a delivery-mechanism failure at the
   // very last step must not retroactively turn a completed, already-published review into an
@@ -2067,7 +2072,39 @@ function lookupMemoized(store, inventory, ruleDigest, engineDigest, config, path
       model,
       config.protocol
     );
-    const entry = lookup(store, key);
+    const entry = lookupUnderSemantics(store, key, PUBLICATION_SEMANTICS);
+    if (entry === void 0) continue;
+    if (contextMatches(entry, path, pathSetDigest, contextDigests)) hits.set(path, entry);
+    else contextInvalidated += 1;
+  }
+  return { hits, eligiblePaths, contextInvalidated };
+}
+function lookupGenerationCheckpoints(store, inventory, ruleDigest, engineDigest, config, pathSetDigest, contextDigests) {
+  if (store === void 0 || engineDigest === void 0) return EMPTY_LOOKUP;
+  let model;
+  try {
+    model = modelId(config.model);
+  } catch {
+    return EMPTY_LOOKUP;
+  }
+  const hits = /* @__PURE__ */ new Map();
+  const eligiblePaths = /* @__PURE__ */ new Set();
+  let contextInvalidated = 0;
+  for (const item of inventory.items) {
+    if (!isCacheEligible(item) || item.baseBlob === void 0 || item.headBlob === void 0) {
+      continue;
+    }
+    const path = item.path;
+    eligiblePaths.add(path);
+    const key = computeKey(
+      item.baseBlob,
+      item.headBlob,
+      ruleDigest,
+      engineDigest,
+      model,
+      config.protocol
+    );
+    const entry = lookupUnderSemantics(store, key, GENERATION_CHECKPOINT_SEMANTICS);
     if (entry === void 0) continue;
     if (contextMatches(entry, path, pathSetDigest, contextDigests)) hits.set(path, entry);
     else contextInvalidated += 1;
@@ -2094,7 +2131,7 @@ function findingsByPath(findings) {
   }
   return byPath;
 }
-function buildNewEntries(inputs) {
+function buildEntries(inputs, semantics) {
   let model;
   try {
     model = modelId(inputs.config.model);
@@ -2134,13 +2171,19 @@ function buildNewEntries(inputs) {
       // Stamped from the constant rather than passed in: only this build knows which publication
       // contract produced these findings, and an entry that lied about it would be replayed by a
       // build whose sanitizer disagrees with the body it stored.
-      semantics: PUBLICATION_SEMANTICS,
+      semantics,
       modelId: model,
       protocol: proto,
       findings: pathFindings
     });
   }
   return entries;
+}
+function buildNewEntries(inputs) {
+  return buildEntries(inputs, PUBLICATION_SEMANTICS);
+}
+function buildGenerationCheckpointEntries(inputs) {
+  return buildEntries(inputs, GENERATION_CHECKPOINT_SEMANTICS);
 }
 
 // src/engine/acquire.ts
@@ -5030,6 +5073,7 @@ var DEFAULT_SEED = 42;
 var RETRIES_PER_FILE = 1;
 var EXAMINER_SHAPE_RETRIES = 1;
 var EXAMINER_SHAPE_RETRY_SEED_OFFSET = 1e4;
+var GENERATION_CHECKPOINT_CHUNK_FILES = 25;
 var COMPANION_HUNK_CHARS = 1200;
 var COMPANION_BLOCK_CHARS = 4e3;
 var CORE_EXAMINER_SEED_OFFSET = 1e3;
@@ -5431,7 +5475,7 @@ function stagedRunStatus(state) {
   if (state.warnings.length === 0) return "success";
   return "completed_with_errors";
 }
-function assembleStdout(state, dispatches, startedMs) {
+function assembleStdout(state, dispatches, startedMs, final) {
   const selected = [...new Set(state.options.expectedReviewablePaths)];
   const failed = new Set(state.warnings.map((warning) => warning.file));
   const completed = dispatches.map((dispatch) => dispatch.path).filter((path) => !failed.has(path));
@@ -5439,7 +5483,7 @@ function assembleStdout(state, dispatches, startedMs) {
   return JSON.stringify({
     // Match the engine result contract: a budget stop overrides warning-derived statuses, while
     // the manifest below still reports exactly which file dispatches completed or failed.
-    status: stagedRunStatus(state),
+    status: final ? stagedRunStatus(state) : "completed_with_errors",
     summary: {
       files_reviewed: dispatches.length,
       comments: state.comments.length,
@@ -5454,7 +5498,7 @@ function assembleStdout(state, dispatches, startedMs) {
     warnings: state.warnings,
     manifest: {
       schema_version: SUPPORTED_MANIFEST_SCHEMA,
-      terminal_state: failed.size === 0 ? "complete" : "partial",
+      terminal_state: final && failed.size === 0 ? "complete" : "partial",
       coverage: {
         selected: coverageEntries(selected),
         completed: coverageEntries(completed),
@@ -5507,6 +5551,47 @@ async function reviewDispatchPool(state, dispatches) {
     (dispatch) => reviewOneFile(state, dispatch)
   );
 }
+function dispatchChunks(dispatches) {
+  const chunks = [];
+  for (let start = 0; start < dispatches.length; start += GENERATION_CHECKPOINT_CHUNK_FILES) {
+    chunks.push(dispatches.slice(start, start + GENERATION_CHECKPOINT_CHUNK_FILES));
+  }
+  return chunks;
+}
+async function reviewAndCheckpoint(state, dispatches, diagnostics, started) {
+  const processed = [];
+  const chunks = dispatchChunks(dispatches);
+  for (const [index, chunk] of chunks.entries()) {
+    await reviewDispatchPool(state, chunk);
+    processed.push(...chunk);
+    diagnostics.record("engine.chunk.completed", {
+      headSha: state.options.pair.head,
+      counts: {
+        chunk: index + 1,
+        chunks: chunks.length,
+        files: chunk.length,
+        completed: processed.length,
+        total: dispatches.length
+      }
+    });
+    if (state.options.onGenerationCheckpoint === void 0) continue;
+    const stdout = assembleStdout(
+      state,
+      processed,
+      started,
+      processed.length === dispatches.length
+    );
+    try {
+      await state.options.onGenerationCheckpoint({
+        stdout,
+        ruleDigest: sha256(createHash9("sha256").update(state.rule).digest("hex")),
+        wireTokens: state.ledger.spent
+      });
+    } catch {
+      diagnostics.record("cache.checkpoint_write_failed", { headSha: state.options.pair.head });
+    }
+  }
+}
 async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
   remainingInvocationMs2(options2, options2.config.reviewTimeoutSeconds * 1e3);
   const token = readModelToken(options2.config, options2.env);
@@ -5523,9 +5608,9 @@ async function runSingleShotEngine(options2, diagnostics, fetchImpl = fetch) {
   const dispatches = prepared.dispatches;
   const state = initialRunState(options2, ruleDocument, fetchImpl, token);
   warnMissingDispatches(state, prepared.missingPaths);
-  await reviewDispatchPool(state, dispatches);
+  await reviewAndCheckpoint(state, dispatches, diagnostics, started);
   requireCompletedBeforeDeadline(options2, state, diagnostics, started);
-  const stdout = assembleStdout(state, dispatches, started);
+  const stdout = assembleStdout(state, dispatches, started, true);
   diagnostics.record("engine.run.completed", {
     headSha: options2.pair.head,
     digest: ruleDigest,
@@ -13493,6 +13578,8 @@ function itemIndex(inventory) {
 var INERT_MEMO = {
   hits: /* @__PURE__ */ new Map(),
   hitPaths: /* @__PURE__ */ new Set(),
+  checkpoints: /* @__PURE__ */ new Map(),
+  checkpointPaths: /* @__PURE__ */ new Set(),
   eligiblePaths: /* @__PURE__ */ new Set(),
   ruleDigest: void 0,
   engineDigest: void 0,
@@ -13505,7 +13592,8 @@ var NO_UNCACHEABLE_PATHS = /* @__PURE__ */ new Set();
 function cacheCounts(memo) {
   return {
     cacheHits: memo.hits.size,
-    cacheMisses: memo.eligiblePaths.size - memo.hits.size,
+    checkpointHits: memo.checkpoints.size,
+    cacheMisses: memo.eligiblePaths.size - memo.hits.size - memo.checkpoints.size,
     contextInvalidated: memo.contextInvalidated
   };
 }
@@ -13566,6 +13654,38 @@ function recordCacheLookupDiagnostics(request, diagnostics, hits, misses, contex
     counts: { invalidated: contextInvalidated }
   });
 }
+function lookupMemoEntries(identity) {
+  const { request, inventory, ruleDigest, engineDigest, pathSetDigest, contextDigests } = identity;
+  const args = [
+    request.cacheStore,
+    inventory,
+    ruleDigest,
+    engineDigest,
+    request.config,
+    pathSetDigest,
+    contextDigests
+  ];
+  const primary = lookupMemoized(...args);
+  const raw = lookupGenerationCheckpoints(...args);
+  return {
+    primary,
+    checkpoints: new Map([...raw.hits].filter(([path]) => !primary.hits.has(path))),
+    contextInvalidated: primary.contextInvalidated + raw.contextInvalidated
+  };
+}
+function recordMemoLookup(request, diagnostics, primary, checkpoints, contextInvalidated) {
+  recordCacheLookupDiagnostics(
+    request,
+    diagnostics,
+    primary.hits.size,
+    primary.eligiblePaths.size - primary.hits.size - checkpoints.size,
+    contextInvalidated
+  );
+  diagnostics.record("cache.checkpoint_hits", {
+    headSha: request.head,
+    counts: { hits: checkpoints.size }
+  });
+}
 function memoWithLookup(request, inventory, diagnostics, contextPacks, guidelineContext) {
   const ruleDigest = promptIdentityDigest(request.profile, request.guidelines);
   const engineDigest = currentPlatformDigest();
@@ -13580,19 +13700,20 @@ function memoWithLookup(request, inventory, diagnostics, contextPacks, guideline
     contextPacks,
     guidelineContext
   );
-  const { hits, eligiblePaths, contextInvalidated } = lookupMemoized(
-    request.cacheStore,
+  const { primary, checkpoints, contextInvalidated } = lookupMemoEntries({
+    request,
     inventory,
     ruleDigest,
     engineDigest,
-    request.config,
     pathSetDigest,
     contextDigests
-  );
+  });
   const memo = {
-    hits,
-    hitPaths: new Set(hits.keys()),
-    eligiblePaths,
+    hits: primary.hits,
+    hitPaths: new Set(primary.hits.keys()),
+    checkpoints,
+    checkpointPaths: new Set(checkpoints.keys()),
+    eligiblePaths: primary.eligiblePaths,
     ruleDigest,
     engineDigest,
     pathSetDigest,
@@ -13601,14 +13722,45 @@ function memoWithLookup(request, inventory, diagnostics, contextPacks, guideline
     ...guidelineContext === void 0 ? {} : { guidelineContext },
     contextInvalidated
   };
-  recordCacheLookupDiagnostics(
-    request,
-    diagnostics,
-    hits.size,
-    eligiblePaths.size - hits.size,
-    contextInvalidated
-  );
+  recordMemoLookup(request, diagnostics, primary, checkpoints, contextInvalidated);
   return memo;
+}
+function withGenerationCheckpoint(input) {
+  const { request, inventory, memo, options: options2 } = input;
+  if (request.persistGenerationCheckpoint === void 0 || request.cacheStore === void 0 || memo.ruleDigest === void 0 || memo.engineDigest === void 0 || memo.pathSetDigest === void 0) {
+    return options2;
+  }
+  const identity = {
+    ruleDigest: memo.ruleDigest,
+    engineDigest: memo.engineDigest,
+    pathSetDigest: memo.pathSetDigest
+  };
+  let checkpointStore = request.cacheStore;
+  const alreadyAnswered = /* @__PURE__ */ new Set([...memo.hitPaths, ...memo.checkpointPaths]);
+  return {
+    ...options2,
+    onGenerationCheckpoint: async (output) => {
+      const parsed = parseEngineResult(output.stdout);
+      const completed = new Set(parsed.coverage.completed.map((entry) => entry.path));
+      const eligiblePaths = new Set(
+        [...memo.eligiblePaths].filter((path) => completed.has(path) && !alreadyAnswered.has(path))
+      );
+      if (eligiblePaths.size === 0) return;
+      const entries = buildGenerationCheckpointEntries({
+        inventory,
+        eligiblePaths,
+        hitPaths: alreadyAnswered,
+        findings: parsed.findings,
+        ...identity,
+        ...memo.contextDigests === void 0 ? {} : { contextDigests: memo.contextDigests },
+        config: request.config
+      });
+      if (entries.length === 0) return;
+      checkpointStore = appendEntries(checkpointStore, entries, RETENTION);
+      for (const path of eligiblePaths) alreadyAnswered.add(path);
+      await request.persistGenerationCheckpoint?.(checkpointStore, entries.length);
+    }
+  };
 }
 var SUBSTANTIATE_RESERVE_PER_FINDING = 86e3;
 var AUDIT_RESERVE_PER_FINDING = 2e3;
@@ -13622,7 +13774,8 @@ function publicationQualityReserve(maxFindings) {
   return substantiateReserve + candidates * AUDIT_RESERVE_PER_FINDING;
 }
 function computeEngineBudget(request, inventory, memo) {
-  const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), memo.hitPaths);
+  const answeredPaths = /* @__PURE__ */ new Set([...memo.hitPaths, ...memo.checkpointPaths]);
+  const excluded = combinedExcludes(mechanicallyCleanPaths(inventory), answeredPaths);
   const excludedSet = new Set(excluded);
   const engineCeiling = Math.max(
     1,
@@ -13695,13 +13848,14 @@ function invokeEngine(options2, diagnostics) {
 function preparedInvocation(request, deadline, inventory, memo, ledger, binaryPath) {
   const { excluded, allottedBudget } = computeEngineBudget(request, inventory, memo);
   ledger.allotted = allottedBudget;
-  return engineInvocationOptions(request, deadline, inventory, {
+  const options2 = engineInvocationOptions(request, deadline, inventory, {
     binaryPath,
     allottedBudget,
     excluded,
     preparedContextPacks: memo.contextPacks,
     guidelineContext: memo.guidelineContext
   });
+  return withGenerationCheckpoint({ request, inventory, memo, options: options2 });
 }
 function recordRejectedEngineFindings(parsed, diagnostics, headSha) {
   if (parsed.rejectedFindings === 0) return;
@@ -13719,6 +13873,18 @@ function recordEngineCandidateCount(parsed, diagnostics, headSha) {
 async function reviewEngineBinaryPath(request, workspace, diagnostics) {
   if (request.env.KFQ_SINGLE_SHOT === "1") return join4(workspace, "unused-by-staged-runner");
   return (await acquireEngine(workspace, diagnostics)).binaryPath;
+}
+function settlementAnsweredPaths(memo, alreadyReviewedPaths) {
+  return /* @__PURE__ */ new Set([...memo.hitPaths, ...memo.checkpointPaths, ...alreadyReviewedPaths]);
+}
+function settleExecutedEngine(inventory, result, request, memo, alreadyReviewedPaths) {
+  return settle(
+    inventory,
+    result,
+    request.profile,
+    request.config,
+    settlementAnsweredPaths(memo, alreadyReviewedPaths)
+  );
 }
 async function executeEngine(request, deadline, inventory, memo, ledger, diagnostics, credited) {
   const workspace = await mkdtemp3(join4(tmpdir3(), "kfq-engine-bin-"));
@@ -13740,7 +13906,7 @@ async function executeEngine(request, deadline, inventory, memo, ledger, diagnos
     requireReviewTime(deadline);
     recordRejectedEngineFindings(parsed, diagnostics, inventory.pair.head);
     recordEngineCandidateCount(parsed, diagnostics, inventory.pair.head);
-    const { result: classified, classifyTokens } = await repairEngineFindings(
+    const { result: repaired, classifyTokens } = await repairEngineFindings(
       parsed,
       request,
       deadline,
@@ -13749,9 +13915,12 @@ async function executeEngine(request, deadline, inventory, memo, ledger, diagnos
     );
     ledger.classify += classifyTokens;
     requireReviewTime(deadline);
+    const classified = {
+      ...repaired,
+      findings: mergeHitFindings(repaired.findings, memo.checkpoints)
+    };
     for (const path of alreadyReviewedPaths) credited.add(path);
-    const memoizedForSettlement = alreadyReviewedPaths.length === 0 ? memo.hitPaths : /* @__PURE__ */ new Set([...memo.hitPaths, ...alreadyReviewedPaths]);
-    return settle(inventory, classified, request.profile, request.config, memoizedForSettlement);
+    return settleExecutedEngine(inventory, classified, request, memo, alreadyReviewedPaths);
   } catch (error) {
     bookPropagatedEngineFailure(error, ledger);
     throw error;
@@ -14936,10 +15105,16 @@ function combineIncompleteFindings(settlement, memo, gate) {
   };
 }
 function fullyMemoizedSettlement(inventory, memo) {
-  if (inventory.reviewablePaths.size === 0 || [...inventory.reviewablePaths].some((path) => !memo.hitPaths.has(path))) {
+  if (inventory.reviewablePaths.size === 0 || [...inventory.reviewablePaths].some(
+    (path) => !memo.hitPaths.has(path) && !memo.checkpointPaths.has(path)
+  )) {
     return void 0;
   }
-  return { status: "complete", mode: "memoized", findings: [] };
+  return {
+    status: "complete",
+    mode: "memoized",
+    findings: mergeHitFindings([], memo.checkpoints)
+  };
 }
 async function resolvePairOrReport(ctx, request, diagnostics) {
   try {

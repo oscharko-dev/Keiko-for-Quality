@@ -80,6 +80,9 @@ const RETRIES_PER_FILE = 1;
 const EXAMINER_SHAPE_RETRIES = 1;
 const EXAMINER_SHAPE_RETRY_SEED_OFFSET = 10_000;
 
+/** Large reviews checkpoint at deterministic, bounded file boundaries. */
+export const GENERATION_CHECKPOINT_CHUNK_FILES = 25;
+
 /** Per-companion and whole-block character budgets for the `<companion_changes>` section. The
  *  block exists to kill the one-sided-pair false-positive class (37 of 52 findings on the first
  *  live release PR), and three bounded hunks do that; a whole package's diffs would just re-crowd
@@ -775,6 +778,7 @@ function assembleStdout(
   state: RunState,
   dispatches: readonly FileDispatch[],
   startedMs: number,
+  final: boolean,
 ): string {
   const selected = [...new Set(state.options.expectedReviewablePaths)];
   const failed = new Set(state.warnings.map((warning) => warning.file));
@@ -783,7 +787,7 @@ function assembleStdout(
   return JSON.stringify({
     // Match the engine result contract: a budget stop overrides warning-derived statuses, while
     // the manifest below still reports exactly which file dispatches completed or failed.
-    status: stagedRunStatus(state),
+    status: final ? stagedRunStatus(state) : "completed_with_errors",
     summary: {
       files_reviewed: dispatches.length,
       comments: state.comments.length,
@@ -798,7 +802,7 @@ function assembleStdout(
     warnings: state.warnings,
     manifest: {
       schema_version: SUPPORTED_MANIFEST_SCHEMA,
-      terminal_state: failed.size === 0 ? "complete" : "partial",
+      terminal_state: final && failed.size === 0 ? "complete" : "partial",
       coverage: {
         selected: coverageEntries(selected),
         completed: coverageEntries(completed),
@@ -869,6 +873,56 @@ async function reviewDispatchPool(
   );
 }
 
+function dispatchChunks(dispatches: readonly FileDispatch[]): readonly (readonly FileDispatch[])[] {
+  const chunks: FileDispatch[][] = [];
+  for (let start = 0; start < dispatches.length; start += GENERATION_CHECKPOINT_CHUNK_FILES) {
+    chunks.push(dispatches.slice(start, start + GENERATION_CHECKPOINT_CHUNK_FILES));
+  }
+  return chunks;
+}
+
+async function reviewAndCheckpoint(
+  state: RunState,
+  dispatches: readonly FileDispatch[],
+  diagnostics: Diagnostics,
+  started: number,
+): Promise<void> {
+  const processed: FileDispatch[] = [];
+  const chunks = dispatchChunks(dispatches);
+  for (const [index, chunk] of chunks.entries()) {
+    await reviewDispatchPool(state, chunk);
+    processed.push(...chunk);
+    diagnostics.record("engine.chunk.completed", {
+      headSha: state.options.pair.head,
+      counts: {
+        chunk: index + 1,
+        chunks: chunks.length,
+        files: chunk.length,
+        completed: processed.length,
+        total: dispatches.length,
+      },
+    });
+    if (state.options.onGenerationCheckpoint === undefined) continue;
+    const stdout = assembleStdout(
+      state,
+      processed,
+      started,
+      processed.length === dispatches.length,
+    );
+    try {
+      await state.options.onGenerationCheckpoint({
+        stdout,
+        ruleDigest: sha256(createHash("sha256").update(state.rule).digest("hex")),
+        wireTokens: state.ledger.spent,
+      });
+    } catch {
+      // Checkpoint I/O is an optimization. The review continues and the final settlement remains
+      // authoritative; the caller records the failed persistence attempt.
+      diagnostics.record("cache.checkpoint_write_failed", { headSha: state.options.pair.head });
+    }
+  }
+}
+
 /**
  * Runs one single-shot review over the same contract as `runEngine`: identical options, identical
  * output shape (engine-compatible stdout JSON plus wire-counted spend), identical failure
@@ -897,11 +951,11 @@ export async function runSingleShotEngine(
   const dispatches = prepared.dispatches;
   const state = initialRunState(options, ruleDocument, fetchImpl, token);
   warnMissingDispatches(state, prepared.missingPaths);
-  await reviewDispatchPool(state, dispatches);
+  await reviewAndCheckpoint(state, dispatches, diagnostics, started);
 
   requireCompletedBeforeDeadline(options, state, diagnostics, started);
 
-  const stdout = assembleStdout(state, dispatches, started);
+  const stdout = assembleStdout(state, dispatches, started, true);
   diagnostics.record("engine.run.completed", {
     headSha: options.pair.head,
     digest: ruleDigest,
