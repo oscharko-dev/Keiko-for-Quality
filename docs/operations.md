@@ -326,6 +326,12 @@ same cost as a pull-request review, paid by the caller instead of the repository
 `--store <path>` is the mitigation for repeated runs over unchanged content: a cache-eligible path
 with a still-valid stored entry is replayed instead of re-sent to the engine.
 
+The GitHub Action also checkpoints large reviews after each deterministic 25-file generation
+chunk. These entries contain raw hypotheses, not accepted findings: the next run avoids only the
+generation calls and re-runs all current evidence, falsification, ranking, sanitization,
+deduplication, and publication gates. Consumers therefore persist the store whenever
+`store_written=true`, including after a later chunk fails or the reviewed head becomes stale.
+
 The CLI never reads or forwards a GitHub token and writes nothing into the repository it reviews —
 the report goes to stdout or `--out`, and the optional review cache goes only to `--store`. A
 review store produced by a local run is never read by CI: the boundary is one-directional by

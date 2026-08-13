@@ -52,13 +52,17 @@ import { CLOSED_RUNTIME_FACT_CATALOG_VERSION } from "../publish/runtime-fact-cat
  * model budget also keeps it from writing a cache entry that a later, trusted run would replay
  * without ever calling the engine.
  *
- * **Why an incomplete run must never write an entry.** A `Settlement` of `"incomplete"` means the
+ * **Why an incomplete run must never write a publication entry.** A `Settlement` of `"incomplete"` means the
  * engine did not finish answering the coverage question for this run, for reasons ranging from a
  * timeout to a rejected schema to a budget ceiling. Caching whatever finding list happened to exist
  * at that moment — often empty — would silently launder a transient failure into a permanent,
  * confidently-replayed "no findings" for that exact content pair, and every future run with the same
  * blobs, rule, engine, and model would inherit the gap without ever seeing a coverage problem to
- * report. Only a `"complete"` settlement's findings may become a cache entry.
+ * report. Only a `"complete"` settlement's findings may become a `PUBLICATION_SEMANTICS` entry.
+ * A generation checkpoint is deliberately different: it records only that one exact file dispatch
+ * completed, carries raw hypotheses under `GENERATION_CHECKPOINT_SEMANTICS`, and is forced back
+ * through the current Truth/Falsifier and publication plan on resume. It saves generation work;
+ * it never claims publication quality already passed.
  *
  * **The honest residual.** This store cannot distinguish a legitimately produced entry from one a
  * trusted workflow run chose to write with fabricated (for example, deliberately emptied) findings
@@ -120,6 +124,18 @@ export const SUPPORTED_STORE_SCHEMA = "keiko-for-quality.review-cache/v3";
  */
 export const PUBLICATION_SEMANTICS =
   `v0.23.0-finding-badges-current-verifier-runtime-facts-v${String(CLOSED_RUNTIME_FACT_CATALOG_VERSION)}` as const;
+
+/**
+ * Raw generation work that completed for one exact file but has not crossed the current
+ * Truth/Falsifier/publication boundary yet.
+ *
+ * It deliberately shares the structural store with publication entries so the consumer can
+ * persist both atomically, but it is a different semantic class: lookup may use it to skip the
+ * expensive generator only when the findings are fed back through every downstream quality gate
+ * as fresh model output. It must never be replayed through the publication-cache fast path.
+ */
+export const GENERATION_CHECKPOINT_SEMANTICS =
+  "keiko-for-quality.generation-checkpoint/v1" as const;
 
 declare const cacheBrand: unique symbol;
 type CacheBrand<T, B extends string> = T & { readonly [cacheBrand]: B };
@@ -471,8 +487,27 @@ export function entriesUnderCurrentSemantics(store: CacheStore): CacheStore {
   return kept.length === store.entries.length ? store : { ...store, entries: kept };
 }
 
+/** Keeps both published verdicts and resumable raw-generation checkpoints. */
+export function entriesUnderSupportedSemantics(store: CacheStore): CacheStore {
+  const kept = store.entries.filter(
+    (entry) =>
+      entry.semantics === PUBLICATION_SEMANTICS ||
+      entry.semantics === GENERATION_CHECKPOINT_SEMANTICS,
+  );
+  return kept.length === store.entries.length ? store : { ...store, entries: kept };
+}
+
 export function lookup(store: CacheStore, key: CacheKey): CacheEntry | undefined {
   return store.entries.find((entry) => entry.key === key);
+}
+
+/** Exact-key lookup that cannot confuse an unaudited checkpoint with a publishable verdict. */
+export function lookupUnderSemantics(
+  store: CacheStore,
+  key: CacheKey,
+  semantics: CacheEntry["semantics"],
+): CacheEntry | undefined {
+  return store.entries.find((entry) => entry.key === key && entry.semantics === semantics);
 }
 
 /**

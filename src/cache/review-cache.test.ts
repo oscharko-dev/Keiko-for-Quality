@@ -14,6 +14,7 @@ import {
   lookup,
   modelId,
   entriesUnderCurrentSemantics,
+  entriesUnderSupportedSemantics,
   protocol,
   readStore,
   removeEntriesByKey,
@@ -25,6 +26,7 @@ import {
   type ModelId,
   type Protocol,
   PUBLICATION_SEMANTICS,
+  GENERATION_CHECKPOINT_SEMANTICS,
 } from "./review-cache.js";
 
 const BASE_BLOB = blobId("a".repeat(40));
@@ -654,5 +656,26 @@ describe("entriesUnderCurrentSemantics", () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error("unreachable");
     expect(result.reason).toBe("cache.store.schema_invalid");
+  });
+});
+
+describe("entriesUnderSupportedSemantics", () => {
+  it("retains resumable checkpoints but the publication-only view refuses them", () => {
+    const published = entryFor(baseline(), []);
+    const checkpoint: CacheEntry = {
+      ...entryFor({ ...baseline(), base: blobId("c".repeat(40)) }, []),
+      semantics: GENERATION_CHECKPOINT_SEMANTICS,
+    };
+    const retired: CacheEntry = {
+      ...entryFor({ ...baseline(), base: blobId("d".repeat(40)) }, []),
+      semantics: "retired-contract",
+    };
+    const store: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [published, checkpoint, retired],
+    };
+
+    expect(entriesUnderSupportedSemantics(store).entries).toEqual([published, checkpoint]);
+    expect(entriesUnderCurrentSemantics(store).entries).toEqual([published]);
   });
 });

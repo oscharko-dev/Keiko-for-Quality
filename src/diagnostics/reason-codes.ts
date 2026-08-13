@@ -38,6 +38,7 @@ export const REASON_CODES = [
   "engine.run.timeout",
   "engine.run.spawn_failed",
   "engine.run.nonzero_exit",
+  "engine.chunk.completed",
 
   // The engine's own verdict about its run, recorded once per engine execution (2026-08-06). One
   // code per status value rather than a free-form field, because diagnostics carry no strings —
@@ -157,6 +158,9 @@ export const REASON_CODES = [
   "cache.store.entry_overflow",
   "cache.store.entry_invalid",
   "cache.store_write_failed",
+  "cache.checkpoint_saved",
+  "cache.checkpoint_write_failed",
+  "cache.checkpoint_hits",
   // The action's own final output write failed (v0.13.0) — `$GITHUB_OUTPUT` unwritable, a full
   // disk. Mirrors `cache.store_write_failed`'s own posture: a delivery-mechanism failure at the
   // very last step must not retroactively turn a completed, already-published review into an

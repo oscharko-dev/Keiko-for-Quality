@@ -11,6 +11,7 @@ import {
   protocol,
   SUPPORTED_STORE_SCHEMA,
   type CacheStore,
+  GENERATION_CHECKPOINT_SEMANTICS,
   PUBLICATION_SEMANTICS,
 } from "./cache/review-cache.js";
 import { compileProfile, type ReviewProfile } from "./config/profile.js";
@@ -401,6 +402,51 @@ describe("performReview: review-cache memoization end to end", () => {
     expect(
       secondDiagnostics.drain().some((record) => record.code === "settlement.mode.memoized"),
     ).toBe(true);
+  });
+
+  it("resumes a generation checkpoint without repeating model work and promotes it only after quality gates", async () => {
+    const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+    const engineDigest = requireEngineDigest();
+    const model = modelId(CONFIG.model);
+    const proto = protocol(CONFIG.protocol);
+    const base = blobId(baseBlobA);
+    const head = blobId(headBlobA);
+    const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+    const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+    const store: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [
+        {
+          key,
+          baseBlob: base,
+          headBlob: head,
+          ruleDigest,
+          engineDigest,
+          prPathSetDigest: currentPathSet,
+          semantics: GENERATION_CHECKPOINT_SEMANTICS,
+          modelId: model,
+          protocol: proto,
+          findings: [],
+        },
+      ],
+    };
+
+    acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+    runEngineMock.mockResolvedValue({ stdout: engineStdout(1), ruleDigest: engineDigest });
+
+    const report = await performReview(baseRequest(store), createSilentDiagnostics());
+
+    const [calledOptions] = runEngineMock.mock.calls[0] as [
+      { mechanicallyCleanPaths: string[]; expectedReviewablePaths: string[] },
+    ];
+    expect(calledOptions.mechanicallyCleanPaths).toContain("src/a.ts");
+    expect(calledOptions.expectedReviewablePaths).toEqual(["src/b.ts"]);
+    expect(report.outcome).toBe("complete");
+    expect(report.cacheHits).toBe(0);
+    expect(report.checkpointHits).toBe(1);
+    expect(report.cacheMisses).toBe(1);
+    const promoted = report.updatedCacheStore?.entries.find((entry) => entry.key === key);
+    expect(promoted?.semantics).toBe(PUBLICATION_SEMANTICS);
   });
 
   it("treats a hit rejected by the path-set digest as an ordinary miss: the file is reviewed and never memoized (v0.10.0, issue #50)", async () => {
@@ -4414,98 +4460,169 @@ describe("performReview: review-cache memoization end to end", () => {
       ).toBeUndefined();
     });
 
-    it("refutes and evicts a replayed finding, so the next run regenerates that path", async () => {
+    it("repairs a raw checkpoint before a fully memoized run reaches publication", async () => {
       const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
       const engineDigest = requireEngineDigest();
       const model = modelId(AUDIT_CONFIG.model);
       const proto = protocol(AUDIT_CONFIG.protocol);
-      const base = blobId(baseBlobA);
-      const head = blobId(headBlobA);
-      const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
-      const BODY = "This cached claim ignores an external guard that now rejects the input.";
-      const baseB = blobId(git(["rev-parse", `${baseSha}:src/b.ts`]).trim());
-      const headB = blobId(git(["rev-parse", `${headSha}:src/b.ts`]).trim());
-      const keyB = computeKey(baseB, headB, ruleDigest, engineDigest, model, proto);
       const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+      const body = withChallengeProbe(
+        "`checkpointCursor` skips its boundary and repeats the final page forever.",
+      );
+      const entryFor = (
+        path: "src/a.ts" | "src/b.ts",
+        findings: CacheStore["entries"][number]["findings"],
+      ): CacheStore["entries"][number] => {
+        const base = blobId(git(["rev-parse", `${baseSha}:${path}`]).trim());
+        const head = blobId(git(["rev-parse", `${headSha}:${path}`]).trim());
+        return {
+          key: computeKey(base, head, ruleDigest, engineDigest, model, proto),
+          baseBlob: base,
+          headBlob: head,
+          ruleDigest,
+          engineDigest,
+          prPathSetDigest: currentPathSet,
+          semantics: path === "src/a.ts" ? GENERATION_CHECKPOINT_SEMANTICS : PUBLICATION_SEMANTICS,
+          modelId: model,
+          protocol: proto,
+          findings,
+        };
+      };
       const store: CacheStore = {
         schemaVersion: SUPPORTED_STORE_SCHEMA,
         entries: [
-          {
-            key,
-            baseBlob: base,
-            headBlob: head,
-            ruleDigest,
-            engineDigest,
-            prPathSetDigest: currentPathSet,
-            semantics: PUBLICATION_SEMANTICS,
-            modelId: model,
-            protocol: proto,
-            findings: [
-              {
-                path: repoPath("src/a.ts"),
-                content: BODY,
-                startLine: 1,
-                endLine: 1,
-                severity: "medium",
-                category: "bug",
-              },
-            ],
-          },
-          {
-            key: keyB,
-            baseBlob: baseB,
-            headBlob: headB,
-            ruleDigest,
-            engineDigest,
-            prPathSetDigest: currentPathSet,
-            semantics: PUBLICATION_SEMANTICS,
-            modelId: model,
-            protocol: proto,
-            findings: [],
-          },
+          entryFor("src/a.ts", [
+            {
+              path: repoPath("src/a.ts"),
+              content: body,
+              startLine: 1,
+              endLine: 1,
+              severity: undefined,
+              category: undefined,
+            },
+          ]),
+          entryFor("src/b.ts", []),
         ],
       };
-
-      acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
-      runEngineMock.mockResolvedValueOnce({
-        stdout: findingsStdout([], 1, 50),
-        ruleDigest: engineDigest,
+      const { impl } = classifyFetchMock({
+        repairPair: { category: "bug", severity: "medium" },
+        auditPair: { category: "bug", severity: "medium" },
       });
-      const { impl, callCount } = classifyFetchMock({ judgeVerdict: "unsupported" });
       globalThis.fetch = impl;
+      const diagnostics = createSilentDiagnostics();
+      const client = successfulClient([]);
 
-      const first = await performReview(
-        auditRequest(successfulClient([]).client, store),
-        createSilentDiagnostics(),
-      );
+      const report = await performReview(auditRequest(client.client, store), diagnostics);
 
-      expect(first.outcome).toBe("complete");
-      expect(first.cacheHits).toBe(2);
-      expect(acquireEngineMock).not.toHaveBeenCalled();
+      expect(report.outcome).toBe("complete");
+      expect(report.checkpointHits).toBe(1);
       expect(runEngineMock).not.toHaveBeenCalled();
-      expect(first.publish).toMatchObject({ published: 0 });
-      expect(callCount()).toBe(2);
-      expect(first.updatedCacheStore?.entries.some((entry) => entry.key === key)).toBe(false);
-      if (first.updatedCacheStore === undefined)
-        throw new Error("expected cache eviction write-back");
-
-      const second = await performReview(
-        auditRequest(successfulClient([]).client, first.updatedCacheStore),
-        createSilentDiagnostics(),
-      );
-
-      expect(second.outcome).toBe("complete");
-      expect(second.cacheHits).toBe(1);
-      expect(second.cacheMisses).toBe(1);
-      expect(runEngineMock).toHaveBeenCalledTimes(1);
-      const secondInvocation = runEngineMock.mock.calls[0]?.[0] as {
-        mechanicallyCleanPaths: string[];
-      };
-      expect(secondInvocation.mechanicallyCleanPaths).toContain("src/b.ts");
-      expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/a.ts");
-      // The stale prose never reappears from the store; the second run has no model claim to verify.
-      expect(callCount()).toBe(2);
+      expect(report.publish?.published).toBe(1);
+      expect(client.created).toHaveLength(1);
+      expect(
+        diagnostics.drain().find((record) => record.code === "classify.repaired")?.counts,
+      ).toMatchObject({ repaired: 1 });
     });
+
+    it.each([
+      { label: "publication hit", semantics: PUBLICATION_SEMANTICS },
+      { label: "generation checkpoint", semantics: GENERATION_CHECKPOINT_SEMANTICS },
+    ] as const)(
+      "refutes and evicts a replayed $label, so the next run regenerates that path",
+      async ({ semantics }) => {
+        const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+        const engineDigest = requireEngineDigest();
+        const model = modelId(AUDIT_CONFIG.model);
+        const proto = protocol(AUDIT_CONFIG.protocol);
+        const base = blobId(baseBlobA);
+        const head = blobId(headBlobA);
+        const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+        const BODY = "This cached claim ignores an external guard that now rejects the input.";
+        const baseB = blobId(git(["rev-parse", `${baseSha}:src/b.ts`]).trim());
+        const headB = blobId(git(["rev-parse", `${headSha}:src/b.ts`]).trim());
+        const keyB = computeKey(baseB, headB, ruleDigest, engineDigest, model, proto);
+        const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+        const store: CacheStore = {
+          schemaVersion: SUPPORTED_STORE_SCHEMA,
+          entries: [
+            {
+              key,
+              baseBlob: base,
+              headBlob: head,
+              ruleDigest,
+              engineDigest,
+              prPathSetDigest: currentPathSet,
+              semantics,
+              modelId: model,
+              protocol: proto,
+              findings: [
+                {
+                  path: repoPath("src/a.ts"),
+                  content: BODY,
+                  startLine: 1,
+                  endLine: 1,
+                  severity: "medium",
+                  category: "bug",
+                },
+              ],
+            },
+            {
+              key: keyB,
+              baseBlob: baseB,
+              headBlob: headB,
+              ruleDigest,
+              engineDigest,
+              prPathSetDigest: currentPathSet,
+              semantics: PUBLICATION_SEMANTICS,
+              modelId: model,
+              protocol: proto,
+              findings: [],
+            },
+          ],
+        };
+
+        acquireEngineMock.mockResolvedValue({ binaryPath: "/fake/engine", digest: engineDigest });
+        runEngineMock.mockResolvedValueOnce({
+          stdout: findingsStdout([], 1, 50),
+          ruleDigest: engineDigest,
+        });
+        const { impl, callCount } = classifyFetchMock({ judgeVerdict: "unsupported" });
+        globalThis.fetch = impl;
+
+        const first = await performReview(
+          auditRequest(successfulClient([]).client, store),
+          createSilentDiagnostics(),
+        );
+
+        expect(first.outcome).toBe("complete");
+        expect(first.cacheHits).toBe(semantics === PUBLICATION_SEMANTICS ? 2 : 1);
+        expect(first.checkpointHits).toBe(semantics === GENERATION_CHECKPOINT_SEMANTICS ? 1 : 0);
+        expect(acquireEngineMock).not.toHaveBeenCalled();
+        expect(runEngineMock).not.toHaveBeenCalled();
+        expect(first.publish).toMatchObject({ published: 0 });
+        expect(callCount()).toBe(2);
+        expect(first.updatedCacheStore?.entries.some((entry) => entry.key === key)).toBe(false);
+        if (first.updatedCacheStore === undefined)
+          throw new Error("expected cache eviction write-back");
+
+        const second = await performReview(
+          auditRequest(successfulClient([]).client, first.updatedCacheStore),
+          createSilentDiagnostics(),
+        );
+
+        expect(second.outcome).toBe("complete");
+        expect(second.cacheHits).toBe(1);
+        expect(second.cacheMisses).toBe(1);
+        expect(runEngineMock).toHaveBeenCalledTimes(1);
+        const secondInvocation = runEngineMock.mock.calls[0]?.[0] as {
+          mechanicallyCleanPaths: string[];
+        };
+        expect(secondInvocation.mechanicallyCleanPaths).toContain("src/b.ts");
+        expect(secondInvocation.mechanicallyCleanPaths).not.toContain("src/a.ts");
+        // The stale prose never reappears from the store; the second run has no model claim to verify.
+        expect(callCount()).toBe(2);
+      },
+    );
 
     it("evicts a ranked-out cache hit and keeps a path with a ranked-out fresh finding uncached", async () => {
       const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });

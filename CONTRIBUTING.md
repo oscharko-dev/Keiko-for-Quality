@@ -20,9 +20,11 @@ These follow from what this product is, not from taste.
 
 - **No runtime dependencies.** The bot runs in other people's CI next to a private key. Every
   package it carries becomes one they implicitly trust. Development dependencies are fine.
-- **No output outside the diagnostics sink.** The sink's field types cannot hold free-form text,
-  which is what makes "no raw content in logs" a property of the code rather than a habit. A
-  `console.*` call bypasses that; lint rejects it.
+- **No log output outside the diagnostics sink.** The sink's field types cannot hold free-form
+  text, which is what makes "no raw content in logs" a property of the code rather than a habit. A
+  `console.*` call bypasses that; lint rejects it. Structured action outputs are the one control-
+  plane exception: they go only through `src/action/inputs.ts`'s `writeOutputs`, whose callers emit
+  closed status/count fields to `$GITHUB_OUTPUT`, never model or repository content.
 - **Validate at the boundary, with a branded type.** Anything arriving from a diff, the engine, an
   event payload, or the GitHub API passes a validator that returns a branded type. A plain `string`
   will not type-check where a `CommitSha` is expected, so a forgotten check is a compile error.
