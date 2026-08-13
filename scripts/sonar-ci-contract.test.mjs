@@ -88,33 +88,21 @@ describe("required Sonar CI contract", () => {
     assert.match(workflow, /github\.event_name == 'pull_request' && github\.base_ref == 'main'/u);
     assert.match(workflow, /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
     assert.match(workflow, /github\.event\.pull_request\.head\.sha \|\| github\.sha/u);
-    assert.doesNotMatch(workflow, /squash_merge_commit_message/u);
-    assert.match(workflow, /main release provenance trailers/u);
-    assert.match(workflow, /repos\/\$\{GITHUB_REPOSITORY\}\/rulesets/u);
-    assert.doesNotMatch(workflow, /name: Require the platform release-trailer rule\n {8}if:/u);
-    const patternLiteral = /\.rules\[0\]\.parameters\.pattern ==\n +(".*")\n/u.exec(workflow)?.[1];
-    assert.notEqual(patternLiteral, undefined);
-    const re2Pattern = JSON.parse(patternLiteral);
-    const releasePattern = new RegExp(
-      re2Pattern.replace(String.raw`\A`, "^").replace(String.raw`\z`, "$"),
-      "u",
+    assert.doesNotMatch(workflow, /squash_merge_commit_message|\/rulesets/u);
+    assert.match(
+      workflow,
+      /types: \[opened, synchronize, reopened, auto_merge_enabled, auto_merge_disabled\]/u,
     );
-    const commit = "a".repeat(40);
-    const tree = "b".repeat(40);
-    const prefix =
-      `release: v0.25.0 (#268)\n\nKeiko-Release-Dev-Commit: ${commit}\n` +
-      `Keiko-Release-Dev-Tree: ${tree}\n\n`;
-    const standard = `${prefix}Quality promotion: green\n\nKeiko-Release-Channel: standard\n`;
-    const recovery =
-      `${prefix}Quality promotion withheld: historical_holdout_fixed_retention_low\n\n` +
-      "Keiko-Release-Channel: recovery\n" +
-      "Keiko-Recovery-Quality-Reason: historical_holdout_fixed_retention_low\n";
-    assert.match(standard, releasePattern);
-    assert.match(recovery, releasePattern);
-    assert.doesNotMatch(`${prefix}Keiko-Release-Channel: standard\n`, releasePattern);
-    assert.doesNotMatch(standard.replace(commit, "a".repeat(39)), releasePattern);
-    assert.doesNotMatch(`${recovery}\n${recovery}`, releasePattern);
-    assert.doesNotMatch(`${recovery}Keiko-Release-Channel: recovery\n`, releasePattern);
+    assert.match(
+      workflow,
+      /name: Require the exact release squash message\n {8}if: github\.event_name == 'pull_request'/u,
+    );
+    assert.match(workflow, /pull-requests: read/u);
+    assert.match(workflow, /\.autoMergeRequest\.mergeMethod == "SQUASH"/u);
+    assert.match(workflow, /\.autoMergeRequest\.commitHeadline == \$headline/u);
+    assert.match(workflow, /\.autoMergeRequest\.commitBody == \$body/u);
+    assert.match(workflow, /git log -1 --format=%s/u);
+    assert.match(workflow, /git log -1 --format=%b/u);
     assert.match(workflow, /node scripts\/release-main-provenance\.mjs/u);
     assert.doesNotMatch(workflow, /git rev-parse 'origin\/dev\^\{tree\}'/u);
   });

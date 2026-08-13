@@ -196,6 +196,32 @@ export function formatPendingPublishInstruction({ version, releaseChannel }) {
   );
 }
 
+/** Exact bytes GitHub must use for the governed squash commit. */
+export function releasePullRequestPlan({ version, number, commit, tree, releaseChannel }) {
+  if (parseVersion(version) === undefined)
+    throw new Error("cannot plan an invalid release version");
+  if (!Number.isSafeInteger(number) || number < 1) {
+    throw new TypeError("cannot plan an invalid release pull-request number");
+  }
+  const validation = validateReleaseChannel(releaseChannel);
+  if (!validation.valid) throw new Error("cannot plan an invalid release channel");
+  const title = `release: v${version}`;
+  const body = [
+    releaseDevBindingMessage({ commit, tree }),
+    releaseChannelDispositionMessage(releaseChannel),
+    releaseChannelMessage(releaseChannel),
+  ].join("\n\n");
+  return { title, body, mergeHeadline: `${title} (#${String(number)})` };
+}
+
+function pullRequestNumberFromUrl(url) {
+  const match =
+    /^https:\/\/github\.com\/oscharko-dev\/Keiko-for-Quality\/pull\/([1-9][0-9]*)$/u.exec(url);
+  const number = match === null ? Number.NaN : Number(match[1]);
+  if (!Number.isSafeInteger(number)) fail("GitHub did not return the created release pull request");
+  return number;
+}
+
 function requireCleanWorktree() {
   if (run("git", ["status", "--porcelain"]).trim() !== "") {
     fail("the worktree has uncommitted changes — commit or stash them first");
@@ -459,17 +485,22 @@ function phaseRelease() {
   run("git", ["rm", "-rq", "."]);
   run("git", ["checkout", "origin/dev", "--", "."]);
   run("git", ["add", "-A"]);
+  const releaseMessages = [
+    releaseDevBindingMessage({ commit: devCommit, tree: devTree }),
+    releaseChannelDispositionMessage(releaseChannel),
+    releaseChannelMessage(releaseChannel),
+  ];
   run("git", [
     "commit",
     "-S",
     "-m",
     `release: v${version}`,
     "-m",
-    releaseDevBindingMessage({ commit: devCommit, tree: devTree }),
+    releaseMessages[0],
     "-m",
-    releaseChannelDispositionMessage(releaseChannel),
+    releaseMessages[1],
     "-m",
-    releaseChannelMessage(releaseChannel),
+    releaseMessages[2],
   ]);
 
   // dev's tree, whole — asserted, never assumed. A release that is not byte-identical to what the
@@ -477,11 +508,50 @@ function phaseRelease() {
   const mine = run("git", ["rev-parse", "HEAD^{tree}"]).trim();
   const theirs = run("git", ["rev-parse", "origin/dev^{tree}"]).trim();
   if (mine !== theirs) fail(`release tree ${mine} does not match dev's ${theirs}`);
+  const releaseCommit = run("git", ["rev-parse", "HEAD^{commit}"]).trim();
 
-  run("git", ["push", "-u", "origin", `release/v${version}`]);
+  const branch = `release/v${version}`;
+  run("git", ["push", "-u", "origin", branch]);
+  const pullRequestUrl = run("gh", [
+    "pr",
+    "create",
+    "--repo",
+    REPO,
+    "--base",
+    "main",
+    "--head",
+    branch,
+    "--title",
+    `release: v${version}`,
+    "--body",
+    releaseMessages.join("\n\n"),
+  ]).trim();
+  const pullRequestNumber = pullRequestNumberFromUrl(pullRequestUrl);
+  const pullRequestPlan = releasePullRequestPlan({
+    version,
+    number: pullRequestNumber,
+    commit: devCommit,
+    tree: devTree,
+    releaseChannel,
+  });
+  run("gh", [
+    "pr",
+    "merge",
+    pullRequestUrl,
+    "--repo",
+    REPO,
+    "--auto",
+    "--squash",
+    "--match-head-commit",
+    releaseCommit,
+    "--subject",
+    pullRequestPlan.mergeHeadline,
+    "--body",
+    pullRequestPlan.body,
+  ]);
   const nextInstruction = formatPendingPublishInstruction({ version, releaseChannel });
   console.log(
-    `release/v${version} pushed, tree identical to dev. Open the PR into main. ${nextInstruction}`,
+    `${pullRequestUrl} opened with exact squash auto-merge, tree identical to dev. ${nextInstruction}`,
   );
 }
 

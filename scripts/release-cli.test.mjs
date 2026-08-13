@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
@@ -6,10 +7,12 @@ import {
   formatPostPrepInstruction,
   formatReleaseCommand,
   parseReleaseCli,
+  releasePullRequestPlan,
 } from "./release.mjs";
 
 const SHA = "a".repeat(40);
 const RECOVERY_REASON = "historical_holdout_fixed_retention_low";
+const releaseSource = readFileSync(new URL("./release.mjs", import.meta.url), "utf8");
 
 test("release CLI admits only each phase's closed flag set", () => {
   assert.deepEqual(parseReleaseCli(["check"]), {
@@ -181,4 +184,39 @@ test("prep waits for gate selection and pending publish keeps recovery explicit"
     "After the PR merges, invoke publish for v0.24.0 with its full 40-character main squash SHA and the standard channel (no channel flags).",
   );
   assert.doesNotMatch(standard, /npm run release|--channel|--recovery-reason/u);
+});
+
+test("release pull requests pin the exact GitHub squash headline and body", () => {
+  const commit = "c".repeat(40);
+  const tree = "d".repeat(40);
+  assert.deepEqual(
+    releasePullRequestPlan({
+      version: "0.25.0",
+      number: 268,
+      commit,
+      tree,
+      releaseChannel: { channel: "standard", recoveryReason: undefined },
+    }),
+    {
+      title: "release: v0.25.0",
+      mergeHeadline: "release: v0.25.0 (#268)",
+      body:
+        `Keiko-Release-Dev-Commit: ${commit}\nKeiko-Release-Dev-Tree: ${tree}\n\n` +
+        "Quality promotion: green\n\nKeiko-Release-Channel: standard",
+    },
+  );
+  assert.throws(
+    () =>
+      releasePullRequestPlan({
+        version: "0.25.0",
+        number: 0,
+        commit,
+        tree,
+        releaseChannel: { channel: "standard", recoveryReason: undefined },
+      }),
+    /invalid release pull-request number/u,
+  );
+  assert.match(releaseSource, /"--auto",\n {4}"--squash",\n {4}"--match-head-commit",/u);
+  assert.match(releaseSource, /"--subject",\n {4}pullRequestPlan\.mergeHeadline,/u);
+  assert.match(releaseSource, /"--body",\n {4}pullRequestPlan\.body,/u);
 });

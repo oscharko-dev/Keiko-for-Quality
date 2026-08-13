@@ -70,8 +70,10 @@ the change on a trusted same-repository branch before merging it. A push to `mai
 non-Sonar path: the signed release commit binds the exact dev commit and tree it copied, and a
 separate provenance job resolves that immutable commit from dev history and recomputes both trees.
 The job is load-bearing on the release pull request by checking the signed release HEAD and the
-active server-side main-trailer rule, and it repeats on the resulting main push to prove that the
-squash actually preserved the binding. It does not compare against the moving dev tip, so a later
+exact squash headline/body already stored in its pending auto-merge request, and it repeats on the
+resulting main push to prove that the squash actually preserved the binding. Auto-merge state
+changes retrigger the check, so removing or replacing that message cannot reuse an earlier green
+result. It does not compare against the moving dev tip, so a later
 dev push cannot invalidate a correct release; a missing, malformed, non-dev, or tree-mismatched
 binding stays red. The release ledger therefore
 reuses already-governed dev evidence only for byte-identical source. Read the `verify` context named
@@ -161,7 +163,7 @@ fails silently belongs in a program, not in a memory or a checklist.
 ```bash
 npm run release -- prep    --version X.Y.Z          # version, README pin comment, build, verify, commit
 npm run release -- attest  --version X.Y.Z          # validate clean-RC gates, verify, evidence-only commit
-npm run release -- release --version X.Y.Z          # release branch off main, dev's tree, identity asserted
+npm run release -- release --version X.Y.Z          # exact-tree PR + exact-message squash auto-merge
 npm run release -- publish --version X.Y.Z --sha <main-squash>   # signed tag + GitHub Release + check
 npm run release -- repin   --version X.Y.Z --sha <main-squash>   # this repo's self-review pin
 npm run release:check                               # any time: newest tag must have a Release
@@ -186,8 +188,10 @@ Four things the script refuses rather than warns about, each an error already ma
   check fails the run when they disagree; the script counts both rewrites so a half-rewrite stops
   before it is pushed.
 
-The phases are separate because two of them wait on a pull request merging. A script that polled
-for that would be claiming to have verified something it only waited for.
+The phases are separate because two of them wait on a pull request merging. `release` opens that PR
+and arms squash auto-merge with the signed release commit's exact body; it does not poll or claim the
+merge happened. A script that polled for that would be claiming to have verified something it only
+waited for.
 
 ## Landing changes here
 
