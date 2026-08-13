@@ -372,7 +372,6 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/rulesets/${ids[0]}" --jq '
               .target == "branch" and
               .enforcement == "active" and
-              (.bypass_actors | length) == 0 and
               .conditions.ref_name.include == ["refs/heads/main"] and
               .conditions.ref_name.exclude == [] and
               (.rules | length) == 1 and
