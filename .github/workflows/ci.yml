@@ -351,21 +351,6 @@ jobs:
         with:
           node-version: 24
 
-      # The exact release HEAD proof below is primary. This secondary repository-policy check
-      # catches a squash-message configuration drift while the PR is still reversible; the main
-      # push repeats the binding proof and remains the final fail-closed guard.
-      - name: Require squash commits to preserve the release binding
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          setting=$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.squash_merge_commit_message')
-          if [ "$setting" != "COMMIT_MESSAGES" ]; then
-            echo "squash commit messages would not preserve the release binding: $setting"
-            exit 1
-          fi
-
       # main is a release ledger, not a second integration line. The pre-merge run makes the
       # binding load-bearing while the PR is still reversible; the push run proves the squash
       # preserved it before reusing dev's Sonar evidence. The release commit binds the exact dev

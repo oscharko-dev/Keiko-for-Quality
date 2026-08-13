@@ -88,8 +88,8 @@ describe("required Sonar CI contract", () => {
     assert.match(workflow, /github\.event_name == 'pull_request' && github\.base_ref == 'main'/u);
     assert.match(workflow, /github\.event_name == 'push' && github\.ref == 'refs\/heads\/main'/u);
     assert.match(workflow, /github\.event\.pull_request\.head\.sha \|\| github\.sha/u);
-    assert.match(workflow, /squash_merge_commit_message/u);
-    assert.match(workflow, /"\$setting" != "COMMIT_MESSAGES"/u);
+    assert.doesNotMatch(workflow, /squash_merge_commit_message/u);
+    assert.doesNotMatch(workflow, /gh api "repos\/\$\{GITHUB_REPOSITORY\}"/u);
     assert.match(workflow, /node scripts\/release-main-provenance\.mjs/u);
     assert.doesNotMatch(workflow, /git rev-parse 'origin\/dev\^\{tree\}'/u);
   });
