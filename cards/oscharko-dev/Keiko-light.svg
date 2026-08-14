@@ -17,17 +17,17 @@
   <text x="75" y="57" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="8.5" fill="#6A746E">last review &lt;1 h ago · complete</text>
   <text x="20" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#1B211E">140</text>
   <text x="20" y="109" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#6A746E">PR records · 30 d</text>
-  <text x="125.30000000000001" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#1B211E">1241</text>
+  <text x="125.30000000000001" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#1B211E">1264</text>
   <text x="125.30000000000001" y="109" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#6A746E">findings · 30 d</text>
   <text x="220.8" y="95" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="21" fill="#2E8F63">90.7%</text>
   <text x="220.8" y="109" font-family="-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="10" fill="#6A746E">PRs complete</text>
   <rect x="20" y="127" width="300" height="44" rx="8" fill="rgba(27,33,30,0.025)" stroke="#E3E8E4"/>
   <text x="70" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#1B211E">28.6%</text>
   <text x="70" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#6A746E">HOLDOUT PREC · V0.25.0</text>
-  <text x="170" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#1B211E">88</text>
+  <text x="170" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#1B211E">56</text>
   <text x="170" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#6A746E">OPEN THREADS</text>
   <text x="270" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#1B211E">2026-08-14</text>
-  <text x="270" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#6A746E">DATA AS OF · 16:04Z</text>
+  <text x="270" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#6A746E">DATA AS OF · 19:11Z</text>
   <line x1="20" y1="203" x2="320" y2="203" stroke="#E3E8E4"/><text x="20" y="218" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="9.5" letter-spacing="0.7" fill="#6A746E">EX EXPERIENTIA DISCO</text><text x="320" y="218" text-anchor="end" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="9.5" fill="#2E8F63">quality.keiko.dev →</text>
   </g>
 </svg>
