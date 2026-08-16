@@ -234,7 +234,7 @@ export function buildSummaryReport(
 const HISTORY_HEADER = "**Recent runs**";
 const MAX_HISTORY_ROWS = 5;
 const HISTORY_ROW =
-  /^- `([0-9a-f]{7})` · (complete|incomplete|abandoned)(?: \(`([^`]+)`\))? · fresh ([0-9]+) · replayed ([0-9]+) · resumed ([0-9]+) · ([0-9]+)s$/;
+  /^- `([0-9a-f]{7})` · (complete|incomplete|abandoned)(?: \(`([^`]+)`\))? · fresh (\d+) · replayed (\d+) · resumed (\d+) · (\d+)s$/;
 
 export interface SummaryHistoryRow {
   readonly outcome: SummaryOutcome;

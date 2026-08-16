@@ -1962,7 +1962,7 @@ function buildSummaryReport(input, diagnostics) {
 }
 var HISTORY_HEADER = "**Recent runs**";
 var MAX_HISTORY_ROWS = 5;
-var HISTORY_ROW = /^- `([0-9a-f]{7})` · (complete|incomplete|abandoned)(?: \(`([^`]+)`\))? · fresh ([0-9]+) · replayed ([0-9]+) · resumed ([0-9]+) · ([0-9]+)s$/;
+var HISTORY_ROW = /^- `([0-9a-f]{7})` · (complete|incomplete|abandoned)(?: \(`([^`]+)`\))? · fresh (\d+) · replayed (\d+) · resumed (\d+) · (\d+)s$/;
 function historyRow(input) {
   const r = input.report;
   const reason = r.reason === void 0 ? "" : ` (\`${r.reason}\`)`;
