@@ -225,6 +225,15 @@ describe("action inputs", () => {
       });
       expect(config.largeReviewOverrideLabel).toBe("");
     });
+
+    it("rejects retry limits the summary history cannot retain", () => {
+      expect(() =>
+        runtimeConfigFromInputs({
+          ...BASE,
+          INPUT_BUDGET_FAILURE_RETRY_LIMIT: "6",
+        }),
+      ).toThrow(ValidationError);
+    });
   });
 
   it("rejects a configuration that names the repository token as the model credential", () => {

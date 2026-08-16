@@ -153,7 +153,8 @@ inputs:
   large_review_override_label:
     description: >-
       Pull-request label whose presence bypasses both the large-review admission guard and the
-      repeated-budget-failure circuit breaker. Empty disables label-based bypass.
+      repeated-budget-failure circuit breaker. Include the `labeled` pull-request event so applying
+      the label starts a fresh review. Empty disables label-based bypass.
     required: false
     default: "keiko-review-override"
 

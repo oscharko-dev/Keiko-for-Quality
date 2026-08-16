@@ -127,6 +127,7 @@ if (modelCheck.allowed) {
       "  This run is a cross-model experiment, not a qualification.",
   );
 }
+const selectedQualificationModel = (process.env.OCR_LLM_MODEL ?? "").trim();
 if (process.env.KFQ_SINGLE_SHOT === "1" && process.env.OCR_RULE !== undefined) {
   console.error("OCR_RULE is not supported by staged production-local qualification");
   process.exit(2);
@@ -466,7 +467,7 @@ async function runSingleShotForCorpus(dir, budgetTokens) {
     {
       protocol: "openai",
       endpoint: process.env.OCR_LLM_URL ?? "",
-      model: process.env.OCR_LLM_MODEL ?? "",
+      model: selectedQualificationModel,
       tokenEnvName: "OCR_LLM_TOKEN",
       language: "English",
       concurrency: singleShotCorpusConcurrency(budgetTokens),
@@ -476,6 +477,7 @@ async function runSingleShotForCorpus(dir, budgetTokens) {
       maxFindings: 50,
       renameDetectionPercent: 50,
       crossArtifactPass: false,
+      // Corpus qualification measures the reviewer, not the GitHub PR admission policy.
       largeReviewMaxFiles: 0,
       budgetFailureRetryLimit: 0,
       budgetFailureMinFiles: 0,
@@ -491,7 +493,7 @@ async function runSingleShotForCorpus(dir, budgetTokens) {
       config,
       profile,
       guidelines: { paths: [] },
-      env: { ...process.env, KFQ_SINGLE_SHOT: "1" },
+      env: { ...process.env, KFQ_SINGLE_SHOT: "1", OCR_LLM_MODEL: selectedQualificationModel },
       pathValue: FIXED_PATH,
     },
     diagnostics,
@@ -520,7 +522,7 @@ async function runEngine(dir, seed = 42, budgetTokens = undefined) {
         LC_ALL: "C",
         OCR_LLM_URL: proxy.url,
         OCR_LLM_TOKEN: process.env.OCR_LLM_TOKEN ?? "",
-        OCR_LLM_MODEL: process.env.OCR_LLM_MODEL ?? "",
+        OCR_LLM_MODEL: selectedQualificationModel,
         OCR_USE_ANTHROPIC: process.env.OCR_USE_ANTHROPIC ?? "false",
         OCR_LLM_TIMEOUT: "180",
         OCR_ENABLE_TELEMETRY: "false",
@@ -584,7 +586,7 @@ async function repairFindings(result) {
   const deps = {
     endpoint: process.env.OCR_LLM_URL ?? "",
     token: process.env.OCR_LLM_TOKEN ?? "",
-    model: process.env.OCR_LLM_MODEL ?? "",
+    model: selectedQualificationModel,
   };
   const repaired = await repairClassification(result.comments ?? [], deps);
   const audited = await auditClassification(repaired.findings, deps);
@@ -1051,7 +1053,7 @@ const binding = buildBinding({
     repositoryRoot: join(HERE, ".."),
   }),
   rule: RULE,
-  model: process.env.OCR_LLM_MODEL ?? "",
+  model: selectedQualificationModel,
   protocol: process.env.OCR_USE_ANTHROPIC === "true" ? "anthropic" : "openai",
   endpoint: process.env.OCR_LLM_URL ?? "",
   strictness: resolveSubstantiationStrictness(process.env),

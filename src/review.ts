@@ -299,6 +299,8 @@ export interface ReviewReport {
    * for that purpose. Always 0 when inert.
    */
   readonly contextInvalidated: number;
+  /** Paths actually sent to the engine. Absent means the standard cache-derived count applies. */
+  readonly reviewedPaths?: number;
   /** How many new-or-refreshed entries `updatedCacheStore` carries over what was read in. */
   readonly cacheAppended: number;
   /** Present only for a `complete` outcome with the feature enabled — the store to write back. */
@@ -850,6 +852,7 @@ interface IncompleteCause {
     readonly scope: "head" | "pull";
     readonly durable: boolean;
   };
+  readonly reviewedPaths?: number;
 }
 
 function cacheCounts(memo: MemoContext): {
@@ -1232,6 +1235,7 @@ function incompleteSettlementReport(
       uncacheablePaths,
     ),
     ...cacheCounts(memo),
+    ...(cause.reviewedPaths === undefined ? {} : { reviewedPaths: cause.reviewedPaths }),
     ...(published === undefined ? {} : { publish: published.outcome }),
   };
 }
@@ -1452,20 +1456,35 @@ function largeReviewBlock(
     reason: "settlement.incomplete.review_too_large",
     counts: { ...reviewSizeCounts(inventory, memo, budget), max_files: maxFiles },
     notice: POLICY_INCOMPLETE_NOTICE,
+    reviewedPaths: 0,
   };
 }
 
-function consecutiveBudgetFailures(
-  history: readonly SummaryHistoryRow[],
-): readonly SummaryHistoryRow[] {
-  const failures: SummaryHistoryRow[] = [];
+const BUDGET_STREAK_REASONS: ReadonlySet<string> = new Set([
+  "settlement.incomplete.budget_exceeded",
+  "settlement.incomplete.budget_circuit_open",
+]);
+
+interface BudgetFailureStreak {
+  readonly budgetFailures: readonly SummaryHistoryRow[];
+  readonly circuitOpen: boolean;
+  readonly previousFresh: number;
+}
+
+function budgetFailureStreak(history: readonly SummaryHistoryRow[]): BudgetFailureStreak {
+  const budgetFailures: SummaryHistoryRow[] = [];
+  let circuitOpen = false;
+  let previousFresh = 0;
   for (const row of history) {
-    if (row.outcome !== "incomplete" || row.reason !== "settlement.incomplete.budget_exceeded") {
-      break;
+    if (row.outcome !== "incomplete" || !BUDGET_STREAK_REASONS.has(row.reason ?? "")) break;
+    if (row.reason === "settlement.incomplete.budget_circuit_open") {
+      circuitOpen = true;
+    } else {
+      budgetFailures.push(row);
+      if (previousFresh === 0) previousFresh = row.fresh;
     }
-    failures.push(row);
   }
-  return failures;
+  return { budgetFailures, circuitOpen, previousFresh };
 }
 
 function materiallyShrunk(current: number, previous: number): boolean {
@@ -1483,22 +1502,23 @@ function budgetCircuitBlock(
   const minFiles = budgetFailureMinFiles(request.config);
   if (retryLimit === 0 || budget.dispatchedFiles < minFiles) return undefined;
 
-  const failures = consecutiveBudgetFailures(history);
-  if (failures.length < retryLimit) return undefined;
+  const streak = budgetFailureStreak(history);
+  if (!streak.circuitOpen && streak.budgetFailures.length < retryLimit) return undefined;
 
-  const previousFresh = failures[0]?.fresh ?? 0;
+  const previousFresh = streak.previousFresh;
   if (materiallyShrunk(budget.dispatchedFiles, previousFresh)) return undefined;
 
   return {
     reason: "settlement.incomplete.budget_circuit_open",
     counts: {
       ...reviewSizeCounts(inventory, memo, budget),
-      recent_budget_exceeded: failures.length,
+      recent_budget_exceeded: streak.budgetFailures.length,
       retry_limit: retryLimit,
       min_files: minFiles,
       previous_fresh: previousFresh,
     },
     notice: POLICY_INCOMPLETE_NOTICE,
+    reviewedPaths: 0,
   };
 }
 
@@ -4454,6 +4474,18 @@ function combineIncompleteFindings(
   };
 }
 
+function combinePolicyBlockedFindings(
+  memo: MemoContext,
+  gate: readonly EngineFinding[],
+): FindingBatch {
+  const modelFindings = mergeHitFindings([], memo.hits);
+  return {
+    findings: [...modelFindings, ...gate],
+    verify: new Set(modelFindings),
+    fresh: new Set(),
+  };
+}
+
 /** Finalizes the cache and report after publication itself completed without degradation. */
 function completedPublicationReport(
   run: ReviewRun,
@@ -4853,6 +4885,22 @@ async function settleInitialInventoryState(
   return undefined;
 }
 
+async function settlePolicyBlock(
+  run: ReviewRun,
+  inventory: Inventory,
+  memo: MemoContext,
+  policyBlock: IncompleteCause,
+): Promise<ReviewReport> {
+  const gate = await collectGateFindings(run.request, inventory, run.diagnostics);
+  return settleIncomplete(
+    run,
+    inventory,
+    policyBlock,
+    memo,
+    combinePolicyBlockedFindings(memo, gate),
+  );
+}
+
 async function performReviewInner(
   request: ReviewRequest,
   diagnostics: Diagnostics,
@@ -4890,7 +4938,7 @@ async function performReviewInner(
   if (preflight !== undefined) return preflight;
 
   const policyBlock = await automaticReviewBlock(run, inventory, memo);
-  if (policyBlock !== undefined) return settleIncomplete(run, inventory, policyBlock);
+  if (policyBlock !== undefined) return settlePolicyBlock(run, inventory, memo, policyBlock);
 
   const settlement = await settleOrReport(run, inventory, memo);
   if ("outcome" in settlement) return settlement;

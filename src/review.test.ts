@@ -336,26 +336,32 @@ describe("performReview: review-cache memoization end to end", () => {
 
   function mockPolicyNoticePublication(request: ReviewRequest): {
     readonly created: () => ReviewComment | undefined;
+    readonly allCreated: () => readonly ReviewComment[];
   } {
-    let created: ReviewComment | undefined;
+    const createdComments: ReviewComment[] = [];
     vi.spyOn(request.client, "createReviewComment").mockImplementation(
       (_ref, _number, input: ReviewCommentInput) => {
-        created = {
-          id: 9001,
+        const created = {
+          id: 9001 + createdComments.length,
           body: input.body,
           path: input.path,
           authorLogin: request.identity,
           commitId: input.commitId,
           url: "https://example.test/review-comments/9001",
         };
+        createdComments.push(created);
         return Promise.resolve(created);
       },
     );
-    vi.spyOn(request.client, "getReviewComment").mockImplementation(() => {
+    vi.spyOn(request.client, "getReviewComment").mockImplementation((_ref, id) => {
+      const created = createdComments.find((comment) => comment.id === id);
       if (created === undefined) return Promise.reject(new Error("no created comment"));
       return Promise.resolve(created);
     });
-    return { created: () => created };
+    return {
+      created: () => createdComments.at(-1),
+      allCreated: () => createdComments,
+    };
   }
 
   it("settles an oversized review before engine acquisition and publishes one durable policy notice", async () => {
@@ -373,6 +379,7 @@ describe("performReview: review-cache memoization end to end", () => {
 
     expect(report.outcome).toBe("incomplete");
     expect(report.reason).toBe("settlement.incomplete.review_too_large");
+    expect(report.reviewedPaths).toBe(0);
     expect(acquireEngineMock).not.toHaveBeenCalled();
     expect(runEngineMock).not.toHaveBeenCalled();
     expect(summaryHistory).not.toHaveBeenCalled();
@@ -401,6 +408,7 @@ describe("performReview: review-cache memoization end to end", () => {
           renderMarker(marker),
           "",
           "**Recent runs**",
+          "- `0000000` · incomplete (`settlement.incomplete.budget_circuit_open`) · fresh 0 · replayed 0 · resumed 0 · 32s",
           "- `1111111` · incomplete (`settlement.incomplete.budget_exceeded`) · fresh 2 · replayed 0 · resumed 0 · 30s",
           "- `2222222` · incomplete (`settlement.incomplete.budget_exceeded`) · fresh 2 · replayed 0 · resumed 0 · 31s",
           "",
@@ -415,9 +423,91 @@ describe("performReview: review-cache memoization end to end", () => {
 
     expect(report.outcome).toBe("incomplete");
     expect(report.reason).toBe("settlement.incomplete.budget_circuit_open");
+    expect(report.reviewedPaths).toBe(0);
     expect(acquireEngineMock).not.toHaveBeenCalled();
     expect(runEngineMock).not.toHaveBeenCalled();
     expect(publication.created()?.body).toContain("settlement.incomplete.budget_circuit_open");
+  });
+
+  it("publishes cache-hit findings before a budget-circuit policy stop", async () => {
+    acquireEngineMock.mockClear();
+    runEngineMock.mockClear();
+    const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
+    const engineDigest = requireEngineDigest();
+    const model = modelId(CONFIG.model);
+    const proto = protocol(CONFIG.protocol);
+    const base = blobId(baseBlobA);
+    const head = blobId(headBlobA);
+    const key = computeKey(base, head, ruleDigest, engineDigest, model, proto);
+    const currentPathSet = computePathSetDigest(["src/a.ts", "src/b.ts"]);
+    const store: CacheStore = {
+      schemaVersion: SUPPORTED_STORE_SCHEMA,
+      entries: [
+        {
+          key,
+          baseBlob: base,
+          headBlob: head,
+          ruleDigest,
+          engineDigest,
+          prPathSetDigest: currentPathSet,
+          semantics: PUBLICATION_SEMANTICS,
+          modelId: model,
+          protocol: proto,
+          findings: [
+            {
+              path: repoPath("src/a.ts"),
+              content:
+                "This code never validates the input length before using it as an array index.",
+              startLine: 1,
+              endLine: 1,
+              severity: "medium",
+              category: "bug",
+            },
+          ],
+        },
+      ],
+    };
+    const marker = summaryMarker("acme/widget", 1);
+    const request: ReviewRequest = {
+      ...baseRequest(store),
+      config: {
+        ...CONFIG,
+        largeReviewMaxFiles: 100,
+        budgetFailureRetryLimit: 2,
+        budgetFailureMinFiles: 1,
+      },
+    };
+    vi.spyOn(request.client, "listIssueComments").mockResolvedValue([
+      {
+        id: 1,
+        body: [
+          "summary",
+          renderMarker(marker),
+          "",
+          "**Recent runs**",
+          "- `1111111` · incomplete (`settlement.incomplete.budget_exceeded`) · fresh 1 · replayed 0 · resumed 0 · 30s",
+          "- `2222222` · incomplete (`settlement.incomplete.budget_exceeded`) · fresh 1 · replayed 0 · resumed 0 · 31s",
+          "",
+        ].join("\n"),
+        authorLogin: request.identity,
+        url: "https://example.test/issues/comments/1",
+      },
+    ]);
+    const publication = mockPolicyNoticePublication(request);
+
+    const report = await performReview(request, createSilentDiagnostics());
+
+    expect(report.outcome).toBe("incomplete");
+    expect(report.reason).toBe("settlement.incomplete.budget_circuit_open");
+    expect(report.cacheHits).toBe(1);
+    expect(report.reviewedPaths).toBe(0);
+    expect(acquireEngineMock).not.toHaveBeenCalled();
+    expect(runEngineMock).not.toHaveBeenCalled();
+    const bodies = publication.allCreated().map((comment) => comment.body);
+    expect(bodies.some((body) => body.includes("array index"))).toBe(true);
+    expect(bodies.some((body) => body.includes("settlement.incomplete.budget_circuit_open"))).toBe(
+      true,
+    );
   });
 
   it("threads a cache hit into the engine's own exclude list and credits it in settlement", async () => {
@@ -3243,6 +3333,95 @@ describe("performReview: review-cache memoization end to end", () => {
       // publish path — not silently dropped alongside the engine's own (empty) output.
       expect(created[0]?.path).toBe("src/server-api.ts");
       expect(created[0]?.body).toContain("ApiShape");
+      expect(modelCalls).toBe(0);
+      const record = diagnostics.drain().find((r) => r.code === "contracts.gate");
+      expect(record?.counts?.findings).toBe(1);
+    });
+
+    it("still runs the deterministic gate when large-review policy stops before engine acquisition", async () => {
+      acquireEngineMock.mockClear();
+      runEngineMock.mockClear();
+      await writeFile(
+        join(repo, "src/server-policy-api.ts"),
+        "export interface PolicyShape {\n  allowed: string;\n  denied: string;\n}\n",
+      );
+      await writeFile(
+        join(repo, "src/client-policy-api.ts"),
+        "export interface PolicyShape {\n  allowed: string;\n}\n",
+      );
+      git(["add", "-A"]);
+      git(["commit", "-q", "-m", "gate-policy-stop", "--no-gpg-sign"]);
+      const gateHead = git(["rev-parse", "HEAD"]).trim();
+
+      const gateProfile = compileProfile({
+        version: 1,
+        reviewRelevant: ["src/**"],
+        deletionCritical: [],
+        generated: [],
+        excluded: [],
+        benignWarnings: [],
+        pathInstructions: [],
+        contractPairs: [
+          { paths: ["src/server-policy-api.ts"], counterparts: ["src/client-policy-api.ts"] },
+        ],
+      } satisfies ReviewProfile);
+
+      const client = new GitHubClient("https://api.example.test", "unused");
+      const created: ReviewCommentInput[] = [];
+      const comments: ReviewComment[] = [];
+      vi.spyOn(client, "getPullRequest").mockResolvedValue({
+        headSha: commitSha(gateHead),
+        draft: false,
+        baseRef: "dev",
+        headRepoFullName: undefined,
+      });
+      vi.spyOn(client, "listReviewComments").mockResolvedValue([]);
+      vi.spyOn(client, "createReviewComment").mockImplementation((_ref, _num, input) => {
+        created.push(input);
+        const comment: ReviewComment = {
+          id: comments.length + 1,
+          body: input.body,
+          path: input.path,
+          authorLogin: "keiko-for-quality[bot]",
+          commitId: input.commitId,
+          url: "https://example.test/c",
+        };
+        comments.push(comment);
+        return Promise.resolve(comment);
+      });
+      vi.spyOn(client, "getReviewComment").mockImplementation((_ref, id) =>
+        Promise.resolve(comments[id - 1]!),
+      );
+
+      let modelCalls = 0;
+      globalThis.fetch = (() => {
+        modelCalls += 1;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      }) as typeof fetch;
+
+      const diagnostics = createSilentDiagnostics();
+      const report = await performReview(
+        {
+          ...baseRequest(undefined),
+          client,
+          base: commitSha(headSha),
+          head: commitSha(gateHead),
+          config: { ...GATE_CONFIG, largeReviewMaxFiles: 1 },
+          profile: gateProfile,
+          env: { MODEL_TOKEN: "fake-token" },
+        },
+        diagnostics,
+      );
+
+      expect(report.outcome).toBe("incomplete");
+      expect(report.reason).toBe("settlement.incomplete.review_too_large");
+      expect(report.reviewedPaths).toBe(0);
+      expect(acquireEngineMock).not.toHaveBeenCalled();
+      expect(runEngineMock).not.toHaveBeenCalled();
+      expect(created.some((input) => input.body.includes("PolicyShape"))).toBe(true);
+      expect(
+        created.some((input) => input.body.includes("settlement.incomplete.review_too_large")),
+      ).toBe(true);
       expect(modelCalls).toBe(0);
       const record = diagnostics.drain().find((r) => r.code === "contracts.gate");
       expect(record?.counts?.findings).toBe(1);

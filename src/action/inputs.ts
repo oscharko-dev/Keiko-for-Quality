@@ -24,6 +24,10 @@ export function readInput(env: NodeJS.ProcessEnv, name: string): string {
   return (env[inputKey(name)] ?? "").trim();
 }
 
+/**
+ * Undefined means the action input was omitted and should use the action's default. An explicitly
+ * empty value remains empty; `large_review_override_label` uses that to disable label-based bypass.
+ */
 function readInputWithDefault(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
   const raw = env[inputKey(name)];
   return raw === undefined ? fallback : raw.trim();

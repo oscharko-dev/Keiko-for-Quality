@@ -271,9 +271,11 @@ remaining dispatch size has shrunk by at least half or is below `budget_failure_
 
 Both policy stops settle `incomplete` and publish one durable review conversation, not one new
 head-specific notice per push. When enabled, the maintained summary comment still records the
-current head and bounded counts. A maintainer can intentionally bypass both stops by applying the
-label named by `large_review_override_label` (default `keiko-review-override`), or by changing the
-workflow inputs.
+current head and bounded counts; because no engine work happened, `Freshly reviewed` is `0`. A
+maintainer can intentionally bypass both stops by applying the label named by
+`large_review_override_label` (default `keiko-review-override`), or by changing the workflow inputs.
+Consumer workflows that use the label override should include the `labeled` pull-request event so
+applying the label starts a fresh run.
 
 ## Local runs
 

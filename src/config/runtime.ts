@@ -71,6 +71,7 @@ export const LARGE_REVIEW_DEFAULTS = {
   budgetFailureRetryLimit: 2,
   budgetFailureMinFiles: 20,
   overrideLabel: "keiko-review-override",
+  summaryHistoryRows: 5,
 } as const;
 
 const KEYS = [
@@ -158,7 +159,7 @@ function parseLargeReviewControls(
       object.budgetFailureRetryLimit,
       `${field}.budgetFailureRetryLimit`,
       0,
-      10,
+      LARGE_REVIEW_DEFAULTS.summaryHistoryRows,
     ),
     budgetFailureMinFiles: asInteger(
       object.budgetFailureMinFiles,

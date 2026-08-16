@@ -168,6 +168,7 @@ const ENGINE_RUNTIME_DEFAULTS = {
   maxFindings: 500,
   renameDetectionPercent: 50,
   crossArtifactPass: false,
+  // Local replay deliberately measures large commits; CI admission policy would make that impossible.
   largeReviewMaxFiles: 0,
   budgetFailureRetryLimit: 0,
   budgetFailureMinFiles: 0,

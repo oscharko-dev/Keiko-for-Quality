@@ -149,6 +149,12 @@ describe("parseRuntimeConfig", () => {
       expect(config.largeReviewOverrideLabel).toBe("");
     });
 
+    it("rejects retry limits beyond the retained summary history", () => {
+      expect(() => parseRuntimeConfig({ ...VALID, budgetFailureRetryLimit: 6 })).toThrow(
+        ValidationError,
+      );
+    });
+
     it("rejects a non-string override label", () => {
       expect(() => parseRuntimeConfig({ ...VALID, largeReviewOverrideLabel: 7 })).toThrow(
         ValidationError,

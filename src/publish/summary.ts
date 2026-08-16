@@ -1,4 +1,6 @@
 import type { CommitSha, VersionTag } from "../core/brands.js";
+import { asInteger } from "../core/validate.js";
+import { LARGE_REVIEW_DEFAULTS } from "../config/runtime.js";
 import { isReasonCode, type ReasonCode } from "../diagnostics/reason-codes.js";
 import type { Diagnostics, DiagnosticRecord } from "../diagnostics/sink.js";
 import type { IssueComment, IssueCommentApi, RepoRef } from "../github/client.js";
@@ -70,6 +72,11 @@ export interface SummarySourceReport {
    *  invalidated — see `ReviewReport.contextInvalidated` (review.ts) for the full rationale.
    *  Always 0 when inert. */
   readonly contextInvalidated: number;
+  /**
+   * Paths actually sent to the engine this run. Absent means the ordinary derived count still applies.
+   * Pre-engine policy stops set this to zero so the summary cannot report unreviewed files as fresh.
+   */
+  readonly reviewedPaths?: number;
   /** Absent on a run that never reached publication — see `EMPTY_PUBLISH_OUTCOME` below. */
   readonly publish?: PublishOutcome;
 }
@@ -160,9 +167,9 @@ const EMPTY_PUBLISH_OUTCOME: PublishOutcome = {
  *
  * Every count is read directly off `report` — extended for this feature with the inventory
  * accounting `performReview` already computes — or off `report.publish`, never recomputed from a
- * second, independent pass over the inventory or the GitHub API. `freshlyReviewed` is the one
- * arithmetic step, and it is a trivial partition of two fields the report already carries:
- * `reviewablePaths - cacheHits - checkpointHits`.
+ * second, independent pass over the inventory or the GitHub API. Ordinary runs still derive
+ * `freshlyReviewed` as the trivial partition `reviewablePaths - cacheHits - checkpointHits`; a run
+ * that deliberately stops before engine acquisition supplies the actual zero instead.
  */
 export function buildSummaryReport(
   input: SummaryRunInput,
@@ -179,7 +186,9 @@ export function buildSummaryReport(
     cacheHits: report.cacheHits,
     checkpointHits: report.checkpointHits,
     contextInvalidated: report.contextInvalidated,
-    freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits - report.checkpointHits),
+    freshlyReviewed:
+      report.reviewedPaths ??
+      Math.max(0, report.reviewablePaths - report.cacheHits - report.checkpointHits),
     findingsPublished: publish.published,
     // Unlike the four counts below, this one stays optional on `PublishOutcome` even once `publish`
     // is known to exist — see its own doc comment in `publisher.ts` — so `EMPTY_PUBLISH_OUTCOME`'s
@@ -232,7 +241,8 @@ export function buildSummaryReport(
  * did last. Five rows is trail enough to see a pattern (repeated invalidations, a flapping
  * outcome) without the comment growing without bound. */
 const HISTORY_HEADER = "**Recent runs**";
-const MAX_HISTORY_ROWS = 5;
+const MAX_HISTORY_ROWS = LARGE_REVIEW_DEFAULTS.summaryHistoryRows;
+const MAX_HISTORY_INTEGER = 1_000_000_000;
 const HISTORY_ROW =
   /^- `([0-9a-f]{7})` · (complete|incomplete|abandoned)(?: \(`([^`]+)`\))? · fresh (\d+) · replayed (\d+) · resumed (\d+) · (\d+)s$/;
 
@@ -245,13 +255,30 @@ export interface SummaryHistoryRow {
   readonly durationSeconds: number;
 }
 
+interface HistoryCaptures {
+  readonly outcome: SummaryOutcome;
+  readonly reason?: ReasonCode;
+  readonly fresh: string;
+  readonly replayed: string;
+  readonly resumed: string;
+  readonly duration: string;
+}
+
+interface HistoryNumbers {
+  readonly fresh: number;
+  readonly replayed: number;
+  readonly resumed: number;
+  readonly durationSeconds: number;
+}
+
 /** One run as one compact line: head, outcome (+reason), fresh/replayed split, duration. */
 function historyRow(input: SummaryRunInput): string {
   const r = input.report;
   const reason = r.reason === undefined ? "" : ` (\`${r.reason}\`)`;
+  const fresh = r.reviewedPaths ?? Math.max(0, r.reviewablePaths - r.cacheHits - r.checkpointHits);
   return (
     `- \`${(input.headSha as string).slice(0, 7)}\` · ${r.outcome}${reason} · ` +
-    `fresh ${String(r.reviewablePaths - r.cacheHits - r.checkpointHits)} · ` +
+    `fresh ${String(fresh)} · ` +
     `replayed ${String(r.cacheHits)} · resumed ${String(r.checkpointHits)} · ` +
     `${String(Math.round(input.durationMs / 1000))}s`
   );
@@ -281,17 +308,60 @@ export function renderRunHistory(currentRow: string, previousBody: string | unde
 function parseHistoryRow(line: string): SummaryHistoryRow | undefined {
   const match = HISTORY_ROW.exec(line);
   if (match === null) return undefined;
+  const captures = parseHistoryCaptures(match);
+  if (captures === undefined) return undefined;
+  const numbers = parseHistoryNumbers(captures);
+  if (numbers === undefined) return undefined;
+  return {
+    outcome: captures.outcome,
+    ...(captures.reason === undefined ? {} : { reason: captures.reason }),
+    ...numbers,
+  };
+}
+
+function parseHistoryCaptures(match: RegExpExecArray): HistoryCaptures | undefined {
   const [, , outcome, reason, fresh, replayed, resumed, duration] = match;
   if (outcome === undefined || fresh === undefined || replayed === undefined) return undefined;
   if (resumed === undefined || duration === undefined) return undefined;
+  if (reason !== undefined && !isReasonCode(reason)) return undefined;
   return {
     outcome: outcome as SummaryOutcome,
-    ...(reason !== undefined && isReasonCode(reason) ? { reason } : {}),
-    fresh: Number(fresh),
-    replayed: Number(replayed),
-    resumed: Number(resumed),
-    durationSeconds: Number(duration),
+    ...(reason === undefined ? {} : { reason }),
+    fresh,
+    replayed,
+    resumed,
+    duration,
   };
+}
+
+function parseHistoryNumbers(captures: HistoryCaptures): HistoryNumbers | undefined {
+  const { fresh, replayed, resumed, duration } = captures;
+  const parsedFresh = parseHistoryInteger(fresh, "summary.history.fresh");
+  const parsedReplayed = parseHistoryInteger(replayed, "summary.history.replayed");
+  const parsedResumed = parseHistoryInteger(resumed, "summary.history.resumed");
+  const parsedDuration = parseHistoryInteger(duration, "summary.history.duration");
+  if (
+    parsedFresh === undefined ||
+    parsedReplayed === undefined ||
+    parsedResumed === undefined ||
+    parsedDuration === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    fresh: parsedFresh,
+    replayed: parsedReplayed,
+    resumed: parsedResumed,
+    durationSeconds: parsedDuration,
+  };
+}
+
+function parseHistoryInteger(raw: string, field: string): number | undefined {
+  try {
+    return asInteger(Number(raw), field, 0, MAX_HISTORY_INTEGER);
+  } catch {
+    return undefined;
+  }
 }
 
 export function parseRunHistory(body: string | undefined): readonly SummaryHistoryRow[] {

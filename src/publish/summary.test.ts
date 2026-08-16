@@ -251,6 +251,20 @@ describe("run history parsing", () => {
     ]);
   });
 
+  it("records the explicit actual reviewed count in the maintained history row", async () => {
+    await maintainRunSummary(
+      context,
+      runInput({
+        report: report({ outcome: "incomplete", reviewedPaths: 0 }),
+      }),
+      createSilentDiagnostics(),
+    );
+
+    expect(parseRunHistory(api.existing[0]?.body)).toEqual([
+      { outcome: "incomplete", fresh: 0, replayed: 2, resumed: 0, durationSeconds: 12 },
+    ]);
+  });
+
   it("reads only this reviewer's newest marker-bound summary", () => {
     const oldBody = [
       "old",
@@ -286,8 +300,18 @@ describe("run history parsing", () => {
       "- candidate-controlled prose",
     ].join("\n");
 
+    expect(parseRunHistory(body)).toEqual([]);
+  });
+
+  it("drops history rows whose numeric fields exceed the bounded integer range", () => {
+    const body = [
+      "**Recent runs**",
+      "- `1111111` · incomplete (`settlement.incomplete.budget_exceeded`) · fresh 1000000001 · replayed 0 · resumed 0 · 2s",
+      "- `2222222` · complete · fresh 1 · replayed 0 · resumed 0 · 2s",
+    ].join("\n");
+
     expect(parseRunHistory(body)).toEqual([
-      { outcome: "incomplete", fresh: 1, replayed: 0, resumed: 0, durationSeconds: 2 },
+      { outcome: "complete", fresh: 1, replayed: 0, resumed: 0, durationSeconds: 2 },
     ]);
   });
 });
@@ -386,6 +410,12 @@ describe("buildSummaryReport", () => {
     const r = report({ reviewablePaths: 50, cacheHits: 12 });
     const summary = buildSummaryReport(runInput({ report: r }), []);
     expect(summary.counts.freshlyReviewed).toBe(r.reviewablePaths - r.cacheHits);
+  });
+
+  it("uses an explicit actual reviewed count for pre-engine policy stops", () => {
+    const r = report({ reviewablePaths: 50, cacheHits: 12, reviewedPaths: 0 });
+    const summary = buildSummaryReport(runInput({ report: r }), []);
+    expect(summary.counts.freshlyReviewed).toBe(0);
   });
 
   it("defaults every finding count to zero when the report never reached publication", () => {

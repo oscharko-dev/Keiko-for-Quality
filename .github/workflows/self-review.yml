@@ -34,7 +34,7 @@ on:
     # both. They are listed so the trigger fires at all, which starts a replacement run whose
     # concurrency group cancels a review already in flight. Without them a pull request pulled
     # back to draft keeps a credential-bearing review running and still able to publish onto it.
-    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]
+    types: [opened, synchronize, reopened, ready_for_review, labeled, converted_to_draft, closed]
 
 # Empty at workflow level on purpose: the one job below declares exactly what it needs, and a
 # future second job starts from nothing rather than inheriting review-grade authority.

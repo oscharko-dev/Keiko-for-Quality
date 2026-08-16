@@ -100,7 +100,17 @@ specific review.
 
    on:
      pull_request_target:
-       types: [opened, synchronize, reopened, ready_for_review, edited, converted_to_draft, closed]
+       types:
+         [
+           opened,
+           synchronize,
+           reopened,
+           ready_for_review,
+           edited,
+           labeled,
+           converted_to_draft,
+           closed,
+         ]
 
    permissions:
      contents: read

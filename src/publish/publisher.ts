@@ -1124,10 +1124,11 @@ export async function publishIncompleteNotice(
   counts?: Readonly<Record<string, number>>,
   options: { readonly scope?: "head" | "pull"; readonly durable?: boolean } = {},
 ): Promise<boolean> {
+  const markerPath = options.scope === "pull" ? "<pull-request>" : anchorPath;
   const marker = fingerprint({
     repository: `${context.ref.owner}/${context.ref.repo}`,
     pullNumber: context.pullNumber,
-    path: anchorPath,
+    path: markerPath,
     rule: "incomplete-review",
     body: reasonCode,
     // Unlike a finding, a notice's meaning is head-specific: "this exact commit was not covered".

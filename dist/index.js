@@ -1089,6 +1089,129 @@ function settle(inventory, result, profile, config, memoizedPaths = NO_MEMOIZED_
   return result.manifestPresent ? settleReconciled(inventory, result, profile, config, memoizedPaths) : settleCounted(inventory, result, profile, config, memoizedPaths);
 }
 
+// src/config/runtime.ts
+var PROTOCOLS2 = /* @__PURE__ */ new Set(["openai", "anthropic"]);
+var LARGE_REVIEW_DEFAULTS = {
+  maxFiles: 100,
+  budgetFailureRetryLimit: 2,
+  budgetFailureMinFiles: 20,
+  overrideLabel: "keiko-review-override",
+  summaryHistoryRows: 5
+};
+var KEYS = [
+  "protocol",
+  "endpoint",
+  "model",
+  "tokenEnvName",
+  "language",
+  "concurrency",
+  "fileTimeoutSeconds",
+  "reviewTimeoutSeconds",
+  "tokenBudget",
+  "maxFindings",
+  "renameDetectionPercent",
+  "crossArtifactPass",
+  "largeReviewMaxFiles",
+  "budgetFailureRetryLimit",
+  "budgetFailureMinFiles",
+  "largeReviewOverrideLabel"
+];
+function parseEndpoint(value, field) {
+  const raw = asString(value, field, 2048);
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ValidationError(field);
+  }
+  if (url.protocol !== "https:") throw new ValidationError(field);
+  if (url.username !== "" || url.password !== "") throw new ValidationError(field);
+  return url.toString();
+}
+function parseTokenEnvName(value, field) {
+  const name = asString(value, field, 128);
+  if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new ValidationError(field);
+  if (name === "GITHUB_TOKEN" || name.startsWith("ACTIONS_")) throw new ValidationError(field);
+  return name;
+}
+function asBoolean(value, field) {
+  if (typeof value !== "boolean") throw new ValidationError(field);
+  return value;
+}
+function asOptionalLabel(value, field) {
+  if (typeof value !== "string" || value.length > 64 || hasControlCharacters(value)) {
+    throw new ValidationError(field);
+  }
+  return value;
+}
+function parseLargeReviewControls(object, field) {
+  return {
+    largeReviewMaxFiles: asInteger(
+      object.largeReviewMaxFiles,
+      `${field}.largeReviewMaxFiles`,
+      0,
+      2e4
+    ),
+    budgetFailureRetryLimit: asInteger(
+      object.budgetFailureRetryLimit,
+      `${field}.budgetFailureRetryLimit`,
+      0,
+      LARGE_REVIEW_DEFAULTS.summaryHistoryRows
+    ),
+    budgetFailureMinFiles: asInteger(
+      object.budgetFailureMinFiles,
+      `${field}.budgetFailureMinFiles`,
+      0,
+      2e4
+    ),
+    largeReviewOverrideLabel: asOptionalLabel(
+      object.largeReviewOverrideLabel,
+      `${field}.largeReviewOverrideLabel`
+    )
+  };
+}
+function parseRuntimeConfig(input, field = "config") {
+  const object = asObject(input, field);
+  requireKeys(object, [...KEYS], field);
+  rejectUnknownKeys(object, [...KEYS], field);
+  const protocol2 = asString(object.protocol, `${field}.protocol`, 32);
+  if (!PROTOCOLS2.has(protocol2)) throw new ValidationError(`${field}.protocol`);
+  return {
+    protocol: protocol2,
+    endpoint: parseEndpoint(object.endpoint, `${field}.endpoint`),
+    model: asString(object.model, `${field}.model`, 256),
+    tokenEnvName: parseTokenEnvName(object.tokenEnvName, `${field}.tokenEnvName`),
+    language: asString(object.language, `${field}.language`, 64),
+    concurrency: asInteger(object.concurrency, `${field}.concurrency`, 1, 32),
+    fileTimeoutSeconds: asInteger(
+      object.fileTimeoutSeconds,
+      `${field}.fileTimeoutSeconds`,
+      5,
+      3600
+    ),
+    reviewTimeoutSeconds: asInteger(
+      object.reviewTimeoutSeconds,
+      `${field}.reviewTimeoutSeconds`,
+      30,
+      21600
+    ),
+    tokenBudget: asInteger(object.tokenBudget, `${field}.tokenBudget`, 1e3, 1e8),
+    maxFindings: asInteger(object.maxFindings, `${field}.maxFindings`, 1, 500),
+    renameDetectionPercent: asInteger(
+      object.renameDetectionPercent,
+      `${field}.renameDetectionPercent`,
+      1,
+      100
+    ),
+    crossArtifactPass: asBoolean(object.crossArtifactPass, `${field}.crossArtifactPass`),
+    ...parseLargeReviewControls(object, field)
+  };
+}
+function readModelToken(config, env) {
+  const value = env[config.tokenEnvName];
+  return value !== void 0 && value.length > 0 ? value : void 0;
+}
+
 // src/diagnostics/reason-codes.ts
 var REASON_CODES = [
   // Run lifecycle
@@ -1925,7 +2048,7 @@ function buildSummaryReport(input, diagnostics) {
     cacheHits: report.cacheHits,
     checkpointHits: report.checkpointHits,
     contextInvalidated: report.contextInvalidated,
-    freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits - report.checkpointHits),
+    freshlyReviewed: report.reviewedPaths ?? Math.max(0, report.reviewablePaths - report.cacheHits - report.checkpointHits),
     findingsPublished: publish.published,
     // Unlike the four counts below, this one stays optional on `PublishOutcome` even once `publish`
     // is known to exist — see its own doc comment in `publisher.ts` — so `EMPTY_PUBLISH_OUTCOME`'s
@@ -1961,12 +2084,14 @@ function buildSummaryReport(input, diagnostics) {
   };
 }
 var HISTORY_HEADER = "**Recent runs**";
-var MAX_HISTORY_ROWS = 5;
+var MAX_HISTORY_ROWS = LARGE_REVIEW_DEFAULTS.summaryHistoryRows;
+var MAX_HISTORY_INTEGER = 1e9;
 var HISTORY_ROW = /^- `([0-9a-f]{7})` · (complete|incomplete|abandoned)(?: \(`([^`]+)`\))? · fresh (\d+) · replayed (\d+) · resumed (\d+) · (\d+)s$/;
 function historyRow(input) {
   const r = input.report;
   const reason = r.reason === void 0 ? "" : ` (\`${r.reason}\`)`;
-  return `- \`${input.headSha.slice(0, 7)}\` \xB7 ${r.outcome}${reason} \xB7 fresh ${String(r.reviewablePaths - r.cacheHits - r.checkpointHits)} \xB7 replayed ${String(r.cacheHits)} \xB7 resumed ${String(r.checkpointHits)} \xB7 ${String(Math.round(input.durationMs / 1e3))}s`;
+  const fresh = r.reviewedPaths ?? Math.max(0, r.reviewablePaths - r.cacheHits - r.checkpointHits);
+  return `- \`${input.headSha.slice(0, 7)}\` \xB7 ${r.outcome}${reason} \xB7 fresh ${String(fresh)} \xB7 replayed ${String(r.cacheHits)} \xB7 resumed ${String(r.checkpointHits)} \xB7 ${String(Math.round(input.durationMs / 1e3))}s`;
 }
 function renderRunHistory(currentRow, previousBody) {
   const carried = [];
@@ -1989,17 +2114,52 @@ ${rows.join("\n")}
 function parseHistoryRow(line) {
   const match = HISTORY_ROW.exec(line);
   if (match === null) return void 0;
+  const captures = parseHistoryCaptures(match);
+  if (captures === void 0) return void 0;
+  const numbers = parseHistoryNumbers(captures);
+  if (numbers === void 0) return void 0;
+  return {
+    outcome: captures.outcome,
+    ...captures.reason === void 0 ? {} : { reason: captures.reason },
+    ...numbers
+  };
+}
+function parseHistoryCaptures(match) {
   const [, , outcome, reason, fresh, replayed, resumed, duration] = match;
   if (outcome === void 0 || fresh === void 0 || replayed === void 0) return void 0;
   if (resumed === void 0 || duration === void 0) return void 0;
+  if (reason !== void 0 && !isReasonCode(reason)) return void 0;
   return {
     outcome,
-    ...reason !== void 0 && isReasonCode(reason) ? { reason } : {},
-    fresh: Number(fresh),
-    replayed: Number(replayed),
-    resumed: Number(resumed),
-    durationSeconds: Number(duration)
+    ...reason === void 0 ? {} : { reason },
+    fresh,
+    replayed,
+    resumed,
+    duration
   };
+}
+function parseHistoryNumbers(captures) {
+  const { fresh, replayed, resumed, duration } = captures;
+  const parsedFresh = parseHistoryInteger(fresh, "summary.history.fresh");
+  const parsedReplayed = parseHistoryInteger(replayed, "summary.history.replayed");
+  const parsedResumed = parseHistoryInteger(resumed, "summary.history.resumed");
+  const parsedDuration = parseHistoryInteger(duration, "summary.history.duration");
+  if (parsedFresh === void 0 || parsedReplayed === void 0 || parsedResumed === void 0 || parsedDuration === void 0) {
+    return void 0;
+  }
+  return {
+    fresh: parsedFresh,
+    replayed: parsedReplayed,
+    resumed: parsedResumed,
+    durationSeconds: parsedDuration
+  };
+}
+function parseHistoryInteger(raw, field) {
+  try {
+    return asInteger(Number(raw), field, 0, MAX_HISTORY_INTEGER);
+  } catch {
+    return void 0;
+  }
 }
 function parseRunHistory(body) {
   if (body === void 0) return [];
@@ -2260,128 +2420,6 @@ function buildNewEntries(inputs) {
 }
 function buildGenerationCheckpointEntries(inputs) {
   return buildEntries(inputs, GENERATION_CHECKPOINT_SEMANTICS);
-}
-
-// src/config/runtime.ts
-var PROTOCOLS2 = /* @__PURE__ */ new Set(["openai", "anthropic"]);
-var LARGE_REVIEW_DEFAULTS = {
-  maxFiles: 100,
-  budgetFailureRetryLimit: 2,
-  budgetFailureMinFiles: 20,
-  overrideLabel: "keiko-review-override"
-};
-var KEYS = [
-  "protocol",
-  "endpoint",
-  "model",
-  "tokenEnvName",
-  "language",
-  "concurrency",
-  "fileTimeoutSeconds",
-  "reviewTimeoutSeconds",
-  "tokenBudget",
-  "maxFindings",
-  "renameDetectionPercent",
-  "crossArtifactPass",
-  "largeReviewMaxFiles",
-  "budgetFailureRetryLimit",
-  "budgetFailureMinFiles",
-  "largeReviewOverrideLabel"
-];
-function parseEndpoint(value, field) {
-  const raw = asString(value, field, 2048);
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new ValidationError(field);
-  }
-  if (url.protocol !== "https:") throw new ValidationError(field);
-  if (url.username !== "" || url.password !== "") throw new ValidationError(field);
-  return url.toString();
-}
-function parseTokenEnvName(value, field) {
-  const name = asString(value, field, 128);
-  if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new ValidationError(field);
-  if (name === "GITHUB_TOKEN" || name.startsWith("ACTIONS_")) throw new ValidationError(field);
-  return name;
-}
-function asBoolean(value, field) {
-  if (typeof value !== "boolean") throw new ValidationError(field);
-  return value;
-}
-function asOptionalLabel(value, field) {
-  if (typeof value !== "string" || value.length > 64 || hasControlCharacters(value)) {
-    throw new ValidationError(field);
-  }
-  return value;
-}
-function parseLargeReviewControls(object, field) {
-  return {
-    largeReviewMaxFiles: asInteger(
-      object.largeReviewMaxFiles,
-      `${field}.largeReviewMaxFiles`,
-      0,
-      2e4
-    ),
-    budgetFailureRetryLimit: asInteger(
-      object.budgetFailureRetryLimit,
-      `${field}.budgetFailureRetryLimit`,
-      0,
-      10
-    ),
-    budgetFailureMinFiles: asInteger(
-      object.budgetFailureMinFiles,
-      `${field}.budgetFailureMinFiles`,
-      0,
-      2e4
-    ),
-    largeReviewOverrideLabel: asOptionalLabel(
-      object.largeReviewOverrideLabel,
-      `${field}.largeReviewOverrideLabel`
-    )
-  };
-}
-function parseRuntimeConfig(input, field = "config") {
-  const object = asObject(input, field);
-  requireKeys(object, [...KEYS], field);
-  rejectUnknownKeys(object, [...KEYS], field);
-  const protocol2 = asString(object.protocol, `${field}.protocol`, 32);
-  if (!PROTOCOLS2.has(protocol2)) throw new ValidationError(`${field}.protocol`);
-  return {
-    protocol: protocol2,
-    endpoint: parseEndpoint(object.endpoint, `${field}.endpoint`),
-    model: asString(object.model, `${field}.model`, 256),
-    tokenEnvName: parseTokenEnvName(object.tokenEnvName, `${field}.tokenEnvName`),
-    language: asString(object.language, `${field}.language`, 64),
-    concurrency: asInteger(object.concurrency, `${field}.concurrency`, 1, 32),
-    fileTimeoutSeconds: asInteger(
-      object.fileTimeoutSeconds,
-      `${field}.fileTimeoutSeconds`,
-      5,
-      3600
-    ),
-    reviewTimeoutSeconds: asInteger(
-      object.reviewTimeoutSeconds,
-      `${field}.reviewTimeoutSeconds`,
-      30,
-      21600
-    ),
-    tokenBudget: asInteger(object.tokenBudget, `${field}.tokenBudget`, 1e3, 1e8),
-    maxFindings: asInteger(object.maxFindings, `${field}.maxFindings`, 1, 500),
-    renameDetectionPercent: asInteger(
-      object.renameDetectionPercent,
-      `${field}.renameDetectionPercent`,
-      1,
-      100
-    ),
-    crossArtifactPass: asBoolean(object.crossArtifactPass, `${field}.crossArtifactPass`),
-    ...parseLargeReviewControls(object, field)
-  };
-}
-function readModelToken(config, env) {
-  const value = env[config.tokenEnvName];
-  return value !== void 0 && value.length > 0 ? value : void 0;
 }
 
 // src/engine/acquire.ts
@@ -8799,10 +8837,11 @@ async function executePublication(context, plan, diagnostics) {
   };
 }
 async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnostics, prefetch, counts, options2 = {}) {
+  const markerPath = options2.scope === "pull" ? "<pull-request>" : anchorPath;
   const marker = fingerprint({
     repository: `${context.ref.owner}/${context.ref.repo}`,
     pullNumber: context.pullNumber,
-    path: anchorPath,
+    path: markerPath,
     rule: "incomplete-review",
     body: reasonCode,
     // Unlike a finding, a notice's meaning is head-specific: "this exact commit was not covered".
@@ -14953,6 +14992,7 @@ function incompleteSettlementReport(run2, inventory, cause, memo, engineFindings
       uncacheablePaths
     ),
     ...cacheCounts(memo),
+    ...cause.reviewedPaths === void 0 ? {} : { reviewedPaths: cause.reviewedPaths },
     ...published === void 0 ? {} : { publish: published.outcome }
   };
 }
@@ -15059,18 +15099,28 @@ function largeReviewBlock(request, inventory, memo, budget) {
   return {
     reason: "settlement.incomplete.review_too_large",
     counts: { ...reviewSizeCounts(inventory, memo, budget), max_files: maxFiles },
-    notice: POLICY_INCOMPLETE_NOTICE
+    notice: POLICY_INCOMPLETE_NOTICE,
+    reviewedPaths: 0
   };
 }
-function consecutiveBudgetFailures(history) {
-  const failures = [];
+var BUDGET_STREAK_REASONS = /* @__PURE__ */ new Set([
+  "settlement.incomplete.budget_exceeded",
+  "settlement.incomplete.budget_circuit_open"
+]);
+function budgetFailureStreak(history) {
+  const budgetFailures = [];
+  let circuitOpen = false;
+  let previousFresh = 0;
   for (const row of history) {
-    if (row.outcome !== "incomplete" || row.reason !== "settlement.incomplete.budget_exceeded") {
-      break;
+    if (row.outcome !== "incomplete" || !BUDGET_STREAK_REASONS.has(row.reason ?? "")) break;
+    if (row.reason === "settlement.incomplete.budget_circuit_open") {
+      circuitOpen = true;
+    } else {
+      budgetFailures.push(row);
+      if (previousFresh === 0) previousFresh = row.fresh;
     }
-    failures.push(row);
   }
-  return failures;
+  return { budgetFailures, circuitOpen, previousFresh };
 }
 function materiallyShrunk(current, previous) {
   return previous > 0 && current * 2 <= previous;
@@ -15079,20 +15129,21 @@ function budgetCircuitBlock(request, inventory, memo, budget, history) {
   const retryLimit = budgetFailureRetryLimit(request.config);
   const minFiles = budgetFailureMinFiles(request.config);
   if (retryLimit === 0 || budget.dispatchedFiles < minFiles) return void 0;
-  const failures = consecutiveBudgetFailures(history);
-  if (failures.length < retryLimit) return void 0;
-  const previousFresh = failures[0]?.fresh ?? 0;
+  const streak = budgetFailureStreak(history);
+  if (!streak.circuitOpen && streak.budgetFailures.length < retryLimit) return void 0;
+  const previousFresh = streak.previousFresh;
   if (materiallyShrunk(budget.dispatchedFiles, previousFresh)) return void 0;
   return {
     reason: "settlement.incomplete.budget_circuit_open",
     counts: {
       ...reviewSizeCounts(inventory, memo, budget),
-      recent_budget_exceeded: failures.length,
+      recent_budget_exceeded: streak.budgetFailures.length,
       retry_limit: retryLimit,
       min_files: minFiles,
       previous_fresh: previousFresh
     },
-    notice: POLICY_INCOMPLETE_NOTICE
+    notice: POLICY_INCOMPLETE_NOTICE,
+    reviewedPaths: 0
   };
 }
 async function summaryHistoryForCircuit(run2) {
@@ -16537,6 +16588,14 @@ function combineIncompleteFindings(settlement, memo, gate) {
     fresh: new Set(settlement.findings)
   };
 }
+function combinePolicyBlockedFindings(memo, gate) {
+  const modelFindings = mergeHitFindings([], memo.hits);
+  return {
+    findings: [...modelFindings, ...gate],
+    verify: new Set(modelFindings),
+    fresh: /* @__PURE__ */ new Set()
+  };
+}
 function completedPublicationReport(run2, inventory, settlement, memo, startedAt, audited) {
   const { outcome: publish, qualityByOriginal, droppedOriginals, uncacheablePaths } = audited;
   run2.diagnostics.record("settlement.complete", {
@@ -16763,6 +16822,16 @@ async function settleInitialInventoryState(run2, inventory, started) {
   }
   return void 0;
 }
+async function settlePolicyBlock(run2, inventory, memo, policyBlock) {
+  const gate = await collectGateFindings(run2.request, inventory, run2.diagnostics);
+  return settleIncomplete(
+    run2,
+    inventory,
+    policyBlock,
+    memo,
+    combinePolicyBlockedFindings(memo, gate)
+  );
+}
 async function performReviewInner(request, diagnostics, ledger, deadline) {
   const started = Date.now();
   const run2 = { request, ledger, diagnostics, deadline, credited: /* @__PURE__ */ new Set() };
@@ -16785,7 +16854,7 @@ async function performReviewInner(request, diagnostics, ledger, deadline) {
   const preflight = await abandonIfStale(run2, inventory, memo);
   if (preflight !== void 0) return preflight;
   const policyBlock = await automaticReviewBlock(run2, inventory, memo);
-  if (policyBlock !== void 0) return settleIncomplete(run2, inventory, policyBlock);
+  if (policyBlock !== void 0) return settlePolicyBlock(run2, inventory, memo, policyBlock);
   const settlement = await settleOrReport(run2, inventory, memo);
   if ("outcome" in settlement) return settlement;
   if (settlement.status === "incomplete") {

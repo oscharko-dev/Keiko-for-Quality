@@ -177,6 +177,7 @@ test("buildEngineRuntimeConfig builds an openai RuntimeConfig from OCR_LLM_* var
   assert.equal(config.maxFindings, 500);
   assert.equal(config.largeReviewMaxFiles, 0);
   assert.equal(config.budgetFailureRetryLimit, 0);
+  assert.equal(config.budgetFailureMinFiles, 0);
   assert.equal(config.largeReviewOverrideLabel, "");
 });
 

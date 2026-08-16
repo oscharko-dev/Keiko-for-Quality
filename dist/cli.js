@@ -627,7 +627,8 @@ var LARGE_REVIEW_DEFAULTS = {
   maxFiles: 100,
   budgetFailureRetryLimit: 2,
   budgetFailureMinFiles: 20,
-  overrideLabel: "keiko-review-override"
+  overrideLabel: "keiko-review-override",
+  summaryHistoryRows: 5
 };
 var KEYS = [
   "protocol",
@@ -687,7 +688,7 @@ function parseLargeReviewControls(object, field) {
       object.budgetFailureRetryLimit,
       `${field}.budgetFailureRetryLimit`,
       0,
-      10
+      LARGE_REVIEW_DEFAULTS.summaryHistoryRows
     ),
     budgetFailureMinFiles: asInteger(
       object.budgetFailureMinFiles,
@@ -7769,6 +7770,9 @@ async function planPublication(context, findings, diagnostics, prefetch) {
     }
   };
 }
+
+// src/publish/summary.ts
+var MAX_HISTORY_ROWS = LARGE_REVIEW_DEFAULTS.summaryHistoryRows;
 
 // src/publish/change-diff.ts
 var DIFF_TIMEOUT_MS = 3e4;
