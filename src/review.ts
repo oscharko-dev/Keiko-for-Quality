@@ -28,7 +28,7 @@ import {
 } from "./cache/review-cache.js";
 import type { CompiledProfile } from "./config/profile.js";
 import type { GuidelineIndex } from "./config/guidelines.js";
-import { readModelToken, type RuntimeConfig } from "./config/runtime.js";
+import { LARGE_REVIEW_DEFAULTS, readModelToken, type RuntimeConfig } from "./config/runtime.js";
 import type { Diagnostics } from "./diagnostics/sink.js";
 import type { ReasonCode } from "./diagnostics/reason-codes.js";
 import { acquireEngine } from "./engine/acquire.js";
@@ -107,7 +107,11 @@ import {
   type PublishContext,
   type PublishOutcome,
 } from "./publish/publisher.js";
-import { isIncompleteNoticeBody } from "./publish/presentation.js";
+import {
+  isIncompleteNoticeBody,
+  isSupersedableIncompleteNoticeBody,
+} from "./publish/presentation.js";
+import { ownSummaryRunHistory, type SummaryHistoryRow } from "./publish/summary.js";
 import { readChangeUnifiedDiff } from "./publish/change-diff.js";
 import {
   buildChangeEvidence,
@@ -188,6 +192,8 @@ export interface ReviewRequest {
   readonly cacheStore?: CacheStore;
   /** Persists raw generation progress after each bounded staged chunk. */
   readonly persistGenerationCheckpoint?: (store: CacheStore, appended: number) => Promise<void>;
+  readonly runSummaryEnabled?: boolean;
+  readonly largeReviewOverride?: boolean;
 }
 
 /**
@@ -236,6 +242,8 @@ interface PipelineRequest {
   readonly cacheStore?: CacheStore;
   /** Present only for the hosted action; local reviews never persist CI checkpoints. */
   readonly persistGenerationCheckpoint?: (store: CacheStore, appended: number) => Promise<void>;
+  readonly runSummaryEnabled?: boolean;
+  readonly largeReviewOverride?: boolean;
 }
 
 /**
@@ -838,6 +846,10 @@ interface IncompleteCause {
    * every caller that has nothing more specific than the reason code itself.
    */
   readonly counts?: Readonly<Record<string, number>>;
+  readonly notice?: {
+    readonly scope: "head" | "pull";
+    readonly durable: boolean;
+  };
 }
 
 function cacheCounts(memo: MemoContext): {
@@ -1184,6 +1196,7 @@ async function publishIncompleteSettlement(
       run.diagnostics,
       prefetch,
       cause.counts,
+      cause.notice,
     );
   }
   return published;
@@ -1339,6 +1352,8 @@ async function settleIncomplete(
 interface EngineBudget {
   readonly excluded: readonly string[];
   readonly allottedBudget: number;
+  readonly dispatchedFiles: number;
+  readonly dispatchedChangedLines: number;
 }
 
 /**
@@ -1386,12 +1401,144 @@ function computeEngineBudget(
     1,
     request.config.tokenBudget - publicationQualityReserve(request.config.maxFindings),
   );
+  const dispatchedFiles = dispatchedPathCount(inventory, excludedSet);
+  const dispatchedChangedLines = reviewableChangedLines(inventory, excludedSet);
   const allottedBudget = computeAllottedBudget(
     engineCeiling,
-    dispatchedPathCount(inventory, excludedSet),
-    reviewableChangedLines(inventory, excludedSet),
+    dispatchedFiles,
+    dispatchedChangedLines,
   );
-  return { excluded, allottedBudget };
+  return { excluded, allottedBudget, dispatchedFiles, dispatchedChangedLines };
+}
+
+const POLICY_INCOMPLETE_NOTICE = { scope: "pull", durable: true } as const;
+
+function largeReviewMaxFiles(config: RuntimeConfig): number {
+  return config.largeReviewMaxFiles ?? LARGE_REVIEW_DEFAULTS.maxFiles;
+}
+
+function budgetFailureRetryLimit(config: RuntimeConfig): number {
+  return config.budgetFailureRetryLimit ?? LARGE_REVIEW_DEFAULTS.budgetFailureRetryLimit;
+}
+
+function budgetFailureMinFiles(config: RuntimeConfig): number {
+  return config.budgetFailureMinFiles ?? LARGE_REVIEW_DEFAULTS.budgetFailureMinFiles;
+}
+
+function reviewSizeCounts(
+  inventory: Inventory,
+  memo: MemoContext,
+  budget: EngineBudget,
+): Readonly<Record<string, number>> {
+  return {
+    reviewable_files: inventory.reviewablePaths.size,
+    dispatched_files: budget.dispatchedFiles,
+    dispatched_changed_lines: budget.dispatchedChangedLines,
+    allotted_budget: budget.allottedBudget,
+    cache_hits: memo.hitPaths.size,
+    checkpoint_hits: memo.checkpointPaths.size,
+  };
+}
+
+function largeReviewBlock(
+  request: PipelineRequest,
+  inventory: Inventory,
+  memo: MemoContext,
+  budget: EngineBudget,
+): IncompleteCause | undefined {
+  const maxFiles = largeReviewMaxFiles(request.config);
+  if (maxFiles === 0 || budget.dispatchedFiles <= maxFiles) return undefined;
+  return {
+    reason: "settlement.incomplete.review_too_large",
+    counts: { ...reviewSizeCounts(inventory, memo, budget), max_files: maxFiles },
+    notice: POLICY_INCOMPLETE_NOTICE,
+  };
+}
+
+function consecutiveBudgetFailures(
+  history: readonly SummaryHistoryRow[],
+): readonly SummaryHistoryRow[] {
+  const failures: SummaryHistoryRow[] = [];
+  for (const row of history) {
+    if (row.outcome !== "incomplete" || row.reason !== "settlement.incomplete.budget_exceeded") {
+      break;
+    }
+    failures.push(row);
+  }
+  return failures;
+}
+
+function materiallyShrunk(current: number, previous: number): boolean {
+  return previous > 0 && current * 2 <= previous;
+}
+
+function budgetCircuitBlock(
+  request: PipelineRequest,
+  inventory: Inventory,
+  memo: MemoContext,
+  budget: EngineBudget,
+  history: readonly SummaryHistoryRow[],
+): IncompleteCause | undefined {
+  const retryLimit = budgetFailureRetryLimit(request.config);
+  const minFiles = budgetFailureMinFiles(request.config);
+  if (retryLimit === 0 || budget.dispatchedFiles < minFiles) return undefined;
+
+  const failures = consecutiveBudgetFailures(history);
+  if (failures.length < retryLimit) return undefined;
+
+  const previousFresh = failures[0]?.fresh ?? 0;
+  if (materiallyShrunk(budget.dispatchedFiles, previousFresh)) return undefined;
+
+  return {
+    reason: "settlement.incomplete.budget_circuit_open",
+    counts: {
+      ...reviewSizeCounts(inventory, memo, budget),
+      recent_budget_exceeded: failures.length,
+      retry_limit: retryLimit,
+      min_files: minFiles,
+      previous_fresh: previousFresh,
+    },
+    notice: POLICY_INCOMPLETE_NOTICE,
+  };
+}
+
+async function summaryHistoryForCircuit(run: ReviewRun): Promise<readonly SummaryHistoryRow[]> {
+  try {
+    const comments = await run.request.client.listIssueComments(
+      run.request.ref,
+      run.request.pullNumber,
+    );
+    return ownSummaryRunHistory(
+      comments,
+      run.request.identity,
+      `${run.request.ref.owner}/${run.request.ref.repo}`,
+      run.request.pullNumber,
+    );
+  } catch {
+    run.diagnostics.record("publish.summary_history_unavailable", { headSha: run.request.head });
+    return [];
+  }
+}
+
+async function automaticReviewBlock(
+  run: ReviewRun,
+  inventory: Inventory,
+  memo: MemoContext,
+): Promise<IncompleteCause | undefined> {
+  if (run.request.largeReviewOverride === true) return undefined;
+  const budget = computeEngineBudget(run.request, inventory, memo);
+  const tooLarge = largeReviewBlock(run.request, inventory, memo, budget);
+  if (tooLarge !== undefined) return tooLarge;
+  if (budgetFailureRetryLimit(run.request.config) === 0) return undefined;
+  if (budget.dispatchedFiles < budgetFailureMinFiles(run.request.config)) return undefined;
+  if (run.request.runSummaryEnabled === false) return undefined;
+  return budgetCircuitBlock(
+    run.request,
+    inventory,
+    memo,
+    budget,
+    await summaryHistoryForCircuit(run),
+  );
 }
 
 /**
@@ -4639,11 +4786,15 @@ export async function performReview(
       // genuinely successful review into a failed one just because it ran last, in the same
       // `finally` that reports `run.spend`.
       try {
+        const isNoticeBody =
+          report?.outcome === "complete"
+            ? isIncompleteNoticeBody
+            : isSupersedableIncompleteNoticeBody;
         const { attempted, resolved } = await request.client.resolveSupersededOwnNotices(
           request.ref,
           request.pullNumber,
           request.identity,
-          isIncompleteNoticeBody,
+          isNoticeBody,
           request.head,
           report?.outcome === "complete",
         );
@@ -4682,6 +4833,26 @@ async function resolvePairOrReport(
   }
 }
 
+async function settleInitialInventoryState(
+  run: ReviewRun,
+  inventory: Inventory,
+  started: number,
+): Promise<ReviewReport | undefined> {
+  // A path the consumer's profile does not describe is a gap in their coverage statement.
+  // Reviewing the rest and reporting success would hide it behind an apparently clean run.
+  if (inventory.unclassified.length > 0) {
+    return settleIncomplete(run, inventory, { reason: "inventory.unclassified_path" });
+  }
+  if (inventory.reviewablePaths.size === 0) {
+    run.diagnostics.record("settlement.complete", {
+      headSha: run.request.head,
+      durationMs: Date.now() - started,
+    });
+    return emptyReviewReport(inventory);
+  }
+  return undefined;
+}
+
 async function performReviewInner(
   request: ReviewRequest,
   diagnostics: Diagnostics,
@@ -4705,18 +4876,8 @@ async function performReviewInner(
   );
   if (reviewDeadlineExpired(deadline)) return reviewDeadlineReport(run, inventory);
 
-  // A path the consumer's profile does not describe is a gap in their coverage statement. Reviewing
-  // the rest and reporting success would hide it behind an apparently clean run.
-  if (inventory.unclassified.length > 0) {
-    return settleIncomplete(run, inventory, { reason: "inventory.unclassified_path" });
-  }
-  if (inventory.reviewablePaths.size === 0) {
-    diagnostics.record("settlement.complete", {
-      headSha: request.head,
-      durationMs: Date.now() - started,
-    });
-    return emptyReviewReport(inventory);
-  }
+  const initialSettlement = await settleInitialInventoryState(run, inventory, started);
+  if (initialSettlement !== undefined) return initialSettlement;
 
   const memo = await prepareMemoization(request, inventory, diagnostics);
   if (reviewDeadlineExpired(deadline)) return reviewDeadlineReport(run, inventory, memo);
@@ -4727,6 +4888,9 @@ async function performReviewInner(
   // shrinks that race from "the whole engine run" down to the gap between here and publication.
   const preflight = await abandonIfStale(run, inventory, memo);
   if (preflight !== undefined) return preflight;
+
+  const policyBlock = await automaticReviewBlock(run, inventory, memo);
+  if (policyBlock !== undefined) return settleIncomplete(run, inventory, policyBlock);
 
   const settlement = await settleOrReport(run, inventory, memo);
   if ("outcome" in settlement) return settlement;

@@ -175,6 +175,9 @@ test("buildEngineRuntimeConfig builds an openai RuntimeConfig from OCR_LLM_* var
   assert.equal(config.reviewTimeoutSeconds, 21_600);
   assert.equal(config.tokenBudget, 6_000_000);
   assert.equal(config.maxFindings, 500);
+  assert.equal(config.largeReviewMaxFiles, 0);
+  assert.equal(config.budgetFailureRetryLimit, 0);
+  assert.equal(config.largeReviewOverrideLabel, "");
 });
 
 test("buildEngineRuntimeConfig selects the anthropic protocol when OCR_USE_ANTHROPIC=true", () => {

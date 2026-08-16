@@ -8,6 +8,8 @@ import { renderMarker, summaryMarker } from "./marker.js";
 import {
   buildSummaryReport,
   maintainRunSummary,
+  ownSummaryRunHistory,
+  parseRunHistory,
   type SummaryPublishContext,
   type SummaryRunInput,
 } from "./summary.js";
@@ -218,6 +220,75 @@ describe("maintainRunSummary: upsert rules", () => {
     const second = createDiagnostics(() => undefined);
     await maintainRunSummary(context, runInput(), second);
     expect(second.drain().map((r) => r.code)).toContain("publish.summary_updated");
+  });
+});
+
+describe("run history parsing", () => {
+  it("parses the maintained history rows as closed, numeric data", async () => {
+    await maintainRunSummary(
+      context,
+      runInput({
+        report: report({
+          outcome: "incomplete",
+          reason: "settlement.incomplete.budget_exceeded",
+          cacheHits: 1,
+          checkpointHits: 2,
+        }),
+        durationMs: 15_200,
+      }),
+      createSilentDiagnostics(),
+    );
+
+    expect(parseRunHistory(api.existing[0]?.body)).toEqual([
+      {
+        outcome: "incomplete",
+        reason: "settlement.incomplete.budget_exceeded",
+        fresh: 3,
+        replayed: 1,
+        resumed: 2,
+        durationSeconds: 15,
+      },
+    ]);
+  });
+
+  it("reads only this reviewer's newest marker-bound summary", () => {
+    const oldBody = [
+      "old",
+      renderMarker(MARKER),
+      "",
+      "**Recent runs**",
+      "- `1111111` · incomplete (`settlement.incomplete.budget_exceeded`) · fresh 40 · replayed 0 · resumed 0 · 60s",
+      "",
+    ].join("\n");
+    const newBody = [
+      "new",
+      renderMarker(MARKER),
+      "",
+      "**Recent runs**",
+      "- `2222222` · complete · fresh 1 · replayed 2 · resumed 3 · 4s",
+      "",
+    ].join("\n");
+    const comments: IssueComment[] = [
+      { id: 1, body: oldBody, authorLogin: IDENTITY, url: "old" },
+      { id: 2, body: oldBody, authorLogin: "someone-else", url: "foreign" },
+      { id: 3, body: newBody, authorLogin: IDENTITY, url: "new" },
+    ];
+
+    expect(ownSummaryRunHistory(comments, IDENTITY, `${REF.owner}/${REF.repo}`, 7)).toEqual([
+      { outcome: "complete", fresh: 1, replayed: 2, resumed: 3, durationSeconds: 4 },
+    ]);
+  });
+
+  it("drops malformed carried rows instead of trusting free-form markdown", () => {
+    const body = [
+      "**Recent runs**",
+      "- `1111111` · incomplete (`not-a-real-code`) · fresh 1 · replayed 0 · resumed 0 · 2s",
+      "- candidate-controlled prose",
+    ].join("\n");
+
+    expect(parseRunHistory(body)).toEqual([
+      { outcome: "incomplete", fresh: 1, replayed: 0, resumed: 0, durationSeconds: 2 },
+    ]);
   });
 });
 

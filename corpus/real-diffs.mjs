@@ -156,6 +156,8 @@ const TOKEN_ENV_NAME = "OCR_LLM_TOKEN";
  *   already-merged, multi-file commit legitimately draws more observations than a typical pull
  *   request diff, and this script's whole purpose is to see them, not to have the run settle
  *   incomplete over an implausible-count guard sized for CI.
+ * - The large-review policy controls are disabled here because this script is an intentional local
+ *   measurement harness, not an automatic pull-request reviewer deciding whether CI should spend.
  */
 const ENGINE_RUNTIME_DEFAULTS = {
   language: "English",
@@ -166,6 +168,10 @@ const ENGINE_RUNTIME_DEFAULTS = {
   maxFindings: 500,
   renameDetectionPercent: 50,
   crossArtifactPass: false,
+  largeReviewMaxFiles: 0,
+  budgetFailureRetryLimit: 0,
+  budgetFailureMinFiles: 0,
+  largeReviewOverrideLabel: "",
 };
 
 /**

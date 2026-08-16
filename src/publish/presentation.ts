@@ -217,11 +217,36 @@ function gapLine(counts: Readonly<Record<string, number>> | undefined): string[]
  * Deliberately plainer than a finding: it is not a defect in the change, and dressing it up like
  * one would mislead. It still carries the repair block, because the operator action is real.
  */
+const DURABLE_POLICY_NOTICE_SENTENCE =
+  "This policy notice stays open across pushes until a later run completes.";
+
+function durablePolicyLines(durable: boolean): readonly string[] {
+  return durable ? ["", DURABLE_POLICY_NOTICE_SENTENCE] : [];
+}
+
+function incompleteAgentPrompt(durable: boolean): readonly string[] {
+  if (durable) {
+    return [
+      "Do not treat this pull request as reviewed. The reviewer intentionally did not start model",
+      "review for the current size or repeated budget-failure pattern. Split the pull request, reduce",
+      "the remaining reviewable file count, or apply the configured override; resolve this conversation",
+      "only once a later run has completed.",
+    ];
+  }
+  return [
+    "Do not treat this pull request as reviewed. Check the reviewer's run for the reason code shown",
+    "above and address the cause, or push a new head so the reviewer runs again. Resolve this",
+    "conversation only once a later run has completed.",
+  ];
+}
+
 export function composeIncompleteNotice(
   reasonCode: string,
   marker: string,
   counts?: Readonly<Record<string, number>>,
+  options: { readonly durable?: boolean } = {},
 ): string {
+  const durable = options.durable === true;
   return [
     // Specimen ③'s chip pair. "COVERAGE" is deliberately outside the CATEGORIES vocabulary;
     // the fixed notice sentence and marker keep this surface distinct from a defect finding.
@@ -234,6 +259,7 @@ export function composeIncompleteNotice(
     "**This change was not fully reviewed.**",
     "",
     `Keiko for Quality could not complete its review. Reason code: \`${escapeInline(reasonCode)}\`.`,
+    ...durablePolicyLines(durable),
     // The size of the shortfall, when the settlement measured one (2026-08-06). Numbers only, and
     // only the settlement's own numbers: they are what separates "one file is still owed" from
     // "nothing was reviewed", which is the first question every reader of this notice asks — the
@@ -248,9 +274,7 @@ export function composeIncompleteNotice(
     "<summary>🤖 Prompt for AI agents</summary>",
     "",
     "```",
-    "Do not treat this pull request as reviewed. Check the reviewer's run for the reason code shown",
-    "above and address the cause, or push a new head so the reviewer runs again. Resolve this",
-    "conversation only once a later run has completed.",
+    ...incompleteAgentPrompt(durable),
     "```",
     "",
     "</details>",
@@ -286,6 +310,10 @@ export function isIncompleteNoticeBody(body: string): boolean {
     body.includes("Keiko for Quality could not complete its review.") &&
     extractMarker(body) !== undefined
   );
+}
+
+export function isSupersedableIncompleteNoticeBody(body: string): boolean {
+  return isIncompleteNoticeBody(body) && !body.includes(DURABLE_POLICY_NOTICE_SENTENCE);
 }
 
 /** Mirrors `ReviewOutcome` (`review.ts`) without importing it, so `publish/` never depends on the

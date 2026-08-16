@@ -1,5 +1,5 @@
 import type { CommitSha, VersionTag } from "../core/brands.js";
-import type { ReasonCode } from "../diagnostics/reason-codes.js";
+import { isReasonCode, type ReasonCode } from "../diagnostics/reason-codes.js";
 import type { Diagnostics, DiagnosticRecord } from "../diagnostics/sink.js";
 import type { IssueComment, IssueCommentApi, RepoRef } from "../github/client.js";
 import { extractMarker, markerComment, summaryMarker } from "./marker.js";
@@ -233,6 +233,17 @@ export function buildSummaryReport(
  * outcome) without the comment growing without bound. */
 const HISTORY_HEADER = "**Recent runs**";
 const MAX_HISTORY_ROWS = 5;
+const HISTORY_ROW =
+  /^- `([0-9a-f]{7})` · (complete|incomplete|abandoned)(?: \(`([^`]+)`\))? · fresh ([0-9]+) · replayed ([0-9]+) · resumed ([0-9]+) · ([0-9]+)s$/;
+
+export interface SummaryHistoryRow {
+  readonly outcome: SummaryOutcome;
+  readonly reason?: ReasonCode;
+  readonly fresh: number;
+  readonly replayed: number;
+  readonly resumed: number;
+  readonly durationSeconds: number;
+}
 
 /** One run as one compact line: head, outcome (+reason), fresh/replayed split, duration. */
 function historyRow(input: SummaryRunInput): string {
@@ -267,6 +278,35 @@ export function renderRunHistory(currentRow: string, previousBody: string | unde
   return `\n\n${HISTORY_HEADER}\n${rows.join("\n")}\n`;
 }
 
+function parseHistoryRow(line: string): SummaryHistoryRow | undefined {
+  const match = HISTORY_ROW.exec(line);
+  if (match === null) return undefined;
+  const [, , outcome, reason, fresh, replayed, resumed, duration] = match;
+  if (outcome === undefined || fresh === undefined || replayed === undefined) return undefined;
+  if (resumed === undefined || duration === undefined) return undefined;
+  return {
+    outcome: outcome as SummaryOutcome,
+    ...(reason !== undefined && isReasonCode(reason) ? { reason } : {}),
+    fresh: Number(fresh),
+    replayed: Number(replayed),
+    resumed: Number(resumed),
+    durationSeconds: Number(duration),
+  };
+}
+
+export function parseRunHistory(body: string | undefined): readonly SummaryHistoryRow[] {
+  if (body === undefined) return [];
+  const at = body.indexOf(HISTORY_HEADER);
+  if (at === -1) return [];
+  const rows: SummaryHistoryRow[] = [];
+  for (const line of body.slice(at).split("\n").slice(1)) {
+    if (!line.startsWith("- `")) break;
+    const parsed = parseHistoryRow(line);
+    if (parsed !== undefined) rows.push(parsed);
+  }
+  return rows;
+}
+
 function newestOwnSummary(comments: readonly IssueComment[]): IssueComment | undefined {
   return comments.reduce<IssueComment | undefined>(
     (newest, comment) => (newest === undefined || comment.id > newest.id ? comment : newest),
@@ -283,6 +323,16 @@ function ownSummaryComments(
   return comments.filter(
     (comment) => comment.authorLogin === identity && extractMarker(comment.body) === marker,
   );
+}
+
+export function ownSummaryRunHistory(
+  comments: readonly IssueComment[],
+  identity: string,
+  repository: string,
+  pullNumber: number,
+): readonly SummaryHistoryRow[] {
+  const marker = summaryMarker(repository, pullNumber);
+  return parseRunHistory(newestOwnSummary(ownSummaryComments(comments, identity, marker))?.body);
 }
 
 /**

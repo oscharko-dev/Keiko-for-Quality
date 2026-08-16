@@ -476,6 +476,10 @@ async function runSingleShotForCorpus(dir, budgetTokens) {
       maxFindings: 50,
       renameDetectionPercent: 50,
       crossArtifactPass: false,
+      largeReviewMaxFiles: 0,
+      budgetFailureRetryLimit: 0,
+      budgetFailureMinFiles: 0,
+      largeReviewOverrideLabel: "",
     },
     "corpus.config",
   );

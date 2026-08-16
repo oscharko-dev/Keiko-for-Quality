@@ -27,7 +27,8 @@ import {
   type ReviewComment,
   type ReviewCommentInput,
 } from "./github/client.js";
-import { fingerprint, markerComment } from "./publish/marker.js";
+import { fingerprint, markerComment, renderMarker, summaryMarker } from "./publish/marker.js";
+import { composeIncompleteNotice } from "./publish/presentation.js";
 import {
   CLOSED_RUNTIME_FACT_CATALOG,
   CLOSED_RUNTIME_FACT_CATALOG_VERSION,
@@ -332,6 +333,92 @@ describe("performReview: review-cache memoization end to end", () => {
       ...(cacheStore === undefined ? {} : { cacheStore }),
     };
   }
+
+  function mockPolicyNoticePublication(request: ReviewRequest): {
+    readonly created: () => ReviewComment | undefined;
+  } {
+    let created: ReviewComment | undefined;
+    vi.spyOn(request.client, "createReviewComment").mockImplementation(
+      (_ref, _number, input: ReviewCommentInput) => {
+        created = {
+          id: 9001,
+          body: input.body,
+          path: input.path,
+          authorLogin: request.identity,
+          commitId: input.commitId,
+          url: "https://example.test/review-comments/9001",
+        };
+        return Promise.resolve(created);
+      },
+    );
+    vi.spyOn(request.client, "getReviewComment").mockImplementation(() => {
+      if (created === undefined) return Promise.reject(new Error("no created comment"));
+      return Promise.resolve(created);
+    });
+    return { created: () => created };
+  }
+
+  it("settles an oversized review before engine acquisition and publishes one durable policy notice", async () => {
+    acquireEngineMock.mockClear();
+    runEngineMock.mockClear();
+    const request: ReviewRequest = {
+      ...baseRequest(undefined),
+      config: { ...CONFIG, largeReviewMaxFiles: 1 },
+    };
+    const summaryHistory = vi.spyOn(request.client, "listIssueComments").mockResolvedValue([]);
+    const publication = mockPolicyNoticePublication(request);
+    const diagnostics = createSilentDiagnostics();
+
+    const report = await performReview(request, diagnostics);
+
+    expect(report.outcome).toBe("incomplete");
+    expect(report.reason).toBe("settlement.incomplete.review_too_large");
+    expect(acquireEngineMock).not.toHaveBeenCalled();
+    expect(runEngineMock).not.toHaveBeenCalled();
+    expect(summaryHistory).not.toHaveBeenCalled();
+    expect(publication.created()?.body).toContain("settlement.incomplete.review_too_large");
+    expect(publication.created()?.body).toContain("This policy notice stays open across pushes");
+  });
+
+  it("opens the budget circuit after repeated budget-exceeded runs without re-entering the engine", async () => {
+    acquireEngineMock.mockClear();
+    runEngineMock.mockClear();
+    const marker = summaryMarker("acme/widget", 1);
+    const request: ReviewRequest = {
+      ...baseRequest(undefined),
+      config: {
+        ...CONFIG,
+        largeReviewMaxFiles: 100,
+        budgetFailureRetryLimit: 2,
+        budgetFailureMinFiles: 1,
+      },
+    };
+    vi.spyOn(request.client, "listIssueComments").mockResolvedValue([
+      {
+        id: 1,
+        body: [
+          "summary",
+          renderMarker(marker),
+          "",
+          "**Recent runs**",
+          "- `1111111` · incomplete (`settlement.incomplete.budget_exceeded`) · fresh 2 · replayed 0 · resumed 0 · 30s",
+          "- `2222222` · incomplete (`settlement.incomplete.budget_exceeded`) · fresh 2 · replayed 0 · resumed 0 · 31s",
+          "",
+        ].join("\n"),
+        authorLogin: request.identity,
+        url: "https://example.test/issues/comments/1",
+      },
+    ]);
+    const publication = mockPolicyNoticePublication(request);
+
+    const report = await performReview(request, createSilentDiagnostics());
+
+    expect(report.outcome).toBe("incomplete");
+    expect(report.reason).toBe("settlement.incomplete.budget_circuit_open");
+    expect(acquireEngineMock).not.toHaveBeenCalled();
+    expect(runEngineMock).not.toHaveBeenCalled();
+    expect(publication.created()?.body).toContain("settlement.incomplete.budget_circuit_open");
+  });
 
   it("threads a cache hit into the engine's own exclude list and credits it in settlement", async () => {
     const ruleDigest = promptIdentityDigest(PROFILE, { paths: [] });
@@ -1256,6 +1343,16 @@ describe("performReview: review-cache memoization end to end", () => {
         "Keiko for Quality could not complete its review. Reason code: `x`.\n" +
         `<!-- ${markerComment("a".repeat(32))} -->`;
       expect(predicate(notice)).toBe(true);
+      expect(
+        predicate(
+          composeIncompleteNotice(
+            "settlement.incomplete.review_too_large",
+            markerComment("b".repeat(32)),
+            undefined,
+            { durable: true },
+          ),
+        ),
+      ).toBe(true);
       expect(predicate("The retry loop never resets its attempt counter.")).toBe(false);
     });
 
@@ -1281,6 +1378,17 @@ describe("performReview: review-cache memoization end to end", () => {
 
       expect(report.outcome).toBe("incomplete");
       expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      const predicate = cleanupSpy.mock.calls[0]?.[3] as (body: string) => boolean;
+      expect(
+        predicate(
+          composeIncompleteNotice(
+            "settlement.incomplete.review_too_large",
+            markerComment("a".repeat(32)),
+            undefined,
+            { durable: true },
+          ),
+        ),
+      ).toBe(false);
     });
 
     it("still calls it when the run is abandoned on a moved head", async () => {
