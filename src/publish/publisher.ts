@@ -1122,17 +1122,19 @@ export async function publishIncompleteNotice(
   // of the marker fingerprint: the notice's identity is reason+head, and a shifting number must
   // not mint a duplicate conversation.
   counts?: Readonly<Record<string, number>>,
+  options: { readonly scope?: "head" | "pull"; readonly durable?: boolean } = {},
 ): Promise<boolean> {
+  const markerPath = options.scope === "pull" ? "<pull-request>" : anchorPath;
   const marker = fingerprint({
     repository: `${context.ref.owner}/${context.ref.repo}`,
     pullNumber: context.pullNumber,
-    path: anchorPath,
+    path: markerPath,
     rule: "incomplete-review",
     body: reasonCode,
     // Unlike a finding, a notice's meaning is head-specific: "this exact commit was not covered".
     // Excluding it would let a notice about a since-superseded head suppress the one a fresh run for
     // the current head still needs to publish.
-    head: context.headSha,
+    ...(options.scope === "pull" ? {} : { head: context.headSha }),
   });
   const { markers: existing } = prefetch ?? (await prefetchExistingConversations(context));
   if (existing.has(marker)) return true;
@@ -1142,7 +1144,9 @@ export async function publishIncompleteNotice(
       context.ref,
       context.pullNumber,
       {
-        body: composeIncompleteNotice(reasonCode, markerComment(marker), counts),
+        body: composeIncompleteNotice(reasonCode, markerComment(marker), counts, {
+          ...(options.durable === undefined ? {} : { durable: options.durable }),
+        }),
         commitId: context.headSha,
         path: anchorPath,
       },

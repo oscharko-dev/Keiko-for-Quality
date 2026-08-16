@@ -1388,6 +1388,30 @@ describe("publishIncompleteNotice", () => {
     expect(api.created).toHaveLength(2);
   });
 
+  it("suppresses pull-scoped policy notices even when the placement anchor changes", async () => {
+    const options = { scope: "pull", durable: true } as const;
+    await publishIncompleteNotice(
+      context,
+      REASON,
+      "src/a.ts",
+      diagnostics,
+      undefined,
+      undefined,
+      options,
+    );
+    await publishIncompleteNotice(
+      context,
+      REASON,
+      "src/b.ts",
+      diagnostics,
+      undefined,
+      undefined,
+      options,
+    );
+
+    expect(api.created).toHaveLength(1);
+  });
+
   it("ignores an identical marker authored by anyone else", async () => {
     await publishIncompleteNotice(context, REASON, ANCHOR, diagnostics);
     api.existing = api.existing.map((comment) => ({ ...comment, authorLogin: "contributor" }));

@@ -43,6 +43,15 @@ describe("parseEventContext", () => {
     expect(parseEventContext(payload({ action: "edited" })).action).toBe("edited");
   });
 
+  it("reads pull request labels for the large-review override gate", () => {
+    const context = parseEventContext(
+      withPull({
+        labels: [{ name: "keiko-review-override" }, { name: "needs work" }, { color: "red" }],
+      }),
+    );
+    expect(context.labels).toEqual(["keiko-review-override", "needs work"]);
+  });
+
   it("detects a base retarget from the changes block", () => {
     const context = parseEventContext(
       payload({ action: "edited", changes: { base: { ref: { from: "main" } } } }),
@@ -176,6 +185,54 @@ describe("action inputs", () => {
       expect(() => runtimeConfigFromInputs({ ...BASE, INPUT_CROSS_ARTIFACT_PASS: "yes" })).toThrow(
         ValidationError,
       );
+    });
+  });
+
+  describe("large review controls", () => {
+    const BASE = {
+      INPUT_MODEL_PROTOCOL: "anthropic",
+      INPUT_MODEL_ENDPOINT: "https://api.example.test/v1",
+      INPUT_MODEL_ID: "test-model",
+      INPUT_MODEL_TOKEN_ENV: "KFQ_MODEL_TOKEN",
+    };
+
+    it("defaults to bounded automatic review with a label override", () => {
+      const config = runtimeConfigFromInputs(BASE);
+      expect(config.largeReviewMaxFiles).toBe(100);
+      expect(config.budgetFailureRetryLimit).toBe(2);
+      expect(config.budgetFailureMinFiles).toBe(20);
+      expect(config.largeReviewOverrideLabel).toBe("keiko-review-override");
+    });
+
+    it("maps explicit large-review inputs", () => {
+      const config = runtimeConfigFromInputs({
+        ...BASE,
+        INPUT_LARGE_REVIEW_MAX_FILES: "0",
+        INPUT_BUDGET_FAILURE_RETRY_LIMIT: "1",
+        INPUT_BUDGET_FAILURE_MIN_FILES: "10",
+        INPUT_LARGE_REVIEW_OVERRIDE_LABEL: "force-large-review",
+      });
+      expect(config.largeReviewMaxFiles).toBe(0);
+      expect(config.budgetFailureRetryLimit).toBe(1);
+      expect(config.budgetFailureMinFiles).toBe(10);
+      expect(config.largeReviewOverrideLabel).toBe("force-large-review");
+    });
+
+    it("allows an explicit empty override label to disable the bypass label", () => {
+      const config = runtimeConfigFromInputs({
+        ...BASE,
+        INPUT_LARGE_REVIEW_OVERRIDE_LABEL: "",
+      });
+      expect(config.largeReviewOverrideLabel).toBe("");
+    });
+
+    it("rejects retry limits the summary history cannot retain", () => {
+      expect(() =>
+        runtimeConfigFromInputs({
+          ...BASE,
+          INPUT_BUDGET_FAILURE_RETRY_LIMIT: "6",
+        }),
+      ).toThrow(ValidationError);
     });
   });
 

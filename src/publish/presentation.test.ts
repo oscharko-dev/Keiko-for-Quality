@@ -7,6 +7,7 @@ import {
   composeIncompleteNotice,
   composeSummaryBody,
   isIncompleteNoticeBody,
+  isSupersedableIncompleteNoticeBody,
   splitTitle,
   type SummaryCounts,
   type SummaryReport,
@@ -233,6 +234,20 @@ describe("isIncompleteNoticeBody", () => {
     "settlement.incomplete.engine_status_not_success",
   ])("recognises a notice regardless of which reason code it carries (%s)", (reason) => {
     expect(isIncompleteNoticeBody(composeIncompleteNotice(reason, MARKER))).toBe(true);
+  });
+
+  it("distinguishes durable policy notices from supersedable head notices", () => {
+    const ordinary = composeIncompleteNotice("settlement.incomplete.budget_exceeded", MARKER);
+    const durable = composeIncompleteNotice(
+      "settlement.incomplete.review_too_large",
+      MARKER,
+      { dispatched_files: 101, max_files: 100 },
+      { durable: true },
+    );
+
+    expect(isIncompleteNoticeBody(durable)).toBe(true);
+    expect(isSupersedableIncompleteNoticeBody(ordinary)).toBe(true);
+    expect(isSupersedableIncompleteNoticeBody(durable)).toBe(false);
   });
 
   /**

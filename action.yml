@@ -129,6 +129,34 @@ inputs:
       later qualification-corpus measurement, not on this input's mere existence.
     required: false
     default: "false"
+  large_review_max_files:
+    description: >-
+      Maximum number of still-unanswered reviewable files this run may send to the model
+      automatically after cache and generation-checkpoint hits are removed. `0` disables this
+      admission guard. Oversized runs settle incomplete before model work and publish one persistent
+      policy notice.
+    required: false
+    default: "100"
+  budget_failure_retry_limit:
+    description: >-
+      Number of consecutive prior `settlement.incomplete.budget_exceeded` summary rows tolerated
+      before a still-large review opens the budget circuit and settles incomplete before model work.
+      Requires `run_summary: true`; `0` disables the circuit breaker.
+    required: false
+    default: "2"
+  budget_failure_min_files:
+    description: >-
+      Minimum still-unanswered reviewable files required before prior budget failures can open the
+      circuit breaker. Small or materially shrunken reviews keep retrying.
+    required: false
+    default: "20"
+  large_review_override_label:
+    description: >-
+      Pull-request label whose presence bypasses both the large-review admission guard and the
+      repeated-budget-failure circuit breaker. Include the `labeled` pull-request event so applying
+      the label starts a fresh review. Empty disables label-based bypass.
+    required: false
+    default: "keiko-review-override"
 
 outputs:
   outcome:

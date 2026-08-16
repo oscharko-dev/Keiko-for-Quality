@@ -12,7 +12,7 @@ import {
 } from "./cache/review-cache.js";
 import { parseGuidelinePaths } from "./config/guidelines.js";
 import { loadReviewProfile, type CompiledProfile } from "./config/profile.js";
-import { parseRuntimeConfig, type RuntimeConfig } from "./config/runtime.js";
+import { LARGE_REVIEW_DEFAULTS, parseRuntimeConfig, type RuntimeConfig } from "./config/runtime.js";
 import { verdictsSurviveIncompleteness } from "./engine/settle.js";
 import { mergeBase, resolveRef, resolveTargetBranchTip, type GitContext } from "./git/plumbing.js";
 import { splitTitle } from "./publish/presentation.js";
@@ -281,6 +281,10 @@ const FIXED_RUNTIME_DEFAULTS = {
   language: "English",
   renameDetectionPercent: 50,
   crossArtifactPass: false,
+  largeReviewMaxFiles: LARGE_REVIEW_DEFAULTS.maxFiles,
+  budgetFailureRetryLimit: LARGE_REVIEW_DEFAULTS.budgetFailureRetryLimit,
+  budgetFailureMinFiles: LARGE_REVIEW_DEFAULTS.budgetFailureMinFiles,
+  largeReviewOverrideLabel: "",
 } as const;
 
 /**
@@ -307,6 +311,10 @@ export function buildRuntimeConfig(env: NodeJS.ProcessEnv, args: CliArgs): Runti
       maxFindings: args.maxFindings,
       renameDetectionPercent: FIXED_RUNTIME_DEFAULTS.renameDetectionPercent,
       crossArtifactPass: FIXED_RUNTIME_DEFAULTS.crossArtifactPass,
+      largeReviewMaxFiles: FIXED_RUNTIME_DEFAULTS.largeReviewMaxFiles,
+      budgetFailureRetryLimit: FIXED_RUNTIME_DEFAULTS.budgetFailureRetryLimit,
+      budgetFailureMinFiles: FIXED_RUNTIME_DEFAULTS.budgetFailureMinFiles,
+      largeReviewOverrideLabel: FIXED_RUNTIME_DEFAULTS.largeReviewOverrideLabel,
     },
     "config",
   );

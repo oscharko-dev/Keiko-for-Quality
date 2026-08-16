@@ -623,6 +623,13 @@ function parseGuidelinePaths(raw, field = "guidelines") {
 
 // src/config/runtime.ts
 var PROTOCOLS2 = /* @__PURE__ */ new Set(["openai", "anthropic"]);
+var LARGE_REVIEW_DEFAULTS = {
+  maxFiles: 100,
+  budgetFailureRetryLimit: 2,
+  budgetFailureMinFiles: 20,
+  overrideLabel: "keiko-review-override",
+  summaryHistoryRows: 5
+};
 var KEYS = [
   "protocol",
   "endpoint",
@@ -635,7 +642,11 @@ var KEYS = [
   "tokenBudget",
   "maxFindings",
   "renameDetectionPercent",
-  "crossArtifactPass"
+  "crossArtifactPass",
+  "largeReviewMaxFiles",
+  "budgetFailureRetryLimit",
+  "budgetFailureMinFiles",
+  "largeReviewOverrideLabel"
 ];
 function parseEndpoint(value, field) {
   const raw = asString(value, field, 2048);
@@ -658,6 +669,38 @@ function parseTokenEnvName(value, field) {
 function asBoolean(value, field) {
   if (typeof value !== "boolean") throw new ValidationError(field);
   return value;
+}
+function asOptionalLabel(value, field) {
+  if (typeof value !== "string" || value.length > 64 || hasControlCharacters(value)) {
+    throw new ValidationError(field);
+  }
+  return value;
+}
+function parseLargeReviewControls(object, field) {
+  return {
+    largeReviewMaxFiles: asInteger(
+      object.largeReviewMaxFiles,
+      `${field}.largeReviewMaxFiles`,
+      0,
+      2e4
+    ),
+    budgetFailureRetryLimit: asInteger(
+      object.budgetFailureRetryLimit,
+      `${field}.budgetFailureRetryLimit`,
+      0,
+      LARGE_REVIEW_DEFAULTS.summaryHistoryRows
+    ),
+    budgetFailureMinFiles: asInteger(
+      object.budgetFailureMinFiles,
+      `${field}.budgetFailureMinFiles`,
+      0,
+      2e4
+    ),
+    largeReviewOverrideLabel: asOptionalLabel(
+      object.largeReviewOverrideLabel,
+      `${field}.largeReviewOverrideLabel`
+    )
+  };
 }
 function parseRuntimeConfig(input, field = "config") {
   const object = asObject(input, field);
@@ -692,7 +735,8 @@ function parseRuntimeConfig(input, field = "config") {
       1,
       100
     ),
-    crossArtifactPass: asBoolean(object.crossArtifactPass, `${field}.crossArtifactPass`)
+    crossArtifactPass: asBoolean(object.crossArtifactPass, `${field}.crossArtifactPass`),
+    ...parseLargeReviewControls(object, field)
   };
 }
 function readModelToken(config, env) {
@@ -1499,6 +1543,8 @@ var REASON_CODES = [
   "settlement.incomplete.coverage_failed",
   "settlement.incomplete.warning_not_allowlisted",
   "settlement.incomplete.budget_exceeded",
+  "settlement.incomplete.review_too_large",
+  "settlement.incomplete.budget_circuit_open",
   "settlement.incomplete.engine_error",
   // A settlement's `reason` is published in the incomplete notice, so it answers "why was my
   // change not fully reviewed" for a reader who has no access to the log. It must therefore name
@@ -1561,6 +1607,7 @@ var REASON_CODES = [
   "publish.summary_updated",
   "publish.summary_upsert_failed",
   "publish.summary_disabled",
+  "publish.summary_history_unavailable",
   // Configuration
   "config.invalid",
   "config.loaded",
@@ -7724,6 +7771,9 @@ async function planPublication(context, findings, diagnostics, prefetch) {
   };
 }
 
+// src/publish/summary.ts
+var MAX_HISTORY_ROWS = LARGE_REVIEW_DEFAULTS.summaryHistoryRows;
+
 // src/publish/change-diff.ts
 var DIFF_TIMEOUT_MS = 3e4;
 var DIFF_MAX_BUFFER = 2 * 1024 * 1024;
@@ -13786,12 +13836,14 @@ function computeEngineBudget(request, inventory, memo) {
     1,
     request.config.tokenBudget - publicationQualityReserve(request.config.maxFindings)
   );
+  const dispatchedFiles = dispatchedPathCount(inventory, excludedSet);
+  const dispatchedChangedLines = reviewableChangedLines(inventory, excludedSet);
   const allottedBudget = computeAllottedBudget(
     engineCeiling,
-    dispatchedPathCount(inventory, excludedSet),
-    reviewableChangedLines(inventory, excludedSet)
+    dispatchedFiles,
+    dispatchedChangedLines
   );
-  return { excluded, allottedBudget };
+  return { excluded, allottedBudget, dispatchedFiles, dispatchedChangedLines };
 }
 function bookPropagatedEngineFailure(error, ledger) {
   if (error instanceof EngineRunError) ledger.engine += error.wireTokens ?? 0;
@@ -15788,7 +15840,11 @@ function resolveCliArgs(raw, cwd) {
 var FIXED_RUNTIME_DEFAULTS = {
   language: "English",
   renameDetectionPercent: 50,
-  crossArtifactPass: false
+  crossArtifactPass: false,
+  largeReviewMaxFiles: LARGE_REVIEW_DEFAULTS.maxFiles,
+  budgetFailureRetryLimit: LARGE_REVIEW_DEFAULTS.budgetFailureRetryLimit,
+  budgetFailureMinFiles: LARGE_REVIEW_DEFAULTS.budgetFailureMinFiles,
+  largeReviewOverrideLabel: ""
 };
 function buildRuntimeConfig(env, args) {
   return parseRuntimeConfig(
@@ -15804,7 +15860,11 @@ function buildRuntimeConfig(env, args) {
       tokenBudget: args.tokenBudget,
       maxFindings: args.maxFindings,
       renameDetectionPercent: FIXED_RUNTIME_DEFAULTS.renameDetectionPercent,
-      crossArtifactPass: FIXED_RUNTIME_DEFAULTS.crossArtifactPass
+      crossArtifactPass: FIXED_RUNTIME_DEFAULTS.crossArtifactPass,
+      largeReviewMaxFiles: FIXED_RUNTIME_DEFAULTS.largeReviewMaxFiles,
+      budgetFailureRetryLimit: FIXED_RUNTIME_DEFAULTS.budgetFailureRetryLimit,
+      budgetFailureMinFiles: FIXED_RUNTIME_DEFAULTS.budgetFailureMinFiles,
+      largeReviewOverrideLabel: FIXED_RUNTIME_DEFAULTS.largeReviewOverrideLabel
     },
     "config"
   );

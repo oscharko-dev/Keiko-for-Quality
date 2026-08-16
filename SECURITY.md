@@ -121,7 +121,9 @@ precisely to read resolved conversations — but only where a human wrote a cons
 what separates "this was decided" from "this was clicked away."
 
 **Incomplete never reads as clean.** Partial, skipped, failed, unknown, unlisted-warning-bearing,
-budget-exhausted, timed-out, and malformed results all settle as incomplete.
+oversized, repeatedly budget-exhausted, timed-out, and malformed results all settle as incomplete.
+The oversized and repeated-budget paths stop before engine acquisition, so they do not hand a model
+credential to a run the configured policy already knows should not spend.
 
 **Coverage is reconciled at one of two strengths, and the run says which.** Against a released
 engine only a `files_reviewed` count is available, so omission is caught by cardinality rather than

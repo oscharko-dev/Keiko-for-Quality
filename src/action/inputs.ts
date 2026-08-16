@@ -1,7 +1,11 @@
 import { appendFileSync } from "node:fs";
 
 import { ValidationError, commitSha, type CommitSha } from "../core/brands.js";
-import { parseRuntimeConfig, type RuntimeConfig } from "../config/runtime.js";
+import {
+  LARGE_REVIEW_DEFAULTS,
+  parseRuntimeConfig,
+  type RuntimeConfig,
+} from "../config/runtime.js";
 
 /**
  * GitHub Actions input and output handling.
@@ -18,6 +22,15 @@ function inputKey(name: string): string {
 
 export function readInput(env: NodeJS.ProcessEnv, name: string): string {
   return (env[inputKey(name)] ?? "").trim();
+}
+
+/**
+ * Undefined means the action input was omitted and should use the action's default. An explicitly
+ * empty value remains empty; `large_review_override_label` uses that to disable label-based bypass.
+ */
+function readInputWithDefault(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
+  const raw = env[inputKey(name)];
+  return raw === undefined ? fallback : raw.trim();
 }
 
 export function readRequiredInput(env: NodeJS.ProcessEnv, name: string): string {
@@ -83,6 +96,26 @@ export function runtimeConfigFromInputs(env: NodeJS.ProcessEnv): RuntimeConfig {
       // Dark-shipped prototype (issue #80 technique C, contracts/change-pass.ts): off by
       // default, same "absent means the default" contract every other input here follows.
       crossArtifactPass: readBooleanInput(env, "cross_artifact_pass", false),
+      largeReviewMaxFiles: readIntegerInput(
+        env,
+        "large_review_max_files",
+        LARGE_REVIEW_DEFAULTS.maxFiles,
+      ),
+      budgetFailureRetryLimit: readIntegerInput(
+        env,
+        "budget_failure_retry_limit",
+        LARGE_REVIEW_DEFAULTS.budgetFailureRetryLimit,
+      ),
+      budgetFailureMinFiles: readIntegerInput(
+        env,
+        "budget_failure_min_files",
+        LARGE_REVIEW_DEFAULTS.budgetFailureMinFiles,
+      ),
+      largeReviewOverrideLabel: readInputWithDefault(
+        env,
+        "large_review_override_label",
+        LARGE_REVIEW_DEFAULTS.overrideLabel,
+      ),
     },
     "input",
   );
@@ -108,6 +141,7 @@ export interface EventContext {
   readonly headRepoFullName: string | undefined;
   readonly action: string | undefined;
   readonly previousBaseRef: string | undefined;
+  readonly labels: readonly string[];
   /**
    * `pull_request.updated_at` from the webhook payload — GitHub's own server-assigned timestamp for
    * this activity, never this process's wall clock. Empty when the payload carried none (an
@@ -148,6 +182,13 @@ function joinIntent(title: unknown, body: unknown): string {
   return parts.filter((part) => part !== "").join("\n\n");
 }
 
+function labelNames(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => text(asRecord(entry).name))
+    .filter((name) => name !== "" && name.length <= 100);
+}
+
 export function parseEventContext(payload: unknown): EventContext {
   const root = asRecord(payload);
   // The activity type lives in the payload, not the environment: `GITHUB_EVENT_NAME` is
@@ -181,6 +222,7 @@ export function parseEventContext(payload: unknown): EventContext {
     headRepoFullName: typeof headRepo.full_name === "string" ? headRepo.full_name : undefined,
     action: eventAction,
     previousBaseRef: typeof baseChange.from === "string" ? baseChange.from : undefined,
+    labels: labelNames(pull.labels),
     eventTimestamp: text(pull.updated_at),
   };
 }

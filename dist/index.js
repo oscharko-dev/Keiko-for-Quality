@@ -1089,42 +1089,127 @@ function settle(inventory, result, profile, config, memoizedPaths = NO_MEMOIZED_
   return result.manifestPresent ? settleReconciled(inventory, result, profile, config, memoizedPaths) : settleCounted(inventory, result, profile, config, memoizedPaths);
 }
 
-// src/publish/marker.ts
-import { createHash as createHash2 } from "node:crypto";
-var MARKER_PREFIX = "keiko-for-quality";
-var MARKER_PATTERN = new RegExp(String.raw`<!--\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\s*-->`);
-var FIELD_SEPARATOR2 = "\0";
-function normalizeUnicodeText(input) {
-  return input.normalize("NFC").replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").replace(/[\u2018\u2019\u201A\u201B]/g, "'").replace(/[\u201C\u201D\u201E\u201F]/g, '"').replace(new RegExp("\\p{Zs}", "gu"), " ").toLowerCase();
+// src/config/runtime.ts
+var PROTOCOLS2 = /* @__PURE__ */ new Set(["openai", "anthropic"]);
+var LARGE_REVIEW_DEFAULTS = {
+  maxFiles: 100,
+  budgetFailureRetryLimit: 2,
+  budgetFailureMinFiles: 20,
+  overrideLabel: "keiko-review-override",
+  summaryHistoryRows: 5
+};
+var KEYS = [
+  "protocol",
+  "endpoint",
+  "model",
+  "tokenEnvName",
+  "language",
+  "concurrency",
+  "fileTimeoutSeconds",
+  "reviewTimeoutSeconds",
+  "tokenBudget",
+  "maxFindings",
+  "renameDetectionPercent",
+  "crossArtifactPass",
+  "largeReviewMaxFiles",
+  "budgetFailureRetryLimit",
+  "budgetFailureMinFiles",
+  "largeReviewOverrideLabel"
+];
+function parseEndpoint(value, field) {
+  const raw = asString(value, field, 2048);
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new ValidationError(field);
+  }
+  if (url.protocol !== "https:") throw new ValidationError(field);
+  if (url.username !== "" || url.password !== "") throw new ValidationError(field);
+  return url.toString();
 }
-function normalizeForFingerprint(body) {
-  return normalizeUnicodeText(body).replace(/```[\s\S]*?```/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+function parseTokenEnvName(value, field) {
+  const name = asString(value, field, 128);
+  if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new ValidationError(field);
+  if (name === "GITHUB_TOKEN" || name.startsWith("ACTIONS_")) throw new ValidationError(field);
+  return name;
 }
-function fingerprint(input) {
-  const material = [
-    input.repository,
-    String(input.pullNumber),
-    input.path,
-    input.rule,
-    normalizeForFingerprint(input.body),
-    ...input.head !== void 0 ? [input.head] : []
-  ].join(FIELD_SEPARATOR2);
-  return createHash2("sha256").update(material).digest("hex").slice(0, 32);
+function asBoolean(value, field) {
+  if (typeof value !== "boolean") throw new ValidationError(field);
+  return value;
 }
-function extractMarker(body) {
-  return MARKER_PATTERN.exec(body)?.[1];
+function asOptionalLabel(value, field) {
+  if (typeof value !== "string" || value.length > 64 || hasControlCharacters(value)) {
+    throw new ValidationError(field);
+  }
+  return value;
 }
-function markerComment(value) {
-  return `${MARKER_PREFIX}:v1:${value}`;
+function parseLargeReviewControls(object, field) {
+  return {
+    largeReviewMaxFiles: asInteger(
+      object.largeReviewMaxFiles,
+      `${field}.largeReviewMaxFiles`,
+      0,
+      2e4
+    ),
+    budgetFailureRetryLimit: asInteger(
+      object.budgetFailureRetryLimit,
+      `${field}.budgetFailureRetryLimit`,
+      0,
+      LARGE_REVIEW_DEFAULTS.summaryHistoryRows
+    ),
+    budgetFailureMinFiles: asInteger(
+      object.budgetFailureMinFiles,
+      `${field}.budgetFailureMinFiles`,
+      0,
+      2e4
+    ),
+    largeReviewOverrideLabel: asOptionalLabel(
+      object.largeReviewOverrideLabel,
+      `${field}.largeReviewOverrideLabel`
+    )
+  };
 }
-function summaryMarker(repository, pullNumber) {
-  return fingerprint({
-    repository,
-    pullNumber,
-    path: "__run-summary__",
-    rule: "run-summary",
-    body: "run-summary"
-  });
+function parseRuntimeConfig(input, field = "config") {
+  const object = asObject(input, field);
+  requireKeys(object, [...KEYS], field);
+  rejectUnknownKeys(object, [...KEYS], field);
+  const protocol2 = asString(object.protocol, `${field}.protocol`, 32);
+  if (!PROTOCOLS2.has(protocol2)) throw new ValidationError(`${field}.protocol`);
+  return {
+    protocol: protocol2,
+    endpoint: parseEndpoint(object.endpoint, `${field}.endpoint`),
+    model: asString(object.model, `${field}.model`, 256),
+    tokenEnvName: parseTokenEnvName(object.tokenEnvName, `${field}.tokenEnvName`),
+    language: asString(object.language, `${field}.language`, 64),
+    concurrency: asInteger(object.concurrency, `${field}.concurrency`, 1, 32),
+    fileTimeoutSeconds: asInteger(
+      object.fileTimeoutSeconds,
+      `${field}.fileTimeoutSeconds`,
+      5,
+      3600
+    ),
+    reviewTimeoutSeconds: asInteger(
+      object.reviewTimeoutSeconds,
+      `${field}.reviewTimeoutSeconds`,
+      30,
+      21600
+    ),
+    tokenBudget: asInteger(object.tokenBudget, `${field}.tokenBudget`, 1e3, 1e8),
+    maxFindings: asInteger(object.maxFindings, `${field}.maxFindings`, 1, 500),
+    renameDetectionPercent: asInteger(
+      object.renameDetectionPercent,
+      `${field}.renameDetectionPercent`,
+      1,
+      100
+    ),
+    crossArtifactPass: asBoolean(object.crossArtifactPass, `${field}.crossArtifactPass`),
+    ...parseLargeReviewControls(object, field)
+  };
+}
+function readModelToken(config, env) {
+  const value = env[config.tokenEnvName];
+  return value !== void 0 && value.length > 0 ? value : void 0;
 }
 
 // src/diagnostics/reason-codes.ts
@@ -1187,6 +1272,8 @@ var REASON_CODES = [
   "settlement.incomplete.coverage_failed",
   "settlement.incomplete.warning_not_allowlisted",
   "settlement.incomplete.budget_exceeded",
+  "settlement.incomplete.review_too_large",
+  "settlement.incomplete.budget_circuit_open",
   "settlement.incomplete.engine_error",
   // A settlement's `reason` is published in the incomplete notice, so it answers "why was my
   // change not fully reviewed" for a reader who has no access to the log. It must therefore name
@@ -1249,6 +1336,7 @@ var REASON_CODES = [
   "publish.summary_updated",
   "publish.summary_upsert_failed",
   "publish.summary_disabled",
+  "publish.summary_history_unavailable",
   // Configuration
   "config.invalid",
   "config.loaded",
@@ -1411,6 +1499,44 @@ var REASON_CODES = [
 var REASON_CODE_SET = new Set(REASON_CODES);
 function isReasonCode(value) {
   return REASON_CODE_SET.has(value);
+}
+
+// src/publish/marker.ts
+import { createHash as createHash2 } from "node:crypto";
+var MARKER_PREFIX = "keiko-for-quality";
+var MARKER_PATTERN = new RegExp(String.raw`<!--\s*${MARKER_PREFIX}:v1:([0-9a-f]{32})\s*-->`);
+var FIELD_SEPARATOR2 = "\0";
+function normalizeUnicodeText(input) {
+  return input.normalize("NFC").replace(/[\u200B-\u200D\u2060\uFEFF]/g, "").replace(/[\u2018\u2019\u201A\u201B]/g, "'").replace(/[\u201C\u201D\u201E\u201F]/g, '"').replace(new RegExp("\\p{Zs}", "gu"), " ").toLowerCase();
+}
+function normalizeForFingerprint(body) {
+  return normalizeUnicodeText(body).replace(/```[\s\S]*?```/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+}
+function fingerprint(input) {
+  const material = [
+    input.repository,
+    String(input.pullNumber),
+    input.path,
+    input.rule,
+    normalizeForFingerprint(input.body),
+    ...input.head !== void 0 ? [input.head] : []
+  ].join(FIELD_SEPARATOR2);
+  return createHash2("sha256").update(material).digest("hex").slice(0, 32);
+}
+function extractMarker(body) {
+  return MARKER_PATTERN.exec(body)?.[1];
+}
+function markerComment(value) {
+  return `${MARKER_PREFIX}:v1:${value}`;
+}
+function summaryMarker(repository, pullNumber) {
+  return fingerprint({
+    repository,
+    pullNumber,
+    path: "__run-summary__",
+    rule: "run-summary",
+    body: "run-summary"
+  });
 }
 
 // src/publish/sanitize.ts
@@ -1734,7 +1860,27 @@ function gapLine(counts) {
   }
   return [];
 }
-function composeIncompleteNotice(reasonCode, marker, counts) {
+var DURABLE_POLICY_NOTICE_SENTENCE = "This policy notice stays open across pushes until a later run completes.";
+function durablePolicyLines(durable) {
+  return durable ? ["", DURABLE_POLICY_NOTICE_SENTENCE] : [];
+}
+function incompleteAgentPrompt(durable) {
+  if (durable) {
+    return [
+      "Do not treat this pull request as reviewed. The reviewer intentionally did not start model",
+      "review for the current size or repeated budget-failure pattern. Split the pull request, reduce",
+      "the remaining reviewable file count, or apply the configured override; resolve this conversation",
+      "only once a later run has completed."
+    ];
+  }
+  return [
+    "Do not treat this pull request as reviewed. Check the reviewer's run for the reason code shown",
+    "above and address the cause, or push a new head so the reviewer runs again. Resolve this",
+    "conversation only once a later run has completed."
+  ];
+}
+function composeIncompleteNotice(reasonCode, marker, counts, options2 = {}) {
+  const durable = options2.durable === true;
   return [
     // Specimen ③'s chip pair. "COVERAGE" is deliberately outside the CATEGORIES vocabulary;
     // the fixed notice sentence and marker keep this surface distinct from a defect finding.
@@ -1747,6 +1893,7 @@ function composeIncompleteNotice(reasonCode, marker, counts) {
     "**This change was not fully reviewed.**",
     "",
     `Keiko for Quality could not complete its review. Reason code: \`${escapeInline(reasonCode)}\`.`,
+    ...durablePolicyLines(durable),
     // The size of the shortfall, when the settlement measured one (2026-08-06). Numbers only, and
     // only the settlement's own numbers: they are what separates "one file is still owed" from
     // "nothing was reviewed", which is the first question every reader of this notice asks — the
@@ -1761,9 +1908,7 @@ function composeIncompleteNotice(reasonCode, marker, counts) {
     "<summary>\u{1F916} Prompt for AI agents</summary>",
     "",
     "```",
-    "Do not treat this pull request as reviewed. Check the reviewer's run for the reason code shown",
-    "above and address the cause, or push a new head so the reviewer runs again. Resolve this",
-    "conversation only once a later run has completed.",
+    ...incompleteAgentPrompt(durable),
     "```",
     "",
     "</details>",
@@ -1773,6 +1918,9 @@ function composeIncompleteNotice(reasonCode, marker, counts) {
 }
 function isIncompleteNoticeBody(body) {
   return body.includes("Keiko for Quality could not complete its review.") && extractMarker(body) !== void 0;
+}
+function isSupersedableIncompleteNoticeBody(body) {
+  return isIncompleteNoticeBody(body) && !body.includes(DURABLE_POLICY_NOTICE_SENTENCE);
 }
 function shortSha(sha) {
   return sha.slice(0, 7);
@@ -1900,7 +2048,7 @@ function buildSummaryReport(input, diagnostics) {
     cacheHits: report.cacheHits,
     checkpointHits: report.checkpointHits,
     contextInvalidated: report.contextInvalidated,
-    freshlyReviewed: Math.max(0, report.reviewablePaths - report.cacheHits - report.checkpointHits),
+    freshlyReviewed: report.reviewedPaths ?? Math.max(0, report.reviewablePaths - report.cacheHits - report.checkpointHits),
     findingsPublished: publish.published,
     // Unlike the four counts below, this one stays optional on `PublishOutcome` even once `publish`
     // is known to exist — see its own doc comment in `publisher.ts` — so `EMPTY_PUBLISH_OUTCOME`'s
@@ -1936,11 +2084,14 @@ function buildSummaryReport(input, diagnostics) {
   };
 }
 var HISTORY_HEADER = "**Recent runs**";
-var MAX_HISTORY_ROWS = 5;
+var MAX_HISTORY_ROWS = LARGE_REVIEW_DEFAULTS.summaryHistoryRows;
+var MAX_HISTORY_INTEGER = 1e9;
+var HISTORY_ROW = /^- `([0-9a-f]{7})` · (complete|incomplete|abandoned)(?: \(`([^`]+)`\))? · fresh (\d+) · replayed (\d+) · resumed (\d+) · (\d+)s$/;
 function historyRow(input) {
   const r = input.report;
   const reason = r.reason === void 0 ? "" : ` (\`${r.reason}\`)`;
-  return `- \`${input.headSha.slice(0, 7)}\` \xB7 ${r.outcome}${reason} \xB7 fresh ${String(r.reviewablePaths - r.cacheHits - r.checkpointHits)} \xB7 replayed ${String(r.cacheHits)} \xB7 resumed ${String(r.checkpointHits)} \xB7 ${String(Math.round(input.durationMs / 1e3))}s`;
+  const fresh = r.reviewedPaths ?? Math.max(0, r.reviewablePaths - r.cacheHits - r.checkpointHits);
+  return `- \`${input.headSha.slice(0, 7)}\` \xB7 ${r.outcome}${reason} \xB7 fresh ${String(fresh)} \xB7 replayed ${String(r.cacheHits)} \xB7 resumed ${String(r.checkpointHits)} \xB7 ${String(Math.round(input.durationMs / 1e3))}s`;
 }
 function renderRunHistory(currentRow, previousBody) {
   const carried = [];
@@ -1960,6 +2111,68 @@ ${HISTORY_HEADER}
 ${rows.join("\n")}
 `;
 }
+function parseHistoryRow(line) {
+  const match = HISTORY_ROW.exec(line);
+  if (match === null) return void 0;
+  const captures = parseHistoryCaptures(match);
+  if (captures === void 0) return void 0;
+  const numbers = parseHistoryNumbers(captures);
+  if (numbers === void 0) return void 0;
+  return {
+    outcome: captures.outcome,
+    ...captures.reason === void 0 ? {} : { reason: captures.reason },
+    ...numbers
+  };
+}
+function parseHistoryCaptures(match) {
+  const [, , outcome, reason, fresh, replayed, resumed, duration] = match;
+  if (outcome === void 0 || fresh === void 0 || replayed === void 0) return void 0;
+  if (resumed === void 0 || duration === void 0) return void 0;
+  if (reason !== void 0 && !isReasonCode(reason)) return void 0;
+  return {
+    outcome,
+    ...reason === void 0 ? {} : { reason },
+    fresh,
+    replayed,
+    resumed,
+    duration
+  };
+}
+function parseHistoryNumbers(captures) {
+  const { fresh, replayed, resumed, duration } = captures;
+  const parsedFresh = parseHistoryInteger(fresh, "summary.history.fresh");
+  const parsedReplayed = parseHistoryInteger(replayed, "summary.history.replayed");
+  const parsedResumed = parseHistoryInteger(resumed, "summary.history.resumed");
+  const parsedDuration = parseHistoryInteger(duration, "summary.history.duration");
+  if (parsedFresh === void 0 || parsedReplayed === void 0 || parsedResumed === void 0 || parsedDuration === void 0) {
+    return void 0;
+  }
+  return {
+    fresh: parsedFresh,
+    replayed: parsedReplayed,
+    resumed: parsedResumed,
+    durationSeconds: parsedDuration
+  };
+}
+function parseHistoryInteger(raw, field) {
+  try {
+    return asInteger(Number(raw), field, 0, MAX_HISTORY_INTEGER);
+  } catch {
+    return void 0;
+  }
+}
+function parseRunHistory(body) {
+  if (body === void 0) return [];
+  const at = body.indexOf(HISTORY_HEADER);
+  if (at === -1) return [];
+  const rows = [];
+  for (const line of body.slice(at).split("\n").slice(1)) {
+    if (!line.startsWith("- `")) break;
+    const parsed = parseHistoryRow(line);
+    if (parsed !== void 0) rows.push(parsed);
+  }
+  return rows;
+}
 function newestOwnSummary(comments) {
   return comments.reduce(
     (newest, comment) => newest === void 0 || comment.id > newest.id ? comment : newest,
@@ -1970,6 +2183,10 @@ function ownSummaryComments(comments, identity, marker) {
   return comments.filter(
     (comment) => comment.authorLogin === identity && extractMarker(comment.body) === marker
   );
+}
+function ownSummaryRunHistory(comments, identity, repository, pullNumber) {
+  const marker = summaryMarker(repository, pullNumber);
+  return parseRunHistory(newestOwnSummary(ownSummaryComments(comments, identity, marker))?.body);
 }
 async function maintainRunSummary(context, input, diagnostics) {
   try {
@@ -2203,85 +2420,6 @@ function buildNewEntries(inputs) {
 }
 function buildGenerationCheckpointEntries(inputs) {
   return buildEntries(inputs, GENERATION_CHECKPOINT_SEMANTICS);
-}
-
-// src/config/runtime.ts
-var PROTOCOLS2 = /* @__PURE__ */ new Set(["openai", "anthropic"]);
-var KEYS = [
-  "protocol",
-  "endpoint",
-  "model",
-  "tokenEnvName",
-  "language",
-  "concurrency",
-  "fileTimeoutSeconds",
-  "reviewTimeoutSeconds",
-  "tokenBudget",
-  "maxFindings",
-  "renameDetectionPercent",
-  "crossArtifactPass"
-];
-function parseEndpoint(value, field) {
-  const raw = asString(value, field, 2048);
-  let url;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new ValidationError(field);
-  }
-  if (url.protocol !== "https:") throw new ValidationError(field);
-  if (url.username !== "" || url.password !== "") throw new ValidationError(field);
-  return url.toString();
-}
-function parseTokenEnvName(value, field) {
-  const name = asString(value, field, 128);
-  if (!/^[A-Z][A-Z0-9_]*$/.test(name)) throw new ValidationError(field);
-  if (name === "GITHUB_TOKEN" || name.startsWith("ACTIONS_")) throw new ValidationError(field);
-  return name;
-}
-function asBoolean(value, field) {
-  if (typeof value !== "boolean") throw new ValidationError(field);
-  return value;
-}
-function parseRuntimeConfig(input, field = "config") {
-  const object = asObject(input, field);
-  requireKeys(object, [...KEYS], field);
-  rejectUnknownKeys(object, [...KEYS], field);
-  const protocol2 = asString(object.protocol, `${field}.protocol`, 32);
-  if (!PROTOCOLS2.has(protocol2)) throw new ValidationError(`${field}.protocol`);
-  return {
-    protocol: protocol2,
-    endpoint: parseEndpoint(object.endpoint, `${field}.endpoint`),
-    model: asString(object.model, `${field}.model`, 256),
-    tokenEnvName: parseTokenEnvName(object.tokenEnvName, `${field}.tokenEnvName`),
-    language: asString(object.language, `${field}.language`, 64),
-    concurrency: asInteger(object.concurrency, `${field}.concurrency`, 1, 32),
-    fileTimeoutSeconds: asInteger(
-      object.fileTimeoutSeconds,
-      `${field}.fileTimeoutSeconds`,
-      5,
-      3600
-    ),
-    reviewTimeoutSeconds: asInteger(
-      object.reviewTimeoutSeconds,
-      `${field}.reviewTimeoutSeconds`,
-      30,
-      21600
-    ),
-    tokenBudget: asInteger(object.tokenBudget, `${field}.tokenBudget`, 1e3, 1e8),
-    maxFindings: asInteger(object.maxFindings, `${field}.maxFindings`, 1, 500),
-    renameDetectionPercent: asInteger(
-      object.renameDetectionPercent,
-      `${field}.renameDetectionPercent`,
-      1,
-      100
-    ),
-    crossArtifactPass: asBoolean(object.crossArtifactPass, `${field}.crossArtifactPass`)
-  };
-}
-function readModelToken(config, env) {
-  const value = env[config.tokenEnvName];
-  return value !== void 0 && value.length > 0 ? value : void 0;
 }
 
 // src/engine/acquire.ts
@@ -8698,17 +8836,18 @@ async function executePublication(context, plan, diagnostics) {
     apiFailures: counters.apiFailures
   };
 }
-async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnostics, prefetch, counts) {
+async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnostics, prefetch, counts, options2 = {}) {
+  const markerPath = options2.scope === "pull" ? "<pull-request>" : anchorPath;
   const marker = fingerprint({
     repository: `${context.ref.owner}/${context.ref.repo}`,
     pullNumber: context.pullNumber,
-    path: anchorPath,
+    path: markerPath,
     rule: "incomplete-review",
     body: reasonCode,
     // Unlike a finding, a notice's meaning is head-specific: "this exact commit was not covered".
     // Excluding it would let a notice about a since-superseded head suppress the one a fresh run for
     // the current head still needs to publish.
-    head: context.headSha
+    ...options2.scope === "pull" ? {} : { head: context.headSha }
   });
   const { markers: existing } = prefetch ?? await prefetchExistingConversations(context);
   if (existing.has(marker)) return true;
@@ -8717,7 +8856,9 @@ async function publishIncompleteNotice(context, reasonCode, anchorPath, diagnost
       context.ref,
       context.pullNumber,
       {
-        body: composeIncompleteNotice(reasonCode, markerComment(marker), counts),
+        body: composeIncompleteNotice(reasonCode, markerComment(marker), counts, {
+          ...options2.durable === void 0 ? {} : { durable: options2.durable }
+        }),
         commitId: context.headSha,
         path: anchorPath
       }
@@ -14828,7 +14969,8 @@ async function publishIncompleteSettlement(run2, context, cause, anchor, batch) 
       anchor,
       run2.diagnostics,
       prefetch,
-      cause.counts
+      cause.counts,
+      cause.notice
     );
   }
   return published;
@@ -14850,6 +14992,7 @@ function incompleteSettlementReport(run2, inventory, cause, memo, engineFindings
       uncacheablePaths
     ),
     ...cacheCounts(memo),
+    ...cause.reviewedPaths === void 0 ? {} : { reviewedPaths: cause.reviewedPaths },
     ...published === void 0 ? {} : { publish: published.outcome }
   };
 }
@@ -14921,12 +15064,120 @@ function computeEngineBudget(request, inventory, memo) {
     1,
     request.config.tokenBudget - publicationQualityReserve(request.config.maxFindings)
   );
+  const dispatchedFiles = dispatchedPathCount(inventory, excludedSet);
+  const dispatchedChangedLines = reviewableChangedLines(inventory, excludedSet);
   const allottedBudget = computeAllottedBudget(
     engineCeiling,
-    dispatchedPathCount(inventory, excludedSet),
-    reviewableChangedLines(inventory, excludedSet)
+    dispatchedFiles,
+    dispatchedChangedLines
   );
-  return { excluded, allottedBudget };
+  return { excluded, allottedBudget, dispatchedFiles, dispatchedChangedLines };
+}
+var POLICY_INCOMPLETE_NOTICE = { scope: "pull", durable: true };
+function largeReviewMaxFiles(config) {
+  return config.largeReviewMaxFiles ?? LARGE_REVIEW_DEFAULTS.maxFiles;
+}
+function budgetFailureRetryLimit(config) {
+  return config.budgetFailureRetryLimit ?? LARGE_REVIEW_DEFAULTS.budgetFailureRetryLimit;
+}
+function budgetFailureMinFiles(config) {
+  return config.budgetFailureMinFiles ?? LARGE_REVIEW_DEFAULTS.budgetFailureMinFiles;
+}
+function reviewSizeCounts(inventory, memo, budget) {
+  return {
+    reviewable_files: inventory.reviewablePaths.size,
+    dispatched_files: budget.dispatchedFiles,
+    dispatched_changed_lines: budget.dispatchedChangedLines,
+    allotted_budget: budget.allottedBudget,
+    cache_hits: memo.hitPaths.size,
+    checkpoint_hits: memo.checkpointPaths.size
+  };
+}
+function largeReviewBlock(request, inventory, memo, budget) {
+  const maxFiles = largeReviewMaxFiles(request.config);
+  if (maxFiles === 0 || budget.dispatchedFiles <= maxFiles) return void 0;
+  return {
+    reason: "settlement.incomplete.review_too_large",
+    counts: { ...reviewSizeCounts(inventory, memo, budget), max_files: maxFiles },
+    notice: POLICY_INCOMPLETE_NOTICE,
+    reviewedPaths: 0
+  };
+}
+var BUDGET_STREAK_REASONS = /* @__PURE__ */ new Set([
+  "settlement.incomplete.budget_exceeded",
+  "settlement.incomplete.budget_circuit_open"
+]);
+function budgetFailureStreak(history) {
+  const budgetFailures = [];
+  let circuitOpen = false;
+  let previousFresh = 0;
+  for (const row of history) {
+    if (row.outcome !== "incomplete" || !BUDGET_STREAK_REASONS.has(row.reason ?? "")) break;
+    if (row.reason === "settlement.incomplete.budget_circuit_open") {
+      circuitOpen = true;
+    } else {
+      budgetFailures.push(row);
+      if (previousFresh === 0) previousFresh = row.fresh;
+    }
+  }
+  return { budgetFailures, circuitOpen, previousFresh };
+}
+function materiallyShrunk(current, previous) {
+  return previous > 0 && current * 2 <= previous;
+}
+function budgetCircuitBlock(request, inventory, memo, budget, history) {
+  const retryLimit = budgetFailureRetryLimit(request.config);
+  const minFiles = budgetFailureMinFiles(request.config);
+  if (retryLimit === 0 || budget.dispatchedFiles < minFiles) return void 0;
+  const streak = budgetFailureStreak(history);
+  if (!streak.circuitOpen && streak.budgetFailures.length < retryLimit) return void 0;
+  const previousFresh = streak.previousFresh;
+  if (materiallyShrunk(budget.dispatchedFiles, previousFresh)) return void 0;
+  return {
+    reason: "settlement.incomplete.budget_circuit_open",
+    counts: {
+      ...reviewSizeCounts(inventory, memo, budget),
+      recent_budget_exceeded: streak.budgetFailures.length,
+      retry_limit: retryLimit,
+      min_files: minFiles,
+      previous_fresh: previousFresh
+    },
+    notice: POLICY_INCOMPLETE_NOTICE,
+    reviewedPaths: 0
+  };
+}
+async function summaryHistoryForCircuit(run2) {
+  try {
+    const comments = await run2.request.client.listIssueComments(
+      run2.request.ref,
+      run2.request.pullNumber
+    );
+    return ownSummaryRunHistory(
+      comments,
+      run2.request.identity,
+      `${run2.request.ref.owner}/${run2.request.ref.repo}`,
+      run2.request.pullNumber
+    );
+  } catch {
+    run2.diagnostics.record("publish.summary_history_unavailable", { headSha: run2.request.head });
+    return [];
+  }
+}
+async function automaticReviewBlock(run2, inventory, memo) {
+  if (run2.request.largeReviewOverride === true) return void 0;
+  const budget = computeEngineBudget(run2.request, inventory, memo);
+  const tooLarge = largeReviewBlock(run2.request, inventory, memo, budget);
+  if (tooLarge !== void 0) return tooLarge;
+  if (budgetFailureRetryLimit(run2.request.config) === 0) return void 0;
+  if (budget.dispatchedFiles < budgetFailureMinFiles(run2.request.config)) return void 0;
+  if (run2.request.runSummaryEnabled === false) return void 0;
+  return budgetCircuitBlock(
+    run2.request,
+    inventory,
+    memo,
+    budget,
+    await summaryHistoryForCircuit(run2)
+  );
 }
 function bookPropagatedEngineFailure(error, ledger) {
   if (error instanceof EngineRunError) ledger.engine += error.wireTokens ?? 0;
@@ -16337,6 +16588,14 @@ function combineIncompleteFindings(settlement, memo, gate) {
     fresh: new Set(settlement.findings)
   };
 }
+function combinePolicyBlockedFindings(memo, gate) {
+  const modelFindings = mergeHitFindings([], memo.hits);
+  return {
+    findings: [...modelFindings, ...gate],
+    verify: new Set(modelFindings),
+    fresh: /* @__PURE__ */ new Set()
+  };
+}
 function completedPublicationReport(run2, inventory, settlement, memo, startedAt, audited) {
   const { outcome: publish, qualityByOriginal, droppedOriginals, uncacheablePaths } = audited;
   run2.diagnostics.record("settlement.complete", {
@@ -16522,11 +16781,12 @@ async function performReview(request, diagnostics) {
     }
     if (request.identityExclusive && !reviewDeadlineExpired(deadline)) {
       try {
+        const isNoticeBody = report?.outcome === "complete" ? isIncompleteNoticeBody : isSupersedableIncompleteNoticeBody;
         const { attempted, resolved } = await request.client.resolveSupersededOwnNotices(
           request.ref,
           request.pullNumber,
           request.identity,
-          isIncompleteNoticeBody,
+          isNoticeBody,
           request.head,
           report?.outcome === "complete"
         );
@@ -16549,6 +16809,29 @@ async function resolvePairOrReport(ctx, request, diagnostics) {
     throw error;
   }
 }
+async function settleInitialInventoryState(run2, inventory, started) {
+  if (inventory.unclassified.length > 0) {
+    return settleIncomplete(run2, inventory, { reason: "inventory.unclassified_path" });
+  }
+  if (inventory.reviewablePaths.size === 0) {
+    run2.diagnostics.record("settlement.complete", {
+      headSha: run2.request.head,
+      durationMs: Date.now() - started
+    });
+    return emptyReviewReport(inventory);
+  }
+  return void 0;
+}
+async function settlePolicyBlock(run2, inventory, memo, policyBlock) {
+  const gate = await collectGateFindings(run2.request, inventory, run2.diagnostics);
+  return settleIncomplete(
+    run2,
+    inventory,
+    policyBlock,
+    memo,
+    combinePolicyBlockedFindings(memo, gate)
+  );
+}
 async function performReviewInner(request, diagnostics, ledger, deadline) {
   const started = Date.now();
   const run2 = { request, ledger, diagnostics, deadline, credited: /* @__PURE__ */ new Set() };
@@ -16564,20 +16847,14 @@ async function performReviewInner(request, diagnostics, ledger, deadline) {
     diagnostics
   );
   if (reviewDeadlineExpired(deadline)) return reviewDeadlineReport(run2, inventory);
-  if (inventory.unclassified.length > 0) {
-    return settleIncomplete(run2, inventory, { reason: "inventory.unclassified_path" });
-  }
-  if (inventory.reviewablePaths.size === 0) {
-    diagnostics.record("settlement.complete", {
-      headSha: request.head,
-      durationMs: Date.now() - started
-    });
-    return emptyReviewReport(inventory);
-  }
+  const initialSettlement = await settleInitialInventoryState(run2, inventory, started);
+  if (initialSettlement !== void 0) return initialSettlement;
   const memo = await prepareMemoization(request, inventory, diagnostics);
   if (reviewDeadlineExpired(deadline)) return reviewDeadlineReport(run2, inventory, memo);
   const preflight = await abandonIfStale(run2, inventory, memo);
   if (preflight !== void 0) return preflight;
+  const policyBlock = await automaticReviewBlock(run2, inventory, memo);
+  if (policyBlock !== void 0) return settlePolicyBlock(run2, inventory, memo, policyBlock);
   const settlement = await settleOrReport(run2, inventory, memo);
   if ("outcome" in settlement) return settlement;
   if (settlement.status === "incomplete") {
@@ -16724,6 +17001,10 @@ function inputKey(name) {
 function readInput(env, name) {
   return (env[inputKey(name)] ?? "").trim();
 }
+function readInputWithDefault(env, name, fallback) {
+  const raw = env[inputKey(name)];
+  return raw === void 0 ? fallback : raw.trim();
+}
 function readRequiredInput(env, name) {
   const value = readInput(env, name);
   if (value === "") throw new ValidationError(`input.${name}`);
@@ -16766,7 +17047,27 @@ function runtimeConfigFromInputs(env) {
       renameDetectionPercent: readIntegerInput(env, "rename_detection_percent", 50),
       // Dark-shipped prototype (issue #80 technique C, contracts/change-pass.ts): off by
       // default, same "absent means the default" contract every other input here follows.
-      crossArtifactPass: readBooleanInput(env, "cross_artifact_pass", false)
+      crossArtifactPass: readBooleanInput(env, "cross_artifact_pass", false),
+      largeReviewMaxFiles: readIntegerInput(
+        env,
+        "large_review_max_files",
+        LARGE_REVIEW_DEFAULTS.maxFiles
+      ),
+      budgetFailureRetryLimit: readIntegerInput(
+        env,
+        "budget_failure_retry_limit",
+        LARGE_REVIEW_DEFAULTS.budgetFailureRetryLimit
+      ),
+      budgetFailureMinFiles: readIntegerInput(
+        env,
+        "budget_failure_min_files",
+        LARGE_REVIEW_DEFAULTS.budgetFailureMinFiles
+      ),
+      largeReviewOverrideLabel: readInputWithDefault(
+        env,
+        "large_review_override_label",
+        LARGE_REVIEW_DEFAULTS.overrideLabel
+      )
     },
     "input"
   );
@@ -16783,6 +17084,10 @@ function joinIntent(title, body) {
     typeof body === "string" ? body.trim() : ""
   ];
   return parts.filter((part) => part !== "").join("\n\n");
+}
+function labelNames(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => text2(asRecord3(entry).name)).filter((name) => name !== "" && name.length <= 100);
 }
 function parseEventContext(payload) {
   const root = asRecord3(payload);
@@ -16815,6 +17120,7 @@ function parseEventContext(payload) {
     headRepoFullName: typeof headRepo.full_name === "string" ? headRepo.full_name : void 0,
     action: eventAction,
     previousBaseRef: typeof baseChange.from === "string" ? baseChange.from : void 0,
+    labels: labelNames(pull.labels),
     eventTimestamp: text2(pull.updated_at)
   };
 }
@@ -16914,8 +17220,8 @@ async function maybeSaveCacheStore(storePath, report, diagnostics) {
     diagnostics
   );
 }
-async function maybeMaintainSummary(env, event, identity, report, durationMs, diagnostics) {
-  if (!readBooleanInput(env, "run_summary", true)) {
+async function maybeMaintainSummary(env, runSummaryEnabled, event, identity, report, durationMs, diagnostics) {
+  if (!runSummaryEnabled) {
     diagnostics.record("publish.summary_disabled");
     return void 0;
   }
@@ -16948,6 +17254,7 @@ function buildReviewRequest(input) {
     guidelines,
     env,
     cacheStore,
+    runSummaryEnabled,
     persistGenerationCheckpoint
   } = input;
   return {
@@ -16964,6 +17271,8 @@ function buildReviewRequest(input) {
     identityExclusive: identity.exclusive,
     env,
     pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    runSummaryEnabled,
+    largeReviewOverride: config.largeReviewOverrideLabel !== void 0 && config.largeReviewOverrideLabel !== "" && event.labels.includes(config.largeReviewOverrideLabel),
     // Omitted rather than passed empty when the payload stated no purpose: under
     // `exactOptionalPropertyTypes` the key is absent or a string, and an absent one leaves every
     // model request byte-identical to what the previous release sent.
@@ -17028,13 +17337,23 @@ function checkpointPersistence(storePath, diagnostics, env) {
     wasWritten: () => written
   };
 }
+async function loadReviewStoreContext(env, diagnostics) {
+  const storePath = readInput(env, "review_store_path");
+  const cacheStore = storePath === "" ? void 0 : await loadCacheStore(storePath, diagnostics);
+  return {
+    storePath,
+    checkpoint: checkpointPersistence(storePath, diagnostics, env),
+    ...cacheStore === void 0 ? {} : { cacheStore }
+  };
+}
 async function loadConfiguration(env, event, diagnostics) {
   try {
     const config = runtimeConfigFromInputs(env);
     const profilePath = readRequiredInput(env, "profile");
     const profile = loadReviewProfile(await readFile2(profilePath, "utf8"));
     const guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
-    return { config, profile, guidelines };
+    const runSummaryEnabled = readBooleanInput(env, "run_summary", true);
+    return { config, profile, guidelines, runSummaryEnabled };
   } catch (error) {
     diagnostics.record("config.invalid", { headSha: event.head });
     throw error;
@@ -17045,11 +17364,13 @@ async function runAction(env, diagnostics) {
   if (!admit(env, event, diagnostics)) return void 0;
   const apiBase = env.GITHUB_API_URL ?? DEFAULT_API_BASE;
   const identity = await resolveIdentityOrThrow(apiBase, env, event, diagnostics);
-  const { config, profile, guidelines } = await loadConfiguration(env, event, diagnostics);
+  const { config, profile, guidelines, runSummaryEnabled } = await loadConfiguration(
+    env,
+    event,
+    diagnostics
+  );
   diagnostics.record("config.loaded", { headSha: event.head });
-  const storePath = readInput(env, "review_store_path");
-  const cacheStore = storePath === "" ? void 0 : await loadCacheStore(storePath, diagnostics);
-  const checkpoint = checkpointPersistence(storePath, diagnostics, env);
+  const reviewStore = await loadReviewStoreContext(env, diagnostics);
   const request = buildReviewRequest({
     event,
     identity,
@@ -17057,15 +17378,17 @@ async function runAction(env, diagnostics) {
     profile,
     guidelines,
     env,
-    cacheStore,
-    ...checkpoint.persist === void 0 ? {} : { persistGenerationCheckpoint: checkpoint.persist }
+    cacheStore: reviewStore.cacheStore,
+    runSummaryEnabled,
+    ...reviewStore.checkpoint.persist === void 0 ? {} : { persistGenerationCheckpoint: reviewStore.checkpoint.persist }
   });
   const reviewStartedAt = Date.now();
   const report = await performReview(request, diagnostics);
   const durationMs = Date.now() - reviewStartedAt;
-  const storeWritten = await maybeSaveCacheStore(storePath, report, diagnostics) || checkpoint.wasWritten();
+  const storeWritten = await maybeSaveCacheStore(reviewStore.storePath, report, diagnostics) || reviewStore.checkpoint.wasWritten();
   const summaryCommentUrl = await maybeMaintainSummary(
     env,
+    runSummaryEnabled,
     event,
     identity,
     report,

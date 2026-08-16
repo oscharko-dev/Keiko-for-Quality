@@ -16,6 +16,10 @@ const VALID = {
   maxFindings: 50,
   renameDetectionPercent: 50,
   crossArtifactPass: false,
+  largeReviewMaxFiles: 100,
+  budgetFailureRetryLimit: 2,
+  budgetFailureMinFiles: 20,
+  largeReviewOverrideLabel: "keiko-review-override",
 };
 
 describe("parseRuntimeConfig", () => {
@@ -83,6 +87,9 @@ describe("parseRuntimeConfig", () => {
       ["token budget", "tokenBudget", 10],
       ["max findings", "maxFindings", 0],
       ["rename detection", "renameDetectionPercent", 101],
+      ["large review max files", "largeReviewMaxFiles", -1],
+      ["budget failure retry limit", "budgetFailureRetryLimit", 11],
+      ["budget failure minimum files", "budgetFailureMinFiles", -1],
     ])("rejects out-of-range %s", (_name, key, value) => {
       expect(() => parseRuntimeConfig({ ...VALID, [key]: value })).toThrow(ValidationError);
     });
@@ -119,6 +126,37 @@ describe("parseRuntimeConfig", () => {
     // that merely looks like one.
     it("rejects a string value rather than coercing it", () => {
       expect(() => parseRuntimeConfig({ ...VALID, crossArtifactPass: "true" })).toThrow(
+        ValidationError,
+      );
+    });
+  });
+
+  describe("large-review controls", () => {
+    it("accepts zero as the explicit disable value for numeric guards", () => {
+      const config = parseRuntimeConfig({
+        ...VALID,
+        largeReviewMaxFiles: 0,
+        budgetFailureRetryLimit: 0,
+        budgetFailureMinFiles: 0,
+      });
+      expect(config.largeReviewMaxFiles).toBe(0);
+      expect(config.budgetFailureRetryLimit).toBe(0);
+      expect(config.budgetFailureMinFiles).toBe(0);
+    });
+
+    it("accepts an empty override label to disable label-based bypass", () => {
+      const config = parseRuntimeConfig({ ...VALID, largeReviewOverrideLabel: "" });
+      expect(config.largeReviewOverrideLabel).toBe("");
+    });
+
+    it("rejects retry limits beyond the retained summary history", () => {
+      expect(() => parseRuntimeConfig({ ...VALID, budgetFailureRetryLimit: 6 })).toThrow(
+        ValidationError,
+      );
+    });
+
+    it("rejects a non-string override label", () => {
+      expect(() => parseRuntimeConfig({ ...VALID, largeReviewOverrideLabel: 7 })).toThrow(
         ValidationError,
       );
     });

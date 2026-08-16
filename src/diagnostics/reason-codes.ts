@@ -71,6 +71,8 @@ export const REASON_CODES = [
   "settlement.incomplete.coverage_failed",
   "settlement.incomplete.warning_not_allowlisted",
   "settlement.incomplete.budget_exceeded",
+  "settlement.incomplete.review_too_large",
+  "settlement.incomplete.budget_circuit_open",
   "settlement.incomplete.engine_error",
   // A settlement's `reason` is published in the incomplete notice, so it answers "why was my
   // change not fully reviewed" for a reader who has no access to the log. It must therefore name
@@ -136,6 +138,7 @@ export const REASON_CODES = [
   "publish.summary_updated",
   "publish.summary_upsert_failed",
   "publish.summary_disabled",
+  "publish.summary_history_unavailable",
 
   // Configuration
   "config.invalid",

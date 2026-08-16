@@ -55,6 +55,8 @@ The product is designed for signal, not comment volume:
 - **Evidence before publication** — malformed, unsupported, or unsafe output is withheld.
 - **One clear run record** — the maintained summary shows coverage, findings, suppression, and
   spend as redacted counts.
+- **Bounded large-review spend** — oversized or repeatedly budget-exhausted pull requests stop
+  before model work and publish one durable incomplete notice.
 - **Honest coverage** — an unfinished review is reported as incomplete, never as clean.
 
 Keiko for Quality is a reviewer only. It never writes code, commits, pushes, merges, approves, or
@@ -98,7 +100,17 @@ specific review.
 
    on:
      pull_request_target:
-       types: [opened, synchronize, reopened, ready_for_review, edited, converted_to_draft, closed]
+       types:
+         [
+           opened,
+           synchronize,
+           reopened,
+           ready_for_review,
+           edited,
+           labeled,
+           converted_to_draft,
+           closed,
+         ]
 
    permissions:
      contents: read

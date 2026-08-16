@@ -658,6 +658,7 @@ describe("runAction: run-summary comment", () => {
 
     await runAction(env, diagnostics);
 
+    expect(performReviewMock.mock.calls[0]?.[0]).toMatchObject({ runSummaryEnabled: false });
     expect(listSpy).not.toHaveBeenCalled();
     expect(createSpy).not.toHaveBeenCalled();
     expect(updateSpy).not.toHaveBeenCalled();

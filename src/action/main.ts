@@ -226,13 +226,14 @@ async function maybeSaveCacheStore(
  */
 async function maybeMaintainSummary(
   env: NodeJS.ProcessEnv,
+  runSummaryEnabled: boolean,
   event: EventContext,
   identity: ResolvedIdentity,
   report: ReviewReport,
   durationMs: number,
   diagnostics: Diagnostics,
 ): Promise<string | undefined> {
-  if (!readBooleanInput(env, "run_summary", true)) {
+  if (!runSummaryEnabled) {
     diagnostics.record("publish.summary_disabled");
     return undefined;
   }
@@ -271,6 +272,7 @@ interface ReviewRequestInput {
   readonly guidelines: GuidelineIndex;
   readonly env: NodeJS.ProcessEnv;
   readonly cacheStore: CacheStore | undefined;
+  readonly runSummaryEnabled: boolean;
   readonly persistGenerationCheckpoint?: (store: CacheStore, appended: number) => Promise<void>;
 }
 
@@ -283,6 +285,7 @@ function buildReviewRequest(input: ReviewRequestInput): ReviewRequest {
     guidelines,
     env,
     cacheStore,
+    runSummaryEnabled,
     persistGenerationCheckpoint,
   } = input;
   return {
@@ -299,6 +302,11 @@ function buildReviewRequest(input: ReviewRequestInput): ReviewRequest {
     identityExclusive: identity.exclusive,
     env,
     pathValue: env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    runSummaryEnabled,
+    largeReviewOverride:
+      config.largeReviewOverrideLabel !== undefined &&
+      config.largeReviewOverrideLabel !== "" &&
+      event.labels.includes(config.largeReviewOverrideLabel),
     // Omitted rather than passed empty when the payload stated no purpose: under
     // `exactOptionalPropertyTypes` the key is absent or a string, and an absent one leaves every
     // model request byte-identical to what the previous release sent.
@@ -370,11 +378,18 @@ interface LoadedConfiguration {
   readonly config: RuntimeConfig;
   readonly profile: CompiledProfile;
   readonly guidelines: GuidelineIndex;
+  readonly runSummaryEnabled: boolean;
 }
 
 interface CheckpointPersistence {
   readonly persist?: (store: CacheStore, appended: number) => Promise<void>;
   readonly wasWritten: () => boolean;
+}
+
+interface ReviewStoreContext {
+  readonly storePath: string;
+  readonly cacheStore?: CacheStore;
+  readonly checkpoint: CheckpointPersistence;
 }
 
 function checkpointPersistence(
@@ -402,6 +417,22 @@ function checkpointPersistence(
   };
 }
 
+async function loadReviewStoreContext(
+  env: NodeJS.ProcessEnv,
+  diagnostics: Diagnostics,
+): Promise<ReviewStoreContext> {
+  // Empty disables the feature entirely: no store is loaded, `cacheStore` stays `undefined`, and
+  // `performReview` never computes a cache key. This is the one input this action reads with no
+  // default fallback to a non-empty value, matching `guidelines`' existing empty-disables contract.
+  const storePath = readInput(env, "review_store_path");
+  const cacheStore = storePath === "" ? undefined : await loadCacheStore(storePath, diagnostics);
+  return {
+    storePath,
+    checkpoint: checkpointPersistence(storePath, diagnostics, env),
+    ...(cacheStore === undefined ? {} : { cacheStore }),
+  };
+}
+
 /**
  * Loads runtime inputs, the review profile, and the guidelines list, recording a distinguishing
  * diagnostic on failure — mirrors `resolveIdentityOrThrow` above for the same reason.
@@ -416,7 +447,8 @@ async function loadConfiguration(
     const profilePath = readRequiredInput(env, "profile");
     const profile = loadReviewProfile(await readFile(profilePath, "utf8"));
     const guidelines = parseGuidelinePaths(readInput(env, "guidelines"));
-    return { config, profile, guidelines };
+    const runSummaryEnabled = readBooleanInput(env, "run_summary", true);
+    return { config, profile, guidelines, runSummaryEnabled };
   } catch (error) {
     // The supplied configuration — runtime inputs, the review profile, or the guidelines list —
     // failed to validate. Recorded before rethrowing so an operator can tell this apart from
@@ -443,15 +475,14 @@ export async function runAction(
   const apiBase = env.GITHUB_API_URL ?? DEFAULT_API_BASE;
   const identity = await resolveIdentityOrThrow(apiBase, env, event, diagnostics);
 
-  const { config, profile, guidelines } = await loadConfiguration(env, event, diagnostics);
+  const { config, profile, guidelines, runSummaryEnabled } = await loadConfiguration(
+    env,
+    event,
+    diagnostics,
+  );
   diagnostics.record("config.loaded", { headSha: event.head });
 
-  // Empty disables the feature entirely: no store is loaded, `cacheStore` stays `undefined`, and
-  // `performReview` never computes a cache key. This is the one input this action reads with no
-  // default fallback to a non-empty value, matching `guidelines`' existing empty-disables contract.
-  const storePath = readInput(env, "review_store_path");
-  const cacheStore = storePath === "" ? undefined : await loadCacheStore(storePath, diagnostics);
-  const checkpoint = checkpointPersistence(storePath, diagnostics, env);
+  const reviewStore = await loadReviewStoreContext(env, diagnostics);
 
   // Measured around the call itself, not the whole action: identity resolution, config/profile
   // loading, and the cache read above are this action's own overhead, not the review's cost.
@@ -463,19 +494,22 @@ export async function runAction(
     profile,
     guidelines,
     env,
-    cacheStore,
-    ...(checkpoint.persist === undefined
+    cacheStore: reviewStore.cacheStore,
+    runSummaryEnabled,
+    ...(reviewStore.checkpoint.persist === undefined
       ? {}
-      : { persistGenerationCheckpoint: checkpoint.persist }),
+      : { persistGenerationCheckpoint: reviewStore.checkpoint.persist }),
   });
   const reviewStartedAt = Date.now();
   const report = await performReview(request, diagnostics);
   const durationMs = Date.now() - reviewStartedAt;
 
   const storeWritten =
-    (await maybeSaveCacheStore(storePath, report, diagnostics)) || checkpoint.wasWritten();
+    (await maybeSaveCacheStore(reviewStore.storePath, report, diagnostics)) ||
+    reviewStore.checkpoint.wasWritten();
   const summaryCommentUrl = await maybeMaintainSummary(
     env,
+    runSummaryEnabled,
     event,
     identity,
     report,

@@ -41,7 +41,7 @@ publication layer.
 | The candidate is data, never code            | Content is read as Git objects through plumbing. The tree is never checked out, symlink-followed, or submodule-initialized, and no candidate script, hook, action, or package manager is executed.                                                                                   |
 | The engine never holds a GitHub token        | Its environment is built from nothing and contains only the model endpoint, model, protocol, timeouts and its credential.                                                                                                                                                            |
 | No candidate file becomes configuration      | The engine runs with an explicit rule file from a working directory outside candidate content, so its discovery paths — including `<repo>/.opencodereview/rule.json` — are never consulted.                                                                                          |
-| Incomplete is never clean                    | Partial, skipped, failed, unknown, unlisted-warning-bearing, budget-exhausted, timed-out, and malformed results all settle as incomplete and publish a blocking notice.                                                                                                              |
+| Incomplete is never clean                    | Partial, skipped, failed, unknown, unlisted-warning-bearing, oversized, budget-exhausted, repeatedly budget-exhausted, timed-out, and malformed results all settle as incomplete and publish a blocking notice.                                                                      |
 | A finding is not lost to an unplaceable line | GitHub can refuse a line-anchored comment when a diff view does not accept the anchor. The publisher retries as a file-level comment before giving up, and only settles incomplete if that also fails — the diagnostic then carries both attempt outcomes, never just the bare code. |
 | Nothing changed is silently unreviewed       | An independent change inventory is computed before the run and reconciled against the engine's coverage manifest afterwards.                                                                                                                                                         |
 | Nothing raw is emitted                       | Diagnostics carry a reason code from a closed vocabulary plus counts, digests, and durations. The type system has no field that can hold free-form text.                                                                                                                             |
@@ -254,6 +254,28 @@ names, never as a live status of the pull request's current head.
 
 Disable it with `run_summary: false` (default `true`). Disabled means exactly that: no
 issue-comment API call is made at all, not even to check whether one already exists.
+
+## Large-review cost guard
+
+The Action refuses automatic model review before engine acquisition when the still-unanswered work
+is too large. The guard is computed after review-cache and generation-checkpoint hits are removed:
+`large_review_max_files` (default `100`) bounds the number of remaining reviewable files that may be
+sent to the model. `0` disables this size guard explicitly.
+
+Repeated budget failures also trip a circuit breaker when the maintained run summary is enabled.
+With the defaults, two consecutive recent summary rows ending in
+`settlement.incomplete.budget_exceeded` stop the next still-large run before model work, unless the
+remaining dispatch size has shrunk by at least half or is below `budget_failure_min_files` (default
+`20`). Set `budget_failure_retry_limit: 0` to disable the circuit breaker; setting
+`run_summary: false` also disables this history-based circuit without weakening the size guard.
+
+Both policy stops settle `incomplete` and publish one durable review conversation, not one new
+head-specific notice per push. When enabled, the maintained summary comment still records the
+current head and bounded counts; because no engine work happened, `Freshly reviewed` is `0`. A
+maintainer can intentionally bypass both stops by applying the label named by
+`large_review_override_label` (default `keiko-review-override`), or by changing the workflow inputs.
+Consumer workflows that use the label override should include the `labeled` pull-request event so
+applying the label starts a fresh run.
 
 ## Local runs
 

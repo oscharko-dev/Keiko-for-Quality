@@ -1,4 +1,4 @@
-import { ValidationError } from "../core/brands.js";
+import { ValidationError, hasControlCharacters } from "../core/brands.js";
 import { asInteger, asObject, asString, rejectUnknownKeys, requireKeys } from "../core/validate.js";
 
 /** Wire protocol the model endpoint speaks. */
@@ -51,7 +51,28 @@ export interface RuntimeConfig {
    * only hand-rolled fixtures elsewhere benefit from the type-level optionality.
    */
   readonly crossArtifactPass?: boolean;
+  /**
+   * Maximum number of still-unanswered reviewable files this run may send to the model automatically.
+   *
+   * Optional on the type for the same fixture-compatibility reason as `crossArtifactPass`; the action
+   * and CLI parsers always supply concrete values. `0` disables this admission guard explicitly.
+   */
+  readonly largeReviewMaxFiles?: number;
+  /** How many consecutive budget-exhausted summary rows are tolerated before automatic review pauses. */
+  readonly budgetFailureRetryLimit?: number;
+  /** Small reviews keep retrying normally; this bound limits the circuit breaker to genuinely large work. */
+  readonly budgetFailureMinFiles?: number;
+  /** Maintainer-applied PR label that bypasses the large-review guard and budget circuit breaker. */
+  readonly largeReviewOverrideLabel?: string;
 }
+
+export const LARGE_REVIEW_DEFAULTS = {
+  maxFiles: 100,
+  budgetFailureRetryLimit: 2,
+  budgetFailureMinFiles: 20,
+  overrideLabel: "keiko-review-override",
+  summaryHistoryRows: 5,
+} as const;
 
 const KEYS = [
   "protocol",
@@ -66,6 +87,10 @@ const KEYS = [
   "maxFindings",
   "renameDetectionPercent",
   "crossArtifactPass",
+  "largeReviewMaxFiles",
+  "budgetFailureRetryLimit",
+  "budgetFailureMinFiles",
+  "largeReviewOverrideLabel",
 ] as const;
 
 /**
@@ -106,6 +131,49 @@ function asBoolean(value: unknown, field: string): boolean {
   return value;
 }
 
+function asOptionalLabel(value: unknown, field: string): string {
+  if (typeof value !== "string" || value.length > 64 || hasControlCharacters(value)) {
+    throw new ValidationError(field);
+  }
+  return value;
+}
+
+function parseLargeReviewControls(
+  object: Record<string, unknown>,
+  field: string,
+): Pick<
+  RuntimeConfig,
+  | "largeReviewMaxFiles"
+  | "budgetFailureRetryLimit"
+  | "budgetFailureMinFiles"
+  | "largeReviewOverrideLabel"
+> {
+  return {
+    largeReviewMaxFiles: asInteger(
+      object.largeReviewMaxFiles,
+      `${field}.largeReviewMaxFiles`,
+      0,
+      20_000,
+    ),
+    budgetFailureRetryLimit: asInteger(
+      object.budgetFailureRetryLimit,
+      `${field}.budgetFailureRetryLimit`,
+      0,
+      LARGE_REVIEW_DEFAULTS.summaryHistoryRows,
+    ),
+    budgetFailureMinFiles: asInteger(
+      object.budgetFailureMinFiles,
+      `${field}.budgetFailureMinFiles`,
+      0,
+      20_000,
+    ),
+    largeReviewOverrideLabel: asOptionalLabel(
+      object.largeReviewOverrideLabel,
+      `${field}.largeReviewOverrideLabel`,
+    ),
+  };
+}
+
 export function parseRuntimeConfig(input: unknown, field = "config"): RuntimeConfig {
   const object = asObject(input, field);
   requireKeys(object, [...KEYS], field);
@@ -142,6 +210,7 @@ export function parseRuntimeConfig(input: unknown, field = "config"): RuntimeCon
       100,
     ),
     crossArtifactPass: asBoolean(object.crossArtifactPass, `${field}.crossArtifactPass`),
+    ...parseLargeReviewControls(object, field),
   };
 }
 
