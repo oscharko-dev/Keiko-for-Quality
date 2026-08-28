@@ -26,8 +26,8 @@
   <text x="70" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#6A746E">HOLDOUT PRECISION</text>
   <text x="170" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#1B211E">80</text>
   <text x="170" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#6A746E">OPEN THREADS</text>
-  <text x="270" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#1B211E">2026-08-27</text>
-  <text x="270" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#6A746E">DATA AS OF · 14:07Z</text>
+  <text x="270" y="147" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="13" fill="#1B211E">2026-08-28</text>
+  <text x="270" y="161" text-anchor="middle" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="7.5" letter-spacing="0.35" fill="#6A746E">DATA AS OF · 00:24Z</text>
   <line x1="20" y1="203" x2="320" y2="203" stroke="#E3E8E4"/><text x="20" y="218" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="9.5" letter-spacing="0.7" fill="#6A746E">EX EXPERIENTIA DISCO</text><text x="320" y="218" text-anchor="end" font-family="'JetBrains Mono',SFMono-Regular,Consolas,Menlo,monospace" font-size="9.5" fill="#2E8F63">quality.keiko.dev →</text>
   </g>
 </svg>
